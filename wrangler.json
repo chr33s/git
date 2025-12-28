@@ -1,0 +1,31 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "git",
+	"main": "src/worker.ts",
+	"compatibility_date": "2025-12-10",
+	"compatibility_flags": ["nodejs_compat"],
+	"dev": {
+		"port": 8080
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "GitServer",
+				"name": "GIT_SERVER",
+				"script_name": "git"
+			}
+		]
+	},
+	"r2_buckets": [
+		{
+			"binding": "GIT_OBJECTS",
+			"bucket_name": "git-objects"
+		}
+	],
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["GitServer"]
+		}
+	]
+}

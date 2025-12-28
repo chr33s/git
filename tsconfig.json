@@ -1,0 +1,21 @@
+{
+	"compilerOptions": {
+		"allowImportingTsExtensions": true,
+		"allowJs": true,
+		"allowSyntheticDefaultImports": true,
+		"checkJs": false,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"lib": ["ES2024", "WebWorker", "DOM"],
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"noEmit": true,
+		"noUncheckedIndexedAccess": true,
+		"skipLibCheck": true,
+		"strict": true,
+		"target": "es2024",
+		"types": ["node"]
+	},
+	"include": ["src/**/*.ts", "worker-configuration.d.ts"],
+	"exclude": ["node_modules", "dist"]
+}

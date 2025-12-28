@@ -1,0 +1,38 @@
+{
+	"name": "@chr33s/git",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Universal Git smart-HTTP protocol server, browser client & nix cli",
+	"license": "MIT",
+	"bin": {
+		".git": "./src/cli.ts"
+	},
+	"files": [
+		"src",
+		"tsconfig.json",
+		"!src/*.test.ts"
+	],
+	"type": "module",
+	"exports": {
+		"./client": "./src/client.ts",
+		"./server": "./src/server.ts"
+	},
+	"scripts": {
+		"check": "oxfmt --check && oxlint --type-aware --type-check",
+		"fix": "oxfmt && oxlint --type-aware --fix",
+		"postinstall": "npx wrangler types",
+		"test": "node --test --test-concurrency=1 --test-global-setup=src/test.helpers.ts"
+	},
+	"devDependencies": {
+		"@types/node": "^25.0.3",
+		"oxfmt": "^0.20.0",
+		"oxlint": "^1.35.0",
+		"oxlint-tsgolint": "^0.10.0",
+		"playwright": "^1.57.0",
+		"typescript": "^5.9.3",
+		"wrangler": "^4.56.0"
+	},
+	"engines": {
+		"node": ">=24.12.0"
+	}
+}

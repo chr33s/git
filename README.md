@@ -101,7 +101,6 @@ The `checkout()` method throws if OPFS is unavailable. Apps can process checkout
 npm install
 npm run check   # run lint/format checks (use: npm run fix)
 npm test        # run unit tests
-npm run test:e2e # run end-to-end tests
 npm run dev
 
 # prod
@@ -111,32 +110,10 @@ npm run deploy
 
 ### Testing
 
-Includes unit/integration and end-to-end tests:
-
-#### Unit/Integration Tests
-
 Unit tests use Node.js built-in test runner and cover individual functions and components:
 
 ```sh
 npm test
-```
-
-#### End-to-End Tests
-
-E2E tests use Playwright to test the complete client/server functionality:
-
-```sh
-# Install Playwright browsers (first time only)
-npx playwright install
-
-# Run E2E tests
-npm run test:e2e
-
-# Run E2E tests with UI mode
-npm run test:e2e:ui
-
-# Debug E2E tests
-npm run test:e2e:debug
 ```
 
 The E2E tests automatically start the development server and test the Git smart-HTTP protocol endpoints.
