@@ -80,19 +80,9 @@ See `JsDoc` comments.
 
 ### Browser compatibility
 
-Core functionality (info, clone, create objects):
-
-- Chrome/Edge: 88+ (Web Streams, Web Crypto API)
-- Firefox: 102+ (Web Streams, Web Crypto API)
-- Safari: 14.1+ (Web Streams, Web Crypto API)
-
-File checkout with OPFS:
-
-- Chrome/Edge: 102+ (OPFS support)
-- Firefox: Not yet supported (planned)
-- Safari: Not yet supported (planned)
-
-The `checkout()` method throws if OPFS is unavailable. Apps can process checkout data manually using cloned objects.
+- Chrome/Edge: 86+
+- Firefox: 111+
+- Safari: 15.2+
 
 ## Development
 
