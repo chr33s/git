@@ -1688,7 +1688,7 @@ export class Cli {
 	}
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
 	try {
 		const args = process.argv.slice(2);
 		const cli = new Cli();
