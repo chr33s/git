@@ -1,10 +1,13 @@
+import { build } from "esbuild";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Miniflare } from "miniflare";
 import { chromium, type LaunchOptions } from "playwright";
-import { getPlatformProxy, unstable_startWorker as startWorker } from "wrangler";
+
+import wrangler from "../wrangler.json" with { type: "json" };
 
 export const __filename = fileURLToPath(import.meta.url);
 export const __dirname = dirname(__filename);
@@ -12,23 +15,35 @@ export const __dirname = dirname(__filename);
 export const root = join(__dirname, "..");
 const tmp = join(root, ".tmp");
 
+async function bundleWorker() {
+	const result = await build({
+		bundle: true,
+		entryPoints: [join(root, wrangler.main)],
+		external: ["cloudflare:workers"],
+		format: "esm",
+		platform: "neutral",
+		target: "esnext",
+		write: false,
+	});
+	const output = result.outputFiles?.[0];
+	if (!output) throw new Error("Failed to bundle worker");
+	return output.text;
+}
+
 export async function cli() {
 	const dir = join(tmp, "git");
-	let pid: number | undefined;
 
 	return {
 		bin,
 		dir,
 		run,
 		seed,
-		server,
 		setup,
 		async before() {
 			await mkdir(dir, { recursive: true });
 		},
 		async after() {
 			await rm(dir, { force: true, recursive: true });
-			if (pid) process.kill(pid);
 		},
 	};
 
@@ -116,40 +131,6 @@ export async function cli() {
 		return cwd;
 	}
 
-	async function server() {
-		return new Promise((resolve, reject) => {
-			const child = spawn(
-				"npx",
-				["wrangler", "dev", `--persist-to=${join(root, ".tmp/wrangler")}`],
-				{
-					cwd: root,
-					// shell: true,
-					stdio: ["pipe", "pipe", "pipe"],
-				},
-			);
-			child.stdout.on("data", (data: Buffer) => {
-				const string = data.toString();
-				if (string.includes("Ready on")) {
-					pid = child.pid;
-					resolve(true);
-				}
-			});
-			child.stderr.on("data", (data: Buffer) => {
-				reject(data.toString());
-			});
-			child.on("close", (code: number | null) => {
-				if (code === 0) {
-					resolve(true);
-				} else {
-					reject(false);
-				}
-			});
-			child.on("error", (error: Error) => {
-				reject(error.toString());
-			});
-		});
-	}
-
 	async function setup() {
 		const cwd = join(dir, randomUUID());
 		await mkdir(cwd, { recursive: true });
@@ -183,48 +164,52 @@ export async function playwright(options?: LaunchOptions) {
 	};
 }
 
-export async function worker(options?: Parameters<typeof startWorker>[0]) {
-	const dir = join(tmp, "wrangler");
-	const config = join(root, "wrangler.json");
-	const instance = await startWorker(
-		merge(
-			{
-				config,
-				dev: {
-					multiworkerPrimary: true,
-					persist: dir,
-					watch: false,
-				},
-			},
-			options,
-		),
-	);
-	const platform = await getPlatformProxy<Env>({
-		configPath: config,
-		persist: { path: dir },
+export interface WorkerOptions {
+	port?: number;
+	persistPath?: string;
+}
+
+export async function worker(options?: WorkerOptions) {
+	const dir = options?.persistPath ?? join(tmp, "miniflare");
+	await mkdir(dir, { recursive: true });
+
+	const script = await bundleWorker();
+	const mf = new Miniflare({
+		modules: true,
+		script,
+		compatibilityDate: wrangler.compatibility_date,
+		compatibilityFlags: wrangler.compatibility_flags,
+		port: options?.port,
+		durableObjects: {
+			GIT_SERVER: { className: "GitServer", useSQLite: true },
+		},
+		r2Buckets: ["GIT_OBJECTS"],
+		durableObjectsPersist: dir,
+		r2Persist: dir,
 	});
 
+	const url = await mf.ready;
+	const env = await mf.getBindings<Env>();
+
 	return {
-		...platform,
+		env,
+		cf: {},
+		ctx: {
+			waitUntil: () => {},
+			passThroughOnException: () => {},
+		},
+		caches: await mf.getCaches(),
+		dispose: () => mf.dispose(),
+		mf,
 		dir,
-		instance,
+		url,
+		dispatchFetch: (input: string, init?: RequestInit) => mf.dispatchFetch(input, init as any),
 		async before() {
-			await instance.ready;
+			await mf.ready;
 		},
 		async after() {
-			await instance?.dispose();
-			await platform?.dispose();
+			await mf.dispose();
 			await rm(dir, { recursive: true, force: true }).catch();
 		},
 	};
-}
-
-function merge(target: Record<string, any>, source?: Record<string, any>) {
-	if (!source) return target;
-	for (const key of Object.keys(source)) {
-		if (source[key] instanceof Object && key in target && target[key] instanceof Object) {
-			Object.assign(source[key], merge(target[key], source[key]));
-		}
-	}
-	return { ...target, ...source };
 }

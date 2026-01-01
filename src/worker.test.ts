@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
-import { spawn as _spawn } from "node:child_process";
 import { after, before, describe, it } from "node:test";
 
 import * as helpers from "./test.helpers.ts";
 
 const cli = await helpers.cli();
-const repoURL = "http://localhost:8080/test.git";
+const worker = await helpers.worker({ port: 8080 });
+const repoURL = `${worker.url}test.git`;
 
 before(async () => {
 	await cli.before();
-	await cli.server();
+	await worker.before();
 	await cli.seed(repoURL);
 });
-after(() => cli.after());
+after(async () => {
+	await cli.after();
+	await worker.after();
+});
 
 void describe("fetch", () => {
 	void it("nok", async () => {

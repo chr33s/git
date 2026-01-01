@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn as _spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -8,13 +7,16 @@ import { after, before, describe, it } from "node:test";
 import * as helpers from "./test.helpers.ts";
 
 const cli = await helpers.cli();
-const repoURL = "http://localhost:8080";
+const worker = await helpers.worker({ port: 8080 });
 
 before(async () => {
 	await cli.before();
-	await cli.server();
+	await worker.before();
 });
-after(() => cli.after());
+after(async () => {
+	await cli.after();
+	await worker.after();
+});
 
 void describe("cli", () => {
 	void it("git clone", async () => {
@@ -29,7 +31,7 @@ void describe("cli", () => {
 		assert.ok(res1.includes("Initial commit"));
 
 		const cloneRepo = `test-repo-${randomUUID().slice(0, 8)}`;
-		const repoUrl = `${repoURL}/${cloneRepo}.git`;
+		const repoUrl = `${worker.url}${cloneRepo}.git`;
 
 		await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
 		await cli.run("git push -u origin main", { cwd: cd1 });
@@ -53,7 +55,7 @@ void describe("cli", () => {
 		await cli.run('git commit -m "commit for push test"', { cwd: cd1 });
 
 		const pushRepo = `push-test-repo-${randomUUID().slice(0, 8)}`;
-		const repoUrl = `${repoURL}/${pushRepo}.git`;
+		const repoUrl = `${worker.url}${pushRepo}.git`;
 		await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
 		await cli.run("git push -u origin main", { cwd: cd1 });
 		const output = await cli.run("git ls-remote origin", { cwd: cd1 });
@@ -71,7 +73,7 @@ void describe("cli", () => {
 		await cli.run('git commit -am "version 1.1"', { cwd: cd1 });
 
 		const fetchRepo = `fetch-test-repo-${randomUUID().slice(0, 8)}`;
-		const repoUrl = `${repoURL}/${fetchRepo}.git`;
+		const repoUrl = `${worker.url}${fetchRepo}.git`;
 		await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
 		await cli.run("git push -u origin main", { cwd: cd1 });
 
@@ -95,7 +97,7 @@ void describe("cli", () => {
 		await cli.run('git commit -am "update data"', { cwd: cd1 });
 
 		const pullRepo = `pull-test-repo-${randomUUID().slice(0, 8)}`;
-		const repoUrl = `${repoURL}/${pullRepo}.git`;
+		const repoUrl = `${worker.url}${pullRepo}.git`;
 		await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
 		await cli.run("git push -u origin main", { cwd: cd1 });
 

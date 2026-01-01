@@ -25,7 +25,7 @@ before(async () => {
 	await worker.before();
 	await playwright.before();
 
-	await playwright.page.goto(`${await worker.instance.url}/test`);
+	await playwright.page.goto(`${worker.url}/test`);
 	await playwright.page.addScriptTag({ content: browserCode, type: "module" });
 	await playwright.page.waitForFunction(() => "OpfsStorage" in window);
 });
