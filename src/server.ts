@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { GitRepository } from "./git.repository.ts";
+import { ServerApi } from "./server.api.ts";
 import { CloudflareStorage as Storage } from "./server.storage.ts";
 
 type RequestBody = ReadableStream<Uint8Array<ArrayBuffer>> | null;
@@ -13,6 +14,7 @@ interface Route {
 }
 
 export class Server extends DurableObject<Env> {
+  #api: ServerApi;
   #repository: GitRepository;
   #routes: Route[] = [
     {
@@ -45,11 +47,23 @@ export class Server extends DurableObject<Env> {
     const storage = new Storage(ctx, env);
     const config = { repoName: ctx.id.toString() };
     this.#repository = new GitRepository(storage, config);
+    this.#api = new ServerApi(this.#repository);
   }
 
   async fetch(request: Request) {
     try {
       request.signal?.throwIfAborted();
+
+      if (new URL(request.url).pathname.startsWith("/api")) {
+        return this.#api.fetch(
+          {
+            body: request.body,
+            method: request.method,
+            url: request.url,
+          },
+          request.signal,
+        );
+      }
 
       await this.#repository.init();
 

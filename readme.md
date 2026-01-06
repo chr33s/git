@@ -59,6 +59,82 @@ flowchart LR
 
 See `src/index.ts` for routing and bindings.
 
+### JSON API
+
+RESTful endpoints for repository operations. All POST endpoints accept JSON body. List endpoints support cursor-based pagination with `cursor`, `limit` params and return `next_cursor`, `has_more` in responses.
+
+Base URL: `/api/:repo{.git}?/`
+
+#### Repository Management
+
+| Method | Endpoint | Description                     |
+| ------ | -------- | ------------------------------- |
+| POST   | `/`      | Create a new repository         |
+| DELETE | `/`      | Permanently delete a repository |
+
+#### Repository Info
+
+| Method | Endpoint         | Description                              |
+| ------ | ---------------- | ---------------------------------------- |
+| GET    | `/status`        | Get working tree status                  |
+| GET    | `/refs`          | List all refs                            |
+| POST   | `/log`           | Get commit history                       |
+| POST   | `/show`          | Show object by ref                       |
+| POST   | `/tree`          | Get tree entries                         |
+| POST   | `/diff`          | Diff between commits                     |
+| POST   | `/branches/diff` | Diff between branch and base (three-dot) |
+| POST   | `/commits/diff`  | Diff for a specific commit               |
+| POST   | `/object`        | Read raw object by OID                   |
+| POST   | `/grep`          | Search content with regex patterns       |
+
+#### Staging & Files
+
+| Method | Endpoint   | Description                    |
+| ------ | ---------- | ------------------------------ |
+| POST   | `/add`     | Stage a file                   |
+| POST   | `/rm`      | Remove files from index        |
+| POST   | `/mv`      | Move/rename a file             |
+| POST   | `/restore` | Restore file from index/commit |
+| POST   | `/read`    | Read file content              |
+| POST   | `/write`   | Write file content             |
+| POST   | `/file`    | Stream file content            |
+| POST   | `/files`   | List all files at ref          |
+
+#### Commits & Branches
+
+| Method | Endpoint           | Description                         |
+| ------ | ------------------ | ----------------------------------- |
+| POST   | `/commit`          | Create a commit                     |
+| POST   | `/commit-pack`     | Create commit via NDJSON stream     |
+| POST   | `/restore-commit`  | Roll back branch to specific commit |
+| POST   | `/branch`          | List/create/delete branch           |
+| POST   | `/branches`        | List branches with pagination       |
+| POST   | `/branches/create` | Create branch from base             |
+| POST   | `/commits`         | List commits with pagination        |
+| POST   | `/checkout`        | Checkout a ref                      |
+| POST   | `/switch`          | Switch branches                     |
+| POST   | `/merge`           | Merge branches                      |
+| POST   | `/rebase`          | Rebase onto another branch          |
+| POST   | `/reset`           | Reset HEAD to ref                   |
+| POST   | `/tag`             | Create/delete tags                  |
+
+#### Remote Operations
+
+| Method | Endpoint  | Description           |
+| ------ | --------- | --------------------- |
+| POST   | `/fetch`  | Fetch from remote     |
+| POST   | `/pull`   | Pull (fetch + merge)  |
+| POST   | `/push`   | Push to remote        |
+| POST   | `/remote` | Manage remote configs |
+
+#### Streaming Commits
+
+The `/commit-pack` endpoint accepts newline-delimited JSON (NDJSON) for efficient large file uploads:
+
+1. Send metadata first with `target_branch`, `commit_message`, `author`, and `files` array
+2. Stream blob chunks with `content_id`, base64-encoded `data` (≤4 MiB), and `eof` marker
+3. Supports async generators and ReadableStreams for memory-efficient uploads
+
 ## GitClient: Git in the browser
 
 `GitClient` provides Git protocol functionality using only Web standards:

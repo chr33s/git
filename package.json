@@ -19,7 +19,7 @@
   },
   "scripts": {
     "check": "oxfmt --check && oxlint --type-aware --type-check",
-    "fix": "oxfmt && oxlint --type-aware --fix",
+    "fix": "oxlint --type-aware --fix && oxfmt --write",
     "postinstall": "npx wrangler types && npm run fix",
     "test": "node --test --test-concurrency=1 --test-global-setup=src/test.helpers.ts"
   },
