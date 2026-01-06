@@ -72,7 +72,7 @@ void describe("GitIndex", () => {
 
       const entries = index.getEntries();
       assert.equal(entries.length, 1);
-      assert.equal(entries[0].path, "test.txt");
+      assert.equal(entries[0]!.path, "test.txt");
     });
 
     void it("should replace existing entry with same path", async () => {
@@ -100,7 +100,7 @@ void describe("GitIndex", () => {
 
       const entries = index.getEntries();
       assert.equal(entries.length, 1);
-      assert.equal(entries[0].oid, "b".repeat(40));
+      assert.equal(entries[0]!.oid, "b".repeat(40));
     });
 
     void it("should sort entries by path", async () => {
@@ -127,8 +127,8 @@ void describe("GitIndex", () => {
       });
 
       const entries = index.getEntries();
-      assert.equal(entries[0].path, "a.txt");
-      assert.equal(entries[1].path, "z.txt");
+      assert.equal(entries[0]!.path, "a.txt");
+      assert.equal(entries[1]!.path, "z.txt");
     });
   });
 
@@ -195,7 +195,7 @@ void describe("GitIndex", () => {
 
       const entries = index.getEntries();
       assert.equal(entries.length, 1);
-      assert.equal(entries[0].path, "keep.txt");
+      assert.equal(entries[0]!.path, "keep.txt");
     });
   });
 
@@ -221,8 +221,8 @@ void describe("GitIndex", () => {
 
       const entries = index2.getEntries();
       assert.equal(entries.length, 1);
-      assert.equal(entries[0].path, "persisted.txt");
-      assert.equal(entries[0].oid, "a".repeat(40));
+      assert.equal(entries[0]!.path, "persisted.txt");
+      assert.equal(entries[0]!.oid, "a".repeat(40));
     });
   });
 
@@ -252,8 +252,8 @@ void describe("GitIndex", () => {
 
       const entries = index.getEntries();
       assert.equal(entries.length, 1);
-      assert.equal(entries[0].path, "myfile.txt");
-      assert.equal(entries[0].oid, blobOid);
+      assert.equal(entries[0]!.path, "myfile.txt");
+      assert.equal(entries[0]!.oid, blobOid);
     });
 
     void it("should handle nested tree structures", async () => {

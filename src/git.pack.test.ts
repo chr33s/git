@@ -143,11 +143,13 @@ void describe("GitPackWriter", () => {
       assert.equal(signature, "PACK");
 
       // Check version (2)
-      const version = (packData[4] << 24) | (packData[5] << 16) | (packData[6] << 8) | packData[7];
+      const version =
+        (packData[4]! << 24) | (packData[5]! << 16) | (packData[6]! << 8) | packData[7]!;
       assert.equal(version, 2);
 
       // Check object count (0)
-      const count = (packData[8] << 24) | (packData[9] << 16) | (packData[10] << 8) | packData[11];
+      const count =
+        (packData[8]! << 24) | (packData[9]! << 16) | (packData[10]! << 8) | packData[11]!;
       assert.equal(count, 0);
     });
 
@@ -170,7 +172,8 @@ void describe("GitPackWriter", () => {
       assert.equal(signature, "PACK");
 
       // Check object count (1)
-      const count = (packData[8] << 24) | (packData[9] << 16) | (packData[10] << 8) | packData[11];
+      const count =
+        (packData[8]! << 24) | (packData[9]! << 16) | (packData[10]! << 8) | packData[11]!;
       assert.equal(count, 1);
     });
 
@@ -190,7 +193,8 @@ void describe("GitPackWriter", () => {
       const packData = await writer.createPack([oid1, oid2, oid3]);
 
       // Check object count (3)
-      const count = (packData[8] << 24) | (packData[9] << 16) | (packData[10] << 8) | packData[11];
+      const count =
+        (packData[8]! << 24) | (packData[9]! << 16) | (packData[10]! << 8) | packData[11]!;
       assert.equal(count, 3);
     });
 
@@ -220,7 +224,8 @@ void describe("GitPackWriter", () => {
       const writer = new GitPackWriter(objectStore);
       const packData = await writer.createPack([blobOid, treeOid, commitOid]);
 
-      const count = (packData[8] << 24) | (packData[9] << 16) | (packData[10] << 8) | packData[11];
+      const count =
+        (packData[8]! << 24) | (packData[9]! << 16) | (packData[10]! << 8) | packData[11]!;
       assert.equal(count, 3);
     });
   });

@@ -107,7 +107,7 @@ void describe("GitDelta", () => {
 
       const target = new Uint8Array(1100);
       for (let i = 0; i < 1000; i++) {
-        target[i] = source[i];
+        target[i] = source[i]!;
       }
       for (let i = 1000; i < 1100; i++) {
         target[i] = (i * 2) % 256;

@@ -261,9 +261,9 @@ Initial commit`;
       const entries = repo.parseTree(treeData);
 
       assert.equal(entries.length, 1);
-      assert.equal(entries[0].mode, "100644");
-      assert.equal(entries[0].name, "file.txt");
-      assert.equal(entries[0].oid, blobOid);
+      assert.equal(entries[0]!.mode, "100644");
+      assert.equal(entries[0]!.name, "file.txt");
+      assert.equal(entries[0]!.oid, blobOid);
     });
   });
 
@@ -381,7 +381,7 @@ Initial commit`;
 
       const entries = repo.getIndexEntries();
       assert.equal(entries.length, 1);
-      assert.equal(entries[0].path, "file.txt");
+      assert.equal(entries[0]!.path, "file.txt");
     });
 
     void it("should add index entry directly", async () => {

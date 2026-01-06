@@ -271,9 +271,9 @@ void describe("GitMerge", () => {
       const renames = await merge.detectRenames(oldTree, newTree);
 
       assert.equal(renames.length, 1);
-      assert.equal(renames[0].oldPath, "old.txt");
-      assert.equal(renames[0].newPath, "new.txt");
-      assert.ok(renames[0].similarity > 0.9);
+      assert.equal(renames[0]!.oldPath, "old.txt");
+      assert.equal(renames[0]!.newPath, "new.txt");
+      assert.ok(renames[0]!.similarity > 0.9);
     });
 
     void it("should not detect renames for completely different content", async () => {
@@ -338,7 +338,7 @@ void describe("ConflictResolver", () => {
 
       const conflicts = resolver.getUnresolvedConflicts();
       assert.equal(conflicts.length, 1);
-      assert.equal(conflicts[0].path, "file.txt");
+      assert.equal(conflicts[0]!.path, "file.txt");
     });
 
     void it("should add multiple conflicts", () => {
@@ -362,7 +362,7 @@ void describe("ConflictResolver", () => {
         theirs: "their-oid",
       });
 
-      resolver.resolveConflict("file.txt", "resolved-oid");
+      resolver.resolveConflict("file.txt", "ours");
 
       const unresolved = resolver.getUnresolvedConflicts();
       assert.equal(unresolved.length, 0);
@@ -377,7 +377,7 @@ void describe("ConflictResolver", () => {
         theirs: "their-oid",
       });
 
-      resolver.resolveConflict("file.txt", "resolved-oid");
+      resolver.resolveConflict("file.txt", "ours");
 
       // The conflict should now be resolved
       assert.ok(resolver.isAllResolved());
@@ -388,7 +388,7 @@ void describe("ConflictResolver", () => {
 
       // Should throw for non-existent conflict
       assert.throws(
-        () => resolver.resolveConflict("nonexistent.txt", "oid"),
+        () => resolver.resolveConflict("nonexistent.txt", "ours"),
         /No conflict found for path: nonexistent.txt/,
       );
     });
@@ -401,11 +401,11 @@ void describe("ConflictResolver", () => {
       resolver.addConflict({ path: "file1.txt", ours: "a", theirs: "b" });
       resolver.addConflict({ path: "file2.txt", ours: "c", theirs: "d" });
 
-      resolver.resolveConflict("file1.txt", "resolved");
+      resolver.resolveConflict("file1.txt", "ours");
 
       const unresolved = resolver.getUnresolvedConflicts();
       assert.equal(unresolved.length, 1);
-      assert.equal(unresolved[0].path, "file2.txt");
+      assert.equal(unresolved[0]!.path, "file2.txt");
     });
   });
 
@@ -428,8 +428,8 @@ void describe("ConflictResolver", () => {
       resolver.addConflict({ path: "file1.txt", ours: "a", theirs: "b" });
       resolver.addConflict({ path: "file2.txt", ours: "c", theirs: "d" });
 
-      resolver.resolveConflict("file1.txt", "r1");
-      resolver.resolveConflict("file2.txt", "r2");
+      resolver.resolveConflict("file1.txt", "ours");
+      resolver.resolveConflict("file2.txt", "theirs");
 
       assert.equal(resolver.isAllResolved(), true);
     });
