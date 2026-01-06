@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "test",
+      "type": "shell",
+      "command": "npm run test -- --watch",
+      "group": "none",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}
