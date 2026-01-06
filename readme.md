@@ -59,7 +59,7 @@ flowchart LR
 
 See `src/index.ts` for routing and bindings.
 
-## GitClient: Git in the browser (and Node 22+)
+## GitClient: Git in the browser
 
 `GitClient` provides Git protocol functionality using only Web standards:
 
@@ -76,13 +76,104 @@ See `src/index.ts` for routing and bindings.
 - Browser‑first: uses Web APIs end‑to‑end
 - OPFS integration: automatic checkout to the browser’s private filesystem with repo‑based directory caching
 
-See `JsDoc` comments.
+### API
+
+```ts
+import { Client } from "@chr33s/git/client";
+
+const client = new Client({ name: "my-repo" });
+```
+
+#### Repository
+
+| Method                       | Description                                 |
+| ---------------------------- | ------------------------------------------- |
+| `init()`                     | Initialize a new repository                 |
+| `clone(url)`                 | Clone a remote repository                   |
+| `remote(action, name, url?)` | Manage remotes (`add`, `remove`, `set-url`) |
+| `getAllRemotes()`            | List all configured remotes                 |
+| `getRemote(name)`            | Get URL for a specific remote               |
+
+#### Staging & Commits
+
+| Method                 | Description                              |
+| ---------------------- | ---------------------------------------- |
+| `add(path)`            | Stage a file                             |
+| `rm(paths, opts?)`     | Remove files (`--cached`, `--recursive`) |
+| `mv(old, new)`         | Move/rename a staged file                |
+| `restore(path)`        | Restore file from HEAD                   |
+| `commit(msg, author?)` | Create a commit                          |
+| `status()`             | Get staged, modified, untracked files    |
+
+#### History & Inspection
+
+| Method      | Description               |
+| ----------- | ------------------------- |
+| `log()`     | List commit history       |
+| `show(ref)` | Show object by ref or OID |
+
+#### Branching & Merging
+
+| Method             | Description                    |
+| ------------------ | ------------------------------ |
+| `branch(name?)`    | Create branch or list branches |
+| `checkout(ref)`    | Check out a ref/commit         |
+| `switch(name)`     | Switch to an existing branch   |
+| `merge(ref)`       | Merge a branch into current    |
+| `rebase(onto)`     | Rebase current branch onto ref |
+| `reset(hard, ref)` | Reset to a commit              |
+| `tag(name)`        | Create a lightweight tag       |
+
+#### Remote Sync
+
+| Method                           | Description                         |
+| -------------------------------- | ----------------------------------- |
+| `fetch(remote?)`                 | Fetch from remote (default: origin) |
+| `pull(remote?, branch?)`         | Fetch and merge                     |
+| `push(remote?, branch?, force?)` | Push to remote                      |
+| `pushDelete(remote?, branch)`    | Delete remote branch                |
 
 ### Browser compatibility
 
 - Chrome/Edge: 86+
 - Firefox: 111+
 - Safari: 15.2+
+
+## GitCli: Git in the terminal
+
+`GitCli` provides a command-line interface that mirrors native Git commands, built on top of `GitClient`.
+
+### Usage
+
+```sh
+npx @chr33s/git <command> [options]
+```
+
+### Commands
+
+| Command    | Description                                      |
+| ---------- | ------------------------------------------------ |
+| `init`     | Initialize a new repository                      |
+| `clone`    | Clone a repository from URL                      |
+| `add`      | Add file contents to the index                   |
+| `rm`       | Remove files from the working tree and index     |
+| `mv`       | Move or rename a file                            |
+| `restore`  | Restore working tree files                       |
+| `commit`   | Record changes to the repository                 |
+| `status`   | Show the working tree status                     |
+| `log`      | Show commit logs                                 |
+| `show`     | Show various types of objects                    |
+| `branch`   | List, create, or delete branches                 |
+| `checkout` | Switch branches or restore working tree files    |
+| `switch`   | Switch to a branch                               |
+| `merge`    | Join two or more development histories together  |
+| `rebase`   | Reapply commits on top of another base tip       |
+| `reset`    | Reset current HEAD to the specified state        |
+| `tag`      | Create, list, or delete tags                     |
+| `fetch`    | Download objects and refs from a remote          |
+| `pull`     | Fetch from and integrate with a remote           |
+| `push`     | Update remote refs along with associated objects |
+| `remote`   | Manage set of tracked repositories               |
 
 ## Development
 
