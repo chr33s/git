@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
-import { type GitStorage } from "./git.storage.ts";
+import { type GitStorage, validateStoragePath } from "./git.storage.ts";
 
 export class FsStorage implements GitStorage {
   #rootPath?: string;
@@ -19,11 +19,23 @@ export class FsStorage implements GitStorage {
     }
   }
 
+  #resolvePath(path: string) {
+    validateStoragePath(path);
+
+    const fullPath = resolve(this.#rootPath!, path);
+    const root = resolve(this.#rootPath!);
+    if (!fullPath.startsWith(root + "/") && fullPath !== root) {
+      throw new Error(`Invalid path: escapes repository root`);
+    }
+
+    return fullPath;
+  }
+
   async exists(path: string) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
     try {
-      await fs.access(join(this.#rootPath, path));
+      await fs.access(this.#resolvePath(path));
       return true;
     } catch {
       return false;
@@ -33,7 +45,7 @@ export class FsStorage implements GitStorage {
   async readFile(path: string) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
-    const fullPath = join(this.#rootPath, path);
+    const fullPath = this.#resolvePath(path);
     const buffer = await fs.readFile(fullPath);
     return new Uint8Array(buffer);
   }
@@ -41,7 +53,7 @@ export class FsStorage implements GitStorage {
   async writeFile(path: string, data: Uint8Array) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
-    const fullPath = join(this.#rootPath, path);
+    const fullPath = this.#resolvePath(path);
     const dir = dirname(fullPath);
 
     // Ensure directory exists
@@ -55,35 +67,35 @@ export class FsStorage implements GitStorage {
   async deleteFile(path: string) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
-    const fullPath = join(this.#rootPath, path);
+    const fullPath = this.#resolvePath(path);
     await fs.unlink(fullPath);
   }
 
   async createDirectory(path: string) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
-    const fullPath = join(this.#rootPath, path);
+    const fullPath = this.#resolvePath(path);
     await fs.mkdir(fullPath, { recursive: true });
   }
 
   async listDirectory(path: string) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
-    const fullPath = join(this.#rootPath, path);
+    const fullPath = this.#resolvePath(path);
     return await fs.readdir(fullPath);
   }
 
   async deleteDirectory(path: string) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
-    const fullPath = join(this.#rootPath, path);
+    const fullPath = this.#resolvePath(path);
     await fs.rm(fullPath, { recursive: true });
   }
 
   async getFileInfo(path: string) {
     if (!this.#rootPath) throw new Error("Storage not initialized");
 
-    const fullPath = join(this.#rootPath, path);
+    const fullPath = this.#resolvePath(path);
     const stats = await fs.stat(fullPath);
 
     return {

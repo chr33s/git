@@ -38,6 +38,23 @@ export interface GitStorageRefChangeResult {
   currentValue: string | null;
 }
 
+export function validateStoragePath(path: string): void {
+  if (path.includes("\0")) {
+    throw new Error(`Invalid path: contains null byte`);
+  }
+
+  if (path.startsWith("/")) {
+    throw new Error(`Invalid path: absolute paths not allowed`);
+  }
+
+  const segments = path.split("/");
+  for (const segment of segments) {
+    if (segment === "..") {
+      throw new Error(`Invalid path: '..' traversal not allowed`);
+    }
+  }
+}
+
 interface MemoryStorageState {
   directories: Set<string>;
   files: Map<string, Uint8Array>;
@@ -61,12 +78,14 @@ export class MemoryStorage implements GitStorage {
   }
 
   async exists(path: string) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     return repository.files.has(path) || repository.directories.has(path);
   }
 
   async readFile(path: string) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     const data = repository.files.get(path);
@@ -76,6 +95,7 @@ export class MemoryStorage implements GitStorage {
   }
 
   async writeFile(path: string, data: Uint8Array) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     // Ensure parent directories exist
@@ -89,6 +109,7 @@ export class MemoryStorage implements GitStorage {
   }
 
   async deleteFile(path: string) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     if (!repository.files.has(path)) {
@@ -99,12 +120,14 @@ export class MemoryStorage implements GitStorage {
   }
 
   async createDirectory(path: string) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     repository.directories.add(path);
   }
 
   async listDirectory(path: string) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     const items = new Set<string>();
@@ -131,6 +154,7 @@ export class MemoryStorage implements GitStorage {
   }
 
   async deleteDirectory(path: string) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     const prefix = path.endsWith("/") ? path : path + "/";
@@ -151,6 +175,7 @@ export class MemoryStorage implements GitStorage {
   }
 
   async getFileInfo(path: string) {
+    validateStoragePath(path);
     const repository = this.#requireRepository();
 
     const data = repository.files.get(path);

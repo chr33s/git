@@ -5,7 +5,15 @@ import ts from "typescript";
 
 import * as helpers from "./test.helpers.ts";
 
-// Read and transpile client.storage.ts to browser-compatible JS
+// Read and transpile git.storage.ts (for validateStoragePath) and client.storage.ts
+const storageSrc = await readFile(join(helpers.__dirname, "git.storage.ts"), "utf-8");
+const storageTranspiled = ts.transpileModule(storageSrc, {
+  compilerOptions: {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+  },
+});
+
 const src = await readFile(join(helpers.__dirname, "client.storage.ts"), "utf-8");
 const transpiled = ts.transpileModule(src, {
   compilerOptions: {
@@ -14,9 +22,12 @@ const transpiled = ts.transpileModule(src, {
   },
 });
 
-// Export to window instead of using ES module export
-const browserCode =
-  transpiled.outputText.replace(/^export /gm, "") + "\nwindow.OpfsStorage = OpfsStorage;";
+// Combine: inject validateStoragePath from git.storage.ts, then OpfsStorage from client.storage.ts
+const storageCode = storageTranspiled.outputText
+  .replace(/^export /gm, "")
+  .replace(/^import .*/gm, "");
+const clientCode = transpiled.outputText.replace(/^export /gm, "").replace(/^import .*/gm, "");
+const browserCode = storageCode + "\n" + clientCode + "\nwindow.OpfsStorage = OpfsStorage;";
 
 const worker = await helpers.worker();
 const playwright = await helpers.playwright({ headless: false });

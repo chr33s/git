@@ -3,6 +3,7 @@ import {
   type GitStorage,
   type GitStorageRefChange,
   type GitStorageRefChangeResult,
+  validateStoragePath,
 } from "./git.storage.ts";
 
 type StoredRefRow = {
@@ -72,7 +73,16 @@ export class CloudflareStorage implements GitStorage {
     `);
   }
 
+  #validatePath(path: string) {
+    validateStoragePath(path);
+
+    if (path !== ".git" && !path.startsWith(".git/")) {
+      throw new Error(`Invalid path: must be within .git/ prefix`);
+    }
+  }
+
   async exists(path: string) {
+    this.#validatePath(path);
     const repository = this.#requireRepository();
 
     const rows = this.#sql
@@ -87,6 +97,7 @@ export class CloudflareStorage implements GitStorage {
   }
 
   async readFile(path: string) {
+    this.#validatePath(path);
     const repository = this.#requireRepository();
     const refName = this.#refNameFromPath(path);
 
@@ -108,6 +119,12 @@ export class CloudflareStorage implements GitStorage {
     const object = await this.#r2.get(key);
 
     if (!object) {
+      // Self-healing: if SQL metadata exists but R2 object is missing, clean up SQL
+      this.#sql.exec(
+        /* SQL */ `DELETE FROM git_files WHERE repository = ? AND path = ?`,
+        repository,
+        path,
+      );
       throw new Error(`File not found: ${path}`);
     }
 
@@ -115,11 +132,13 @@ export class CloudflareStorage implements GitStorage {
   }
 
   async writeFile(path: string, data: Uint8Array) {
+    this.#validatePath(path);
     const repository = this.#requireRepository();
     const refName = this.#refNameFromPath(path);
 
     if (refName) {
       const content = new TextDecoder().decode(data).trim();
+      // Write R2 blob first, then update SQL metadata
       await this.#r2.put(this.#key(path), data);
       this.#upsertRef(repository, refName, path, content, new Date().toISOString());
       return;
@@ -128,6 +147,7 @@ export class CloudflareStorage implements GitStorage {
     const key = this.#key(path);
     const now = new Date().toISOString();
 
+    // Write R2 blob first, then update SQL metadata
     await this.#r2.put(key, data);
 
     this.#sql.exec(
@@ -145,11 +165,12 @@ export class CloudflareStorage implements GitStorage {
   }
 
   async deleteFile(path: string) {
+    this.#validatePath(path);
     const repository = this.#requireRepository();
     const refName = this.#refNameFromPath(path);
 
     if (refName) {
-      await this.#r2.delete(this.#key(path));
+      // Delete SQL metadata first, then R2 blob
       this.#sql.exec(
         /* SQL */ `DELETE FROM git_refs WHERE repository = ? AND ref_name = ?`,
         repository,
@@ -160,24 +181,29 @@ export class CloudflareStorage implements GitStorage {
         repository,
         path,
       );
+      await this.#r2.delete(this.#key(path));
       return;
     }
 
     const key = this.#key(path);
-    await this.#r2.delete(key);
 
+    // Delete SQL metadata first (within transaction), then R2 blob
     this.#sql.exec(
       /* SQL */ `DELETE FROM git_files WHERE repository = ? AND path = ?`,
       repository,
       path,
     );
+
+    await this.#r2.delete(key);
   }
 
-  async createDirectory(_path: string) {
+  async createDirectory(path: string) {
+    this.#validatePath(path);
     // R2 doesn't require explicit directory creation.
   }
 
   async listDirectory(path: string) {
+    this.#validatePath(path);
     const repository = this.#requireRepository();
     const pathPattern = this.#pattern(path);
     const normalizedPath = path.replace(/\/$/, "");
@@ -210,6 +236,7 @@ export class CloudflareStorage implements GitStorage {
   }
 
   async deleteDirectory(path: string) {
+    this.#validatePath(path);
     const repository = this.#requireRepository();
     const pathPattern = this.#pattern(path);
 
@@ -246,6 +273,7 @@ export class CloudflareStorage implements GitStorage {
   }
 
   async getFileInfo(path: string) {
+    this.#validatePath(path);
     const repository = this.#requireRepository();
 
     const result = this.#sql
@@ -272,6 +300,10 @@ export class CloudflareStorage implements GitStorage {
   async applyRefChanges(changes: GitStorageRefChange[], options?: { atomic?: boolean }) {
     const repository = this.#requireRepository();
     const atomic = !!options?.atomic;
+
+    for (const change of changes) {
+      this.#validatePath(change.path);
+    }
     const uploads = changes
       .filter((change) => change.newValue !== null)
       .map((change) => ({
@@ -403,7 +435,14 @@ export class CloudflareStorage implements GitStorage {
   }
 
   #key(path: string) {
-    return `${this.#repoName}/${path}`;
+    const key = `${this.#repoName}/${path}`;
+    const prefix = `${this.#repoName}/`;
+
+    if (!key.startsWith(prefix) || key.includes("/../") || key.endsWith("/..")) {
+      throw new Error(`Invalid R2 key: escapes repository namespace`);
+    }
+
+    return key;
   }
 
   #requireRepository() {
