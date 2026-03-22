@@ -1004,3 +1004,24 @@ void describe("remote endpoint", () => {
     assert.equal(json.error, "name and url required");
   });
 });
+
+void describe("repository management", () => {
+  void it("should create a repository with the requested default branch", async () => {
+    const { repo, api } = await setupRepo();
+
+    const response = await api.fetch(
+      createRequest("http://localhost/api/test", "POST", {
+        default_branch: "develop",
+        id: "created-repo",
+      }),
+    );
+
+    assert.equal(response.status, 201);
+    const json = (await response.json()) as { id: string; default_branch: string };
+    assert.equal(json.id, "created-repo");
+    assert.equal(json.default_branch, "develop");
+
+    await repo.initStorage("created-repo");
+    assert.equal(await repo.getCurrentHead(), "refs/heads/develop");
+  });
+});

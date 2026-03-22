@@ -1818,8 +1818,7 @@ export class ServerApi {
     const repoId = id || crypto.randomUUID();
 
     // Initialize the repository storage
-    await this.#repository.initStorage(repoId);
-    await this.#repository.init();
+    await this.#repository.initStorage(repoId, defaultBranch);
 
     return Response.json(
       {

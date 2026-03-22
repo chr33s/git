@@ -65,10 +65,10 @@ export class GitRepository {
     // Initialize storage
     await this.storage.init(this.config.repoName);
 
-    await this.#initializeRepositoryLayout();
+    await this.#initializeRepositoryLayout(this.config.branch || "main");
   }
 
-  async #initializeRepositoryLayout() {
+  async #initializeRepositoryLayout(initialBranch: string) {
     // Initialize git components
     await this.objectStore.init();
     await this.refStore.init();
@@ -82,7 +82,6 @@ export class GitRepository {
 
     // Initialize HEAD for this repository namespace if it doesn't exist yet.
     if (!(await this.storage.exists(".git/HEAD"))) {
-      const initialBranch = this.config.branch || "main";
       await this.storage.writeFile(
         ".git/HEAD",
         new TextEncoder().encode(`ref: refs/heads/${initialBranch}\n`),
@@ -515,9 +514,12 @@ export class GitRepository {
     return await this.storage.deleteFile(path);
   }
 
-  async initStorage(repoName: string): Promise<void> {
+  async initStorage(
+    repoName: string,
+    branch: string = this.config.branch || "main",
+  ): Promise<void> {
     await this.storage.init(repoName);
-    await this.#initializeRepositoryLayout();
+    await this.#initializeRepositoryLayout(branch);
   }
 
   async #collectTreeObjectsRecursive(treeOid: string, objects: Set<string>): Promise<void> {
