@@ -11,10 +11,6 @@ const worker = await helpers.worker({ port: 8080 });
 
 const ZERO_OID = "0".repeat(40);
 
-function pktLine(text: string) {
-  return (text.length + 4).toString(16).padStart(4, "0") + text;
-}
-
 before(async () => {
   await cli.before();
   await worker.before();
@@ -81,7 +77,7 @@ void describe("cli", () => {
     await cli.run("git push -u origin main", { cwd: cd1 });
 
     const headOid = (await cli.run("git rev-parse HEAD", { cwd: cd1 })).trim();
-    const body = pktLine(
+    const body = helpers.pktLine(
       `${ZERO_OID} ${headOid} refs/heads/main\0report-status delete-refs ofs-delta\n`,
     );
 
@@ -112,9 +108,9 @@ void describe("cli", () => {
 
     const headOid = (await cli.run("git rev-parse HEAD", { cwd: cd1 })).trim();
     const body =
-      pktLine(
+      helpers.pktLine(
         `${ZERO_OID} ${headOid} refs/heads/feature\0report-status delete-refs ofs-delta atomic\n`,
-      ) + pktLine(`${ZERO_OID} ${headOid} refs/heads/main\n`);
+      ) + helpers.pktLine(`${ZERO_OID} ${headOid} refs/heads/main\n`);
 
     const response = await fetch(`${repoUrl}/git-receive-pack`, {
       body: `${body}0000`,

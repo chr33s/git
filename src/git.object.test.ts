@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { GitObjectStore } from "./git.object.ts";
 import { MemoryStorage } from "./git.storage.ts";
+import { compressData, hexToBytes } from "./git.utils.ts";
 
 void describe("GitObjectStore", () => {
   void describe("init", () => {
@@ -241,6 +242,97 @@ void describe("GitObjectStore", () => {
         assert.equal(obj.type, testCase.type);
         assert.deepEqual(obj.data, testCase.data);
       }
+    });
+  });
+
+  void describe("fsck", () => {
+    void it("should detect a corrupted blob", async () => {
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+
+      const objectStore = new GitObjectStore(storage);
+      await objectStore.init();
+
+      const original = new TextEncoder().encode("original blob");
+      const oid = await objectStore.writeObject("blob", original);
+      const corrupted = new TextEncoder().encode("tampered blob");
+      const header = new TextEncoder().encode(`blob ${corrupted.length}\0`);
+      const content = new Uint8Array(header.length + corrupted.length);
+      content.set(header);
+      content.set(corrupted, header.length);
+
+      await storage.writeFile(
+        `.git/objects/${oid.slice(0, 2)}/${oid.slice(2)}`,
+        await compressData(content),
+      );
+
+      const result = await objectStore.validateObject(oid);
+      assert.equal(result.valid, false);
+      assert.ok(result.errors.some((error) => error.includes("hash mismatch")));
+    });
+
+    void it("should reject malformed commits", async () => {
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+
+      const objectStore = new GitObjectStore(storage);
+      await objectStore.init();
+
+      const commitData = new TextEncoder().encode(
+        `tree ${"a".repeat(40)}\ncommitter Test <test@example.com> 1 +0000\n\nmessage`,
+      );
+      const oid = await objectStore.writeObject("commit", commitData);
+
+      const result = await objectStore.validateObject(oid);
+      assert.equal(result.valid, false);
+      assert.ok(result.errors.some((error) => error.includes("author")));
+      assert.ok(result.errors.some((error) => error.includes("Missing commit tree object")));
+    });
+
+    void it("should enforce tree ordering and duplicate names", async () => {
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+
+      const objectStore = new GitObjectStore(storage);
+      await objectStore.init();
+
+      const blobA = await objectStore.writeObject("blob", new TextEncoder().encode("a"));
+      const blobB = await objectStore.writeObject("blob", new TextEncoder().encode("b"));
+      const treeData = new Uint8Array([
+        ...new TextEncoder().encode("100644 z.txt\0"),
+        ...hexToBytes(blobA),
+        ...new TextEncoder().encode("100644 a.txt\0"),
+        ...hexToBytes(blobB),
+        ...new TextEncoder().encode("100644 a.txt\0"),
+        ...hexToBytes(blobA),
+      ]);
+      const oid = await objectStore.writeObject("tree", treeData);
+
+      const result = await objectStore.validateObject(oid);
+      assert.equal(result.valid, false);
+      assert.ok(result.errors.some((error) => error.includes("not sorted")));
+      assert.ok(result.errors.some((error) => error.includes("Duplicate tree entry 'a.txt'")));
+    });
+
+    void it("should fsck all stored objects", async () => {
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+
+      const objectStore = new GitObjectStore(storage);
+      await objectStore.init();
+
+      const blobOid = await objectStore.writeObject("blob", new TextEncoder().encode("blob"));
+      const tagOid = await objectStore.writeObject(
+        "tag",
+        new TextEncoder().encode(
+          `object ${blobOid}\ntype blob\ntag v1.0\ntagger Test <test@example.com> 1 +0000\n`,
+        ),
+      );
+
+      const results = await objectStore.fsckAll();
+      assert.equal(results.length, 2);
+      assert.ok(results.every((result) => result.valid));
+      assert.deepEqual(results.map((result) => result.oid).sort(), [blobOid, tagOid].sort());
     });
   });
 });

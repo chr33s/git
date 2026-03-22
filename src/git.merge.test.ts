@@ -5,15 +5,7 @@ import { GitMerge, ConflictResolver } from "./git.merge.ts";
 import { GitObjectStore } from "./git.object.ts";
 import { GitRefStore } from "./git.ref.ts";
 import { MemoryStorage } from "./git.storage.ts";
-
-// Helper function
-function hexToBytes(hex: string) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
+import { hexToBytes } from "./git.utils.ts";
 
 async function createTestTree(objectStore: GitObjectStore, files: Record<string, string>) {
   const entries: Array<{ mode: string; name: string; oid: string }> = [];

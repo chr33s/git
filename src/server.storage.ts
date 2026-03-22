@@ -26,50 +26,50 @@ export class CloudflareStorage implements GitStorage {
     this.#repoName = repoName;
 
     this.#sql.exec(/* SQL */ `
-			CREATE TABLE IF NOT EXISTS git_files (
-				repository TEXT NOT NULL,
-				path TEXT NOT NULL,
-				size INTEGER NOT NULL,
-				last_modified DATETIME NOT NULL,
-				r2_key TEXT NOT NULL,
-				PRIMARY KEY (repository, path)
-			);
+      CREATE TABLE IF NOT EXISTS git_files (
+        repository TEXT NOT NULL,
+        path TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        last_modified DATETIME NOT NULL,
+        r2_key TEXT NOT NULL,
+        PRIMARY KEY (repository, path)
+      );
 
-			CREATE INDEX IF NOT EXISTS idx_git_files_repo
-			ON git_files(repository);
+      CREATE INDEX IF NOT EXISTS idx_git_files_repo
+      ON git_files(repository);
 
-			CREATE INDEX IF NOT EXISTS idx_git_files_path
-			ON git_files(repository, path);
+      CREATE INDEX IF NOT EXISTS idx_git_files_path
+      ON git_files(repository, path);
 
-			CREATE TABLE IF NOT EXISTS git_refs (
-				repository TEXT NOT NULL,
-				ref_name TEXT NOT NULL,
-				path TEXT NOT NULL,
-				value TEXT NOT NULL,
-				kind TEXT NOT NULL,
-				target TEXT,
-				oid TEXT,
-				last_modified DATETIME NOT NULL,
-				PRIMARY KEY (repository, ref_name)
-			);
+      CREATE TABLE IF NOT EXISTS git_refs (
+        repository TEXT NOT NULL,
+        ref_name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        value TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        target TEXT,
+        oid TEXT,
+        last_modified DATETIME NOT NULL,
+        PRIMARY KEY (repository, ref_name)
+      );
 
-			CREATE INDEX IF NOT EXISTS idx_git_refs_path
-			ON git_refs(repository, path);
+      CREATE INDEX IF NOT EXISTS idx_git_refs_path
+      ON git_refs(repository, path);
 
-			CREATE TABLE IF NOT EXISTS git_reflogs (
-				repository TEXT NOT NULL,
-				ref_name TEXT NOT NULL,
-				seq INTEGER NOT NULL,
-				old_oid TEXT NOT NULL,
-				new_oid TEXT NOT NULL,
-				timestamp TEXT NOT NULL,
-				message TEXT NOT NULL,
-				PRIMARY KEY (repository, ref_name, seq)
-			);
+      CREATE TABLE IF NOT EXISTS git_reflogs (
+        repository TEXT NOT NULL,
+        ref_name TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        old_oid TEXT NOT NULL,
+        new_oid TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        message TEXT NOT NULL,
+        PRIMARY KEY (repository, ref_name, seq)
+      );
 
-			CREATE INDEX IF NOT EXISTS idx_git_reflogs_ref
-			ON git_reflogs(repository, ref_name, seq);
-		`);
+      CREATE INDEX IF NOT EXISTS idx_git_reflogs_ref
+      ON git_reflogs(repository, ref_name, seq);
+    `);
   }
 
   async exists(path: string) {
@@ -132,10 +132,10 @@ export class CloudflareStorage implements GitStorage {
 
     this.#sql.exec(
       /* SQL */ `
-				INSERT OR REPLACE INTO git_files
-				(repository, path, size, last_modified, r2_key)
-				VALUES (?, ?, ?, ?, ?)
-			`,
+        INSERT OR REPLACE INTO git_files
+        (repository, path, size, last_modified, r2_key)
+        VALUES (?, ?, ?, ?, ?)
+      `,
       repository,
       path,
       data.length,
@@ -186,10 +186,10 @@ export class CloudflareStorage implements GitStorage {
     const rows = this.#sql
       .exec(
         /* SQL */ `
-					SELECT path FROM git_files
-					WHERE repository = ?
-					AND path LIKE ?
-				`,
+          SELECT path FROM git_files
+          WHERE repository = ?
+          AND path LIKE ?
+        `,
         repository,
         pathPattern,
       )
@@ -216,9 +216,9 @@ export class CloudflareStorage implements GitStorage {
     const files = this.#sql
       .exec(
         /* SQL */ `
-					SELECT path, r2_key FROM git_files
-					WHERE repository = ? AND path LIKE ?
-				`,
+          SELECT path, r2_key FROM git_files
+          WHERE repository = ? AND path LIKE ?
+        `,
         repository,
         pathPattern,
       )
@@ -228,9 +228,9 @@ export class CloudflareStorage implements GitStorage {
 
     this.#sql.exec(
       /* SQL */ `
-				DELETE FROM git_files
-				WHERE repository = ? AND path LIKE ?
-			`,
+        DELETE FROM git_files
+        WHERE repository = ? AND path LIKE ?
+      `,
       repository,
       pathPattern,
     );
@@ -251,9 +251,9 @@ export class CloudflareStorage implements GitStorage {
     const result = this.#sql
       .exec(
         /* SQL */ `
-					SELECT size, last_modified FROM git_files
-					WHERE repository = ? AND path = ?
-				`,
+          SELECT size, last_modified FROM git_files
+          WHERE repository = ? AND path = ?
+        `,
         repository,
         path,
       )
@@ -363,11 +363,11 @@ export class CloudflareStorage implements GitStorage {
     const rows = this.#sql
       .exec(
         /* SQL */ `
-				SELECT old_oid, new_oid, timestamp, message
-				FROM git_reflogs
-				WHERE repository = ? AND ref_name = ?
-				ORDER BY seq ASC
-			`,
+        SELECT old_oid, new_oid, timestamp, message
+        FROM git_reflogs
+        WHERE repository = ? AND ref_name = ?
+        ORDER BY seq ASC
+      `,
         repository,
         refName,
       )
@@ -379,6 +379,23 @@ export class CloudflareStorage implements GitStorage {
       oldOid: (row as { old_oid: string }).old_oid,
       timestamp: (row as { timestamp: string }).timestamp,
     })) satisfies GitReflogEntry[];
+  }
+
+  async listReflogRefs() {
+    const repository = this.#requireRepository();
+
+    const rows = this.#sql
+      .exec(
+        /* SQL */ `
+        SELECT DISTINCT ref_name
+        FROM git_reflogs
+        WHERE repository = ?
+      `,
+        repository,
+      )
+      .toArray();
+
+    return rows.map((row) => (row as { ref_name: string }).ref_name);
   }
 
   #pattern(path: string) {
@@ -434,10 +451,10 @@ export class CloudflareStorage implements GitStorage {
 
     this.#sql.exec(
       /* SQL */ `
-				INSERT OR REPLACE INTO git_refs
-				(repository, ref_name, path, value, kind, target, oid, last_modified)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			`,
+        INSERT OR REPLACE INTO git_refs
+        (repository, ref_name, path, value, kind, target, oid, last_modified)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
       repository,
       refName,
       path,
@@ -450,10 +467,10 @@ export class CloudflareStorage implements GitStorage {
 
     this.#sql.exec(
       /* SQL */ `
-				INSERT OR REPLACE INTO git_files
-				(repository, path, size, last_modified, r2_key)
-				VALUES (?, ?, ?, ?, ?)
-			`,
+        INSERT OR REPLACE INTO git_files
+        (repository, path, size, last_modified, r2_key)
+        VALUES (?, ?, ?, ?, ?)
+      `,
       repository,
       path,
       value.length + 1,
@@ -482,10 +499,10 @@ export class CloudflareStorage implements GitStorage {
     const nextSeqRow = this.#sql
       .exec(
         /* SQL */ `
-				SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
-				FROM git_reflogs
-				WHERE repository = ? AND ref_name = ?
-			`,
+        SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
+        FROM git_reflogs
+        WHERE repository = ? AND ref_name = ?
+      `,
         repository,
         refName,
       )
@@ -495,10 +512,10 @@ export class CloudflareStorage implements GitStorage {
 
     this.#sql.exec(
       /* SQL */ `
-				INSERT INTO git_reflogs
-				(repository, ref_name, seq, old_oid, new_oid, timestamp, message)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
-			`,
+        INSERT INTO git_reflogs
+        (repository, ref_name, seq, old_oid, new_oid, timestamp, message)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
       repository,
       refName,
       nextSeq,
@@ -510,17 +527,17 @@ export class CloudflareStorage implements GitStorage {
 
     this.#sql.exec(
       /* SQL */ `
-				DELETE FROM git_reflogs
-				WHERE repository = ?
-				AND ref_name = ?
-				AND seq NOT IN (
-					SELECT seq
-					FROM git_reflogs
-					WHERE repository = ? AND ref_name = ?
-					ORDER BY seq DESC
-					LIMIT 1000
-				)
-			`,
+        DELETE FROM git_reflogs
+        WHERE repository = ?
+        AND ref_name = ?
+        AND seq NOT IN (
+          SELECT seq
+          FROM git_reflogs
+          WHERE repository = ? AND ref_name = ?
+          ORDER BY seq DESC
+          LIMIT 1000
+        )
+      `,
       repository,
       refName,
       repository,

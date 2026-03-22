@@ -1,7 +1,11 @@
 import * as assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import * as helpers from "./test.helpers.ts";
+import { run } from "./test.helpers.ts";
 
 const worker = await helpers.worker();
 
@@ -96,6 +100,61 @@ void describe("CloudflareStorage", () => {
       "http://localhost/metadata-repo.git/info/refs?service=git-upload-pack",
     );
     assert.strictEqual(refsResponse.status, 200, "Refs should be accessible");
+  });
+
+  void it("should accept a git-generated receive-pack request body", async () => {
+    const id = worker.env.GIT_SERVER.idFromName("git-generated-receive-pack");
+    const stub = worker.env.GIT_SERVER.get(id);
+    const tempDir = await mkdtemp(join(tmpdir(), "receive-pack-"));
+
+    try {
+      const capturePath = join(tempDir, "capture.bin");
+      const wrapperPath = join(tempDir, "capture-receive-pack.sh");
+      const remoteDir = join(tempDir, "remote.git");
+      const clientDir = join(tempDir, "client");
+
+      await writeFile(wrapperPath, 'tee "$1" | git-receive-pack "$2"\n');
+
+      await run(`git init --bare ${remoteDir}`, { cwd: tempDir });
+      await run(`git init -b main ${clientDir}`, { cwd: tempDir });
+      await run('git config user.name "Test User"', { cwd: clientDir });
+      await run('git config user.email "test@example.com"', { cwd: clientDir });
+      await run("git config commit.gpgSign false", { cwd: clientDir });
+
+      await writeFile(join(clientDir, "file.txt"), "hello from captured push\n");
+      await run("git add file.txt", { cwd: clientDir });
+      await run('git commit -m "init"', { cwd: clientDir });
+      await run(
+        `git push '--receive-pack=sh ${wrapperPath} ${capturePath} ${remoteDir}' ${remoteDir} main`,
+        { cwd: clientDir },
+      );
+
+      const requestBody = new Uint8Array(await readFile(capturePath));
+      assert.ok(requestBody.length > 0, "Expected captured push request body");
+
+      const response = await stub.fetch(
+        "http://localhost/git-generated-receive-pack.git/git-receive-pack",
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/x-git-receive-pack-result",
+            "Content-Type": "application/x-git-receive-pack-request",
+          },
+          body: requestBody,
+        },
+      );
+      const text = await response.text();
+
+      assert.match(text, /unpack ok/, `Expected unpack ok, got: ${text}`);
+
+      const advertisedRefs = await stub.fetch(
+        "http://localhost/git-generated-receive-pack.git/info/refs?service=git-upload-pack",
+      );
+      const refsText = await advertisedRefs.text();
+      assert.match(refsText, /refs\/heads\/main/, "Expected pushed main branch to exist");
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
   });
 
   void it("should create directories implicitly for R2 storage", async () => {

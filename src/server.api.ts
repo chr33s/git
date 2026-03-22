@@ -131,6 +131,16 @@ export class ServerApi {
       pathname: "/api/:repo{.git}?/reflog/:ref",
     },
     {
+      handler: (...args) => this.#fsck(...args),
+      method: "POST",
+      pathname: "/api/:repo{.git}?/fsck",
+    },
+    {
+      handler: (...args) => this.#gc(...args),
+      method: "POST",
+      pathname: "/api/:repo{.git}?/gc",
+    },
+    {
       handler: (...args) => this.#tag(...args),
       method: "POST",
       pathname: "/api/:repo{.git}?/tag",
@@ -587,6 +597,26 @@ export class ServerApi {
 
     const entries = await this.#repository.readReflog(ref);
     return Response.json({ entries, ref });
+  }
+
+  async #fsck(payload: Payload, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const oid = payload.oid as string | undefined;
+
+    if (oid) {
+      const result = await this.#repository.validateObject(oid);
+      return Response.json({ result, valid: result.valid });
+    }
+
+    const results = await this.#repository.fsckAll();
+    return Response.json({ results, valid: results.every((result) => result.valid) });
+  }
+
+  async #gc(payload: Payload, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const gracePeriodMinutes = payload.gracePeriodMinutes as number | undefined;
+    const result = await this.#repository.gc(gracePeriodMinutes);
+    return Response.json(result);
   }
 
   async #tag(payload: Payload, signal?: AbortSignal) {

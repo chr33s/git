@@ -82,7 +82,11 @@ export class GitProtocol {
 
     // Build request
     const lines: string[] = [];
-    const capabilities = ["report-status", "ofs-delta"];
+    const capabilities = ["report-status"];
+
+    if (advertisement.capabilities.has("ofs-delta")) {
+      capabilities.push("ofs-delta");
+    }
 
     if (advertisement.capabilities.has("atomic")) {
       capabilities.push("atomic");

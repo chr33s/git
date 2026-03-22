@@ -3,6 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 import { GitRepository } from "./git.repository.ts";
 import { ServerApi } from "./server.api.ts";
 import { CloudflareStorage as Storage } from "./server.storage.ts";
+import { concatenateUint8Arrays } from "./git.utils.ts";
 
 interface Route {
   handler: (request: Request) => Promise<Response>;
@@ -220,7 +221,7 @@ export class Server extends DurableObject<Env> {
 
       while (!result.done) {
         signal?.throwIfAborted();
-        chunks.push(result.value);
+        chunks.push(new Uint8Array(result.value));
         result = await reader.read();
       }
 
@@ -278,7 +279,7 @@ export class Server extends DurableObject<Env> {
       }
 
       // Parse and apply pack data
-      const packData = fullData.slice(idx);
+      const packData = this.#extractReceivePackData(fullData.slice(idx), capabilities);
       if (packData.length > 0) {
         signal?.throwIfAborted();
         const packStream = new ReadableStream({
@@ -362,7 +363,7 @@ export class Server extends DurableObject<Env> {
 
       while (!result.done) {
         signal?.throwIfAborted();
-        chunks.push(result.value);
+        chunks.push(new Uint8Array(result.value));
         result = await reader.read();
       }
 
@@ -674,7 +675,7 @@ export class Server extends DurableObject<Env> {
       let result = await reader.read();
       while (!result.done) {
         signal?.throwIfAborted();
-        chunks.push(result.value);
+        chunks.push(new Uint8Array(result.value));
         result = await reader.read();
       }
       reader.releaseLock();
@@ -933,5 +934,57 @@ export class Server extends DurableObject<Env> {
       nextIdx: offset + length,
       data: lengthStr,
     };
+  }
+
+  #extractReceivePackData(data: Uint8Array, capabilities: Set<string>) {
+    if (data.length === 0) {
+      return data;
+    }
+
+    const signature = new TextDecoder().decode(data.slice(0, 4));
+    if (signature === "PACK") {
+      return data;
+    }
+
+    if (!capabilities.has("side-band") && !capabilities.has("side-band-64k")) {
+      return data;
+    }
+
+    const chunks: Uint8Array[] = [];
+    let offset = 0;
+
+    while (offset < data.length) {
+      const packet = this.#readPktLine(data, offset);
+      if (!packet) {
+        throw new Error("Malformed side-band receive-pack payload");
+      }
+
+      offset = packet.nextIdx;
+
+      if (packet.data === "0000") {
+        break;
+      }
+
+      const channel = packet.content[0];
+      const payload = packet.content.slice(1);
+
+      if (channel === 1) {
+        chunks.push(payload);
+        continue;
+      }
+
+      if (channel === 2) {
+        continue;
+      }
+
+      if (channel === 3) {
+        const message = new TextDecoder().decode(payload).trim();
+        throw new Error(message || "Client aborted pack transfer");
+      }
+
+      throw new Error(`Unsupported side-band channel ${channel}`);
+    }
+
+    return concatenateUint8Arrays(chunks);
   }
 }

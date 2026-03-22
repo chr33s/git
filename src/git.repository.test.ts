@@ -1,8 +1,12 @@
 import * as assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { GitObjectStore } from "./git.object.ts";
+import { GitPackWriter } from "./git.pack.ts";
 import { GitRepository } from "./git.repository.ts";
 import { MemoryStorage } from "./git.storage.ts";
+import { hexToBytes } from "./git.utils.ts";
+import { toStream } from "./test.helpers.ts";
 
 void describe("GitRepository", () => {
   void describe("init", () => {
@@ -646,13 +650,82 @@ Merge commit`;
       assert.ok(entries.some((e) => e.path === "checkout.txt"));
     });
   });
-});
 
-// Helper function
-function hexToBytes(hex: string) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
+  void describe("reachability and gc", () => {
+    void it("should collect reachable objects from refs", async () => {
+      const storage = new MemoryStorage();
+      const repo = new GitRepository(storage, { repoName: "test" });
+      await repo.init();
+
+      await repo.add("reachable.txt", new TextEncoder().encode("reachable"));
+      const commitOid = await repo.commit("Reachable", { name: "Test", email: "test@test.com" });
+      const commit = await repo.readObject(commitOid);
+      const info = repo.parseCommit(commit.data);
+      const treeEntries = repo.parseTree((await repo.readObject(info.tree)).data);
+
+      const reachable = await repo.getReachableObjects();
+      assert.ok(reachable.has(commitOid));
+      assert.ok(reachable.has(info.tree));
+      assert.ok(reachable.has(treeEntries[0]!.oid));
+    });
+
+    void it("should delete unreachable loose objects when grace period is disabled", async () => {
+      const storage = new MemoryStorage();
+      const repo = new GitRepository(storage, { repoName: "test" });
+      await repo.init();
+
+      const danglingOid = await repo.writeObject("blob", new TextEncoder().encode("dangling"));
+      const result = await repo.gc(0);
+
+      assert.equal(result.deleted, 1);
+      assert.ok(result.freedBytes > 0);
+      await assert.rejects(() => repo.readObject(danglingOid), /not found/);
+    });
+
+    void it("should keep objects that are only reachable from reflogs", async () => {
+      const storage = new MemoryStorage();
+      const repo = new GitRepository(storage, { repoName: "test" });
+      await repo.init();
+
+      await repo.add("one.txt", new TextEncoder().encode("one"));
+      const commit1 = await repo.commit("one", { name: "Test", email: "test@test.com" });
+      await repo.add("two.txt", new TextEncoder().encode("two"));
+      const commit2 = await repo.commit("two", { name: "Test", email: "test@test.com" });
+
+      const rewound = await repo.compareAndSwapRef("refs/heads/main", commit2, commit1, "rewind");
+      assert.equal(rewound, true);
+
+      const result = await repo.gc(0);
+      assert.equal(result.deleted, 0);
+
+      const preserved = await repo.readObject(commit2);
+      assert.equal(preserved.type, "commit");
+    });
+
+    void it("should delete unreachable packed objects", async () => {
+      const sourceStorage = new MemoryStorage();
+      await sourceStorage.init("source");
+      const sourceObjectStore = new GitObjectStore(sourceStorage);
+      await sourceObjectStore.init();
+
+      const packedOid = await sourceObjectStore.writeObject(
+        "blob",
+        new TextEncoder().encode("packed"),
+      );
+      const writer = new GitPackWriter(sourceObjectStore);
+      const artifacts = await writer.createPackArtifacts([packedOid]);
+
+      const storage = new MemoryStorage();
+      const repo = new GitRepository(storage, { repoName: "test" });
+      await repo.init();
+      await repo.parsePack(toStream(artifacts.packData));
+
+      const before = await repo.readObject(packedOid);
+      assert.equal(before.type, "blob");
+
+      const result = await repo.gc(0);
+      assert.equal(result.deleted, 1);
+      await assert.rejects(() => repo.readObject(packedOid), /not found/);
+    });
+  });
+});

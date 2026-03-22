@@ -244,6 +244,22 @@ export class GitRefStore {
     }
   }
 
+  async listReflogRefs() {
+    if (this.#storage.listReflogRefs) {
+      return await this.#storage.listReflogRefs();
+    }
+
+    const refs = new Set<string>();
+
+    try {
+      await this.#walkReflogs(".git/logs", "", refs);
+    } catch {
+      // Ignore missing reflog directories.
+    }
+
+    return Array.from(refs);
+  }
+
   async getAllRefs() {
     const refs: GitRef[] = [];
 
@@ -254,6 +270,32 @@ export class GitRefStore {
     }
 
     return refs;
+  }
+
+  async #walkReflogs(dirPath: string, prefix: string, refs: Set<string>) {
+    const entries = await this.#storage.listDirectory(dirPath);
+
+    for (const entry of entries) {
+      const path = `${dirPath}/${entry}`;
+      const refName = prefix ? `${prefix}/${entry}` : entry;
+
+      try {
+        const data = await this.#storage.readFile(path);
+        const text = new TextDecoder().decode(data).trim();
+        if (text.length > 0) {
+          refs.add(refName);
+        }
+        continue;
+      } catch {
+        // Directory entries are handled recursively below.
+      }
+
+      try {
+        await this.#walkReflogs(path, refName, refs);
+      } catch {
+        // Ignore non-directory leaf nodes.
+      }
+    }
   }
 
   async #walkRefs(dirPath: string, prefix: string, refs: GitRef[]) {

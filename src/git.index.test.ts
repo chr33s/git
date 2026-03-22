@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { GitIndex } from "./git.index.ts";
 import { GitObjectStore } from "./git.object.ts";
 import { MemoryStorage } from "./git.storage.ts";
+import { hexToBytes } from "./git.utils.ts";
 
 void describe("GitIndex", () => {
   void describe("init", () => {
@@ -346,12 +347,3 @@ void describe("GitIndex", () => {
     });
   });
 });
-
-// Helper function
-function hexToBytes(hex: string) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}

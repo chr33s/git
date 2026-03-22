@@ -13,6 +13,7 @@ export interface GitStorage {
     options?: { atomic?: boolean },
   ): Promise<GitStorageRefChangeResult[]>;
   readReflog?(refName: string): Promise<GitReflogEntry[]>;
+  listReflogRefs?(): Promise<string[]>;
 }
 
 export interface GitReflogEntry {

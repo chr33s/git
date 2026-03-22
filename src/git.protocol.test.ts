@@ -2,10 +2,7 @@ import * as assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 
 import { GitProtocol } from "./git.protocol.ts";
-
-function pktLine(text: string) {
-  return (text.length + 4).toString(16).padStart(4, "0") + text;
-}
+import { pktLine } from "./test.helpers.ts";
 
 void describe("GitProtocol", () => {
   void describe("constructor", () => {
@@ -219,7 +216,7 @@ void describe("GitProtocol", () => {
             return {
               ok: true,
               text: async () =>
-                `${pktLine("# service=git-receive-pack\n")}0000${pktLine(`${"0".repeat(40)} capabilities^{}\0report-status ofs-delta\n`)}0000`,
+                `${pktLine("# service=git-receive-pack\n")}0000${pktLine(`${"0".repeat(40)} capabilities^{}\0report-status\n`)}0000`,
             };
           }
 

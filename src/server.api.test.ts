@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { GitRepository } from "./git.repository.ts";
 import { MemoryStorage } from "./git.storage.ts";
 import { ServerApi, type ServerApiRequest } from "./server.api.ts";
+import { compressData } from "./git.utils.ts";
 
 function createRequest(url: string, method: string = "GET", body?: Record<string, unknown>) {
   let bodyStream: ServerApiRequest["body"] = null;
@@ -1048,6 +1049,52 @@ void describe("remote endpoint", () => {
 });
 
 void describe("repository management", () => {
+  void it("should fsck a requested object", async () => {
+    const storage = new MemoryStorage();
+    const repo = new GitRepository(storage, { repoName: "test" });
+    await repo.init();
+    const api = new ServerApi(repo);
+
+    const oid = await repo.writeObject("blob", new TextEncoder().encode("healthy"));
+    const tampered = new TextEncoder().encode("tampered");
+    const header = new TextEncoder().encode(`blob ${tampered.length}\0`);
+    const content = new Uint8Array(header.length + tampered.length);
+    content.set(header);
+    content.set(tampered, header.length);
+    await storage.writeFile(
+      `.git/objects/${oid.slice(0, 2)}/${oid.slice(2)}`,
+      await compressData(content),
+    );
+
+    const response = await api.fetch(
+      createRequest("http://localhost/api/test/fsck", "POST", { oid }),
+    );
+
+    assert.equal(response.status, 200);
+    const json = (await response.json()) as {
+      result: { errors: string[]; valid: boolean };
+      valid: boolean;
+    };
+    assert.equal(json.valid, false);
+    assert.equal(json.result.valid, false);
+    assert.ok(json.result.errors.some((error) => error.includes("hash mismatch")));
+  });
+
+  void it("should gc unreachable objects", async () => {
+    const { repo, api } = await setupRepo();
+    const oid = await repo.writeObject("blob", new TextEncoder().encode("orphan"));
+
+    const response = await api.fetch(
+      createRequest("http://localhost/api/test/gc", "POST", { gracePeriodMinutes: 0 }),
+    );
+
+    assert.equal(response.status, 200);
+    const json = (await response.json()) as { deleted: number; freedBytes: number };
+    assert.equal(json.deleted, 1);
+    assert.ok(json.freedBytes > 0);
+    await assert.rejects(() => repo.readObject(oid), /not found/);
+  });
+
   void it("should create a repository with the requested default branch", async () => {
     const { repo, api } = await setupRepo();
 

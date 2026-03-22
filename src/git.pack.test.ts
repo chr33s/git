@@ -1,9 +1,14 @@
 import * as assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { GitPackParser, GitPackWriter } from "./git.pack.ts";
 import { GitObjectStore } from "./git.object.ts";
 import { MemoryStorage } from "./git.storage.ts";
+import { exec, run, toStream } from "./test.helpers.ts";
+import { hexToBytes } from "./git.utils.ts";
 
 void describe("GitPackParser", () => {
   void describe("constructor", () => {
@@ -262,25 +267,51 @@ void describe("GitPackWriter", () => {
       assert.equal(stored.type, "blob");
       assert.deepEqual(stored.data, content);
     });
+
+    void it("should persist and read a pack index", async () => {
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+
+      const objectStore = new GitObjectStore(storage);
+      await objectStore.init();
+
+      const oid = await objectStore.writeObject("blob", new TextEncoder().encode("indexed"));
+      const writer = new GitPackWriter(objectStore);
+      const artifacts = await writer.createPackArtifacts([oid]);
+      const { idxPath } = await objectStore.writePack(artifacts.packData, artifacts.indexEntries);
+
+      const index = await objectStore.readPackIndex(idxPath);
+      assert.equal(index.entries.length, 1);
+      assert.equal(index.entries[0]!.oid, oid);
+
+      const readBack = await objectStore.readObject(oid);
+      assert.equal(readBack.type, "blob");
+      assert.deepEqual(readBack.data, new TextEncoder().encode("indexed"));
+    });
   });
 });
 
-// Helper function
-function hexToBytes(hex: string) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
+function encodePackObjectHeader(type: number, size: number) {
+  const bytes: number[] = [];
+  let byte = (type << 4) | (size & 0xf);
+  size >>= 4;
 
-function toStream(data: Uint8Array) {
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(data);
-      controller.close();
-    },
-  });
+  if (size > 0) {
+    byte |= 0x80;
+  }
+
+  bytes.push(byte);
+
+  while (size > 0) {
+    byte = size & 0x7f;
+    size >>= 7;
+    if (size > 0) {
+      byte |= 0x80;
+    }
+    bytes.push(byte);
+  }
+
+  return new Uint8Array(bytes);
 }
 
 void describe("thin pack handling", () => {
@@ -313,7 +344,7 @@ void describe("thin pack handling", () => {
     // 1 object
     chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x01]));
 
-    // ref_delta object header: type 7, size = delta.length
+    // ref_delta object header: type 7, size = decompressed delta length
     const headerBytes: number[] = [];
     let byte = (7 << 4) | (delta.length & 0xf);
     let remaining = delta.length >> 4;
@@ -348,6 +379,163 @@ void describe("thin pack handling", () => {
     assert.deepEqual(stored.data, targetContent);
   });
 
+  void it("should parse a delta object followed by another packed object", async () => {
+    const storage = new MemoryStorage();
+    await storage.init("test-repo");
+    const objectStore = new GitObjectStore(storage);
+    await objectStore.init();
+
+    const baseContent = new TextEncoder().encode("Hello, World! This is the base content.");
+    const baseOid = await objectStore.writeObject("blob", baseContent);
+    const targetContent = new TextEncoder().encode("Hello, World! This is the MODIFIED content.");
+    const trailingContent = new TextEncoder().encode("trailing blob");
+
+    const { GitDelta } = await import("./git.delta.ts");
+    const { compressData, createSha1, concatenateUint8Arrays } = await import("./git.utils.ts");
+    const delta = GitDelta.createDelta(baseContent, targetContent);
+    const compressedDelta = await compressData(delta);
+    const compressedBlob = await compressData(trailingContent);
+
+    const chunks: Uint8Array[] = [];
+    chunks.push(new TextEncoder().encode("PACK"));
+    chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x02]));
+    chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x02]));
+
+    chunks.push(encodePackObjectHeader(7, delta.length));
+    chunks.push(hexToBytes(baseOid));
+    chunks.push(compressedDelta);
+
+    chunks.push(encodePackObjectHeader(3, trailingContent.length));
+    chunks.push(compressedBlob);
+
+    const packWithoutChecksum = concatenateUint8Arrays(chunks);
+    const checksum = await createSha1(packWithoutChecksum);
+    const packData = concatenateUint8Arrays([packWithoutChecksum, hexToBytes(checksum)]);
+
+    const parser = new GitPackParser(objectStore);
+    await parser.parsePack(toStream(packData));
+
+    const resolvedOid = await objectStore.writeObject("blob", targetContent);
+    const trailingOid = await objectStore.writeObject("blob", trailingContent);
+    assert.deepEqual((await objectStore.readObject(resolvedOid)).data, targetContent);
+    assert.deepEqual((await objectStore.readObject(trailingOid)).data, trailingContent);
+  });
+
+  void it("should parse a git-generated pack with multiple object boundaries", async () => {
+    const repoDir = await mkdtemp(join(tmpdir(), "git-pack-"));
+
+    try {
+      await run("git init -b main", { cwd: repoDir });
+      await run('git config user.name "Test User"', { cwd: repoDir });
+      await run('git config user.email "test@example.com"', { cwd: repoDir });
+      await run("git config commit.gpgSign false", { cwd: repoDir });
+
+      await writeFile(join(repoDir, "file.txt"), "v1\n");
+      await run("git add file.txt", { cwd: repoDir });
+      await run('git commit -m "c1"', { cwd: repoDir });
+
+      await writeFile(join(repoDir, "file.txt"), "v2 with more content\n");
+      await run('git commit -am "c2"', { cwd: repoDir });
+
+      await writeFile(
+        join(repoDir, "file.txt"),
+        "v3 with more content and enough repeated bytes to encourage git delta compression\n",
+      );
+      await run('git commit -am "c3"', { cwd: repoDir });
+
+      const packData = new Uint8Array(
+        await exec("git pack-objects --all --stdout", { cwd: repoDir }),
+      );
+      const latestBlobOid = (await run("git rev-parse HEAD:file.txt", { cwd: repoDir })).trim();
+      const latestContent = new Uint8Array(await readFile(join(repoDir, "file.txt")));
+
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+      const objectStore = new GitObjectStore(storage);
+      await objectStore.init();
+
+      const parser = new GitPackParser(objectStore);
+      await parser.parsePack(toStream(packData));
+
+      const stored = await objectStore.readObject(latestBlobOid);
+      assert.equal(stored.type, "blob");
+      assert.deepEqual(stored.data, latestContent);
+    } finally {
+      await rm(repoDir, { force: true, recursive: true });
+    }
+  });
+
+  void it("should parse a pack extracted from a git push request", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "git-push-pack-"));
+
+    try {
+      const capturePath = join(tempDir, "capture.bin");
+      const wrapperPath = join(tempDir, "capture-receive-pack.sh");
+      const remoteDir = join(tempDir, "remote.git");
+      const clientDir = join(tempDir, "client");
+
+      await writeFile(wrapperPath, 'tee "$1" | git-receive-pack "$2"\n');
+
+      await run(`git init --bare ${remoteDir}`, { cwd: tempDir });
+      await run(`git init -b main ${clientDir}`, { cwd: tempDir });
+      await run('git config user.name "Test User"', { cwd: clientDir });
+      await run('git config user.email "test@example.com"', { cwd: clientDir });
+      await run("git config commit.gpgSign false", { cwd: clientDir });
+
+      await writeFile(join(clientDir, "file.txt"), "v1\n");
+      await run("git add file.txt", { cwd: clientDir });
+      await run('git commit -m "c1"', { cwd: clientDir });
+
+      await writeFile(join(clientDir, "file.txt"), "v2 with more content\n");
+      await run('git commit -am "c2"', { cwd: clientDir });
+
+      await writeFile(
+        join(clientDir, "file.txt"),
+        "v3 with more content and enough repeated bytes to encourage git delta compression\n",
+      );
+      await run('git commit -am "c3"', { cwd: clientDir });
+
+      await run(
+        `git push '--receive-pack=sh ${wrapperPath} ${capturePath} ${remoteDir}' ${remoteDir} main`,
+        { cwd: clientDir },
+      );
+
+      const body = new Uint8Array(await readFile(capturePath));
+      let offset = 0;
+
+      while (offset + 4 <= body.length) {
+        const length = parseInt(new TextDecoder().decode(body.slice(offset, offset + 4)), 16);
+        assert.ok(!Number.isNaN(length), "Expected pkt-line length prefix");
+        offset += 4;
+
+        if (length === 0) {
+          break;
+        }
+
+        offset += length - 4;
+      }
+
+      const packData = body.slice(offset);
+      assert.equal(new TextDecoder().decode(packData.slice(0, 4)), "PACK");
+
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+      const objectStore = new GitObjectStore(storage);
+      await objectStore.init();
+
+      const parser = new GitPackParser(objectStore);
+      await parser.parsePack(toStream(packData));
+
+      const latestBlobOid = (await run("git rev-parse HEAD:file.txt", { cwd: clientDir })).trim();
+      const latestContent = new Uint8Array(await readFile(join(clientDir, "file.txt")));
+      const stored = await objectStore.readObject(latestBlobOid);
+      assert.equal(stored.type, "blob");
+      assert.deepEqual(stored.data, latestContent);
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
   void it("should throw on unresolvable ref_delta", async () => {
     const storage = new MemoryStorage();
     await storage.init("test-repo");
@@ -366,7 +554,7 @@ void describe("thin pack handling", () => {
     chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x02])); // version
     chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x01])); // 1 object
 
-    // ref_delta header: type 7, size = fakeDelta.length
+    // ref_delta header: type 7, size = decompressed delta length
     const headerBytes: number[] = [];
     let byte = (7 << 4) | (fakeDelta.length & 0xf);
     let remaining = fakeDelta.length >> 4;

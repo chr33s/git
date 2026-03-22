@@ -1,5 +1,5 @@
 import { GitIndex } from "./git.index.ts";
-import { GitObjectStore } from "./git.object.ts";
+import { GitObjectStore, type FsckResult } from "./git.object.ts";
 import { GitPackParser, GitPackWriter } from "./git.pack.ts";
 import { GitProtocol } from "./git.protocol.ts";
 import { GitRefStore, type GitRefUpdate } from "./git.ref.ts";
@@ -43,6 +43,8 @@ export interface GitRepoInfo {
   repo: string;
   protocol: string;
 }
+
+const ZERO_OID = "0".repeat(40);
 
 export class GitRepository {
   protected storage: GitStorage;
@@ -443,6 +445,14 @@ export class GitRepository {
     return await this.objectStore.readObject(oid);
   }
 
+  async validateObject(oid: string): Promise<FsckResult> {
+    return await this.objectStore.validateObject(oid);
+  }
+
+  async fsckAll(): Promise<FsckResult[]> {
+    return await this.objectStore.fsckAll();
+  }
+
   async writeObject(type: "blob" | "tree" | "commit" | "tag", data: Uint8Array) {
     return await this.objectStore.writeObject(type, data);
   }
@@ -488,6 +498,172 @@ export class GitRepository {
 
   async readReflog(name: string) {
     return await this.refStore.readReflog(name);
+  }
+
+  async getReachableObjects() {
+    const reachable = new Set<string>();
+    const queue: string[] = [];
+
+    const refs = await this.refStore.getAllRefs();
+    for (const ref of refs) {
+      if (this.#isReachableOid(ref.oid)) {
+        queue.push(ref.oid);
+      }
+    }
+
+    const headOid = await this.refStore.readRef("HEAD");
+    if (this.#isReachableOid(headOid)) {
+      queue.push(headOid);
+    }
+
+    const reflogRefs = new Set<string>(["HEAD", ...(await this.refStore.listReflogRefs())]);
+    for (const reflogRef of reflogRefs) {
+      const entries = await this.refStore.readReflog(reflogRef);
+      for (const entry of entries) {
+        if (this.#isReachableOid(entry.oldOid)) {
+          queue.push(entry.oldOid);
+        }
+        if (this.#isReachableOid(entry.newOid)) {
+          queue.push(entry.newOid);
+        }
+      }
+    }
+
+    while (queue.length > 0) {
+      const oid = queue.pop();
+      if (!oid || reachable.has(oid) || !this.#isReachableOid(oid)) {
+        continue;
+      }
+
+      let object;
+      try {
+        object = await this.objectStore.readObject(oid);
+      } catch {
+        continue;
+      }
+
+      reachable.add(oid);
+
+      if (object.type === "commit") {
+        const info = this.parseCommit(object.data);
+        if (this.#isReachableOid(info.tree)) {
+          queue.push(info.tree);
+        }
+        for (const parent of info.parents) {
+          if (this.#isReachableOid(parent)) {
+            queue.push(parent);
+          }
+        }
+      } else if (object.type === "tree") {
+        const entries = this.parseTree(object.data);
+        for (const entry of entries) {
+          if (this.#isReachableOid(entry.oid)) {
+            queue.push(entry.oid);
+          }
+        }
+      } else if (object.type === "tag") {
+        const targetOid = this.#parseTagTarget(object.data);
+        if (this.#isReachableOid(targetOid)) {
+          queue.push(targetOid);
+        }
+      }
+    }
+
+    return reachable;
+  }
+
+  async gc(gracePeriodMinutes: number = 10) {
+    const reachable = await this.getReachableObjects();
+    const gracePeriodMs = Math.max(0, gracePeriodMinutes) * 60_000;
+    const cutoff = Date.now() - gracePeriodMs;
+    const useGracePeriod = gracePeriodMs > 0;
+
+    const protectedOids = new Set<string>(reachable);
+    const looseObjects = await this.objectStore.listLooseObjects();
+    for (const object of looseObjects) {
+      if (useGracePeriod && object.lastModified.getTime() >= cutoff) {
+        protectedOids.add(object.oid);
+      }
+    }
+
+    const packs = await this.objectStore.listPackFiles();
+    const packsToDelete: Array<{ deletedObjects: number; pack: (typeof packs)[number] }> = [];
+    const repackCandidates: Array<{ keepOids: string[]; pack: (typeof packs)[number] }> = [];
+
+    for (const pack of packs) {
+      if (useGracePeriod && pack.lastModified.getTime() >= cutoff) {
+        for (const entry of pack.index.entries) {
+          protectedOids.add(entry.oid);
+        }
+        continue;
+      }
+
+      const keepOids = pack.index.entries
+        .filter((entry) => protectedOids.has(entry.oid))
+        .map((entry) => entry.oid);
+
+      if (keepOids.length === pack.index.entries.length) {
+        continue;
+      }
+
+      if (keepOids.length === 0) {
+        packsToDelete.push({ deletedObjects: pack.index.entries.length, pack });
+      } else {
+        repackCandidates.push({ keepOids: Array.from(new Set(keepOids)), pack });
+      }
+    }
+
+    let deleted = 0;
+    let freedBytes = 0;
+
+    for (const object of looseObjects) {
+      if (protectedOids.has(object.oid)) {
+        continue;
+      }
+
+      await this.storage.deleteFile(object.path);
+      deleted++;
+      freedBytes += object.size;
+    }
+
+    const repackOids = Array.from(
+      new Set(repackCandidates.flatMap((candidate) => candidate.keepOids)),
+    );
+
+    let rewrittenBytes = 0;
+    if (repackOids.length > 0) {
+      const writer = new GitPackWriter(this.objectStore);
+      const artifacts = await writer.createPackArtifacts(repackOids);
+      const { idxPath, packPath } = await this.objectStore.writePack(
+        artifacts.packData,
+        artifacts.indexEntries,
+      );
+      const [packInfo, idxInfo] = await Promise.all([
+        this.storage.getFileInfo(packPath),
+        this.storage.getFileInfo(idxPath),
+      ]);
+      rewrittenBytes = packInfo.size + idxInfo.size;
+    }
+
+    for (const candidate of repackCandidates) {
+      const removedCount = candidate.pack.index.entries.length - candidate.keepOids.length;
+      deleted += removedCount;
+      freedBytes += candidate.pack.packSize + candidate.pack.idxSize;
+      await this.storage.deleteFile(candidate.pack.packPath);
+      await this.storage.deleteFile(candidate.pack.idxPath);
+    }
+
+    for (const candidate of packsToDelete) {
+      deleted += candidate.deletedObjects;
+      freedBytes += candidate.pack.packSize + candidate.pack.idxSize;
+      await this.storage.deleteFile(candidate.pack.packPath);
+      await this.storage.deleteFile(candidate.pack.idxPath);
+    }
+
+    return {
+      deleted,
+      freedBytes: Math.max(0, freedBytes - rewrittenBytes),
+    };
   }
 
   async collectTreeObjects(treeOid: string) {
@@ -599,5 +775,19 @@ export class GitRepository {
   async parsePack(packStream: ReadableStream<Uint8Array>) {
     const parser = new GitPackParser(this.objectStore);
     return await parser.parsePack(packStream);
+  }
+
+  #parseTagTarget(data: Uint8Array) {
+    const text = new TextDecoder().decode(data);
+    const objectLine = text
+      .split("\n")
+      .find((line) => line.startsWith("object "))
+      ?.slice(7);
+
+    return objectLine || null;
+  }
+
+  #isReachableOid(oid: string | null | undefined): oid is string {
+    return !!oid && oid !== ZERO_OID && /^[0-9a-f]{40}$/.test(oid);
   }
 }
