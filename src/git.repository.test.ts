@@ -236,6 +236,69 @@ Initial commit`;
       assert.equal(parsed.tree, "a".repeat(40));
       assert.equal(parsed.parent, undefined);
     });
+
+    void it("should parse commit with multiple parents", async () => {
+      const storage = new MemoryStorage();
+      const config = { repoName: "test" };
+
+      const repo = new GitRepository(storage, config);
+      await repo.init();
+
+      const parent1 = "b".repeat(40);
+      const parent2 = "c".repeat(40);
+      const commitText = `tree ${"a".repeat(40)}
+parent ${parent1}
+parent ${parent2}
+author Test <test@test.com> 1234567890 +0000
+committer Test <test@test.com> 1234567890 +0000
+
+Merge commit`;
+
+      const data = new TextEncoder().encode(commitText);
+      const parsed = repo.parseCommit(data);
+
+      assert.equal(parsed.parent, parent1);
+      assert.deepEqual(parsed.parents, [parent1, parent2]);
+    });
+  });
+
+  void describe("shallow grafts", () => {
+    void it("should read and write shallow commits", async () => {
+      const storage = new MemoryStorage();
+      const config = { repoName: "test" };
+
+      const repo = new GitRepository(storage, config);
+      await repo.init();
+
+      // Initially empty
+      const empty = await repo.getShallowCommits();
+      assert.equal(empty.size, 0);
+
+      // Write shallow commits
+      const oid1 = "a".repeat(40);
+      const oid2 = "b".repeat(40);
+      await repo.setShallowCommits(new Set([oid1, oid2]));
+
+      const result = await repo.getShallowCommits();
+      assert.equal(result.size, 2);
+      assert.ok(result.has(oid1));
+      assert.ok(result.has(oid2));
+    });
+
+    void it("should delete shallow file when set is empty", async () => {
+      const storage = new MemoryStorage();
+      const config = { repoName: "test" };
+
+      const repo = new GitRepository(storage, config);
+      await repo.init();
+
+      const oid = "a".repeat(40);
+      await repo.setShallowCommits(new Set([oid]));
+      assert.equal((await repo.getShallowCommits()).size, 1);
+
+      await repo.setShallowCommits(new Set());
+      assert.equal((await repo.getShallowCommits()).size, 0);
+    });
   });
 
   void describe("parseTree", () => {
@@ -323,6 +386,26 @@ Initial commit`;
       const head = await repo.getCurrentHead();
       assert.equal(head, "refs/heads/main");
     });
+
+    void it("should initialize HEAD in each storage namespace", async () => {
+      const storage = new MemoryStorage();
+      const config = { repoName: "server-root" };
+
+      const repo = new GitRepository(storage, config);
+      await repo.init();
+
+      await repo.initStorage("repo-a");
+      assert.equal(await repo.getCurrentHead(), "refs/heads/main");
+
+      await repo.initStorage("repo-b");
+      assert.equal(await repo.getCurrentHead(), "refs/heads/main");
+
+      await repo.writeFile(".git/HEAD", new TextEncoder().encode("ref: refs/heads/custom\n"));
+      assert.equal(await repo.getCurrentHead(), "refs/heads/custom");
+
+      await repo.initStorage("repo-a");
+      assert.equal(await repo.getCurrentHead(), "refs/heads/main");
+    });
   });
 
   void describe("getCurrentCommitOid", () => {
@@ -346,6 +429,20 @@ Initial commit`;
 
       await repo.add("test.txt", new TextEncoder().encode("content"));
       const commitOid = await repo.commit("Test", { name: "T", email: "t@t.com" });
+
+      const currentOid = await repo.getCurrentCommitOid();
+      assert.equal(currentOid, commitOid);
+    });
+
+    void it("should return commit OID for detached HEAD", async () => {
+      const storage = new MemoryStorage();
+      const config = { repoName: "test" };
+
+      const repo = new GitRepository(storage, config);
+      await repo.init();
+
+      const commitOid = "a".repeat(40);
+      await repo.writeFile(".git/HEAD", new TextEncoder().encode(`${commitOid}\n`));
 
       const currentOid = await repo.getCurrentCommitOid();
       assert.equal(currentOid, commitOid);

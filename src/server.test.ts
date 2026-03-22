@@ -121,4 +121,264 @@ void describe("cli", () => {
     const branchOutput = await cli.run("git branch -r", { cwd: clonedDir3 });
     assert.match(branchOutput, /origin\/main/, "Pull should set up remote tracking");
   });
+
+  void it("git clone --depth 1", async () => {
+    const cd1 = await cli.setup();
+
+    // Create 3 commits so there's history to truncate
+    await writeFile(join(cd1, "file.txt"), "v1");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "commit 1"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v2");
+    await cli.run('git commit -am "commit 2"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v3");
+    await cli.run('git commit -am "commit 3"', { cwd: cd1 });
+
+    const repo = `shallow-test-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    // Shallow clone with depth 1
+    const cd2 = await cli.setup();
+    await cli.run(`git -c init.defaultBranch=main clone --depth 1 ${repoUrl} shallow-repo`, {
+      cwd: cd2,
+    });
+
+    const shallowDir = join(cd2, "shallow-repo");
+
+    // File should contain latest content
+    const content = await readFile(join(shallowDir, "file.txt"), "utf-8");
+    assert.equal(content, "v3");
+
+    // Should have only 1 commit in history
+    const log = await cli.run("git log --oneline", { cwd: shallowDir });
+    const commits = log.trim().split("\n").filter(Boolean);
+    assert.equal(commits.length, 1, "Shallow clone should have only 1 commit");
+
+    // Should be marked as shallow
+    const isShallow = await cli.run("git rev-parse --is-shallow-repository", {
+      cwd: shallowDir,
+    });
+    assert.equal(isShallow.trim(), "true", "Repository should be shallow");
+  });
+
+  void it("git fetch --deepen", async () => {
+    const cd1 = await cli.setup();
+
+    // Create 3 commits
+    await writeFile(join(cd1, "file.txt"), "v1");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "commit 1"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v2");
+    await cli.run('git commit -am "commit 2"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v3");
+    await cli.run('git commit -am "commit 3"', { cwd: cd1 });
+
+    const repo = `deepen-test-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    // Shallow clone with depth 1
+    const cd2 = await cli.setup();
+    await cli.run(`git -c init.defaultBranch=main clone --depth 1 ${repoUrl} deepen-repo`, {
+      cwd: cd2,
+    });
+
+    const deepenDir = join(cd2, "deepen-repo");
+
+    // Deepen by 1 more commit
+    await cli.run("git fetch --deepen=1", { cwd: deepenDir });
+
+    const log = await cli.run("git log --oneline origin/main", { cwd: deepenDir });
+    const commits = log.trim().split("\n").filter(Boolean);
+    assert.ok(commits.length >= 2, "Deepen should add at least one more commit");
+  });
+
+  void it("git fetch --unshallow", async () => {
+    const cd1 = await cli.setup();
+
+    // Create 3 commits
+    await writeFile(join(cd1, "file.txt"), "v1");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "commit 1"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v2");
+    await cli.run('git commit -am "commit 2"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v3");
+    await cli.run('git commit -am "commit 3"', { cwd: cd1 });
+
+    const repo = `unshallow-test-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    // Shallow clone with depth 1
+    const cd2 = await cli.setup();
+    await cli.run(`git -c init.defaultBranch=main clone --depth 1 ${repoUrl} unshallow-repo`, {
+      cwd: cd2,
+    });
+
+    const unshallowDir = join(cd2, "unshallow-repo");
+
+    // Unshallow — fetch full history
+    await cli.run("git fetch --unshallow", { cwd: unshallowDir });
+
+    // Should have all 3 commits now
+    const log = await cli.run("git log --oneline origin/main", { cwd: unshallowDir });
+    const commits = log.trim().split("\n").filter(Boolean);
+    assert.equal(commits.length, 3, "Unshallow should fetch all commits");
+
+    // Should no longer be shallow
+    const isShallow = await cli.run("git rev-parse --is-shallow-repository", {
+      cwd: unshallowDir,
+    });
+    assert.equal(isShallow.trim(), "false", "Repository should no longer be shallow");
+  });
+
+  void it("git clone (protocol v2)", async () => {
+    const cd1 = await cli.setup();
+
+    await writeFile(join(cd1, "hello.txt"), "protocol v2 test");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "v2 commit"', { cwd: cd1 });
+
+    const repo = `v2-test-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    // Clone using protocol v2
+    const cd2 = await cli.setup();
+    await cli.run(
+      `git -c protocol.version=2 -c init.defaultBranch=main clone ${repoUrl} v2-cloned`,
+      { cwd: cd2 },
+    );
+
+    const clonedDir = join(cd2, "v2-cloned");
+    const content = await readFile(join(clonedDir, "hello.txt"), "utf-8");
+    assert.equal(content, "protocol v2 test");
+
+    // Verify commit came through
+    const log = await cli.run("git log --oneline", { cwd: clonedDir });
+    assert.match(log, /v2 commit/);
+  });
+
+  void it("git fetch (protocol v2)", async () => {
+    const cd1 = await cli.setup();
+
+    await writeFile(join(cd1, "data.txt"), "initial");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "first"', { cwd: cd1 });
+
+    const repo = `v2-fetch-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    // Clone with v2
+    const cd2 = await cli.setup();
+    await cli.run(
+      `git -c protocol.version=2 -c init.defaultBranch=main clone ${repoUrl} v2-fetch-repo`,
+      { cwd: cd2 },
+    );
+    const clonedDir = join(cd2, "v2-fetch-repo");
+
+    // Push another commit from cd1
+    await writeFile(join(cd1, "data.txt"), "updated");
+    await cli.run('git commit -am "second"', { cwd: cd1 });
+    await cli.run("git push origin main", { cwd: cd1 });
+
+    // Fetch with v2
+    await cli.run("git -c protocol.version=2 fetch origin", { cwd: clonedDir });
+    await cli.run("git merge origin/main", { cwd: clonedDir });
+    const content = await readFile(join(clonedDir, "data.txt"), "utf-8");
+    assert.equal(content, "updated");
+  });
+
+  void it("git clone --depth 1 (protocol v2)", async () => {
+    const cd1 = await cli.setup();
+
+    await writeFile(join(cd1, "file.txt"), "v1");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "c1"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v2");
+    await cli.run('git commit -am "c2"', { cwd: cd1 });
+
+    await writeFile(join(cd1, "file.txt"), "v3");
+    await cli.run('git commit -am "c3"', { cwd: cd1 });
+
+    const repo = `v2-shallow-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    const cd2 = await cli.setup();
+    await cli.run(
+      `git -c protocol.version=2 -c init.defaultBranch=main clone --depth 1 ${repoUrl} v2-shallow`,
+      { cwd: cd2 },
+    );
+
+    const shallowDir = join(cd2, "v2-shallow");
+    const content = await readFile(join(shallowDir, "file.txt"), "utf-8");
+    assert.equal(content, "v3");
+
+    const log = await cli.run("git log --oneline", { cwd: shallowDir });
+    const commits = log.trim().split("\n").filter(Boolean);
+    assert.equal(commits.length, 1, "Shallow clone should have only 1 commit");
+  });
+
+  void it("v2 info/refs returns capabilities", async () => {
+    const cd1 = await cli.setup();
+
+    await writeFile(join(cd1, "test.txt"), "cap test");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "init"', { cwd: cd1 });
+
+    const repo = `v2-cap-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    // Hit info/refs with v2 header directly
+    const resp = await fetch(`${repoUrl}/info/refs?service=git-upload-pack`, {
+      headers: { "Git-Protocol": "version=2" },
+    });
+    const text = await resp.text();
+
+    assert.ok(text.includes("version 2"), "Should contain version 2");
+    assert.ok(text.includes("ls-refs"), "Should advertise ls-refs");
+    assert.ok(text.includes("fetch"), "Should advertise fetch");
+    assert.ok(text.includes("object-format=sha1"), "Should advertise object-format");
+  });
+
+  void it("v1 fallback when no Git-Protocol header", async () => {
+    const cd1 = await cli.setup();
+
+    await writeFile(join(cd1, "test.txt"), "v1 fallback test");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "init"', { cwd: cd1 });
+
+    const repo = `v1-fallback-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    // Clone without v2 (force v1)
+    const cd2 = await cli.setup();
+    await cli.run(
+      `git -c protocol.version=1 -c init.defaultBranch=main clone ${repoUrl} v1-clone`,
+      { cwd: cd2 },
+    );
+
+    const content = await readFile(join(cd2, "v1-clone", "test.txt"), "utf-8");
+    assert.equal(content, "v1 fallback test");
+  });
 });

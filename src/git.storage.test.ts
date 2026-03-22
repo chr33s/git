@@ -140,4 +140,21 @@ void describe("MemoryStorage", () => {
     assert.ok(await storage.exists("deep/nested/path"));
     assert.ok(await storage.exists("deep/nested/path/file.txt"));
   });
+
+  void it("should isolate repository namespaces", async () => {
+    const storage = new MemoryStorage();
+
+    await storage.init("repo-a");
+    await storage.writeFile("shared.txt", new Uint8Array([1]));
+
+    await storage.init("repo-b");
+    assert.ok(!(await storage.exists("shared.txt")));
+    await storage.writeFile("shared.txt", new Uint8Array([2]));
+
+    await storage.init("repo-a");
+    assert.deepEqual(await storage.readFile("shared.txt"), new Uint8Array([1]));
+
+    await storage.init("repo-b");
+    assert.deepEqual(await storage.readFile("shared.txt"), new Uint8Array([2]));
+  });
 });

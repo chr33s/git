@@ -85,7 +85,7 @@ export class GitPackParser {
     const calculatedChecksum = await this.#calculateChecksum(buffer.slice(0, buffer.length - 20));
 
     if (!this.#compareChecksums(packChecksum, calculatedChecksum)) {
-      console.warn("Pack checksum mismatch");
+      throw new Error("Pack checksum mismatch");
     }
   }
 
@@ -194,7 +194,7 @@ export class GitPackParser {
 
     // Verify size
     if (decompressed.length !== expectedSize) {
-      console.warn(`Size mismatch: expected ${expectedSize}, got ${decompressed.length}`);
+      throw new Error(`Object size mismatch: expected ${expectedSize}, got ${decompressed.length}`);
     }
 
     return {
@@ -271,7 +271,9 @@ export class GitPackParser {
     } while (unresolvedCount > 0 && iteration < maxIterations);
 
     if (unresolvedCount > 0) {
-      console.warn(`Failed to resolve ${unresolvedCount} delta objects`);
+      throw new Error(
+        `Unresolvable deltas: ${unresolvedCount} delta object(s) have no base in pack or object store`,
+      );
     }
   }
 

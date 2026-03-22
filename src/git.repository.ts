@@ -27,6 +27,7 @@ export interface GitAuthor {
 export interface GitCommitInfo {
   tree: string;
   parent?: string;
+  parents: string[];
   author: string;
   message: string;
 }
@@ -64,6 +65,10 @@ export class GitRepository {
     // Initialize storage
     await this.storage.init(this.config.repoName);
 
+    await this.#initializeRepositoryLayout();
+  }
+
+  async #initializeRepositoryLayout() {
     // Initialize git components
     await this.objectStore.init();
     await this.refStore.init();
@@ -75,12 +80,14 @@ export class GitRepository {
     await this.storage.createDirectory(".git/objects/info");
     await this.storage.createDirectory(".git/objects/pack");
 
-    // Initialize HEAD
-    const initialBranch = this.config.branch || "main";
-    await this.storage.writeFile(
-      ".git/HEAD",
-      new TextEncoder().encode(`ref: refs/heads/${initialBranch}\n`),
-    );
+    // Initialize HEAD for this repository namespace if it doesn't exist yet.
+    if (!(await this.storage.exists(".git/HEAD"))) {
+      const initialBranch = this.config.branch || "main";
+      await this.storage.writeFile(
+        ".git/HEAD",
+        new TextEncoder().encode(`ref: refs/heads/${initialBranch}\n`),
+      );
+    }
   }
 
   async clone(url: string) {
@@ -311,13 +318,14 @@ export class GitRepository {
     const lines = text.split("\n");
 
     const tree = lines.find((l) => l.startsWith("tree "))?.slice(5) || "";
-    const parent = lines.find((l) => l.startsWith("parent "))?.slice(7);
+    const parents = lines.filter((l) => l.startsWith("parent ")).map((l) => l.slice(7));
+    const parent = parents[0];
     const author = lines.find((l) => l.startsWith("author "))?.slice(7) || "";
 
     const messageStart = lines.findIndex((l) => l === "") + 1;
     const message = lines.slice(messageStart).join("\n");
 
-    return { tree, parent, author, message };
+    return { tree, parent, parents, author, message };
   }
 
   parseTree(data: Uint8Array): GitTreeEntry[] {
@@ -384,11 +392,18 @@ export class GitRepository {
   }
 
   async getCurrentCommitOid(): Promise<string | null> {
-    const headRef = await this.getCurrentHead();
-    if (headRef) {
-      return await this.refStore.readRef(headRef);
+    try {
+      const headContent = await this.storage.readFile(".git/HEAD");
+      const content = new TextDecoder().decode(headContent).trim();
+
+      if (content.startsWith("ref: ")) {
+        return await this.refStore.readRef(content.slice(5).trim());
+      }
+
+      return content || null;
+    } catch {
+      return null;
     }
-    return null;
   }
 
   async hashObject(type: string, data: Uint8Array): Promise<string> {
@@ -501,7 +516,8 @@ export class GitRepository {
   }
 
   async initStorage(repoName: string): Promise<void> {
-    return await this.storage.init(repoName);
+    await this.storage.init(repoName);
+    await this.#initializeRepositoryLayout();
   }
 
   async #collectTreeObjectsRecursive(treeOid: string, objects: Set<string>): Promise<void> {
@@ -525,6 +541,36 @@ export class GitRepository {
     } catch {
       // Tree not found, skip
     }
+  }
+
+  // ==================== Shallow Graft Methods ====================
+
+  async getShallowCommits(): Promise<Set<string>> {
+    const shallow = new Set<string>();
+    try {
+      const data = await this.storage.readFile(".git/shallow");
+      const text = new TextDecoder().decode(data);
+      for (const line of text.split("\n")) {
+        const oid = line.trim();
+        if (oid) shallow.add(oid);
+      }
+    } catch {
+      // No shallow file
+    }
+    return shallow;
+  }
+
+  async setShallowCommits(oids: Set<string>): Promise<void> {
+    if (oids.size === 0) {
+      try {
+        await this.storage.deleteFile(".git/shallow");
+      } catch {
+        // File doesn't exist
+      }
+      return;
+    }
+    const text = Array.from(oids).join("\n") + "\n";
+    await this.storage.writeFile(".git/shallow", new TextEncoder().encode(text));
   }
 
   // ==================== Merge & Pack Delegation Methods ====================

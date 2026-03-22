@@ -38,11 +38,11 @@ void describe("fetch", () => {
 
     assert.ok(response.ok, `Expected response to be ok, got ${response.ok}`);
     assert.strictEqual(response.status, 200, `Expected status to be 200, got: ${response.status}`);
-    assert.strictEqual(
-      data.split("").slice(0, 36).join(""),
-      "001d# service=git-upload-pack0000007",
-      `Expected "001d# service=git-upload-pack0000007", got: ${data}`,
+    assert.ok(
+      data.startsWith("001d# service=git-upload-pack0000"),
+      `Expected smart HTTP service announcement, got: ${data}`,
     );
+    assert.match(data, /refs\/heads\/main/, `Expected advertised main branch, got: ${data}`);
   });
 });
 

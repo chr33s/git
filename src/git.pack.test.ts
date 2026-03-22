@@ -27,21 +27,11 @@ void describe("GitPackParser", () => {
       const objectStore = new GitObjectStore(storage);
       await objectStore.init();
 
+      // Use the writer to produce a pack with a correct checksum
+      const writer = new GitPackWriter(objectStore);
+      const packData = await writer.createPack([]);
+
       const parser = new GitPackParser(objectStore);
-
-      // Create a minimal valid pack file with correct checksum
-      const packData = new Uint8Array([
-        // Pack signature: 'PACK'
-        0x50, 0x41, 0x43, 0x4b,
-        // Version: 2
-        0x00, 0x00, 0x00, 0x02,
-        // Object count: 0
-        0x00, 0x00, 0x00, 0x00,
-        // SHA1 checksum (20 bytes) - placeholder
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00,
-      ]);
-
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(packData);
@@ -87,14 +77,17 @@ void describe("GitPackParser", () => {
       const objectStore = new GitObjectStore(storage);
       await objectStore.init();
 
+      // Use the writer to produce a valid pack, then split it into chunks
+      const writer = new GitPackWriter(objectStore);
+      const packData = await writer.createPack([]);
+
+      // Split into header chunks + checksum
+      const chunk1 = packData.slice(0, 4); // "PACK"
+      const chunk2 = packData.slice(4, 8); // version
+      const chunk3 = packData.slice(8, 12); // count
+      const chunk4 = packData.slice(12); // checksum
+
       const parser = new GitPackParser(objectStore);
-
-      // Split pack data into chunks
-      const chunk1 = new Uint8Array([0x50, 0x41, 0x43, 0x4b]); // "PACK"
-      const chunk2 = new Uint8Array([0x00, 0x00, 0x00, 0x02]); // version
-      const chunk3 = new Uint8Array([0x00, 0x00, 0x00, 0x00]); // count
-      const chunk4 = new Uint8Array(20).fill(0); // checksum
-
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(chunk1);
@@ -280,3 +273,155 @@ function hexToBytes(hex: string): Uint8Array {
   }
   return bytes;
 }
+
+function toStream(data: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(data);
+      controller.close();
+    },
+  });
+}
+
+void describe("thin pack handling", () => {
+  void it("should resolve ref_delta against object in store", async () => {
+    const storage = new MemoryStorage();
+    await storage.init("test-repo");
+    const objectStore = new GitObjectStore(storage);
+    await objectStore.init();
+
+    // Write a base blob to the store
+    const baseContent = new TextEncoder().encode("Hello, World! This is the base content.");
+    const baseOid = await objectStore.writeObject("blob", baseContent);
+
+    // Create a second blob that shares most content with the base
+    const targetContent = new TextEncoder().encode("Hello, World! This is the MODIFIED content.");
+
+    // Use GitDelta to create a proper delta
+    const { GitDelta } = await import("./git.delta.ts");
+    const delta = GitDelta.createDelta(baseContent, targetContent);
+
+    // Build a pack containing ONLY the ref_delta (thin pack — base is in store, not in pack)
+    const { compressData, createSha1, concatenateUint8Arrays } = await import("./git.utils.ts");
+    const compressed = await compressData(delta);
+
+    const chunks: Uint8Array[] = [];
+    // PACK header
+    chunks.push(new TextEncoder().encode("PACK"));
+    // Version 2
+    chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x02]));
+    // 1 object
+    chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x01]));
+
+    // ref_delta object header: type 7, size = delta.length
+    const headerBytes: number[] = [];
+    let byte = (7 << 4) | (delta.length & 0xf);
+    let remaining = delta.length >> 4;
+    if (remaining > 0) byte |= 0x80;
+    headerBytes.push(byte);
+    while (remaining > 0) {
+      byte = remaining & 0x7f;
+      remaining >>= 7;
+      if (remaining > 0) byte |= 0x80;
+      headerBytes.push(byte);
+    }
+    chunks.push(new Uint8Array(headerBytes));
+
+    // Base OID (20 bytes)
+    chunks.push(hexToBytes(baseOid));
+
+    // Compressed delta data
+    chunks.push(compressed);
+
+    // Combine everything except checksum to calculate it
+    const packWithoutChecksum = concatenateUint8Arrays(chunks);
+    const checksum = await createSha1(packWithoutChecksum);
+    const packData = concatenateUint8Arrays([packWithoutChecksum, hexToBytes(checksum)]);
+
+    // Parse the thin pack — should resolve the ref_delta using the base from the store
+    const parser = new GitPackParser(objectStore);
+    await parser.parsePack(toStream(packData));
+
+    // The resolved object should be stored — find it by writing and comparing
+    const expectedOid = await objectStore.writeObject("blob", targetContent);
+    const stored = await objectStore.readObject(expectedOid);
+    assert.deepEqual(stored.data, targetContent);
+  });
+
+  void it("should throw on unresolvable ref_delta", async () => {
+    const storage = new MemoryStorage();
+    await storage.init("test-repo");
+    const objectStore = new GitObjectStore(storage);
+    await objectStore.init();
+
+    // Build a pack with a ref_delta whose base OID doesn't exist anywhere
+    const { compressData, createSha1, concatenateUint8Arrays } = await import("./git.utils.ts");
+
+    // Fake delta data (just needs to be valid compressed bytes)
+    const fakeDelta = new Uint8Array([0x05, 0x05, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]);
+    const compressed = await compressData(fakeDelta);
+
+    const chunks: Uint8Array[] = [];
+    chunks.push(new TextEncoder().encode("PACK"));
+    chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x02])); // version
+    chunks.push(new Uint8Array([0x00, 0x00, 0x00, 0x01])); // 1 object
+
+    // ref_delta header: type 7, size = fakeDelta.length
+    const headerBytes: number[] = [];
+    let byte = (7 << 4) | (fakeDelta.length & 0xf);
+    let remaining = fakeDelta.length >> 4;
+    if (remaining > 0) byte |= 0x80;
+    headerBytes.push(byte);
+    while (remaining > 0) {
+      byte = remaining & 0x7f;
+      remaining >>= 7;
+      if (remaining > 0) byte |= 0x80;
+      headerBytes.push(byte);
+    }
+    chunks.push(new Uint8Array(headerBytes));
+
+    // Non-existent base OID
+    chunks.push(hexToBytes("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
+
+    // Compressed delta
+    chunks.push(compressed);
+
+    const packWithoutChecksum = concatenateUint8Arrays(chunks);
+    const checksum = await createSha1(packWithoutChecksum);
+    const packData = concatenateUint8Arrays([packWithoutChecksum, hexToBytes(checksum)]);
+
+    const parser = new GitPackParser(objectStore);
+    await assert.rejects(() => parser.parsePack(toStream(packData)), {
+      message: /[Uu]nresolvable deltas/,
+    });
+  });
+
+  void it("should throw on pack checksum mismatch", async () => {
+    const storage = new MemoryStorage();
+    await storage.init("test-repo");
+    const objectStore = new GitObjectStore(storage);
+    await objectStore.init();
+
+    // Create a valid pack then corrupt the checksum
+    const content = new TextEncoder().encode("test");
+    const oid = await objectStore.writeObject("blob", content);
+
+    const writer = new GitPackWriter(objectStore);
+    const packData = await writer.createPack([oid]);
+
+    // Corrupt the last byte of the checksum
+    const corrupted = new Uint8Array(packData);
+    corrupted[corrupted.length - 1] = (corrupted[corrupted.length - 1]! + 1) % 256;
+
+    // Parse into fresh store
+    const storage2 = new MemoryStorage();
+    await storage2.init("test-repo-2");
+    const objectStore2 = new GitObjectStore(storage2);
+    await objectStore2.init();
+
+    const parser = new GitPackParser(objectStore2);
+    await assert.rejects(() => parser.parsePack(toStream(corrupted)), {
+      message: /[Cc]hecksum mismatch/,
+    });
+  });
+});
