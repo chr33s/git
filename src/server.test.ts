@@ -9,6 +9,12 @@ import * as helpers from "./test.helpers.ts";
 const cli = await helpers.cli();
 const worker = await helpers.worker({ port: 8080 });
 
+const ZERO_OID = "0".repeat(40);
+
+function pktLine(text: string) {
+  return (text.length + 4).toString(16).padStart(4, "0") + text;
+}
+
 before(async () => {
   await cli.before();
   await worker.before();
@@ -60,6 +66,73 @@ void describe("cli", () => {
     await cli.run("git push -u origin main", { cwd: cd1 });
     const output = await cli.run("git ls-remote origin", { cwd: cd1 });
     assert.match(output, /refs\/heads\/main/, "Push should create refs on remote");
+  });
+
+  void it("git receive-pack rejects stale old values", async () => {
+    const cd1 = await cli.setup();
+
+    await writeFile(join(cd1, "stale.txt"), "stale test");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "stale base"', { cwd: cd1 });
+
+    const repo = `stale-push-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    const headOid = (await cli.run("git rev-parse HEAD", { cwd: cd1 })).trim();
+    const body = pktLine(
+      `${ZERO_OID} ${headOid} refs/heads/main\0report-status delete-refs ofs-delta\n`,
+    );
+
+    const response = await fetch(`${repoUrl}/git-receive-pack`, {
+      body: `${body}0000`,
+      headers: {
+        Accept: "application/x-git-receive-pack-result",
+        "Content-Type": "application/x-git-receive-pack-request",
+      },
+      method: "POST",
+    });
+    const text = await response.text();
+
+    assert.match(text, /ng refs\/heads\/main non-fast-forward/);
+  });
+
+  void it("git receive-pack rolls back atomic batches", async () => {
+    const cd1 = await cli.setup();
+
+    await writeFile(join(cd1, "atomic.txt"), "atomic test");
+    await cli.run("git add .", { cwd: cd1 });
+    await cli.run('git commit -m "atomic base"', { cwd: cd1 });
+
+    const repo = `atomic-push-${randomUUID().slice(0, 8)}`;
+    const repoUrl = `${worker.url}${repo}.git`;
+    await cli.run(`git remote add origin ${repoUrl}`, { cwd: cd1 });
+    await cli.run("git push -u origin main", { cwd: cd1 });
+
+    const headOid = (await cli.run("git rev-parse HEAD", { cwd: cd1 })).trim();
+    const body =
+      pktLine(
+        `${ZERO_OID} ${headOid} refs/heads/feature\0report-status delete-refs ofs-delta atomic\n`,
+      ) + pktLine(`${ZERO_OID} ${headOid} refs/heads/main\n`);
+
+    const response = await fetch(`${repoUrl}/git-receive-pack`, {
+      body: `${body}0000`,
+      headers: {
+        Accept: "application/x-git-receive-pack-result",
+        "Content-Type": "application/x-git-receive-pack-request",
+      },
+      method: "POST",
+    });
+    const text = await response.text();
+
+    assert.match(text, /ng refs\/heads\/feature atomic push failed/);
+    assert.match(text, /ng refs\/heads\/main non-fast-forward/);
+
+    const advertisedRefs = await fetch(`${repoUrl}/info/refs?service=git-upload-pack`).then((res) =>
+      res.text(),
+    );
+    assert.doesNotMatch(advertisedRefs, /refs\/heads\/feature/);
   });
 
   void it("git fetch", async () => {

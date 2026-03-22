@@ -188,6 +188,20 @@ void describe("branch endpoint", () => {
     assert.equal(json.created, "feature");
   });
 
+  void it("should reject overwriting an existing branch", async () => {
+    const { api } = await setupRepoWithCommit();
+
+    await api.fetch(createRequest("http://localhost/api/test/branch", "POST", { name: "feature" }));
+
+    const response = await api.fetch(
+      createRequest("http://localhost/api/test/branch", "POST", { name: "feature" }),
+    );
+
+    assert.equal(response.status, 409);
+    const json = (await response.json()) as { error: string };
+    assert.equal(json.error, "Branch 'feature' already exists");
+  });
+
   void it("should delete a branch", async () => {
     const { api } = await setupRepoWithCommit();
 
@@ -351,6 +365,42 @@ void describe("refs endpoint", () => {
     assert.equal(response.status, 200);
     const json = (await response.json()) as { refs: unknown[] };
     assert.ok(Array.isArray(json.refs));
+  });
+});
+
+void describe("reflog endpoint", () => {
+  void it("should return reflog entries for a ref", async () => {
+    const { api } = await setupRepoWithCommit();
+    const request = createRequest("http://localhost/api/test/reflog/refs%2Fheads%2Fmain", "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 200);
+    const json = (await response.json()) as {
+      entries: Array<{ oldOid: string; newOid: string; timestamp: string; message: string }>;
+      ref: string;
+    };
+    assert.equal(json.ref, "refs/heads/main");
+    assert.ok(json.entries.length >= 1);
+    assert.equal(json.entries[0]?.newOid.length, 40);
+  });
+});
+
+void describe("tag endpoint", () => {
+  void it("should reject overwriting an existing tag", async () => {
+    const { api } = await setupRepoWithCommit();
+
+    let response = await api.fetch(
+      createRequest("http://localhost/api/test/tag", "POST", { name: "v1.0.0" }),
+    );
+    assert.equal(response.status, 200);
+
+    response = await api.fetch(
+      createRequest("http://localhost/api/test/tag", "POST", { name: "v1.0.0" }),
+    );
+
+    assert.equal(response.status, 409);
+    const json = (await response.json()) as { error: string };
+    assert.equal(json.error, "Tag 'v1.0.0' already exists");
   });
 });
 

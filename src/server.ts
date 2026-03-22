@@ -52,7 +52,16 @@ export class Server extends DurableObject<Env> {
     try {
       request.signal?.throwIfAborted();
 
-      if (new URL(request.url).pathname.startsWith("/api")) {
+      const url = new URL(request.url);
+
+      if (url.pathname.startsWith("/api")) {
+        const apiRepo = url.pathname.split("/")[2]?.replace(/\.git$/, "");
+
+        await this.#repository.init();
+        if (apiRepo) {
+          await this.#repository.initStorage(apiRepo);
+        }
+
         return this.#api.fetch(
           {
             body: request.body,
@@ -139,7 +148,7 @@ export class Server extends DurableObject<Env> {
     // Capabilities to advertise
     const capabilities =
       service === "git-receive-pack"
-        ? "report-status delete-refs ofs-delta"
+        ? "report-status delete-refs ofs-delta atomic"
         : [
             "multi_ack_detailed",
             "side-band-64k",
@@ -226,6 +235,7 @@ export class Server extends DurableObject<Env> {
 
       // Parse ref updates and pack data
       let idx = 0;
+      const capabilities = new Set<string>();
       const refUpdates: Array<{ ref: string; old: string; new: string }> = [];
 
       // Read ref update commands (format: "old new ref\0")
@@ -245,6 +255,15 @@ export class Server extends DurableObject<Env> {
         const text = new TextDecoder().decode(line.content);
         const parts = text.split("\0");
         const refUpdate = parts[0]?.trim();
+        const advertisedCapabilities = parts[1]?.trim();
+
+        if (advertisedCapabilities) {
+          for (const capability of advertisedCapabilities.split(/\s+/)) {
+            if (capability) {
+              capabilities.add(capability);
+            }
+          }
+        }
 
         if (refUpdate) {
           const match = refUpdate.match(/^([0-9a-f]{40}) ([0-9a-f]{40}) (.+)$/);
@@ -283,17 +302,24 @@ export class Server extends DurableObject<Env> {
       }
 
       // Update refs
-      const refResults: string[] = [];
-      for (const update of refUpdates) {
-        if (update.new === "0000000000000000000000000000000000000000") {
-          // Delete ref
-          await this.#repository.deleteRef(update.ref);
-        } else {
-          // Write ref
-          await this.#repository.writeRef(update.ref, update.new);
-        }
-        refResults.push(this.#pktLine(`ok ${update.ref}\n`));
-      }
+      const updateResults = await this.#repository.updateRefs(
+        refUpdates.map((update) => ({
+          message: "push",
+          new: update.new === "0000000000000000000000000000000000000000" ? null : update.new,
+          old: update.old === "0000000000000000000000000000000000000000" ? null : update.old,
+          ref: update.ref,
+        })),
+        {
+          atomic: capabilities.has("atomic"),
+          compareOldOid: true,
+        },
+      );
+
+      const refResults = updateResults.map((result: { ok: boolean; ref: string; error?: string }) =>
+        result.ok
+          ? this.#pktLine(`ok ${result.ref}\n`)
+          : this.#pktLine(`ng ${result.ref} ${result.error || "update rejected"}\n`),
+      );
 
       // Send success response (unpack ok + ref status)
       const response = this.#pktLine("unpack ok\n") + refResults.join("") + "0000";

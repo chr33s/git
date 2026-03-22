@@ -2,7 +2,7 @@ import { GitIndex } from "./git.index.ts";
 import { GitObjectStore } from "./git.object.ts";
 import { GitPackParser, GitPackWriter } from "./git.pack.ts";
 import { GitProtocol } from "./git.protocol.ts";
-import { GitRefStore } from "./git.ref.ts";
+import { GitRefStore, type GitRefUpdate } from "./git.ref.ts";
 import { GitMerge, type MergeResult } from "./git.merge.ts";
 import type { GitStorage } from "./git.storage.ts";
 import { hexToBytes, bytesToHex } from "./git.utils.ts";
@@ -82,10 +82,7 @@ export class GitRepository {
 
     // Initialize HEAD for this repository namespace if it doesn't exist yet.
     if (!(await this.storage.exists(".git/HEAD"))) {
-      await this.storage.writeFile(
-        ".git/HEAD",
-        new TextEncoder().encode(`ref: refs/heads/${initialBranch}\n`),
-      );
+      await this.refStore.writeSymbolicRef("HEAD", `refs/heads/${initialBranch}`, "init");
     }
   }
 
@@ -116,8 +113,9 @@ export class GitRepository {
     await parser.parsePack(packStream);
 
     // Update refs
+    await this.refStore.writeSymbolicRef("HEAD", defaultBranch, "clone");
     for (const ref of refs) {
-      if (ref.oid) {
+      if (ref.oid && ref.name !== "HEAD") {
         await this.refStore.writeRef(ref.name, ref.oid);
       }
     }
@@ -240,7 +238,16 @@ export class GitRepository {
 
     // Update HEAD
     if (headRef) {
-      await this.refStore.writeRef(headRef, commitOid);
+      const updated = await this.refStore.compareAndSwapRef(
+        headRef,
+        parentOid || null,
+        commitOid,
+        "commit",
+      );
+
+      if (!updated) {
+        throw new Error(`HEAD moved during commit for ${headRef}`);
+      }
     }
 
     return commitOid;
@@ -376,33 +383,11 @@ export class GitRepository {
   }
 
   async getCurrentHead() {
-    try {
-      const headContent = await this.storage.readFile(".git/HEAD");
-      const content = new TextDecoder().decode(headContent);
-
-      if (content.startsWith("ref: ")) {
-        return content.slice(5).trim();
-      }
-
-      return null;
-    } catch {
-      return null;
-    }
+    return await this.refStore.readSymbolicRef("HEAD");
   }
 
   async getCurrentCommitOid() {
-    try {
-      const headContent = await this.storage.readFile(".git/HEAD");
-      const content = new TextDecoder().decode(headContent).trim();
-
-      if (content.startsWith("ref: ")) {
-        return await this.refStore.readRef(content.slice(5).trim());
-      }
-
-      return content || null;
-    } catch {
-      return null;
-    }
+    return await this.refStore.readRef("HEAD");
   }
 
   async hashObject(type: string, data: Uint8Array) {
@@ -467,15 +452,42 @@ export class GitRepository {
   }
 
   async getRef(name: string) {
-    return await this.refStore.readRef(name);
+    try {
+      return await this.refStore.readRef(name);
+    } catch {
+      return null;
+    }
   }
 
-  async writeRef(name: string, oid: string) {
-    return await this.refStore.writeRef(name, oid);
+  async readSymbolicRef(name: string) {
+    return await this.refStore.readSymbolicRef(name);
   }
 
-  async deleteRef(name: string) {
-    return await this.refStore.deleteRef(name);
+  async writeRef(name: string, oid: string, message?: string) {
+    return await this.refStore.writeRef(name, oid, message);
+  }
+
+  async writeSymbolicRef(name: string, target: string, message?: string) {
+    return await this.refStore.writeSymbolicRef(name, target, message);
+  }
+
+  async compareAndSwapRef(name: string, expectedOld: string | null, oid: string, message?: string) {
+    return await this.refStore.compareAndSwapRef(name, expectedOld, oid, message);
+  }
+
+  async deleteRef(name: string, message?: string) {
+    return await this.refStore.deleteRef(name, message);
+  }
+
+  async updateRefs(
+    updates: GitRefUpdate[],
+    options?: { atomic?: boolean; compareOldOid?: boolean },
+  ) {
+    return await this.refStore.applyRefUpdates(updates, options);
+  }
+
+  async readReflog(name: string) {
+    return await this.refStore.readReflog(name);
   }
 
   async collectTreeObjects(treeOid: string) {

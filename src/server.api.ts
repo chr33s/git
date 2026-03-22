@@ -56,6 +56,8 @@ export interface CommitPackResult {
   };
 }
 
+const ZERO_OID = "0".repeat(40);
+
 interface BaseRoute {
   method: string;
   pathname: string;
@@ -122,6 +124,11 @@ export class ServerApi {
       handler: (...args) => this.#refs(...args),
       method: "GET",
       pathname: "/api/:repo{.git}?/refs",
+    },
+    {
+      handler: (...args) => this.#reflog(...args),
+      method: "GET",
+      pathname: "/api/:repo{.git}?/reflog/:ref",
     },
     {
       handler: (...args) => this.#tag(...args),
@@ -283,12 +290,18 @@ export class ServerApi {
       if (!pattern.test(request.url)) continue;
 
       try {
+        const match = pattern.exec(request.url);
+        const routePayload = {
+          ...match?.pathname.groups,
+          ...match?.search.groups,
+        };
+
         if (route.streaming) {
           return route.handler(request.body, signal);
         }
 
         const payload = await this.#parseBody(request.body);
-        return route.handler(payload, signal);
+        return route.handler({ ...routePayload, ...payload }, signal);
       } catch (error: any) {
         if (error.name === "AbortError") throw error;
         console.error(`API error for '${route.pathname}':`, error);
@@ -321,6 +334,37 @@ export class ServerApi {
     }
     const text = new TextDecoder().decode(fullData);
     return text ? JSON.parse(text) : {};
+  }
+
+  async #readHeadState() {
+    const headRef = await this.#repository.getCurrentHead();
+    const headOid = await this.#repository.getCurrentCommitOid();
+    return { headOid, headRef };
+  }
+
+  async #writeRefIfUnchanged(
+    refName: string,
+    expectedOld: string | null,
+    newOid: string,
+    message: string,
+  ) {
+    return await this.#repository.compareAndSwapRef(refName, expectedOld, newOid, message);
+  }
+
+  async #deleteRefIfUnchanged(refName: string, expectedOld: string | null, message: string) {
+    const results = await this.#repository.updateRefs(
+      [{ ref: refName, old: expectedOld, new: null, message }],
+      { compareOldOid: true },
+    );
+    return results[0]?.ok || false;
+  }
+
+  async #refConflictResponse(message: string, refName: string) {
+    const currentOid = await this.#repository.getRef(refName);
+    return Response.json(
+      { current_oid: currentOid, error: message, ref: refName },
+      { status: 409 },
+    );
   }
 
   async #status(_payload: Payload, signal?: AbortSignal) {
@@ -402,18 +446,30 @@ export class ServerApi {
     signal?.throwIfAborted();
     const name = payload.name as string | undefined;
     const deleteFlag = payload.delete as boolean | undefined;
+    const branchRef = name ? `refs/heads/${name}` : null;
 
-    if (deleteFlag && name) {
-      await this.#repository.deleteRef(`refs/heads/${name}`);
+    if (deleteFlag && name && branchRef) {
+      const currentOid = await this.#repository.getRef(branchRef);
+      if (currentOid) {
+        const deleted = await this.#deleteRefIfUnchanged(branchRef, currentOid, "branch delete");
+        if (!deleted) {
+          return await this.#refConflictResponse(`Branch '${name}' moved during delete`, branchRef);
+        }
+      }
       return Response.json({ deleted: name });
     }
 
-    if (name) {
+    if (name && branchRef) {
       const headOid = await this.#repository.getCurrentCommitOid();
       if (!headOid) {
         return Response.json({ error: "No HEAD commit" }, { status: 400 });
       }
-      await this.#repository.writeRef(`refs/heads/${name}`, headOid);
+
+      const created = await this.#writeRefIfUnchanged(branchRef, null, headOid, "branch");
+      if (!created) {
+        return await this.#refConflictResponse(`Branch '${name}' already exists`, branchRef);
+      }
+
       return Response.json({ created: name });
     }
 
@@ -438,6 +494,11 @@ export class ServerApi {
     }
 
     await this.#repository.checkoutCommit(commitOid);
+
+    if (ref.startsWith("refs/heads/")) {
+      await this.#repository.writeSymbolicRef("HEAD", ref, "checkout");
+    }
+
     return Response.json({ success: true, ref });
   }
 
@@ -516,6 +577,18 @@ export class ServerApi {
     return Response.json({ refs });
   }
 
+  async #reflog(payload: Payload, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const rawRef = payload.ref as string | undefined;
+    const ref = rawRef ? decodeURIComponent(rawRef) : undefined;
+    if (!ref) {
+      return Response.json({ error: "ref required" }, { status: 400 });
+    }
+
+    const entries = await this.#repository.readReflog(ref);
+    return Response.json({ entries, ref });
+  }
+
   async #tag(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const name = payload.name as string;
@@ -526,7 +599,14 @@ export class ServerApi {
     }
 
     if (deleteFlag) {
-      await this.#repository.deleteRef(`refs/tags/${name}`);
+      const tagRef = `refs/tags/${name}`;
+      const currentOid = await this.#repository.getRef(tagRef);
+      if (currentOid) {
+        const deleted = await this.#deleteRefIfUnchanged(tagRef, currentOid, "tag delete");
+        if (!deleted) {
+          return await this.#refConflictResponse(`Tag '${name}' moved during delete`, tagRef);
+        }
+      }
       return Response.json({ deleted: name });
     }
 
@@ -542,7 +622,12 @@ export class ServerApi {
       oid = headOid;
     }
 
-    await this.#repository.writeRef(`refs/tags/${name}`, oid);
+    const tagRef = `refs/tags/${name}`;
+    const created = await this.#writeRefIfUnchanged(tagRef, null, oid, "tag");
+    if (!created) {
+      return await this.#refConflictResponse(`Tag '${name}' already exists`, tagRef);
+    }
+
     return Response.json({ created: name, oid });
   }
 
@@ -553,7 +638,7 @@ export class ServerApi {
       return Response.json({ error: "ref required" }, { status: 400 });
     }
 
-    const headOid = await this.#repository.getCurrentCommitOid();
+    const { headOid, headRef } = await this.#readHeadState();
     if (!headOid) {
       return Response.json({ error: "No HEAD commit" }, { status: 400 });
     }
@@ -603,9 +688,11 @@ export class ServerApi {
       new TextEncoder().encode(mergeCommitData),
     );
 
-    const headRef = await this.#repository.getCurrentHead();
     if (headRef) {
-      await this.#repository.writeRef(headRef, mergeCommitOid);
+      const updated = await this.#writeRefIfUnchanged(headRef, headOid, mergeCommitOid, "merge");
+      if (!updated) {
+        return await this.#refConflictResponse("HEAD moved during merge", headRef);
+      }
     }
 
     return Response.json({ success: true, mergedTree: result.mergedTree, mergeCommitOid });
@@ -641,6 +728,7 @@ export class ServerApi {
     signal?.throwIfAborted();
     const ref = (payload.ref as string) || "HEAD";
     const hard = payload.hard as boolean | undefined;
+    const { headOid, headRef } = await this.#readHeadState();
 
     let commitOid = ref;
     const refOid = await this.#repository.getRef(ref);
@@ -651,9 +739,11 @@ export class ServerApi {
     await this.#repository.checkoutCommit(commitOid);
 
     if (hard) {
-      const headRef = await this.#repository.getCurrentHead();
       if (headRef) {
-        await this.#repository.writeRef(headRef, commitOid);
+        const updated = await this.#writeRefIfUnchanged(headRef, headOid, commitOid, "reset");
+        if (!updated) {
+          return await this.#refConflictResponse("HEAD moved during reset", headRef);
+        }
       }
     }
 
@@ -919,7 +1009,11 @@ export class ServerApi {
       if (!headOid) {
         return Response.json({ error: "No HEAD commit" }, { status: 400 });
       }
-      await this.#repository.writeRef(refName, headOid);
+
+      const createdBranch = await this.#writeRefIfUnchanged(refName, null, headOid, "branch");
+      if (!createdBranch) {
+        return await this.#refConflictResponse(`Branch '${branchName}' already exists`, refName);
+      }
     }
 
     // Check if branch exists
@@ -932,7 +1026,7 @@ export class ServerApi {
     await this.#repository.checkoutCommit(branchOid);
 
     // Update HEAD to point to the branch
-    await this.#repository.writeFile(".git/HEAD", new TextEncoder().encode(`ref: ${refName}\n`));
+    await this.#repository.writeSymbolicRef("HEAD", refName, "switch");
 
     return Response.json({ success: true, branch: branchName, created: !!create });
   }
@@ -945,7 +1039,7 @@ export class ServerApi {
       return Response.json({ error: "onto required" }, { status: 400 });
     }
 
-    const headOid = await this.#repository.getCurrentCommitOid();
+    const { headOid, headRef } = await this.#readHeadState();
     if (!headOid) {
       return Response.json({ error: "No HEAD commit" }, { status: 400 });
     }
@@ -996,9 +1090,11 @@ export class ServerApi {
     }
 
     // Update HEAD ref
-    const headRef = await this.#repository.getCurrentHead();
     if (headRef) {
-      await this.#repository.writeRef(headRef, baseOid);
+      const updated = await this.#writeRefIfUnchanged(headRef, headOid, baseOid, "rebase");
+      if (!updated) {
+        return await this.#refConflictResponse("HEAD moved during rebase", headRef);
+      }
     }
 
     return Response.json({ success: true, replayed: commitsToReplay.length, newHead: baseOid });
@@ -1020,6 +1116,7 @@ export class ServerApi {
     signal?.throwIfAborted();
     const remote = (payload.remote as string) || "origin";
     const branch = (payload.branch as string) || "main";
+    const { headOid, headRef } = await this.#readHeadState();
 
     try {
       // Fetch first
@@ -1036,14 +1133,14 @@ export class ServerApi {
         );
       }
 
-      const headOid = await this.#repository.getCurrentCommitOid();
-
       if (!headOid) {
         // No local commits, just checkout
         await this.#repository.checkoutCommit(remoteOid);
-        const headRef = await this.#repository.getCurrentHead();
         if (headRef) {
-          await this.#repository.writeRef(headRef, remoteOid);
+          const updated = await this.#writeRefIfUnchanged(headRef, null, remoteOid, "pull");
+          if (!updated) {
+            return await this.#refConflictResponse("HEAD moved during pull", headRef);
+          }
         }
         return Response.json({ success: true, remote, branch, merged: remoteOid });
       }
@@ -1062,9 +1159,11 @@ export class ServerApi {
       if (commonAncestorOid === headOid) {
         // Fast-forward merge
         await this.#repository.checkoutCommit(remoteOid);
-        const headRef = await this.#repository.getCurrentHead();
         if (headRef) {
-          await this.#repository.writeRef(headRef, remoteOid);
+          const updated = await this.#writeRefIfUnchanged(headRef, headOid, remoteOid, "pull");
+          if (!updated) {
+            return await this.#refConflictResponse("HEAD moved during pull", headRef);
+          }
         }
         return Response.json({
           success: true,
@@ -1108,9 +1207,16 @@ export class ServerApi {
         new TextEncoder().encode(mergeCommitData),
       );
 
-      const headRef = await this.#repository.getCurrentHead();
       if (headRef) {
-        await this.#repository.writeRef(headRef, mergeCommitOid);
+        const updated = await this.#writeRefIfUnchanged(
+          headRef,
+          headOid,
+          mergeCommitOid,
+          "pull merge",
+        );
+        if (!updated) {
+          return await this.#refConflictResponse("HEAD moved during pull", headRef);
+        }
       }
 
       return Response.json({ success: true, remote, branch, merged: mergeCommitOid });
@@ -1425,7 +1531,19 @@ export class ServerApi {
     }
 
     // Create or update target branch
-    await this.#repository.writeRef(targetRef, baseOid);
+    const expectedOld = force ? existingOid : null;
+    const updated = await this.#writeRefIfUnchanged(
+      targetRef,
+      expectedOld || null,
+      baseOid,
+      "branch",
+    );
+    if (!updated) {
+      return await this.#refConflictResponse(
+        `Branch '${targetBranch}' moved during create`,
+        targetRef,
+      );
+    }
 
     return Response.json({
       target_branch: targetBranch,
@@ -1794,12 +1912,23 @@ export class ServerApi {
     );
 
     // Update branch ref
-    await this.#repository.writeRef(branchRef, newCommitOid);
+    const updated = await this.#writeRefIfUnchanged(
+      branchRef,
+      currentOid || null,
+      newCommitOid,
+      "restore",
+    );
+    if (!updated) {
+      return await this.#refConflictResponse(
+        `Branch '${targetBranch}' moved during restore`,
+        branchRef,
+      );
+    }
 
     return Response.json({
       commit_sha: newCommitOid,
       ref_update: {
-        old_sha: currentOid || "0000000000000000000000000000000000000000",
+        old_sha: currentOid || ZERO_OID,
         new_sha: newCommitOid,
       },
     });
@@ -1986,9 +2115,30 @@ export class ServerApi {
 
     // Update branch ref
     const branchRef = `refs/heads/${metadata.target_branch}`;
-    const oldSha =
-      (await this.#repository.getRef(branchRef)) || "0000000000000000000000000000000000000000";
-    await this.#repository.writeRef(branchRef, commitOid);
+    const oldSha = (await this.#repository.getRef(branchRef)) || ZERO_OID;
+    const updated = await this.#writeRefIfUnchanged(
+      branchRef,
+      oldSha === ZERO_OID ? null : oldSha,
+      commitOid,
+      "commit-pack",
+    );
+    if (!updated) {
+      const currentOid = await this.#repository.getRef(branchRef);
+      return Response.json(
+        {
+          error: "Expected head SHA does not match current branch tip",
+          result: {
+            branch: metadata.target_branch,
+            old_sha: currentOid || ZERO_OID,
+            new_sha: "",
+            success: false,
+            status: "precondition_failed",
+            message: "Branch tip moved",
+          },
+        },
+        { status: 409 },
+      );
+    }
 
     const result: CommitPackResult = {
       commit: {

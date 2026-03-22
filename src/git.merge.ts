@@ -489,16 +489,6 @@ export class GitMerge {
             throw new Error("HEAD reference not found");
           }
 
-          // If HEAD contains a ref, resolve it
-          if (headOid.startsWith("ref: ")) {
-            const targetRef = headOid.slice(5).trim();
-            const targetOid = await this.#refStore.readRef(targetRef);
-            if (!targetOid) {
-              throw new Error(`Target reference ${targetRef} not found`);
-            }
-            return targetOid;
-          }
-
           return headOid;
         }
 

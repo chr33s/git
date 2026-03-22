@@ -158,6 +158,29 @@ export class Client {
     }
   }
 
+  async #readHeadState() {
+    const headRef = await this.#repository.getCurrentHead();
+    const headOid = await this.#repository.getCurrentCommitOid();
+    return { headOid, headRef };
+  }
+
+  async #writeRefIfUnchanged(
+    refName: string,
+    expectedOld: string | null,
+    newOid: string,
+    message: string,
+  ) {
+    return await this.#repository.compareAndSwapRef(refName, expectedOld, newOid, message);
+  }
+
+  async #deleteRefIfUnchanged(refName: string, expectedOld: string | null, message: string) {
+    const results = await this.#repository.updateRefs(
+      [{ ref: refName, old: expectedOld, new: null, message }],
+      { compareOldOid: true },
+    );
+    return results[0]?.ok || false;
+  }
+
   async log() {
     const commits: any[] = [];
     let commitOid = await this.#repository.getCurrentCommitOid();
@@ -203,7 +226,11 @@ export class Client {
       if (!headOid) {
         throw new Error("No HEAD commit");
       }
-      await this.#repository.writeRef(`refs/heads/${ref}`, headOid);
+
+      const created = await this.#writeRefIfUnchanged(`refs/heads/${ref}`, null, headOid, "branch");
+      if (!created) {
+        throw new Error(`Branch ${ref} already exists`);
+      }
     } else {
       // List branches
       const refs = await this.#repository.getAllRefs();
@@ -226,10 +253,7 @@ export class Client {
     await this.#repository.checkoutCommit(commitOid);
 
     // Update HEAD
-    await this.#repository.writeFile(
-      ".git/HEAD",
-      new TextEncoder().encode(`ref: refs/heads/${ref}\n`),
-    );
+    await this.#repository.writeSymbolicRef("HEAD", `refs/heads/${ref}`, "checkout");
   }
 
   async switch(name: string) {
@@ -242,12 +266,12 @@ export class Client {
     }
 
     await this.#repository.checkoutCommit(branchOid);
-    await this.#repository.writeFile(".git/HEAD", new TextEncoder().encode(`ref: ${branchRef}\n`));
+    await this.#repository.writeSymbolicRef("HEAD", branchRef, "switch");
   }
 
   async merge(ref: string) {
     // Get current HEAD commit
-    const headOid = await this.#repository.getCurrentCommitOid();
+    const { headOid, headRef } = await this.#readHeadState();
     if (!headOid) {
       throw new Error("No HEAD commit");
     }
@@ -300,9 +324,11 @@ export class Client {
     );
 
     // Update HEAD to point to merge commit
-    const headRef = await this.#repository.getCurrentHead();
     if (headRef) {
-      await this.#repository.writeRef(headRef, mergeCommitOid);
+      const updated = await this.#writeRefIfUnchanged(headRef, headOid, mergeCommitOid, "merge");
+      if (!updated) {
+        throw new Error(`HEAD moved during merge for ${headRef}`);
+      }
     }
 
     return {
@@ -343,7 +369,7 @@ export class Client {
 
   async rebase(onto: string) {
     // Get current HEAD commit
-    const currentHeadOid = await this.#repository.getCurrentCommitOid();
+    const { headOid: currentHeadOid, headRef } = await this.#readHeadState();
     if (!currentHeadOid) {
       throw new Error("No HEAD commit");
     }
@@ -435,9 +461,11 @@ export class Client {
     }
 
     // Update HEAD to point to the new rebased commit
-    const headRef = await this.#repository.getCurrentHead();
     if (headRef) {
-      await this.#repository.writeRef(headRef, newParent);
+      const updated = await this.#writeRefIfUnchanged(headRef, currentHeadOid, newParent, "rebase");
+      if (!updated) {
+        throw new Error(`HEAD moved during rebase for ${headRef}`);
+      }
     }
 
     // Check out the rebased commit
@@ -451,6 +479,8 @@ export class Client {
   }
 
   async reset(hard: boolean, ref: string) {
+    const { headOid, headRef } = await this.#readHeadState();
+
     // Resolve ref to commit
     let commitOid = ref;
     const refOid = await this.#repository.getRef(ref);
@@ -463,9 +493,11 @@ export class Client {
 
     // If hard reset, also update HEAD
     if (hard) {
-      const headRef = await this.#repository.getCurrentHead();
       if (headRef) {
-        await this.#repository.writeRef(headRef, commitOid);
+        const updated = await this.#writeRefIfUnchanged(headRef, headOid, commitOid, "reset");
+        if (!updated) {
+          throw new Error(`HEAD moved during reset for ${headRef}`);
+        }
       }
     }
   }
@@ -477,7 +509,10 @@ export class Client {
       throw new Error("No HEAD commit");
     }
 
-    await this.#repository.writeRef(`refs/tags/${name}`, headOid);
+    const created = await this.#writeRefIfUnchanged(`refs/tags/${name}`, null, headOid, "tag");
+    if (!created) {
+      throw new Error(`Tag ${name} already exists`);
+    }
   }
 
   async fetch(remote: string = "origin") {
@@ -563,7 +598,15 @@ export class Client {
 
     if (success) {
       // Update remote tracking branch locally
-      await this.#repository.writeRef(remoteTrackingRef, localOid);
+      const updated = await this.#writeRefIfUnchanged(
+        remoteTrackingRef,
+        oldOid || null,
+        localOid,
+        "fetch",
+      );
+      if (!updated) {
+        throw new Error(`Remote tracking branch ${remoteTrackingRef} moved during push`);
+      }
 
       console.log(`Successfully pushed ${objectsToSend.size} objects to ${remote}/${branch}`);
     }
@@ -602,7 +645,10 @@ export class Client {
 
     if (success) {
       // Delete local tracking branch
-      await this.#repository.deleteRef(remoteTrackingRef);
+      const deleted = await this.#deleteRefIfUnchanged(remoteTrackingRef, oldOid, "delete");
+      if (!deleted) {
+        throw new Error(`Remote tracking branch ${remoteTrackingRef} moved during delete`);
+      }
       console.log(`Successfully deleted ${remote}/${branch}`);
     }
 

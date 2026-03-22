@@ -3,6 +3,10 @@ import { describe, it, mock } from "node:test";
 
 import { GitProtocol } from "./git.protocol.ts";
 
+function pktLine(text: string) {
+  return (text.length + 4).toString(16).padStart(4, "0") + text;
+}
+
 void describe("GitProtocol", () => {
   void describe("constructor", () => {
     void it("should create protocol instance", () => {
@@ -32,11 +36,8 @@ void describe("GitProtocol", () => {
       try {
         globalThis.fetch = mock.fn(async () => ({
           ok: true,
-          text: async () => `001e# service=git-upload-pack
-0000
-00a0${"a".repeat(40)} refs/heads/main\0multi_ack thin-pack side-band
-003f${"b".repeat(40)} refs/heads/feature
-0000`,
+          text: async () =>
+            `${pktLine("# service=git-upload-pack\n")}0000${pktLine(`${"a".repeat(40)} refs/heads/main\0multi_ack thin-pack side-band\n`)}${pktLine(`${"b".repeat(40)} refs/heads/feature\n`)}0000`,
         })) as any;
 
         const protocol = new GitProtocol();
@@ -76,10 +77,7 @@ void describe("GitProtocol", () => {
         globalThis.fetch = mock.fn(async () => ({
           ok: true,
           text: async () =>
-            `001e# service=git-upload-pack
-0000
-00c0${"a".repeat(40)} HEAD\0symref=HEAD:refs/heads/main multi_ack
-0000`,
+            `${pktLine("# service=git-upload-pack\n")}0000${pktLine(`${"a".repeat(40)} HEAD\0symref=HEAD:refs/heads/main multi_ack\n`)}0000`,
         })) as any;
 
         const protocol = new GitProtocol();
@@ -177,12 +175,23 @@ void describe("GitProtocol", () => {
       const originalFetch = globalThis.fetch;
       let capturedUrl: string | undefined;
       let capturedHeaders: any;
+      let callCount = 0;
 
       try {
         globalThis.fetch = mock.fn(async (url: string, options: any) => {
+          callCount++;
+
+          if (url.includes("info/refs?service=git-receive-pack")) {
+            return {
+              ok: true,
+              text: async () =>
+                `${pktLine("# service=git-receive-pack\n")}0000${pktLine(`${"0".repeat(40)} capabilities^{}\0report-status delete-refs ofs-delta atomic\n`)}0000`,
+            };
+          }
+
           capturedUrl = url;
           capturedHeaders = options?.headers;
-          return { ok: true };
+          return { ok: true, text: async () => `${pktLine("unpack ok\n")}0000` };
         }) as any;
 
         const protocol = new GitProtocol();
@@ -196,6 +205,7 @@ void describe("GitProtocol", () => {
 
         assert.ok(capturedUrl?.includes("git-receive-pack"));
         assert.equal(capturedHeaders?.["Content-Type"], "application/x-git-receive-pack-request");
+        assert.equal(callCount, 2);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -204,10 +214,20 @@ void describe("GitProtocol", () => {
     void it("should throw on failed push", async () => {
       const originalFetch = globalThis.fetch;
       try {
-        globalThis.fetch = mock.fn(async () => ({
-          ok: false,
-          statusText: "Forbidden",
-        })) as any;
+        globalThis.fetch = mock.fn(async (url: string) => {
+          if (url.includes("info/refs?service=git-receive-pack")) {
+            return {
+              ok: true,
+              text: async () =>
+                `${pktLine("# service=git-receive-pack\n")}0000${pktLine(`${"0".repeat(40)} capabilities^{}\0report-status ofs-delta\n`)}0000`,
+            };
+          }
+
+          return {
+            ok: false,
+            statusText: "Forbidden",
+          };
+        }) as any;
 
         const protocol = new GitProtocol();
 
@@ -231,9 +251,17 @@ void describe("GitProtocol", () => {
       let capturedBody: Uint8Array | undefined;
 
       try {
-        globalThis.fetch = mock.fn(async (_url: string, options: any) => {
+        globalThis.fetch = mock.fn(async (url: string, options: any) => {
+          if (url.includes("info/refs?service=git-receive-pack")) {
+            return {
+              ok: true,
+              text: async () =>
+                `${pktLine("# service=git-receive-pack\n")}0000${pktLine(`${"0".repeat(40)} capabilities^{}\0report-status ofs-delta atomic\n`)}0000`,
+            };
+          }
+
           capturedBody = new Uint8Array(options?.body);
-          return { ok: true };
+          return { ok: true, text: async () => `${pktLine("unpack ok\n")}0000` };
         }) as any;
 
         const protocol = new GitProtocol();
@@ -250,6 +278,43 @@ void describe("GitProtocol", () => {
         assert.ok(bodyText.includes(oldOid));
         assert.ok(bodyText.includes(newOid));
         assert.ok(bodyText.includes("refs/heads/main"));
+        assert.match(bodyText, /^[0-9a-f]{4}/);
+        assert.ok(bodyText.includes("\0report-status ofs-delta atomic\n"));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    void it("should throw when server rejects a ref update", async () => {
+      const originalFetch = globalThis.fetch;
+
+      try {
+        globalThis.fetch = mock.fn(async (url: string) => {
+          if (url.includes("info/refs?service=git-receive-pack")) {
+            return {
+              ok: true,
+              text: async () =>
+                `${pktLine("# service=git-receive-pack\n")}0000${pktLine(`${"a".repeat(40)} refs/heads/main\0report-status ofs-delta atomic\n`)}0000`,
+            };
+          }
+
+          return {
+            ok: true,
+            text: async () =>
+              `${pktLine("unpack ok\n")}${pktLine("ng refs/heads/main non-fast-forward\n")}0000`,
+          };
+        }) as any;
+
+        const protocol = new GitProtocol();
+
+        await assert.rejects(
+          protocol.pushPack(
+            { host: "github.com", repo: "user/repo" },
+            [{ ref: "refs/heads/main", old: "a".repeat(40), new: "b".repeat(40) }],
+            new Uint8Array([]),
+          ),
+          /Push rejected: refs\/heads\/main non-fast-forward/,
+        );
       } finally {
         globalThis.fetch = originalFetch;
       }

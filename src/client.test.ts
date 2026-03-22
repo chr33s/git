@@ -153,6 +153,21 @@ void describe("Client", () => {
       const branches = await client.branch();
       assert.ok(branches?.includes("feature"));
     });
+
+    void it("should throw when branch already exists", async () => {
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+      const client = new TestableClient(storage);
+      await client.init();
+
+      await storage.writeFile("file.txt", new TextEncoder().encode("content"));
+      await client.add("file.txt");
+      await client.commit("Initial", { name: "Test", email: "test@test.com" });
+
+      await client.branch("feature");
+
+      await assert.rejects(client.branch("feature"), /Branch feature already exists/);
+    });
   });
 
   void describe("checkout", () => {
@@ -321,6 +336,21 @@ void describe("Client", () => {
       await client.tag("v1.0.0");
 
       assert.ok(await storage.exists(".git/refs/tags/v1.0.0"));
+    });
+
+    void it("should throw when tag already exists", async () => {
+      const storage = new MemoryStorage();
+      await storage.init("test-repo");
+      const client = new TestableClient(storage);
+      await client.init();
+
+      await storage.writeFile("file.txt", new TextEncoder().encode("content"));
+      await client.add("file.txt");
+      await client.commit("Initial", { name: "Test", email: "test@test.com" });
+
+      await client.tag("v1.0.0");
+
+      await assert.rejects(client.tag("v1.0.0"), /Tag v1.0.0 already exists/);
     });
 
     void it("should throw for repo without commits", async () => {

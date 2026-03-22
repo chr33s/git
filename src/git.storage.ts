@@ -8,6 +8,33 @@ export interface GitStorage {
   listDirectory(path: string): Promise<string[]>;
   deleteDirectory(path: string): Promise<void>;
   getFileInfo(path: string): Promise<{ size: number; lastModified: Date }>;
+  applyRefChanges?(
+    changes: GitStorageRefChange[],
+    options?: { atomic?: boolean },
+  ): Promise<GitStorageRefChangeResult[]>;
+  readReflog?(refName: string): Promise<GitReflogEntry[]>;
+}
+
+export interface GitReflogEntry {
+  oldOid: string;
+  newOid: string;
+  timestamp: string;
+  message: string;
+}
+
+export interface GitStorageRefChange {
+  refName: string;
+  path: string;
+  newValue: string | null;
+  expectedOid?: string | null;
+  reflogEntry?: GitReflogEntry;
+}
+
+export interface GitStorageRefChangeResult {
+  refName: string;
+  applied: boolean;
+  currentOid: string | null;
+  currentValue: string | null;
 }
 
 interface MemoryStorageState {

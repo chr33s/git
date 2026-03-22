@@ -9,6 +9,11 @@ export interface GitRef {
   target?: string;
 }
 
+interface GitServiceAdvertisement {
+  capabilities: Set<string>;
+  refs: GitRef[];
+}
+
 export class GitProtocol {
   async discoverRefs(repo: GitRepoInfo) {
     const url = `https://${repo.host}/${repo.repo}.git/info/refs?service=git-upload-pack`;
@@ -72,13 +77,20 @@ export class GitProtocol {
     refs: Array<{ ref: string; old: string; new: string }>,
     packData: Uint8Array,
   ) {
+    const advertisement = await this.#discoverServiceAdvertisement(repo, "git-receive-pack");
     const url = `https://${repo.host}/${repo.repo}.git/git-receive-pack`;
 
     // Build request
     const lines: string[] = [];
+    const capabilities = ["report-status", "ofs-delta"];
 
-    for (const ref of refs) {
-      lines.push(`${ref.old} ${ref.new} ${ref.ref}\0`);
+    if (advertisement.capabilities.has("atomic")) {
+      capabilities.push("atomic");
+    }
+
+    for (const [index, ref] of refs.entries()) {
+      const suffix = index === 0 ? `\0${capabilities.join(" ")}` : "";
+      lines.push(this.#pktLine(`${ref.old} ${ref.new} ${ref.ref}${suffix}\n`));
     }
 
     lines.push("0000");
@@ -100,20 +112,60 @@ export class GitProtocol {
     if (!response.ok) {
       throw new Error(`Failed to push: ${response.statusText}`);
     }
+
+    const responseText = await response.text();
+    this.#assertPushResult(responseText);
   }
 
-  #parseRefs(data: string) {
+  async #discoverServiceAdvertisement(
+    repo: GitRepoInfo,
+    service: "git-upload-pack" | "git-receive-pack",
+  ) {
+    const url = `https://${repo.host}/${repo.repo}.git/info/refs?service=${service}`;
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to discover refs: ${response.statusText}`);
+    }
+
+    const text = await response.text();
+    return this.#parseAdvertisement(text);
+  }
+
+  #pktLine(text: string) {
+    const length = text.length + 4;
+    return length.toString(16).padStart(4, "0") + text;
+  }
+
+  #parseAdvertisement(data: string): GitServiceAdvertisement {
     const refs: GitRef[] = [];
-    const lines = data.split("\n");
+    const capabilities = new Set<string>();
+    const packets = this.#readPktLines(data);
 
-    for (const line of lines) {
-      if (line.length === 0 || line.startsWith("#")) continue;
+    for (const packet of packets) {
+      const text = packet.endsWith("\n") ? packet.slice(0, -1) : packet;
+      if (!text || text.startsWith("# service=")) {
+        continue;
+      }
 
-      // Remove pkt-line length prefix if present
-      const content = line.replace(/^[0-9a-f]{4}/, "");
+      const [refPart, capabilityPart] = text.split("\0", 2);
+      if (capabilityPart) {
+        for (const capability of capabilityPart.trim().split(/\s+/)) {
+          if (capability) {
+            capabilities.add(capability);
+          }
 
-      const match = content.match(/^([0-9a-f]{40})\s+(.+?)(\^\{\})?$/);
-      if (match && match[1] && match[2]) {
+          if (capability.startsWith("symref=HEAD:")) {
+            refs.push({
+              name: "HEAD",
+              target: capability.slice("symref=HEAD:".length),
+            });
+          }
+        }
+      }
+
+      const match = refPart?.match(/^([0-9a-f]{40})\s+(.+?)(\^\{\})?$/);
+      if (match && match[1] && match[2] && match[2] !== "capabilities^{}") {
         refs.push({
           oid: match[1],
           name: match[2],
@@ -121,18 +173,67 @@ export class GitProtocol {
       }
     }
 
-    // Parse symbolic refs
-    const headLine = lines.find((l) => l.includes("symref=HEAD"));
-    if (headLine) {
-      const match = headLine.match(/symref=HEAD:(.+?)\s/);
-      if (match) {
-        refs.push({
-          name: "HEAD",
-          target: match[1],
-        });
+    return { capabilities, refs };
+  }
+
+  #assertPushResult(data: string) {
+    const packets = this.#readPktLines(data);
+    let unpackError: string | null = null;
+    const refErrors: string[] = [];
+
+    for (const packet of packets) {
+      const text = packet.endsWith("\n") ? packet.slice(0, -1) : packet;
+      if (!text) continue;
+
+      if (text.startsWith("unpack ") && text !== "unpack ok") {
+        unpackError = text.slice("unpack ".length);
+      }
+
+      if (text.startsWith("ng ")) {
+        refErrors.push(text.slice(3));
       }
     }
 
-    return refs;
+    if (unpackError) {
+      throw new Error(`Push rejected: ${unpackError}`);
+    }
+
+    if (refErrors.length > 0) {
+      throw new Error(`Push rejected: ${refErrors.join("; ")}`);
+    }
+  }
+
+  #readPktLines(data: string) {
+    const packets: string[] = [];
+    let index = 0;
+
+    while (index + 4 <= data.length) {
+      const lengthText = data.slice(index, index + 4);
+      const length = parseInt(lengthText, 16);
+
+      if (Number.isNaN(length)) {
+        break;
+      }
+
+      index += 4;
+
+      if (length === 0 || length === 1) {
+        continue;
+      }
+
+      const contentLength = length - 4;
+      if (index + contentLength > data.length) {
+        break;
+      }
+
+      packets.push(data.slice(index, index + contentLength));
+      index += contentLength;
+    }
+
+    return packets;
+  }
+
+  #parseRefs(data: string) {
+    return this.#parseAdvertisement(data).refs;
   }
 }
