@@ -668,90 +668,28 @@ export class ServerApi {
       return Response.json({ error: "ref required" }, { status: 400 });
     }
 
-    const { headOid, headRef } = await this.#readHeadState();
-    if (!headOid) {
-      return Response.json({ error: "No HEAD commit" }, { status: 400 });
-    }
-
-    let mergeOid = ref;
-    const refOid = await this.#repository.getRef(ref);
-    if (refOid) {
-      mergeOid = refOid;
-    }
-
-    const commonAncestorOid = await this.#findCommonAncestor(headOid, mergeOid);
-    if (!commonAncestorOid) {
-      return Response.json({ error: "No common ancestor found" }, { status: 400 });
-    }
-
-    const currentCommit = await this.#repository.readObject(headOid);
-    const currentInfo = this.#repository.parseCommit(currentCommit.data);
-
-    const mergeCommit = await this.#repository.readObject(mergeOid);
-    const mergeInfo = this.#repository.parseCommit(mergeCommit.data);
-
-    const baseCommit = await this.#repository.readObject(commonAncestorOid);
-    const baseInfo = this.#repository.parseCommit(baseCommit.data);
-
-    const result = await this.#repository.merge(baseInfo.tree, currentInfo.tree, mergeInfo.tree);
-
-    if (!result.success) {
-      return Response.json(
-        { error: `Merge conflict: ${result.message || "Unable to merge"}` },
-        { status: 409 },
+    try {
+      const result = await this.#repository.mergeRef(
+        ref,
+        { name: "Git Server", email: "server@example.com" },
+        `Merge branch '${ref}'`,
       );
-    }
 
-    const authorStr = "Git Server <server@example.com>";
-    const timestamp = Math.floor(Date.now() / 1000);
-    const timezone = "+0000";
-
-    let mergeCommitData = `tree ${result.mergedTree}\n`;
-    mergeCommitData += `parent ${headOid}\n`;
-    mergeCommitData += `parent ${mergeOid}\n`;
-    mergeCommitData += `author ${authorStr} ${timestamp} ${timezone}\n`;
-    mergeCommitData += `committer ${authorStr} ${timestamp} ${timezone}\n`;
-    mergeCommitData += `\nMerge branch '${ref}'\n`;
-
-    const mergeCommitOid = await this.#repository.writeObject(
-      "commit",
-      new TextEncoder().encode(mergeCommitData),
-    );
-
-    if (headRef) {
-      const updated = await this.#writeRefIfUnchanged(headRef, headOid, mergeCommitOid, "merge");
-      if (!updated) {
-        return await this.#refConflictResponse("HEAD moved during merge", headRef);
+      if (!result.success) {
+        return Response.json(
+          { error: `Merge conflict: ${result.message || "Unable to merge"}` },
+          { status: 409 },
+        );
       }
+
+      return Response.json({
+        success: true,
+        mergedTree: result.mergedTree,
+        mergeCommitOid: result.mergeCommitOid,
+      });
+    } catch (error: any) {
+      return Response.json({ error: error.message }, { status: 400 });
     }
-
-    return Response.json({ success: true, mergedTree: result.mergedTree, mergeCommitOid });
-  }
-
-  async #findCommonAncestor(oid1: string, oid2: string) {
-    const history1 = new Set<string>();
-    let current: string | null = oid1;
-
-    while (current) {
-      history1.add(current);
-      const commit = await this.#repository.readObject(current);
-      if (commit.type !== "commit") break;
-      const info = this.#repository.parseCommit(commit.data);
-      current = info.parent || null;
-    }
-
-    current = oid2;
-    while (current) {
-      if (history1.has(current)) {
-        return current;
-      }
-      const commit = await this.#repository.readObject(current);
-      if (commit.type !== "commit") break;
-      const info = this.#repository.parseCommit(commit.data);
-      current = info.parent || null;
-    }
-
-    return null;
   }
 
   async #reset(payload: Payload, signal?: AbortSignal) {
@@ -1181,7 +1119,7 @@ export class ServerApi {
       }
 
       // Perform merge
-      const commonAncestorOid = await this.#findCommonAncestor(headOid, remoteOid);
+      const commonAncestorOid = await this.#repository.findMergeBase(headOid, remoteOid);
       if (!commonAncestorOid) {
         return Response.json({ error: "No common ancestor found" }, { status: 400 });
       }
@@ -1204,52 +1142,18 @@ export class ServerApi {
         });
       }
 
-      // Three-way merge
-      const currentCommit = await this.#repository.readObject(headOid);
-      const currentInfo = this.#repository.parseCommit(currentCommit.data);
-
-      const remoteCommit = await this.#repository.readObject(remoteOid);
-      const remoteInfo = this.#repository.parseCommit(remoteCommit.data);
-
-      const baseCommit = await this.#repository.readObject(commonAncestorOid);
-      const baseInfo = this.#repository.parseCommit(baseCommit.data);
-
-      const result = await this.#repository.merge(baseInfo.tree, currentInfo.tree, remoteInfo.tree);
+      // Three-way merge via mergeRef
+      const result = await this.#repository.mergeRef(
+        remoteBranchRef,
+        { name: "Git Server", email: "server@example.com" },
+        `Merge remote-tracking branch '${remote}/${branch}'`,
+      );
 
       if (!result.success) {
         return Response.json({ error: "Merge conflict" }, { status: 409 });
       }
 
-      // Create merge commit
-      const authorStr = "Git Server <server@example.com>";
-      const timestamp = Math.floor(Date.now() / 1000);
-      const timezone = "+0000";
-
-      let mergeCommitData = `tree ${result.mergedTree}\n`;
-      mergeCommitData += `parent ${headOid}\n`;
-      mergeCommitData += `parent ${remoteOid}\n`;
-      mergeCommitData += `author ${authorStr} ${timestamp} ${timezone}\n`;
-      mergeCommitData += `committer ${authorStr} ${timestamp} ${timezone}\n`;
-      mergeCommitData += `\nMerge remote-tracking branch '${remote}/${branch}'\n`;
-
-      const mergeCommitOid = await this.#repository.writeObject(
-        "commit",
-        new TextEncoder().encode(mergeCommitData),
-      );
-
-      if (headRef) {
-        const updated = await this.#writeRefIfUnchanged(
-          headRef,
-          headOid,
-          mergeCommitOid,
-          "pull merge",
-        );
-        if (!updated) {
-          return await this.#refConflictResponse("HEAD moved during pull", headRef);
-        }
-      }
-
-      return Response.json({ success: true, remote, branch, merged: mergeCommitOid });
+      return Response.json({ success: true, remote, branch, merged: result.mergeCommitOid });
     } catch (error: any) {
       return Response.json({ error: error.message || "Pull failed" }, { status: 400 });
     }

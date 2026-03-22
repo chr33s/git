@@ -2,9 +2,134 @@ import { GitObjectStore } from "./git.object.ts";
 import { GitRefStore } from "./git.ref.ts";
 import { bytesToHex, hexToBytes } from "./git.utils.ts";
 
+// --- Diff3 three-way merge algorithm ---
+
+function computeLCS(a: string[], b: string[]): [number, number][] {
+  const m = a.length;
+  const n = b.length;
+  if (m * n > 10_000_000) return [];
+
+  const dp: Uint32Array[] = [];
+  for (let i = 0; i <= m; i++) dp[i] = new Uint32Array(n + 1);
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i]![j] = dp[i - 1]![j - 1]! + 1;
+      } else {
+        dp[i]![j] = Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
+      }
+    }
+  }
+
+  const matches: [number, number][] = [];
+  let i = m,
+    j = n;
+  while (i > 0 && j > 0) {
+    if (a[i - 1] === b[j - 1]) {
+      matches.push([i - 1, j - 1]);
+      i--;
+      j--;
+    } else if (dp[i - 1]![j]! > dp[i]![j - 1]!) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+  matches.reverse();
+  return matches;
+}
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+interface Diff3Result {
+  merged: string[];
+  hasConflicts: boolean;
+  conflictRanges: Array<{ start: number; end: number }>;
+}
+
+function diff3Merge(base: string[], ours: string[], theirs: string[]): Diff3Result {
+  const matchesOurs = computeLCS(base, ours);
+  const matchesTheirs = computeLCS(base, theirs);
+
+  const baseToOurs = new Map<number, number>();
+  for (const [b, o] of matchesOurs) baseToOurs.set(b, o);
+
+  const baseToTheirs = new Map<number, number>();
+  for (const [b, t] of matchesTheirs) baseToTheirs.set(b, t);
+
+  // Find stable points: base lines matched in both ours and theirs
+  const stablePoints: Array<{ base: number; ours: number; theirs: number }> = [];
+  for (const [bi] of matchesOurs) {
+    if (baseToTheirs.has(bi)) {
+      const oi = baseToOurs.get(bi)!;
+      const ti = baseToTheirs.get(bi)!;
+      if (stablePoints.length === 0) {
+        stablePoints.push({ base: bi, ours: oi, theirs: ti });
+      } else {
+        const prev = stablePoints[stablePoints.length - 1]!;
+        if (oi > prev.ours && ti > prev.theirs) {
+          stablePoints.push({ base: bi, ours: oi, theirs: ti });
+        }
+      }
+    }
+  }
+
+  const points = [
+    { base: -1, ours: -1, theirs: -1 },
+    ...stablePoints,
+    { base: base.length, ours: ours.length, theirs: theirs.length },
+  ];
+
+  const merged: string[] = [];
+  const conflictRanges: Array<{ start: number; end: number }> = [];
+  let hasConflicts = false;
+
+  for (let i = 0; i < points.length - 1; i++) {
+    const p = points[i]!;
+    const q = points[i + 1]!;
+
+    if (p.base >= 0) {
+      merged.push(base[p.base]!);
+    }
+
+    const baseGap = base.slice(p.base + 1, q.base);
+    const oursGap = ours.slice(p.ours + 1, q.ours);
+    const theirsGap = theirs.slice(p.theirs + 1, q.theirs);
+
+    if (baseGap.length === 0 && oursGap.length === 0 && theirsGap.length === 0) {
+      // No gap
+    } else if (arraysEqual(oursGap, theirsGap)) {
+      merged.push(...oursGap);
+    } else if (arraysEqual(baseGap, oursGap)) {
+      merged.push(...theirsGap);
+    } else if (arraysEqual(baseGap, theirsGap)) {
+      merged.push(...oursGap);
+    } else {
+      hasConflicts = true;
+      const start = merged.length;
+      merged.push("<<<<<<< ours");
+      merged.push(...oursGap);
+      merged.push("=======");
+      merged.push(...theirsGap);
+      merged.push(">>>>>>> theirs");
+      conflictRanges.push({ start, end: merged.length });
+    }
+  }
+
+  return { merged, hasConflicts, conflictRanges };
+}
+
 export interface MergeResult {
   success: boolean;
   mergedTree?: string;
+  mergeCommitOid?: string;
   conflicts?: ConflictEntry[];
   message?: string;
 }
@@ -14,6 +139,7 @@ export interface ConflictEntry {
   base?: string;
   ours?: string;
   theirs?: string;
+  merged?: string;
   resolved?: boolean;
   resolution?: string;
 }
@@ -37,7 +163,7 @@ export class GitMerge {
     baseCommit: string,
     ourCommit: string,
     theirCommit: string,
-    strategy: "recursive" | "resolve" | "ours" | "theirs" | "octopus" = "recursive",
+    strategy: "recursive" | "resolve" | "ours" | "theirs" = "recursive",
   ): Promise<MergeResult> {
     // Get tree OIDs from commits
     const baseTree = await this.#getTreeFromCommit(baseCommit);
@@ -53,11 +179,163 @@ export class GitMerge {
         return await this.#oursMerge(ourTree);
       case "theirs":
         return await this.#theirsMerge(theirTree);
-      case "octopus":
-        return await this.#octopusMerge([baseTree, ourTree, theirTree]);
       default:
         throw new Error(`Unknown merge strategy: ${String(strategy)}`);
     }
+  }
+
+  async mergeTrees(baseTree: string, ourTree: string, theirTree: string): Promise<MergeResult> {
+    return await this.#recursiveMerge(baseTree, ourTree, theirTree);
+  }
+
+  async findMergeBase(commit1: string, commit2: string): Promise<string | null> {
+    const history1 = new Set<string>();
+    const queue1: string[] = [commit1];
+
+    while (queue1.length > 0) {
+      const current = queue1.pop()!;
+      if (history1.has(current)) continue;
+      history1.add(current);
+      try {
+        const obj = await this.#objectStore.readObject(current);
+        if (obj.type !== "commit") continue;
+        const info = this.#parseCommitFull(obj.data);
+        for (const parent of info.parents) queue1.push(parent);
+      } catch {
+        // Object not found, stop this branch
+      }
+    }
+
+    // BFS from commit2 to find the first intersection
+    const queue2: string[] = [commit2];
+    const visited = new Set<string>();
+
+    while (queue2.length > 0) {
+      const current = queue2.shift()!;
+      if (visited.has(current)) continue;
+      visited.add(current);
+      if (history1.has(current)) return current;
+      try {
+        const obj = await this.#objectStore.readObject(current);
+        if (obj.type !== "commit") continue;
+        const info = this.#parseCommitFull(obj.data);
+        for (const parent of info.parents) queue2.push(parent);
+      } catch {
+        // Object not found
+      }
+    }
+
+    return null;
+  }
+
+  async mergeCommits(
+    ourCommit: string,
+    theirCommit: string,
+    author: { name: string; email: string } = { name: "Git", email: "git@example.com" },
+    message?: string,
+  ): Promise<MergeResult> {
+    const baseCommit = await this.findMergeBase(ourCommit, theirCommit);
+    if (!baseCommit) {
+      throw new Error("No common ancestor found");
+    }
+
+    const result = await this.threeWayMerge(baseCommit, ourCommit, theirCommit);
+
+    if (!result.success) {
+      return result;
+    }
+
+    // Create merge commit with two parents
+    const authorStr = `${author.name} <${author.email}>`;
+    const timestamp = Math.floor(Date.now() / 1000);
+    const timezone = "+0000";
+    const commitMessage = message || `Merge commit '${theirCommit.slice(0, 7)}'`;
+
+    let commitData = `tree ${result.mergedTree}\n`;
+    commitData += `parent ${ourCommit}\n`;
+    commitData += `parent ${theirCommit}\n`;
+    commitData += `author ${authorStr} ${timestamp} ${timezone}\n`;
+    commitData += `committer ${authorStr} ${timestamp} ${timezone}\n`;
+    commitData += `\n${commitMessage}\n`;
+
+    const mergeCommitOid = await this.#objectStore.writeObject(
+      "commit",
+      new TextEncoder().encode(commitData),
+    );
+
+    return {
+      ...result,
+      mergeCommitOid,
+    };
+  }
+
+  async octopusMerge(
+    ourCommit: string,
+    theirCommits: string[],
+    author: { name: string; email: string } = { name: "Git", email: "git@example.com" },
+    message?: string,
+  ): Promise<MergeResult> {
+    if (theirCommits.length < 2) {
+      throw new Error("Octopus merge requires at least 2 branches to merge");
+    }
+
+    let currentTree = await this.#getTreeFromCommit(ourCommit);
+    let currentCommit = ourCommit;
+
+    for (let i = 0; i < theirCommits.length; i++) {
+      const theirCommit = theirCommits[i]!;
+
+      // Find merge base between current state and this branch
+      const base = await this.findMergeBase(currentCommit, theirCommit);
+      if (!base) {
+        return {
+          success: false,
+          message: `Octopus merge refused: no common ancestor with branch ${i + 1}`,
+        };
+      }
+
+      const baseTree = await this.#getTreeFromCommit(base);
+      const theirTree = await this.#getTreeFromCommit(theirCommit);
+
+      const result = await this.#recursiveMerge(baseTree, currentTree, theirTree);
+
+      if (!result.success) {
+        return {
+          success: false,
+          message: `Octopus merge refused: conflicts with branch ${i + 1}`,
+        };
+      }
+
+      currentTree = result.mergedTree!;
+      currentCommit = theirCommit;
+    }
+
+    // Create octopus merge commit with N+1 parents
+    const authorStr = `${author.name} <${author.email}>`;
+    const timestamp = Math.floor(Date.now() / 1000);
+    const timezone = "+0000";
+    const commitMessage = message || `Merge ${theirCommits.length} branches`;
+
+    let commitData = `tree ${currentTree}\n`;
+    commitData += `parent ${ourCommit}\n`;
+    for (const tc of theirCommits) {
+      commitData += `parent ${tc}\n`;
+    }
+    commitData += `author ${authorStr} ${timestamp} ${timezone}\n`;
+    commitData += `committer ${authorStr} ${timestamp} ${timezone}\n`;
+    commitData += `\n${commitMessage}\n`;
+
+    const mergeCommitOid = await this.#objectStore.writeObject(
+      "commit",
+      new TextEncoder().encode(commitData),
+    );
+
+    return {
+      success: true,
+      mergedTree: currentTree,
+      mergeCommitOid,
+      message: `Octopus merge successful (${theirCommits.length + 1} branches)`,
+    };
   }
 
   async #recursiveMerge(
@@ -80,21 +358,23 @@ export class GitMerge {
 
       if (mergeResult.conflict) {
         conflicts.push(mergeResult.conflict);
-      } else if (mergeResult.entry) {
+      }
+      if (mergeResult.entry) {
         mergedEntries.push(mergeResult.entry);
       }
     }
 
+    // Always create merged tree (even with conflicts — marker content is embedded)
+    const mergedTree = await this.#createTree(mergedEntries);
+
     if (conflicts.length > 0) {
       return {
         success: false,
+        mergedTree,
         conflicts,
         message: `Merge failed with ${conflicts.length} conflicts`,
       };
     }
-
-    // Create merged tree
-    const mergedTree = await this.#createTree(mergedEntries);
 
     return {
       success: true,
@@ -173,54 +453,12 @@ export class GitMerge {
     };
   }
 
-  async #octopusMerge(trees: string[]): Promise<MergeResult> {
-    if (trees.length < 3) {
-      throw new Error("Octopus merge requires at least 3 trees");
-    }
-
-    const baseTree = trees[0];
-    if (!baseTree) {
-      throw new Error("Base tree is required for octopus merge");
-    }
-
-    let currentTree = baseTree;
-
-    for (let i = 1; i < trees.length; i++) {
-      const targetTree = trees[i];
-      if (!targetTree) {
-        throw new Error(`Tree at index ${i} is undefined`);
-      }
-
-      const result = await this.#recursiveMerge(
-        baseTree, // Always use first as base
-        currentTree,
-        targetTree,
-      );
-
-      if (!result.success) {
-        return {
-          success: false,
-          conflicts: result.conflicts,
-          message: `Octopus merge failed at branch ${i}`,
-        };
-      }
-
-      currentTree = result.mergedTree!;
-    }
-
-    return {
-      success: true,
-      mergedTree: currentTree,
-      message: `Octopus merge successful (${trees.length} branches)`,
-    };
-  }
-
   async #mergeEntry(
     path: string,
     baseEntry: TreeEntry | null,
     ourEntry: TreeEntry | null,
     theirEntry: TreeEntry | null,
-  ) {
+  ): Promise<{ entry?: TreeEntry; conflict?: ConflictEntry }> {
     // Both deleted
     if (!ourEntry && !theirEntry) {
       return {};
@@ -257,28 +495,30 @@ export class GitMerge {
           theirEntry.oid,
         );
 
-        if (mergedContent.success) {
-          const mergedOid = await this.#objectStore.writeObject("blob", mergedContent.content!);
+        const mergedOid = await this.#objectStore.writeObject("blob", mergedContent.content);
+        const entry: TreeEntry = {
+          mode: ourEntry.mode,
+          name: ourEntry.name,
+          oid: mergedOid,
+        };
+
+        if (mergedContent.hasConflicts) {
           return {
-            entry: {
-              mode: ourEntry.mode,
-              name: ourEntry.name,
-              oid: mergedOid,
-            },
-          };
-        } else {
-          return {
+            entry,
             conflict: {
               path,
               base: baseEntry?.oid,
               ours: ourEntry.oid,
               theirs: theirEntry.oid,
+              merged: mergedOid,
             },
           };
         }
+
+        return { entry };
       }
 
-      // Binary conflict
+      // Binary conflict — no merged blob
       return {
         conflict: {
           path,
@@ -292,53 +532,29 @@ export class GitMerge {
     return {};
   }
 
-  async #mergeTextContent(baseOid: string | undefined, ourOid: string, theirOid: string) {
+  async #mergeTextContent(
+    baseOid: string | undefined,
+    ourOid: string,
+    theirOid: string,
+  ): Promise<{
+    content: Uint8Array;
+    hasConflicts: boolean;
+    conflictRanges: Array<{ start: number; end: number }>;
+  }> {
     const ourContent = await this.#readBlobAsText(ourOid);
     const theirContent = await this.#readBlobAsText(theirOid);
     const baseContent = baseOid ? await this.#readBlobAsText(baseOid) : "";
 
-    const ourLines = ourContent.split("\n");
-    const theirLines = theirContent.split("\n");
-    const baseLines = baseContent.split("\n");
-
-    // Perform line-by-line three-way merge
-    const mergedLines: string[] = [];
-    const conflicts: string[] = [];
-
-    const maxLength = Math.max(ourLines.length, theirLines.length, baseLines.length);
-
-    for (let i = 0; i < maxLength; i++) {
-      const baseLine = baseLines[i] || "";
-      const ourLine = ourLines[i] || "";
-      const theirLine = theirLines[i] || "";
-
-      if (ourLine === theirLine) {
-        mergedLines.push(ourLine);
-      } else if (ourLine === baseLine) {
-        mergedLines.push(theirLine);
-      } else if (theirLine === baseLine) {
-        mergedLines.push(ourLine);
-      } else {
-        // Conflict
-        conflicts.push(`Line ${i + 1}`);
-        mergedLines.push("<<<<<<< ours");
-        mergedLines.push(ourLine);
-        mergedLines.push("=======");
-        mergedLines.push(theirLine);
-        mergedLines.push(">>>>>>> theirs");
-      }
-    }
-
-    if (conflicts.length > 0) {
-      return {
-        success: false,
-        conflicts,
-      };
-    }
+    const result = diff3Merge(
+      baseContent.split("\n"),
+      ourContent.split("\n"),
+      theirContent.split("\n"),
+    );
 
     return {
-      success: true,
-      content: new TextEncoder().encode(mergedLines.join("\n")),
+      content: new TextEncoder().encode(result.merged.join("\n")),
+      hasConflicts: result.hasConflicts,
+      conflictRanges: result.conflictRanges,
     };
   }
 
@@ -642,6 +858,20 @@ export class GitMerge {
     const message = lines.slice(messageStart).join("\n");
 
     return { tree, parent, author, message };
+  }
+
+  #parseCommitFull(data: Uint8Array) {
+    const text = new TextDecoder().decode(data);
+    const lines = text.split("\n");
+
+    const tree = lines.find((l) => l.startsWith("tree "))?.slice(5) || "";
+    const parents = lines.filter((l) => l.startsWith("parent ")).map((l) => l.slice(7));
+    const author = lines.find((l) => l.startsWith("author "))?.slice(7) || "";
+
+    const messageStart = lines.findIndex((l) => l === "") + 1;
+    const message = lines.slice(messageStart).join("\n");
+
+    return { tree, parents, author, message };
   }
 
   #parseTree(data: Uint8Array) {

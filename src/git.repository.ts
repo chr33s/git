@@ -764,7 +764,84 @@ export class GitRepository {
 
   async merge(baseTree: string, ourTree: string, theirTree: string): Promise<MergeResult> {
     const merger = new GitMerge(this.objectStore, this.refStore);
-    return await merger.threeWayMerge(baseTree, ourTree, theirTree);
+    return await merger.mergeTrees(baseTree, ourTree, theirTree);
+  }
+
+  async mergeRef(
+    ref: string,
+    author: GitAuthor = { name: "Git", email: "git@example.com" },
+    message?: string,
+  ): Promise<MergeResult> {
+    const headRef = await this.getCurrentHead();
+    const headOid = headRef ? await this.refStore.readRef(headRef) : null;
+    if (!headOid) {
+      throw new Error("No HEAD commit");
+    }
+
+    // Resolve ref to commit OID
+    let theirOid = ref;
+    const refOid = await this.getRef(ref);
+    if (refOid) theirOid = refOid;
+
+    const merger = new GitMerge(this.objectStore, this.refStore);
+
+    // Find merge base
+    const baseOid = await merger.findMergeBase(headOid, theirOid);
+    if (!baseOid) {
+      throw new Error("No common ancestor found");
+    }
+
+    const result = await merger.mergeCommits(headOid, theirOid, author, message);
+
+    if (!result.success) {
+      // Write MERGE_HEAD for conflict resolution flow
+      await this.storage.writeFile(".git/MERGE_HEAD", new TextEncoder().encode(theirOid + "\n"));
+      return result;
+    }
+
+    // Update HEAD to point to merge commit
+    if (headRef && result.mergeCommitOid) {
+      const updated = await this.refStore.compareAndSwapRef(
+        headRef,
+        headOid,
+        result.mergeCommitOid,
+        "merge",
+      );
+      if (!updated) {
+        throw new Error(`HEAD moved during merge for ${headRef}`);
+      }
+
+      // Clear MERGE_HEAD on success
+      await this.#clearMergeHead();
+    }
+
+    return result;
+  }
+
+  async abortMerge(): Promise<void> {
+    await this.#clearMergeHead();
+  }
+
+  async getMergeHead(): Promise<string | null> {
+    try {
+      const data = await this.storage.readFile(".git/MERGE_HEAD");
+      return new TextDecoder().decode(data).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async #clearMergeHead() {
+    try {
+      await this.storage.deleteFile(".git/MERGE_HEAD");
+    } catch {
+      // Already cleared
+    }
+  }
+
+  async findMergeBase(commit1: string, commit2: string): Promise<string | null> {
+    const merger = new GitMerge(this.objectStore, this.refStore);
+    return await merger.findMergeBase(commit1, commit2);
   }
 
   async createPack(objects: string[]) {

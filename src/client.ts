@@ -270,101 +270,21 @@ export class Client {
   }
 
   async merge(ref: string) {
-    // Get current HEAD commit
-    const { headOid, headRef } = await this.#readHeadState();
-    if (!headOid) {
-      throw new Error("No HEAD commit");
-    }
-
-    // Resolve ref to commit OID
-    let mergeOid = ref;
-    const refOid = await this.#repository.getRef(ref);
-    if (refOid) {
-      mergeOid = refOid;
-    }
-
-    // Find the common ancestor (lowest common ancestor - LCA)
-    const commonAncestorOid = await this.#findCommonAncestor(headOid, mergeOid);
-    if (!commonAncestorOid) {
-      throw new Error("No common ancestor found");
-    }
-
-    // Get the three commits
-    const currentCommit = await this.#repository.readObject(headOid);
-    const currentInfo = this.#repository.parseCommit(currentCommit.data);
-
-    const mergeCommit = await this.#repository.readObject(mergeOid);
-    const mergeInfo = this.#repository.parseCommit(mergeCommit.data);
-
-    const baseCommit = await this.#repository.readObject(commonAncestorOid);
-    const baseInfo = this.#repository.parseCommit(baseCommit.data);
-
-    // Perform three-way merge with proper base tree
-    const result = await this.#repository.merge(baseInfo.tree, currentInfo.tree, mergeInfo.tree);
+    const result = await this.#repository.mergeRef(
+      ref,
+      { name: "Git Client", email: "client@example.com" },
+      `Merge branch '${ref}' into current branch`,
+    );
 
     if (!result.success) {
       throw new Error(`Merge conflict: ${result.message || "Unable to merge branches"}`);
     }
 
-    // Create merge commit with both parents
-    const authorStr = "Git Client <client@example.com>";
-    const timestamp = Math.floor(Date.now() / 1000);
-    const timezone = "+0000";
-
-    let mergeCommitData = `tree ${result.mergedTree}\n`;
-    mergeCommitData += `parent ${headOid}\n`;
-    mergeCommitData += `parent ${mergeOid}\n`;
-    mergeCommitData += `author ${authorStr} ${timestamp} ${timezone}\n`;
-    mergeCommitData += `committer ${authorStr} ${timestamp} ${timezone}\n`;
-    mergeCommitData += `\nMerge branch '${ref}' into current branch\n`;
-
-    const mergeCommitOid = await this.#repository.writeObject(
-      "commit",
-      new TextEncoder().encode(mergeCommitData),
-    );
-
-    // Update HEAD to point to merge commit
-    if (headRef) {
-      const updated = await this.#writeRefIfUnchanged(headRef, headOid, mergeCommitOid, "merge");
-      if (!updated) {
-        throw new Error(`HEAD moved during merge for ${headRef}`);
-      }
-    }
-
     return {
       success: true,
       mergedTree: result.mergedTree,
-      mergeCommitOid,
+      mergeCommitOid: result.mergeCommitOid,
     };
-  }
-
-  async #findCommonAncestor(oid1: string, oid2: string) {
-    // Build history set for first commit
-    const history1 = new Set<string>();
-    let current: string | null = oid1;
-
-    while (current) {
-      history1.add(current);
-      const commit = await this.#repository.readObject(current);
-      if (commit.type !== "commit") break;
-      const info = this.#repository.parseCommit(commit.data);
-      current = info.parent || null;
-    }
-
-    // Walk second commit's history to find intersection
-    current = oid2;
-    while (current) {
-      if (history1.has(current)) {
-        return current; // Found common ancestor
-      }
-
-      const commit = await this.#repository.readObject(current);
-      if (commit.type !== "commit") break;
-      const info = this.#repository.parseCommit(commit.data);
-      current = info.parent || null;
-    }
-
-    return null; // No common ancestor found
   }
 
   async rebase(onto: string) {
@@ -382,7 +302,7 @@ export class Client {
     }
 
     // Find the fork point (common ancestor)
-    const forkPoint = await this.#findCommonAncestor(currentHeadOid, ontoOid);
+    const forkPoint = await this.#repository.findMergeBase(currentHeadOid, ontoOid);
     if (!forkPoint) {
       throw new Error("No common ancestor found");
     }
