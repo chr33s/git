@@ -1,10 +1,10 @@
-export function bytesToHex(bytes: Uint8Array): string {
+export function bytesToHex(bytes: Uint8Array) {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
 
-export function hexToBytes(hex: string): Uint8Array {
+export function hexToBytes(hex: string) {
   if (hex.length % 2 !== 0) {
     throw new Error("Invalid hex string length");
   }
@@ -15,7 +15,7 @@ export function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-export function concatenateUint8Arrays(arrays: Uint8Array[]): Uint8Array {
+export function concatenateUint8Arrays(arrays: Uint8Array[]) {
   const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
   const result = new Uint8Array(totalLength);
   let offset = 0;
@@ -28,7 +28,7 @@ export function concatenateUint8Arrays(arrays: Uint8Array[]): Uint8Array {
   return result;
 }
 
-export async function createSha1(data: Uint8Array): Promise<string> {
+export async function createSha1(data: Uint8Array) {
   const buffer =
     data.buffer instanceof ArrayBuffer
       ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
@@ -40,7 +40,7 @@ export async function createSha1(data: Uint8Array): Promise<string> {
   return bytesToHex(new Uint8Array(hashBuffer));
 }
 
-export async function compressData(data: Uint8Array): Promise<Uint8Array> {
+export async function compressData(data: Uint8Array) {
   const cs = new CompressionStream("deflate");
   const writer = cs.writable.getWriter();
 
@@ -67,7 +67,7 @@ export async function compressData(data: Uint8Array): Promise<Uint8Array> {
   return concatenateUint8Arrays(chunks);
 }
 
-export async function decompressData(compressed: Uint8Array): Promise<Uint8Array> {
+export async function decompressData(compressed: Uint8Array) {
   const ds = new DecompressionStream("deflate");
   const writer = ds.writable.getWriter();
 
@@ -97,7 +97,7 @@ export async function decompressData(compressed: Uint8Array): Promise<Uint8Array
   return concatenateUint8Arrays(chunks);
 }
 
-export function createStreamFromData(data: Uint8Array): ReadableStream<Uint8Array> {
+export function createStreamFromData(data: Uint8Array) {
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(data);
@@ -106,7 +106,7 @@ export function createStreamFromData(data: Uint8Array): ReadableStream<Uint8Arra
   });
 }
 
-export async function collectStream(body: ReadableStream<Uint8Array> | null): Promise<Uint8Array> {
+export async function collectStream(body: ReadableStream<Uint8Array> | null) {
   if (!body) {
     return new Uint8Array(0);
   }
@@ -121,18 +121,18 @@ export async function collectStream(body: ReadableStream<Uint8Array> | null): Pr
   return concatenateUint8Arrays(chunks);
 }
 
-export async function deflateData(data: Uint8Array): Promise<Uint8Array> {
+export async function deflateData(data: Uint8Array) {
   const rs = createStreamFromData(data);
   const ds = deflateStream(rs);
   return collectStream(ds);
 }
 
-export function deflateStream(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export function deflateStream(stream: ReadableStream<Uint8Array>) {
   const cs = new CompressionStream("deflate");
   return (stream as any).pipeThrough(cs) as ReadableStream<Uint8Array>;
 }
 
-export function readVarInt(data: Uint8Array, offset: number): { value: number; bytesRead: number } {
+export function readVarInt(data: Uint8Array, offset: number) {
   let value = 0;
   let shift = 0;
   let bytesRead = 0;
@@ -153,7 +153,7 @@ export function readVarInt(data: Uint8Array, offset: number): { value: number; b
   throw new Error("Incomplete varint");
 }
 
-export function writeVarInt(value: number): Uint8Array {
+export function writeVarInt(value: number) {
   const bytes: number[] = [];
 
   while (value >= 0x80) {
@@ -165,11 +165,11 @@ export function writeVarInt(value: number): Uint8Array {
   return new Uint8Array(bytes);
 }
 
-export function isValidSha(sha: string): boolean {
+export function isValidSha(sha: string) {
   return /^[0-9a-f]{40}$/i.test(sha);
 }
 
-export function applyDelta(base: Uint8Array, delta: Uint8Array): Uint8Array {
+export function applyDelta(base: Uint8Array, delta: Uint8Array) {
   let deltaOffset = 0;
 
   // Read base object size from delta

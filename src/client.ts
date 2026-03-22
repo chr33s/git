@@ -141,7 +141,7 @@ export class Client {
     return { staged, modified, untracked };
   }
 
-  async #walkTreePaths(treeOid: string, prefix: string, paths: Set<string>): Promise<void> {
+  async #walkTreePaths(treeOid: string, prefix: string, paths: Set<string>) {
     const tree = await this.#repository.readObject(treeOid);
     const entries = this.#repository.parseTree(tree.data);
 
@@ -312,7 +312,7 @@ export class Client {
     };
   }
 
-  async #findCommonAncestor(oid1: string, oid2: string): Promise<string | null> {
+  async #findCommonAncestor(oid1: string, oid2: string) {
     // Build history set for first commit
     const history1 = new Set<string>();
     let current: string | null = oid1;
@@ -576,7 +576,7 @@ export class Client {
     };
   }
 
-  async pushDelete(remote: string = "origin", branch: string): Promise<any> {
+  async pushDelete(remote: string = "origin", branch: string) {
     // Delete branch on remote by sending null OID
     const remoteTrackingRef = `refs/remotes/${remote}/${branch}`;
     const oldOid = await this.#repository.getRef(remoteTrackingRef);
@@ -612,7 +612,7 @@ export class Client {
     };
   }
 
-  async #collectTreeObjects(treeOid: string, objects: Set<string>): Promise<void> {
+  async #collectTreeObjects(treeOid: string, objects: Set<string>) {
     if (objects.has(treeOid)) return;
 
     objects.add(treeOid);
@@ -673,7 +673,7 @@ export class Client {
     await this.#repository.writeFile(configPath, new TextEncoder().encode(configText));
   }
 
-  async getAllRemotes(): Promise<Record<string, string>> {
+  async getAllRemotes() {
     const configPath = ".git/config";
     let config: Record<string, Record<string, string>> = {};
 
@@ -688,12 +688,12 @@ export class Client {
     return config["remote"] || {};
   }
 
-  async getRemote(name: string): Promise<string | null> {
+  async getRemote(name: string) {
     const remotes = await this.getAllRemotes();
     return remotes[name] || null;
   }
 
-  #parseConfig(text: string): Record<string, Record<string, string>> {
+  #parseConfig(text: string) {
     const config: Record<string, Record<string, string>> = {};
     let currentSection = "";
 
@@ -722,7 +722,7 @@ export class Client {
     return config;
   }
 
-  #serializeConfig(config: Record<string, Record<string, string>>): string {
+  #serializeConfig(config: Record<string, Record<string, string>>) {
     let text = "";
 
     for (const [section, values] of Object.entries(config)) {

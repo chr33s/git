@@ -18,7 +18,7 @@ export class GitIndex {
     this.#storage = storage;
   }
 
-  async init(): Promise<void> {
+  async init() {
     await this.load();
   }
 
@@ -55,7 +55,7 @@ export class GitIndex {
     await this.save();
   }
 
-  getEntries(): IndexEntry[] {
+  getEntries() {
     return [...this.#entries];
   }
 
@@ -105,7 +105,7 @@ export class GitIndex {
     }
   }
 
-  #parseTreeObject(data: Uint8Array): Array<{ mode: string; name: string; oid: string }> {
+  #parseTreeObject(data: Uint8Array) {
     const entries: Array<{ mode: string; name: string; oid: string }> = [];
     let offset = 0;
 
@@ -132,7 +132,7 @@ export class GitIndex {
     return entries;
   }
 
-  #parseIndex(buffer: Uint8Array): IndexEntry[] {
+  #parseIndex(buffer: Uint8Array) {
     const entries: IndexEntry[] = [];
 
     // Check signature
@@ -190,7 +190,7 @@ export class GitIndex {
     return entries;
   }
 
-  async #serializeIndex(): Promise<Uint8Array> {
+  async #serializeIndex() {
     // Calculate size - must match actual write offsets including header
     let size = 12; // Header
 
@@ -264,7 +264,7 @@ export class GitIndex {
     return buffer;
   }
 
-  #readUint32BE(buffer: Uint8Array, offset: number): number {
+  #readUint32BE(buffer: Uint8Array, offset: number) {
     if (offset + 3 >= buffer.length) {
       throw new Error("Buffer underrun in readUint32BE");
     }
@@ -276,7 +276,7 @@ export class GitIndex {
     );
   }
 
-  #readUint16BE(buffer: Uint8Array, offset: number): number {
+  #readUint16BE(buffer: Uint8Array, offset: number) {
     if (offset + 1 >= buffer.length) {
       throw new Error("Buffer underrun in readUint16BE");
     }

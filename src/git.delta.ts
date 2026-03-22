@@ -1,7 +1,7 @@
 import { readVarInt, writeVarInt } from "./git.utils.ts";
 
 export class GitDelta {
-  static applyDelta(base: Uint8Array, delta: Uint8Array): Uint8Array {
+  static applyDelta(base: Uint8Array, delta: Uint8Array) {
     let deltaOffset = 0;
 
     // Read base object size from delta
@@ -60,7 +60,7 @@ export class GitDelta {
     return result;
   }
 
-  static createDelta(source: Uint8Array, target: Uint8Array): Uint8Array {
+  static createDelta(source: Uint8Array, target: Uint8Array) {
     const instructions: Array<{
       type: "copy" | "insert";
       offset?: number;
@@ -134,7 +134,7 @@ export class GitDelta {
     targetOffset: number,
     sourceChunks: Map<string, number[]>,
     chunkSize: number,
-  ): { offset: number; size: number } | null {
+  ) {
     if (targetOffset + chunkSize > target.length) {
       return null;
     }
@@ -177,7 +177,7 @@ export class GitDelta {
       size?: number;
       data?: Uint8Array;
     }>,
-  ): Uint8Array {
+  ) {
     const chunks: Uint8Array[] = [];
 
     // Add source size
@@ -210,7 +210,7 @@ export class GitDelta {
     return result;
   }
 
-  static #encodeCopyInstruction(offset: number, size: number): Uint8Array {
+  static #encodeCopyInstruction(offset: number, size: number) {
     const bytes: number[] = [];
     let cmd = 0x80;
 
@@ -253,7 +253,7 @@ export class GitDelta {
     return result;
   }
 
-  static #encodeInsertInstruction(data: Uint8Array): Uint8Array {
+  static #encodeInsertInstruction(data: Uint8Array) {
     if (data.length === 0 || data.length > 127) {
       throw new Error(`Invalid insert size: ${data.length}`);
     }
@@ -265,11 +265,11 @@ export class GitDelta {
     return result;
   }
 
-  static #encodeVarint(value: number): Uint8Array {
+  static #encodeVarint(value: number) {
     return writeVarInt(value);
   }
 
-  static #hashChunk(chunk: Uint8Array): string {
+  static #hashChunk(chunk: Uint8Array) {
     // Simple hash function for chunks
     let hash = 0;
     for (let i = 0; i < chunk.length; i++) {
@@ -282,11 +282,11 @@ export class GitDelta {
     return hash.toString(36);
   }
 
-  static calculateCompressionRatio(original: Uint8Array, delta: Uint8Array): number {
+  static calculateCompressionRatio(original: Uint8Array, delta: Uint8Array) {
     return 1 - delta.length / original.length;
   }
 
-  static shouldUseDelta(original: Uint8Array, delta: Uint8Array): boolean {
+  static shouldUseDelta(original: Uint8Array, delta: Uint8Array) {
     // Use delta if it saves at least 10% space
     return delta.length < original.length * 0.9;
   }
@@ -313,11 +313,11 @@ export class GitDeltaCache {
     this.#cache.set(targetOid, { base: baseOid, delta });
   }
 
-  get(targetOid: string): { base: string; delta: Uint8Array } | undefined {
+  get(targetOid: string) {
     return this.#cache.get(targetOid);
   }
 
-  has(targetOid: string): boolean {
+  has(targetOid: string) {
     return this.#cache.has(targetOid);
   }
 

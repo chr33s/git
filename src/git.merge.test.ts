@@ -7,7 +7,7 @@ import { GitRefStore } from "./git.ref.ts";
 import { MemoryStorage } from "./git.storage.ts";
 
 // Helper function
-function hexToBytes(hex: string): Uint8Array {
+function hexToBytes(hex: string) {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -15,10 +15,7 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-async function createTestTree(
-  objectStore: GitObjectStore,
-  files: Record<string, string>,
-): Promise<string> {
+async function createTestTree(objectStore: GitObjectStore, files: Record<string, string>) {
   const entries: Array<{ mode: string; name: string; oid: string }> = [];
 
   for (const [name, content] of Object.entries(files)) {
@@ -47,11 +44,7 @@ async function createTestTree(
   return await objectStore.writeObject("tree", treeData);
 }
 
-async function createTestCommit(
-  objectStore: GitObjectStore,
-  treeOid: string,
-  parentOid?: string,
-): Promise<string> {
+async function createTestCommit(objectStore: GitObjectStore, treeOid: string, parentOid?: string) {
   const timestamp = Math.floor(Date.now() / 1000);
   let commitData = `tree ${treeOid}\n`;
   if (parentOid) {

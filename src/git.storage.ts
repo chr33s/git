@@ -19,7 +19,7 @@ export class MemoryStorage implements GitStorage {
   #repositories = new Map<string, MemoryStorageState>();
   #currentRepository: MemoryStorageState | null = null;
 
-  async init(repositoryName: string): Promise<void> {
+  async init(repositoryName: string) {
     let repository = this.#repositories.get(repositoryName);
     if (!repository) {
       repository = {
@@ -134,7 +134,7 @@ export class MemoryStorage implements GitStorage {
     };
   }
 
-  #requireRepository(): MemoryStorageState {
+  #requireRepository() {
     if (!this.#currentRepository) throw new Error("Storage not initialized");
     return this.#currentRepository;
   }

@@ -10,7 +10,7 @@ export class CloudflareStorage implements GitStorage {
     this.#r2 = env.GIT_OBJECTS;
   }
 
-  async init(repoName: string): Promise<void> {
+  async init(repoName: string) {
     this.#repoName = repoName;
 
     // Ensure database tables exist
@@ -32,7 +32,7 @@ export class CloudflareStorage implements GitStorage {
 		`);
   }
 
-  async exists(path: string): Promise<boolean> {
+  async exists(path: string) {
     if (!this.#repoName) throw new Error("Storage not initialized");
 
     const rows = this.#sql
@@ -46,7 +46,7 @@ export class CloudflareStorage implements GitStorage {
     return rows.length > 0;
   }
 
-  async readFile(path: string): Promise<Uint8Array> {
+  async readFile(path: string) {
     if (!this.#repoName) throw new Error("Storage not initialized");
 
     const key = this.#key(path);
@@ -99,7 +99,7 @@ export class CloudflareStorage implements GitStorage {
     // Directories are implicit in object keys
   }
 
-  async listDirectory(path: string): Promise<string[]> {
+  async listDirectory(path: string) {
     if (!this.#repoName) throw new Error("Storage not initialized");
 
     const pathPattern = this.#pattern(path);
@@ -163,7 +163,7 @@ export class CloudflareStorage implements GitStorage {
     );
   }
 
-  async getFileInfo(path: string): Promise<{ size: number; lastModified: Date }> {
+  async getFileInfo(path: string) {
     if (!this.#repoName) throw new Error("Storage not initialized");
 
     const result = this.#sql
@@ -191,7 +191,7 @@ export class CloudflareStorage implements GitStorage {
     return path ? `${path.replace(/\/$/, "")}/%` : "%";
   }
 
-  #key(path: string): string {
+  #key(path: string) {
     return `${this.#repoName}/${path}`;
   }
 }

@@ -4,18 +4,18 @@ export class OpfsStorage implements GitStorage {
   #rootHandle?: FileSystemDirectoryHandle;
   #repositoryHandle?: FileSystemDirectoryHandle;
 
-  async init(repositoryName: string): Promise<void> {
+  async init(repositoryName: string) {
     this.#rootHandle = await navigator.storage.getDirectory();
     this.#repositoryHandle = await this.#rootHandle.getDirectoryHandle(repositoryName, {
       create: true,
     });
   }
 
-  get repositoryHandle(): FileSystemDirectoryHandle | undefined {
+  get repositoryHandle() {
     return this.#repositoryHandle;
   }
 
-  async exists(path: string): Promise<boolean> {
+  async exists(path: string) {
     if (!this.#repositoryHandle) throw new Error("Storage not initialized");
 
     try {
@@ -26,7 +26,7 @@ export class OpfsStorage implements GitStorage {
     }
   }
 
-  async readFile(path: string): Promise<Uint8Array> {
+  async readFile(path: string) {
     if (!this.#repositoryHandle) throw new Error("Storage not initialized");
 
     const handle = await this.#getHandle(path);
@@ -92,7 +92,7 @@ export class OpfsStorage implements GitStorage {
     }
   }
 
-  async listDirectory(path: string): Promise<string[]> {
+  async listDirectory(path: string) {
     if (!this.#repositoryHandle) throw new Error("Storage not initialized");
 
     const dirHandle = path ? await this.#getDirectoryHandle(path) : this.#repositoryHandle;
@@ -120,7 +120,7 @@ export class OpfsStorage implements GitStorage {
     await parentHandle.removeEntry(dirName, { recursive: true });
   }
 
-  async getFileInfo(path: string): Promise<{ size: number; lastModified: Date }> {
+  async getFileInfo(path: string) {
     if (!this.#repositoryHandle) throw new Error("Storage not initialized");
 
     const handle = await this.#getHandle(path);
@@ -136,7 +136,7 @@ export class OpfsStorage implements GitStorage {
     };
   }
 
-  async #getHandle(path: string): Promise<FileSystemHandle> {
+  async #getHandle(path: string) {
     if (!this.#repositoryHandle) throw new Error("Storage not initialized");
 
     const parts = path.split("/").filter((p) => p);
@@ -158,7 +158,7 @@ export class OpfsStorage implements GitStorage {
     }
   }
 
-  async #getDirectoryHandle(path: string): Promise<FileSystemDirectoryHandle> {
+  async #getDirectoryHandle(path: string) {
     if (!this.#repositoryHandle) throw new Error("Storage not initialized");
 
     const parts = path.split("/").filter((p) => p);

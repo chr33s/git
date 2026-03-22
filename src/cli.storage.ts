@@ -6,7 +6,7 @@ import { type GitStorage } from "./git.storage.ts";
 export class FsStorage implements GitStorage {
   #rootPath?: string;
 
-  async init(_repositoryName: string): Promise<void> {
+  async init(_repositoryName: string) {
     // Use current working directory as the repository root
     this.#rootPath = process.cwd();
 

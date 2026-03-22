@@ -188,7 +188,7 @@ export class Server extends DurableObject<Env> {
     });
   }
 
-  #pktLine(text: string): string {
+  #pktLine(text: string) {
     const length = text.length + 4;
     return length.toString(16).padStart(4, "0") + text;
   }
@@ -496,7 +496,7 @@ export class Server extends DurableObject<Env> {
     deepenSince: number,
     deepenNot: string | null,
     signal?: AbortSignal,
-  ): Promise<{ objectsToSend: Set<string>; newShallows: Set<string>; unshallows: Set<string> }> {
+  ) {
     const isShallowRequest = deepen > 0 || deepenSince > 0 || deepenNot !== null;
     const serverShallows = await this.#repository.getShallowCommits();
 
@@ -594,7 +594,7 @@ export class Server extends DurableObject<Env> {
   }
 
   /** Wrap data in a single sideband pkt-line for the given channel (1=pack, 2=progress, 3=error) */
-  #sidebandPacket(channel: 1 | 2 | 3, data: Uint8Array): Uint8Array {
+  #sidebandPacket(channel: 1 | 2 | 3, data: Uint8Array) {
     const packetLen = data.length + 5; // 4 length bytes + 1 channel byte + data
     const lenStr = packetLen.toString(16).padStart(4, "0");
     const packet = new Uint8Array(packetLen);
@@ -605,7 +605,7 @@ export class Server extends DurableObject<Env> {
   }
 
   /** Split data into max-size sideband packets for the given channel */
-  #sidebandPackets(channel: 1 | 2 | 3, data: Uint8Array): Uint8Array[] {
+  #sidebandPackets(channel: 1 | 2 | 3, data: Uint8Array) {
     const maxChunk = 65515; // 65520 - 5 (4 len + 1 channel)
     const packets: Uint8Array[] = [];
     for (let i = 0; i < data.length; i += maxChunk) {
@@ -616,7 +616,7 @@ export class Server extends DurableObject<Env> {
     return packets;
   }
 
-  #infoRefsV2(): Response {
+  #infoRefsV2() {
     // Protocol v2 capability advertisement
     const lines: string[] = [];
     lines.push(this.#pktLine("version 2\n"));
@@ -632,7 +632,7 @@ export class Server extends DurableObject<Env> {
     });
   }
 
-  async #uploadPackV2(request: Request): Promise<Response> {
+  async #uploadPackV2(request: Request) {
     const body = request.body;
     const signal = request.signal;
     if (!body) {
@@ -692,7 +692,7 @@ export class Server extends DurableObject<Env> {
     }
   }
 
-  async #lsRefs(data: Uint8Array, startIdx: number, signal?: AbortSignal): Promise<Response> {
+  async #lsRefs(data: Uint8Array, startIdx: number, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     // Parse ls-refs arguments after the delimiter packet (0001)
@@ -757,7 +757,7 @@ export class Server extends DurableObject<Env> {
     });
   }
 
-  async #fetchV2(data: Uint8Array, startIdx: number, signal?: AbortSignal): Promise<Response> {
+  async #fetchV2(data: Uint8Array, startIdx: number, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     // Parse fetch arguments
@@ -884,10 +884,7 @@ export class Server extends DurableObject<Env> {
     });
   }
 
-  #readPktLine(
-    data: Uint8Array,
-    offset: number,
-  ): { content: Uint8Array; nextIdx: number; data: string } | null {
+  #readPktLine(data: Uint8Array, offset: number) {
     if (offset + 4 > data.length) return null;
 
     const lengthStr = new TextDecoder().decode(data.slice(offset, offset + 4));

@@ -205,7 +205,7 @@ export class GitRepository {
     });
   }
 
-  async commit(message: string, author?: GitAuthor): Promise<string> {
+  async commit(message: string, author?: GitAuthor) {
     // Get current HEAD
     const headRef = await this.getCurrentHead();
     let parentOid: string | undefined;
@@ -246,7 +246,7 @@ export class GitRepository {
     return commitOid;
   }
 
-  async createTreeFromIndex(): Promise<string> {
+  async createTreeFromIndex() {
     const entries = this.index.getEntries();
 
     // Group entries by directory
@@ -272,7 +272,7 @@ export class GitRepository {
     return await this.createTreeObject(tree, ".");
   }
 
-  async createTreeObject(tree: Map<string, any[]>, path: string): Promise<string> {
+  async createTreeObject(tree: Map<string, any[]>, path: string) {
     const entries = tree.get(path) || [];
 
     // Sort entries
@@ -299,7 +299,7 @@ export class GitRepository {
     return await this.objectStore.writeObject("tree", treeData);
   }
 
-  parseGitUrl(url: string): GitRepoInfo {
+  parseGitUrl(url: string) {
     const match = url.match(/^(https?:\/\/|git@)([^:/]+)[:\\/]([^/]+)\/(.+?)(\.git)?$/);
     if (!match || match.length < 5) {
       throw new Error("Invalid git URL");
@@ -312,7 +312,7 @@ export class GitRepository {
     };
   }
 
-  parseCommit(data: Uint8Array): GitCommitInfo {
+  parseCommit(data: Uint8Array) {
     const text = new TextDecoder().decode(data);
     const lines = text.split("\n");
 
@@ -327,7 +327,7 @@ export class GitRepository {
     return { tree, parent, parents, author, message };
   }
 
-  parseTree(data: Uint8Array): GitTreeEntry[] {
+  parseTree(data: Uint8Array) {
     const entries: GitTreeEntry[] = [];
     let offset = 0;
 
@@ -354,7 +354,7 @@ export class GitRepository {
     return entries;
   }
 
-  async findInTree(treeOid: string, path: string): Promise<{ oid: string; mode: string } | null> {
+  async findInTree(treeOid: string, path: string) {
     const parts = path.split("/");
     let currentTree = treeOid;
 
@@ -375,7 +375,7 @@ export class GitRepository {
     return null;
   }
 
-  async getCurrentHead(): Promise<string | null> {
+  async getCurrentHead() {
     try {
       const headContent = await this.storage.readFile(".git/HEAD");
       const content = new TextDecoder().decode(headContent);
@@ -390,7 +390,7 @@ export class GitRepository {
     }
   }
 
-  async getCurrentCommitOid(): Promise<string | null> {
+  async getCurrentCommitOid() {
     try {
       const headContent = await this.storage.readFile(".git/HEAD");
       const content = new TextDecoder().decode(headContent).trim();
@@ -405,7 +405,7 @@ export class GitRepository {
     }
   }
 
-  async hashObject(type: string, data: Uint8Array): Promise<string> {
+  async hashObject(type: string, data: Uint8Array) {
     const header = new TextEncoder().encode(`${type} ${data.length}\0`);
     const combined = new Uint8Array(header.length + data.length);
     combined.set(header);
@@ -419,7 +419,7 @@ export class GitRepository {
     refs: Array<{ ref: string; old: string; new: string }>,
     packData: Uint8Array,
     force: boolean = false,
-  ): Promise<boolean> {
+  ) {
     if (!this.config.remote) {
       throw new Error("No remote configured");
     }
@@ -458,7 +458,7 @@ export class GitRepository {
     return await this.objectStore.readObject(oid);
   }
 
-  async writeObject(type: "blob" | "tree" | "commit" | "tag", data: Uint8Array): Promise<string> {
+  async writeObject(type: "blob" | "tree" | "commit" | "tag", data: Uint8Array) {
     return await this.objectStore.writeObject(type, data);
   }
 
@@ -466,19 +466,19 @@ export class GitRepository {
     return await this.refStore.getAllRefs();
   }
 
-  async getRef(name: string): Promise<string | null> {
+  async getRef(name: string) {
     return await this.refStore.readRef(name);
   }
 
-  async writeRef(name: string, oid: string): Promise<void> {
+  async writeRef(name: string, oid: string) {
     return await this.refStore.writeRef(name, oid);
   }
 
-  async deleteRef(name: string): Promise<void> {
+  async deleteRef(name: string) {
     return await this.refStore.deleteRef(name);
   }
 
-  async collectTreeObjects(treeOid: string): Promise<string[]> {
+  async collectTreeObjects(treeOid: string) {
     const objects: Set<string> = new Set();
     await this.#collectTreeObjectsRecursive(treeOid, objects);
     return Array.from(objects);
@@ -494,35 +494,32 @@ export class GitRepository {
     mode: string;
     size: number;
     mtime: number;
-  }): Promise<void> {
+  }) {
     return await this.index.addEntry(entry);
   }
 
-  async removeIndexEntry(path: string): Promise<void> {
+  async removeIndexEntry(path: string) {
     return await this.index.removeEntry(path);
   }
 
-  async readFile(path: string): Promise<Uint8Array> {
+  async readFile(path: string) {
     return await this.storage.readFile(path);
   }
 
-  async writeFile(path: string, content: Uint8Array): Promise<void> {
+  async writeFile(path: string, content: Uint8Array) {
     return await this.storage.writeFile(path, content);
   }
 
-  async deleteFile(path: string): Promise<void> {
+  async deleteFile(path: string) {
     return await this.storage.deleteFile(path);
   }
 
-  async initStorage(
-    repoName: string,
-    branch: string = this.config.branch || "main",
-  ): Promise<void> {
+  async initStorage(repoName: string, branch: string = this.config.branch || "main") {
     await this.storage.init(repoName);
     await this.#initializeRepositoryLayout(branch);
   }
 
-  async #collectTreeObjectsRecursive(treeOid: string, objects: Set<string>): Promise<void> {
+  async #collectTreeObjectsRecursive(treeOid: string, objects: Set<string>) {
     if (objects.has(treeOid)) return;
 
     objects.add(treeOid);
@@ -547,7 +544,7 @@ export class GitRepository {
 
   // ==================== Shallow Graft Methods ====================
 
-  async getShallowCommits(): Promise<Set<string>> {
+  async getShallowCommits() {
     const shallow = new Set<string>();
     try {
       const data = await this.storage.readFile(".git/shallow");
@@ -562,7 +559,7 @@ export class GitRepository {
     return shallow;
   }
 
-  async setShallowCommits(oids: Set<string>): Promise<void> {
+  async setShallowCommits(oids: Set<string>) {
     if (oids.size === 0) {
       try {
         await this.storage.deleteFile(".git/shallow");
@@ -582,12 +579,12 @@ export class GitRepository {
     return await merger.threeWayMerge(baseTree, ourTree, theirTree);
   }
 
-  async createPack(objects: string[]): Promise<Uint8Array> {
+  async createPack(objects: string[]) {
     const packWriter = new GitPackWriter(this.objectStore);
     return await packWriter.createPack(objects);
   }
 
-  async parsePack(packStream: ReadableStream<Uint8Array>): Promise<void> {
+  async parsePack(packStream: ReadableStream<Uint8Array>) {
     const parser = new GitPackParser(this.objectStore);
     return await parser.parsePack(packStream);
   }

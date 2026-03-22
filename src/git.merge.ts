@@ -220,7 +220,7 @@ export class GitMerge {
     baseEntry: TreeEntry | null,
     ourEntry: TreeEntry | null,
     theirEntry: TreeEntry | null,
-  ): Promise<{ entry?: TreeEntry; conflict?: ConflictEntry }> {
+  ) {
     // Both deleted
     if (!ourEntry && !theirEntry) {
       return {};
@@ -292,11 +292,7 @@ export class GitMerge {
     return {};
   }
 
-  async #mergeTextContent(
-    baseOid: string | undefined,
-    ourOid: string,
-    theirOid: string,
-  ): Promise<{ success: boolean; content?: Uint8Array; conflicts?: string[] }> {
+  async #mergeTextContent(baseOid: string | undefined, ourOid: string, theirOid: string) {
     const ourContent = await this.#readBlobAsText(ourOid);
     const theirContent = await this.#readBlobAsText(theirOid);
     const baseContent = baseOid ? await this.#readBlobAsText(baseOid) : "";
@@ -346,11 +342,7 @@ export class GitMerge {
     };
   }
 
-  async detectRenames(
-    oldTree: string,
-    newTree: string,
-    threshold: number = 0.5,
-  ): Promise<Array<{ oldPath: string; newPath: string; similarity: number }>> {
+  async detectRenames(oldTree: string, newTree: string, threshold: number = 0.5) {
     const renames: Array<{
       oldPath: string;
       newPath: string;
@@ -401,7 +393,7 @@ export class GitMerge {
     });
   }
 
-  #calculateSimilarity(content1: Uint8Array, content2: Uint8Array): number {
+  #calculateSimilarity(content1: Uint8Array, content2: Uint8Array) {
     if (content1.length === 0 || content2.length === 0) {
       return 0;
     }
@@ -419,7 +411,7 @@ export class GitMerge {
     return intersection.size / union.size;
   }
 
-  async cherryPick(commitOid: string, targetBranch: string): Promise<MergeResult> {
+  async cherryPick(commitOid: string, targetBranch: string) {
     const commit = await this.#objectStore.readObject(commitOid);
     const commitData = this.#parseCommit(commit.data);
 
@@ -435,15 +427,7 @@ export class GitMerge {
     return await this.#recursiveMerge(parentTree, targetTree, commitTree);
   }
 
-  async rebase(
-    sourceBranch: string,
-    targetBranch: string,
-    _interactive: boolean = false,
-  ): Promise<{
-    success: boolean;
-    commits: string[];
-    conflicts?: ConflictEntry[];
-  }> {
+  async rebase(sourceBranch: string, targetBranch: string, _interactive: boolean = false) {
     const sourceCommits = await this.#getCommitList(sourceBranch);
     const targetHead = await this.#getBranchHead(targetBranch);
 
@@ -471,23 +455,23 @@ export class GitMerge {
     };
   }
 
-  async #getTreeFromCommit(commitOid: string): Promise<string> {
+  async #getTreeFromCommit(commitOid: string) {
     const commit = await this.#objectStore.readObject(commitOid);
     return this.#parseCommit(commit.data).tree;
   }
 
-  async #getTreeFromBranch(branch: string): Promise<string> {
+  async #getTreeFromBranch(branch: string) {
     // Read branch ref and get tree from commit
     const commitOid = await this.#getBranchHead(branch);
     return await this.#getTreeFromCommit(commitOid);
   }
 
-  async #getBranchHead(branch: string): Promise<string> {
+  async #getBranchHead(branch: string) {
     // Read branch reference from .git/refs/heads/{branch} or packed-refs file
     return await this.#readBranchRef(branch);
   }
 
-  async #readBranchRef(branch: string): Promise<string> {
+  async #readBranchRef(branch: string) {
     if (!this.#refStore) {
       throw new Error("GitRefStore is required for branch operations");
     }
@@ -529,7 +513,7 @@ export class GitMerge {
     }
   }
 
-  async #getCommitList(branch: string): Promise<string[]> {
+  async #getCommitList(branch: string) {
     // Walk commit history starting from branch head
     const commits: string[] = [];
     let currentCommit = await this.#getBranchHead(branch);
@@ -555,7 +539,7 @@ export class GitMerge {
     return commits;
   }
 
-  async #getAllPaths(...trees: string[]): Promise<Set<string>> {
+  async #getAllPaths(...trees: string[]) {
     const paths = new Set<string>();
 
     for (const tree of trees) {
@@ -566,7 +550,7 @@ export class GitMerge {
     return paths;
   }
 
-  async #getTreePaths(treeOid: string): Promise<string[]> {
+  async #getTreePaths(treeOid: string) {
     const paths: string[] = [];
     await this.#walkTree(treeOid, "", paths);
     return paths;
@@ -587,7 +571,7 @@ export class GitMerge {
     }
   }
 
-  async #getTreeEntry(treeOid: string, path: string): Promise<TreeEntry | null> {
+  async #getTreeEntry(treeOid: string, path: string) {
     const parts = path.split("/");
     let currentTree = treeOid;
 
@@ -608,7 +592,7 @@ export class GitMerge {
     return null;
   }
 
-  async #createTree(entries: TreeEntry[]): Promise<string> {
+  async #createTree(entries: TreeEntry[]) {
     // Sort entries
     entries.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -633,7 +617,7 @@ export class GitMerge {
     return await this.#objectStore.writeObject("tree", treeData);
   }
 
-  async #isTextFile(oid: string): Promise<boolean> {
+  async #isTextFile(oid: string) {
     const blob = await this.#objectStore.readObject(oid);
 
     // Check for null bytes (binary indicator)
@@ -646,22 +630,17 @@ export class GitMerge {
     return true;
   }
 
-  async #readBlob(oid: string): Promise<Uint8Array> {
+  async #readBlob(oid: string) {
     const blob = await this.#objectStore.readObject(oid);
     return blob.data;
   }
 
-  async #readBlobAsText(oid: string): Promise<string> {
+  async #readBlobAsText(oid: string) {
     const data = await this.#readBlob(oid);
     return new TextDecoder().decode(data);
   }
 
-  #parseCommit(data: Uint8Array): {
-    tree: string;
-    parent?: string;
-    author: string;
-    message: string;
-  } {
+  #parseCommit(data: Uint8Array) {
     const text = new TextDecoder().decode(data);
     const lines = text.split("\n");
 
@@ -675,7 +654,7 @@ export class GitMerge {
     return { tree, parent, author, message };
   }
 
-  #parseTree(data: Uint8Array): TreeEntry[] {
+  #parseTree(data: Uint8Array) {
     const entries: TreeEntry[] = [];
     let offset = 0;
 
@@ -734,15 +713,15 @@ export class ConflictResolver {
     }
   }
 
-  getUnresolvedConflicts(): ConflictEntry[] {
+  getUnresolvedConflicts() {
     return Array.from(this.#conflicts.values()).filter((c) => !c.resolved);
   }
 
-  getAllConflicts(): ConflictEntry[] {
+  getAllConflicts() {
     return Array.from(this.#conflicts.values());
   }
 
-  isAllResolved(): boolean {
+  isAllResolved() {
     return Array.from(this.#conflicts.values()).every((c) => c.resolved);
   }
 

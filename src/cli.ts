@@ -1674,7 +1674,7 @@ export class Cli {
     this.#write("out", pkg.version);
   }
 
-  #write(std: "out" | "err", message: string): void {
+  #write(std: "out" | "err", message: string) {
     switch (std) {
       case "out":
         process.stdout.write(`${message}\n`);

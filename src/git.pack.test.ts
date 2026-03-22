@@ -266,7 +266,7 @@ void describe("GitPackWriter", () => {
 });
 
 // Helper function
-function hexToBytes(hex: string): Uint8Array {
+function hexToBytes(hex: string) {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -274,7 +274,7 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-function toStream(data: Uint8Array): ReadableStream<Uint8Array> {
+function toStream(data: Uint8Array) {
   return new ReadableStream({
     start(controller) {
       controller.enqueue(data);

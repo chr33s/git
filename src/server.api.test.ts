@@ -5,11 +5,7 @@ import { GitRepository } from "./git.repository.ts";
 import { MemoryStorage } from "./git.storage.ts";
 import { ServerApi, type ServerApiRequest } from "./server.api.ts";
 
-function createRequest(
-  url: string,
-  method: string = "GET",
-  body?: Record<string, unknown>,
-): ServerApiRequest {
+function createRequest(url: string, method: string = "GET", body?: Record<string, unknown>) {
   let bodyStream: ServerApiRequest["body"] = null;
 
   if (body) {
@@ -26,7 +22,7 @@ function createRequest(
   return { url, method, body: bodyStream };
 }
 
-async function setupRepo(): Promise<{ repo: GitRepository; api: ServerApi }> {
+async function setupRepo() {
   const storage = new MemoryStorage();
   const config = { repoName: "test" };
   const repo = new GitRepository(storage, config);
@@ -35,11 +31,7 @@ async function setupRepo(): Promise<{ repo: GitRepository; api: ServerApi }> {
   return { repo, api };
 }
 
-async function setupRepoWithCommit(): Promise<{
-  repo: GitRepository;
-  api: ServerApi;
-  commitOid: string;
-}> {
+async function setupRepoWithCommit() {
   const { repo, api } = await setupRepo();
 
   // Add a file and commit

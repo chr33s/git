@@ -10,7 +10,7 @@ export interface GitRef {
 }
 
 export class GitProtocol {
-  async discoverRefs(repo: GitRepoInfo): Promise<GitRef[]> {
+  async discoverRefs(repo: GitRepoInfo) {
     const url = `https://${repo.host}/${repo.repo}.git/info/refs?service=git-upload-pack`;
 
     const response = await fetch(url);
@@ -22,11 +22,7 @@ export class GitProtocol {
     return this.#parseRefs(text);
   }
 
-  async fetchPack(
-    repo: GitRepoInfo,
-    wants: string[],
-    haves: string[],
-  ): Promise<ReadableStream<Uint8Array>> {
+  async fetchPack(repo: GitRepoInfo, wants: string[], haves: string[]) {
     const url = `https://${repo.host}/${repo.repo}.git/git-upload-pack`;
 
     // Build request body
@@ -106,7 +102,7 @@ export class GitProtocol {
     }
   }
 
-  #parseRefs(data: string): GitRef[] {
+  #parseRefs(data: string) {
     const refs: GitRef[] = [];
     const lines = data.split("\n");
 

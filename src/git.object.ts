@@ -13,12 +13,12 @@ export class GitObjectStore {
     this.#storage = storage;
   }
 
-  async init(): Promise<void> {
+  async init() {
     // Ensure the objects directory structure exists
     await this.#storage.createDirectory(".git/objects");
   }
 
-  async readObject(oid: string): Promise<GitObject> {
+  async readObject(oid: string) {
     const dir = oid.substring(0, 2);
     const file = oid.substring(2);
     const path = `.git/objects/${dir}/${file}`;
@@ -44,7 +44,7 @@ export class GitObjectStore {
     }
   }
 
-  async writeObject(type: GitObject["type"], data: Uint8Array): Promise<string> {
+  async writeObject(type: GitObject["type"], data: Uint8Array) {
     // Create object content
     const header = new TextEncoder().encode(`${type} ${data.length}\0`);
     const content = new Uint8Array(header.length + data.length);
@@ -67,7 +67,7 @@ export class GitObjectStore {
     return oid;
   }
 
-  async hasObject(oid: string): Promise<boolean> {
+  async hasObject(oid: string) {
     const dir = oid.substring(0, 2);
     const file = oid.substring(2);
     const path = `.git/objects/${dir}/${file}`;

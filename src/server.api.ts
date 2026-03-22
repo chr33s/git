@@ -273,7 +273,7 @@ export class ServerApi {
     this.#repository = repository;
   }
 
-  async fetch(request: ServerApiRequest, signal?: AbortSignal): Promise<Response> {
+  async fetch(request: ServerApiRequest, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     for (const route of this.#routes) {
@@ -299,7 +299,7 @@ export class ServerApi {
     return Response.json({ error: "Not Found" }, { status: 404 });
   }
 
-  async #parseBody(body: ServerApiRequest["body"]): Promise<Payload> {
+  async #parseBody(body: ServerApiRequest["body"]) {
     if (!body) return {};
 
     const reader = body.getReader();
@@ -323,7 +323,7 @@ export class ServerApi {
     return text ? JSON.parse(text) : {};
   }
 
-  async #status(_payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #status(_payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const indexEntries = this.#repository.getIndexEntries();
     const headCommitOid = await this.#repository.getCurrentCommitOid();
@@ -341,7 +341,7 @@ export class ServerApi {
     return Response.json({ staged, modified, untracked });
   }
 
-  async #log(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #log(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const maxCount = payload.maxCount as number | undefined;
     const commits: any[] = [];
@@ -368,7 +368,7 @@ export class ServerApi {
     return Response.json({ commits });
   }
 
-  async #show(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #show(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const ref = (payload.ref as string) || "HEAD";
     let oid = ref;
@@ -398,7 +398,7 @@ export class ServerApi {
     });
   }
 
-  async #branch(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #branch(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const name = payload.name as string | undefined;
     const deleteFlag = payload.delete as boolean | undefined;
@@ -424,7 +424,7 @@ export class ServerApi {
     return Response.json({ branches });
   }
 
-  async #checkout(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #checkout(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const ref = payload.ref as string;
     if (!ref) {
@@ -441,7 +441,7 @@ export class ServerApi {
     return Response.json({ success: true, ref });
   }
 
-  async #commit(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #commit(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const message = payload.message as string;
     const author = payload.author as { name: string; email: string } | undefined;
@@ -452,7 +452,7 @@ export class ServerApi {
     return Response.json({ success: true, oid });
   }
 
-  async #add(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #add(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const path = payload.path as string;
     const content = payload.content as string;
@@ -470,7 +470,7 @@ export class ServerApi {
     return Response.json({ success: true, path });
   }
 
-  async #rm(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #rm(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const paths = payload.paths as string | string[];
     const cached = payload.cached as boolean | undefined;
@@ -510,13 +510,13 @@ export class ServerApi {
     return Response.json({ success: true });
   }
 
-  async #refs(_payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #refs(_payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const refs = await this.#repository.getAllRefs();
     return Response.json({ refs });
   }
 
-  async #tag(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #tag(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const name = payload.name as string;
     const ref = payload.ref as string | undefined;
@@ -546,7 +546,7 @@ export class ServerApi {
     return Response.json({ created: name, oid });
   }
 
-  async #merge(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #merge(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const ref = payload.ref as string;
     if (!ref) {
@@ -611,7 +611,7 @@ export class ServerApi {
     return Response.json({ success: true, mergedTree: result.mergedTree, mergeCommitOid });
   }
 
-  async #findCommonAncestor(oid1: string, oid2: string): Promise<string | null> {
+  async #findCommonAncestor(oid1: string, oid2: string) {
     const history1 = new Set<string>();
     let current: string | null = oid1;
 
@@ -637,7 +637,7 @@ export class ServerApi {
     return null;
   }
 
-  async #reset(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #reset(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const ref = (payload.ref as string) || "HEAD";
     const hard = payload.hard as boolean | undefined;
@@ -660,7 +660,7 @@ export class ServerApi {
     return Response.json({ success: true, ref });
   }
 
-  async #read(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #read(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const path = payload.path as string;
     if (!path) {
@@ -671,7 +671,7 @@ export class ServerApi {
     return Response.json({ path, content });
   }
 
-  async #write(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #write(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const path = payload.path as string;
     const content = payload.content as string;
@@ -682,7 +682,7 @@ export class ServerApi {
     return Response.json({ success: true, path });
   }
 
-  async #tree(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #tree(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const ref = (payload.ref as string) || "HEAD";
     const path = payload.path as string | undefined;
@@ -723,7 +723,7 @@ export class ServerApi {
     });
   }
 
-  async #diff(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #diff(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const from = payload.from as string | undefined;
     const to = payload.to as string | undefined;
@@ -762,7 +762,7 @@ export class ServerApi {
     return Response.json({ from: fromOid, to: toOid, changes });
   }
 
-  async #object(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #object(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const oid = payload.oid as string;
     if (!oid) {
@@ -776,7 +776,7 @@ export class ServerApi {
     });
   }
 
-  async #collectTreeFiles(treeOid: string, prefix: string): Promise<Record<string, string>> {
+  async #collectTreeFiles(treeOid: string, prefix: string) {
     const files: Record<string, string> = {};
 
     const tree = await this.#repository.readObject(treeOid);
@@ -796,7 +796,7 @@ export class ServerApi {
     return files;
   }
 
-  async #mv(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #mv(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const source = payload.source as string;
     const destination = payload.destination as string;
@@ -832,7 +832,7 @@ export class ServerApi {
     return Response.json({ success: true, source, destination });
   }
 
-  async #restore(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #restore(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const path = payload.path as string;
     const staged = payload.staged as boolean | undefined;
@@ -901,7 +901,7 @@ export class ServerApi {
     return Response.json({ success: true, path });
   }
 
-  async #switch(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #switch(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const target = payload.target as string;
     const create = payload.create as string | undefined;
@@ -937,7 +937,7 @@ export class ServerApi {
     return Response.json({ success: true, branch: branchName, created: !!create });
   }
 
-  async #rebase(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #rebase(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const onto = payload.onto as string;
 
@@ -1004,7 +1004,7 @@ export class ServerApi {
     return Response.json({ success: true, replayed: commitsToReplay.length, newHead: baseOid });
   }
 
-  async #fetch(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #fetch(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const remote = (payload.remote as string) || "origin";
 
@@ -1016,7 +1016,7 @@ export class ServerApi {
     }
   }
 
-  async #pull(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #pull(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const remote = (payload.remote as string) || "origin";
     const branch = (payload.branch as string) || "main";
@@ -1119,7 +1119,7 @@ export class ServerApi {
     }
   }
 
-  async #push(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #push(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const remote = (payload.remote as string) || "origin";
     const branch = (payload.branch as string) || "main";
@@ -1169,7 +1169,7 @@ export class ServerApi {
     }
   }
 
-  async #remote(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #remote(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const action = payload.action as string | undefined;
     const name = payload.name as string | undefined;
@@ -1281,7 +1281,7 @@ export class ServerApi {
   // ==================== Advanced API Endpoints ====================
 
   /** Search for patterns within repository content */
-  async #grep(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #grep(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const pattern = payload.pattern as string;
@@ -1399,7 +1399,7 @@ export class ServerApi {
   }
 
   /** Create a new branch from an existing branch */
-  async #createBranch(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #createBranch(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const baseBranch = payload.base_branch as string;
@@ -1436,7 +1436,7 @@ export class ServerApi {
   }
 
   /** Get the diff between a branch and its base */
-  async #getBranchDiff(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #getBranchDiff(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const branch = payload.branch as string;
@@ -1500,7 +1500,7 @@ export class ServerApi {
   }
 
   /** Get the diff for a specific commit */
-  async #getCommitDiff(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #getCommitDiff(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const sha = payload.sha as string;
@@ -1565,7 +1565,7 @@ export class ServerApi {
   }
 
   /** List all files at a specific ref */
-  async #listFiles(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #listFiles(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const ref = (payload.ref as string) || "HEAD";
@@ -1591,7 +1591,7 @@ export class ServerApi {
   }
 
   /** Stream file content */
-  async #getFileStream(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #getFileStream(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const path = payload.path as string;
@@ -1631,7 +1631,7 @@ export class ServerApi {
   }
 
   /** List branches with pagination */
-  async #listBranches(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #listBranches(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const cursor = payload.cursor as string | undefined;
@@ -1664,7 +1664,7 @@ export class ServerApi {
   }
 
   /** List commits with pagination */
-  async #listCommits(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #listCommits(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const branch = payload.branch as string | undefined;
@@ -1737,7 +1737,7 @@ export class ServerApi {
   }
 
   /** Restore a branch to a specific commit */
-  async #restoreCommit(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #restoreCommit(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const targetBranch = payload.target_branch as string;
@@ -1808,7 +1808,7 @@ export class ServerApi {
   // ==================== Repository Management ====================
 
   /** Create a new repository */
-  async #createRepo(payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #createRepo(payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     const id = payload.id as string | undefined;
@@ -1831,7 +1831,7 @@ export class ServerApi {
   }
 
   /** Delete a repository */
-  async #deleteRepo(_payload: Payload, signal?: AbortSignal): Promise<Response> {
+  async #deleteRepo(_payload: Payload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     // Note: Actual deletion would require storage-level support
@@ -1845,7 +1845,7 @@ export class ServerApi {
   // ==================== Streaming Endpoints ====================
 
   /** Handle NDJSON commit-pack streaming */
-  async #commitPack(body: SteamingPayload, signal?: AbortSignal): Promise<Response> {
+  async #commitPack(body: SteamingPayload, signal?: AbortSignal) {
     signal?.throwIfAborted();
 
     if (!body) {

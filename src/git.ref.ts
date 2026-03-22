@@ -12,14 +12,14 @@ export class GitRefStore {
     this.#storage = storage;
   }
 
-  async init(): Promise<void> {
+  async init() {
     // Ensure the refs directory structure exists
     await this.#storage.createDirectory(".git/refs");
     await this.#storage.createDirectory(".git/refs/heads");
     await this.#storage.createDirectory(".git/refs/tags");
   }
 
-  async readRef(refName: string): Promise<string | null> {
+  async readRef(refName: string) {
     try {
       const path = this.#getRefPath(refName);
       const data = await this.#storage.readFile(path);
@@ -45,7 +45,7 @@ export class GitRefStore {
     }
   }
 
-  async getAllRefs(): Promise<GitRef[]> {
+  async getAllRefs() {
     const refs: GitRef[] = [];
 
     try {
@@ -89,7 +89,7 @@ export class GitRefStore {
     }
   }
 
-  #getRefPath(refName: string): string {
+  #getRefPath(refName: string) {
     // Remove 'refs/' prefix if present
     const cleanRefName = refName.startsWith("refs/") ? refName : `refs/${refName}`;
 

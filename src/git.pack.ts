@@ -33,7 +33,7 @@ export class GitPackParser {
     this.#deltaCache = new GitDeltaCache();
   }
 
-  async #readFullStream(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<Uint8Array> {
+  async #readFullStream(reader: ReadableStreamDefaultReader<Uint8Array>) {
     const chunks: Uint8Array[] = [];
 
     try {
@@ -89,13 +89,7 @@ export class GitPackParser {
     }
   }
 
-  async #parsePackObject(
-    buffer: Uint8Array,
-    offset: number,
-  ): Promise<{
-    object: PackObject;
-    nextOffset: number;
-  }> {
+  async #parsePackObject(buffer: Uint8Array, offset: number) {
     const startOffset = offset;
 
     // Read object header
@@ -180,11 +174,7 @@ export class GitPackParser {
     return { object, nextOffset: offset };
   }
 
-  async #readCompressedData(
-    buffer: Uint8Array,
-    offset: number,
-    expectedSize: number,
-  ): Promise<{ data: Uint8Array; nextOffset: number }> {
+  async #readCompressedData(buffer: Uint8Array, offset: number, expectedSize: number) {
     // Find the end of compressed data
     const compressedEnd = await this.#findCompressedEnd(buffer, offset);
     const compressed = buffer.slice(offset, compressedEnd);
@@ -203,7 +193,7 @@ export class GitPackParser {
     };
   }
 
-  async #findCompressedEnd(buffer: Uint8Array, offset: number): Promise<number> {
+  async #findCompressedEnd(buffer: Uint8Array, offset: number) {
     // Use zlib structure to find end
     // Scan for next object header or end of buffer
     let pos = offset + 2; // Skip zlib header
@@ -277,7 +267,7 @@ export class GitPackParser {
     }
   }
 
-  async #resolveDelta(deltaObject: DeltaObject): Promise<PackObject | null> {
+  async #resolveDelta(deltaObject: DeltaObject) {
     let baseObject: PackObject | null = null;
 
     if (deltaObject.baseOffset !== undefined) {
@@ -348,18 +338,18 @@ export class GitPackParser {
     }
   }
 
-  async #decompress(data: Uint8Array): Promise<Uint8Array> {
+  async #decompress(data: Uint8Array) {
     return await decompressData(data);
   }
 
-  async #calculateChecksum(data: Uint8Array): Promise<Uint8Array> {
+  async #calculateChecksum(data: Uint8Array) {
     const oid = await createSha1(data);
     return new Uint8Array(oid.length / 2).map((_, i) =>
       parseInt(oid.substring(i * 2, i * 2 + 2), 16),
     );
   }
 
-  #compareChecksums(a: Uint8Array, b: Uint8Array): boolean {
+  #compareChecksums(a: Uint8Array, b: Uint8Array) {
     if (a.length !== b.length) return false;
 
     for (let i = 0; i < a.length; i++) {
@@ -369,7 +359,7 @@ export class GitPackParser {
     return true;
   }
 
-  #crc32(data: Uint8Array): number {
+  #crc32(data: Uint8Array) {
     const table = this.#getCRC32Table();
     let crc = 0xffffffff;
 
@@ -386,7 +376,7 @@ export class GitPackParser {
     return (crc ^ 0xffffffff) >>> 0;
   }
 
-  #getCRC32Table(): Uint32Array {
+  #getCRC32Table() {
     const table = new Uint32Array(256);
 
     for (let i = 0; i < 256; i++) {
@@ -402,7 +392,7 @@ export class GitPackParser {
     return table;
   }
 
-  #readUint32BE(buffer: Uint8Array, offset: number): number {
+  #readUint32BE(buffer: Uint8Array, offset: number) {
     return (
       (buffer[offset] ?? 0 << 24) |
       (buffer[offset + 1] ?? 0 << 16) |
@@ -419,7 +409,7 @@ export class GitPackWriter {
     this.#objectStore = objectStore;
   }
 
-  async createPack(oids: string[]): Promise<Uint8Array> {
+  async createPack(oids: string[]) {
     // Collect all objects to pack
     const objects: Array<{ oid: string; type: string; data: Uint8Array }> = [];
 
@@ -437,9 +427,7 @@ export class GitPackWriter {
     return packData;
   }
 
-  async #buildPack(
-    objects: Array<{ oid: string; type: string; data: Uint8Array }>,
-  ): Promise<Uint8Array> {
+  async #buildPack(objects: Array<{ oid: string; type: string; data: Uint8Array }>) {
     const chunks: Uint8Array[] = [];
 
     // Header: "PACK"
@@ -471,7 +459,7 @@ export class GitPackWriter {
     return finalData;
   }
 
-  async #encodeObject(typeNum: number, data: Uint8Array): Promise<Uint8Array> {
+  async #encodeObject(typeNum: number, data: Uint8Array) {
     // Compress the data first
     const compressed = await compressData(data);
 
@@ -482,7 +470,7 @@ export class GitPackWriter {
     return concatenateUint8Arrays([headerBytes, compressed]);
   }
 
-  #encodeObjectHeader(type: number, size: number): Uint8Array {
+  #encodeObjectHeader(type: number, size: number) {
     const bytes: number[] = [];
 
     // First byte: type (top 3 bits) and first 4 bits of size (low 4 bits)
@@ -511,7 +499,7 @@ export class GitPackWriter {
     return new Uint8Array(bytes);
   }
 
-  #getTypeNumber(type: string): number {
+  #getTypeNumber(type: string) {
     const typeMap: Record<string, number> = {
       commit: 1,
       tree: 2,
@@ -524,11 +512,11 @@ export class GitPackWriter {
     return typeMap[type] ?? 0;
   }
 
-  async #calculateChecksum(data: Uint8Array): Promise<string> {
+  async #calculateChecksum(data: Uint8Array) {
     return await createSha1(data);
   }
 
-  #writeUint32BE(value: number): Uint8Array {
+  #writeUint32BE(value: number) {
     const bytes = new Uint8Array(4);
     bytes[0] = (value >>> 24) & 0xff;
     bytes[1] = (value >>> 16) & 0xff;
