@@ -1,4 +1,5 @@
 import { GitDelta } from "./git.delta.ts";
+import { PackCorruptError } from "./git.error.ts";
 import {
   bytesToHex,
   compressData,
@@ -89,7 +90,7 @@ function readUint64BE(buffer: Uint8Array, offset: number) {
   }
 
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error("Pack offset exceeds JavaScript safe integer range");
+    throw new PackCorruptError("Pack offset exceeds JavaScript safe integer range");
   }
 
   return Number(value);
@@ -263,7 +264,7 @@ async function readCompressedData(
     .filter((value): value is string => value !== null)
     .join(", ");
 
-  throw new Error(
+  throw new PackCorruptError(
     `Unable to locate end of compressed pack object${details ? ` (${details})` : ""}`,
     { cause: lastError || undefined },
   );
@@ -309,7 +310,7 @@ export async function readPackObjectAtOffset(
   const startOffset = offset;
   let byte = packData[offset++];
   if (byte === undefined) {
-    throw new Error("Unexpected end of pack data");
+    throw new PackCorruptError("Unexpected end of pack data");
   }
 
   const type = (byte >> 4) & 0x7;
@@ -319,7 +320,7 @@ export async function readPackObjectAtOffset(
   while (byte & 0x80) {
     byte = packData[offset++];
     if (byte === undefined) {
-      throw new Error("Unexpected end of pack data");
+      throw new PackCorruptError("Unexpected end of pack data");
     }
 
     size |= (byte & 0x7f) << shift;
@@ -329,14 +330,14 @@ export async function readPackObjectAtOffset(
   const typeNames = ["", "commit", "tree", "blob", "tag", "", "ofs_delta", "ref_delta"];
   const typeName = typeNames[type];
   if (!typeName) {
-    throw new Error(`Unsupported pack object type ${type}`);
+    throw new PackCorruptError(`Unsupported pack object type ${type}`);
   }
 
   if (typeName === "ofs_delta") {
     let baseDistance = 0;
     byte = packData[offset++];
     if (byte === undefined) {
-      throw new Error("Unexpected end of pack data");
+      throw new PackCorruptError("Unexpected end of pack data");
     }
 
     baseDistance = byte & 0x7f;
@@ -344,7 +345,7 @@ export async function readPackObjectAtOffset(
     while (byte & 0x80) {
       byte = packData[offset++];
       if (byte === undefined) {
-        throw new Error("Unexpected end of pack data");
+        throw new PackCorruptError("Unexpected end of pack data");
       }
 
       baseDistance = ((baseDistance + 1) << 7) | (byte & 0x7f);
@@ -399,12 +400,12 @@ export async function readPackObjectAtOffset(
 
 export function parsePackIndex(data: Uint8Array): PackIndex {
   if (!compareChecksums(data.slice(0, 4), PACK_INDEX_MAGIC)) {
-    throw new Error("Invalid pack index signature");
+    throw new PackCorruptError("Invalid pack index signature");
   }
 
   const version = readUint32BE(data, 4);
   if (version !== 2) {
-    throw new Error(`Unsupported pack index version ${version}`);
+    throw new PackCorruptError(`Unsupported pack index version ${version}`);
   }
 
   let offset = 8;
@@ -572,7 +573,7 @@ export class GitPackParser {
 
     const signature = new TextDecoder().decode(buffer.slice(0, 4));
     if (signature !== PACK_SIGNATURE) {
-      throw new Error("Invalid pack signature");
+      throw new PackCorruptError("Invalid pack signature");
     }
 
     const _version = readUint32BE(buffer, 4);
@@ -586,7 +587,7 @@ export class GitPackParser {
         offset = result.nextOffset;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(
+        throw new PackCorruptError(
           `Failed to parse pack object ${index + 1}/${objectCount} at offset ${offset}: ${message}`,
           { cause: error instanceof Error ? error : undefined },
         );
@@ -601,7 +602,7 @@ export class GitPackParser {
       buffer.slice(0, buffer.length - PACK_TRAILER_SIZE),
     );
     if (!compareChecksums(packChecksum, calculatedChecksum)) {
-      throw new Error("Pack checksum mismatch");
+      throw new PackCorruptError("Pack checksum mismatch");
     }
 
     await this.#buildIndexEntries();
@@ -646,7 +647,7 @@ export class GitPackParser {
     const startOffset = offset;
     let byte = buffer[offset++];
     if (byte === undefined) {
-      throw new Error("Unexpected end of buffer");
+      throw new PackCorruptError("Unexpected end of buffer");
     }
 
     const type = (byte >> 4) & 0x7;
@@ -656,7 +657,7 @@ export class GitPackParser {
     while (byte & 0x80) {
       byte = buffer[offset++];
       if (byte === undefined) {
-        throw new Error("Unexpected end of buffer");
+        throw new PackCorruptError("Unexpected end of buffer");
       }
 
       size |= (byte & 0x7f) << shift;
@@ -666,7 +667,7 @@ export class GitPackParser {
     const typeNames = ["", "commit", "tree", "blob", "tag", "", "ofs_delta", "ref_delta"];
     const typeName = typeNames[type] as PackObject["type"] | undefined;
     if (!typeName) {
-      throw new Error(`Unsupported pack object type ${type}`);
+      throw new PackCorruptError(`Unsupported pack object type ${type}`);
     }
 
     try {
@@ -675,7 +676,7 @@ export class GitPackParser {
         let baseDistance = 0;
         byte = buffer[offset++];
         if (byte === undefined) {
-          throw new Error("Unexpected end of buffer");
+          throw new PackCorruptError("Unexpected end of buffer");
         }
 
         baseDistance = byte & 0x7f;
@@ -683,7 +684,7 @@ export class GitPackParser {
         while (byte & 0x80) {
           byte = buffer[offset++];
           if (byte === undefined) {
-            throw new Error("Unexpected end of buffer");
+            throw new PackCorruptError("Unexpected end of buffer");
           }
 
           baseDistance = ((baseDistance + 1) << 7) | (byte & 0x7f);
@@ -728,7 +729,7 @@ export class GitPackParser {
       return { object, nextOffset: offset };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
+      throw new PackCorruptError(
         `Failed to decode ${typeName} object at offset ${startOffset} with declared size ${size}: ${message}`,
         { cause: error instanceof Error ? error : undefined },
       );
@@ -760,7 +761,7 @@ export class GitPackParser {
     } while (unresolvedCount > 0 && iteration < maxIterations);
 
     if (unresolvedCount > 0) {
-      throw new Error(
+      throw new PackCorruptError(
         `Unresolvable deltas: ${unresolvedCount} delta object(s) have no base in pack or object store`,
       );
     }

@@ -1,3 +1,5 @@
+import { StorageError, ValidationError } from "./git.error.ts";
+
 export interface GitStorage {
   init(repositoryName: string): Promise<void>;
   exists(path: string): Promise<boolean>;
@@ -40,17 +42,17 @@ export interface GitStorageRefChangeResult {
 
 export function validateStoragePath(path: string): void {
   if (path.includes("\0")) {
-    throw new Error(`Invalid path: contains null byte`);
+    throw new ValidationError(`Invalid path: contains null byte`);
   }
 
   if (path.startsWith("/")) {
-    throw new Error(`Invalid path: absolute paths not allowed`);
+    throw new ValidationError(`Invalid path: absolute paths not allowed`);
   }
 
   const segments = path.split("/");
   for (const segment of segments) {
     if (segment === "..") {
-      throw new Error(`Invalid path: '..' traversal not allowed`);
+      throw new ValidationError(`Invalid path: '..' traversal not allowed`);
     }
   }
 }
@@ -89,7 +91,7 @@ export class MemoryStorage implements GitStorage {
     const repository = this.#requireRepository();
 
     const data = repository.files.get(path);
-    if (!data) throw new Error(`File not found: ${path}`);
+    if (!data) throw new StorageError(`File not found: ${path}`);
 
     return new Uint8Array(data);
   }
@@ -113,7 +115,7 @@ export class MemoryStorage implements GitStorage {
     const repository = this.#requireRepository();
 
     if (!repository.files.has(path)) {
-      throw new Error(`File not found: ${path}`);
+      throw new StorageError(`File not found: ${path}`);
     }
 
     repository.files.delete(path);
@@ -179,7 +181,7 @@ export class MemoryStorage implements GitStorage {
     const repository = this.#requireRepository();
 
     const data = repository.files.get(path);
-    if (!data) throw new Error(`File not found: ${path}`);
+    if (!data) throw new StorageError(`File not found: ${path}`);
 
     return {
       size: data.length,
@@ -188,7 +190,7 @@ export class MemoryStorage implements GitStorage {
   }
 
   #requireRepository() {
-    if (!this.#currentRepository) throw new Error("Storage not initialized");
+    if (!this.#currentRepository) throw new StorageError("Storage not initialized");
     return this.#currentRepository;
   }
 }

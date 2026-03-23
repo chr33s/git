@@ -1,3 +1,4 @@
+import { ObjectNotFoundError, ValidationError } from "./git.error.ts";
 import type { GitStorage } from "./git.storage.ts";
 import {
   buildPackIndex,
@@ -55,7 +56,7 @@ export class GitObjectStore {
 
   async readObject(oid: string) {
     if (!this.#isValidOid(oid)) {
-      throw new Error(`Object ${oid} not found: invalid object id`);
+      throw new ValidationError(`Object ${oid}: invalid object id`);
     }
 
     const looseObject = await this.#readLooseObject(oid);
@@ -68,7 +69,7 @@ export class GitObjectStore {
       return packedObject;
     }
 
-    throw new Error(`Object ${oid} not found`);
+    throw new ObjectNotFoundError(oid);
   }
 
   async writeObject(type: GitObject["type"], data: Uint8Array) {

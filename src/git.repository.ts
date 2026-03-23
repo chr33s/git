@@ -1,3 +1,4 @@
+import { GitError, ObjectNotFoundError, RefConflictError, ValidationError } from "./git.error.ts";
 import { GitIndex } from "./git.index.ts";
 import { GitObjectStore, type FsckResult } from "./git.object.ts";
 import { GitPackParser, GitPackWriter } from "./git.pack.ts";
@@ -104,7 +105,7 @@ export class GitRepository {
     const headCommit = refs.find((r) => r.name === defaultBranch)?.oid;
 
     if (!headCommit) {
-      throw new Error("Could not find HEAD commit");
+      throw new ObjectNotFoundError("HEAD");
     }
 
     // Negotiate and fetch pack
@@ -127,7 +128,7 @@ export class GitRepository {
 
   async fetch(remote: string = "origin") {
     if (!this.config.remote) {
-      throw new Error("No remote configured");
+      throw new GitError("No remote configured", "no_remote");
     }
 
     const repoInfo = this.parseGitUrl(this.config.remote);
@@ -179,7 +180,7 @@ export class GitRepository {
     // Read commit object
     const commit = await this.objectStore.readObject(commitOid);
     if (commit.type !== "commit") {
-      throw new Error("Not a commit");
+      throw new ValidationError("Not a commit");
     }
 
     // Parse commit to get tree
@@ -248,7 +249,7 @@ export class GitRepository {
       );
 
       if (!updated) {
-        throw new Error(`HEAD moved during commit for ${headRef}`);
+        throw new RefConflictError(headRef, `HEAD moved during commit for ${headRef}`);
       }
     }
 
@@ -311,7 +312,7 @@ export class GitRepository {
   parseGitUrl(url: string) {
     const match = url.match(/^(https?:\/\/|git@)([^:/]+)[:\\/]([^/]+)\/(.+?)(\.git)?$/);
     if (!match || match.length < 5) {
-      throw new Error("Invalid git URL");
+      throw new ValidationError("Invalid git URL");
     }
 
     return {
@@ -408,7 +409,7 @@ export class GitRepository {
     force: boolean = false,
   ) {
     if (!this.config.remote) {
-      throw new Error("No remote configured");
+      throw new GitError("No remote configured", "no_remote");
     }
 
     const repoInfo = this.parseGitUrl(this.config.remote);
@@ -423,7 +424,10 @@ export class GitRepository {
 
       if (remoteRef?.oid && remoteRef.oid !== ref.old) {
         if (!force) {
-          throw new Error(`Non-fast-forward push to ${ref.ref}. Use force push to override.`);
+          throw new RefConflictError(
+            ref.ref,
+            `Non-fast-forward push to ${ref.ref}. Use force push to override.`,
+          );
         }
       }
 
@@ -775,7 +779,7 @@ export class GitRepository {
     const headRef = await this.getCurrentHead();
     const headOid = headRef ? await this.refStore.readRef(headRef) : null;
     if (!headOid) {
-      throw new Error("No HEAD commit");
+      throw new ObjectNotFoundError("HEAD");
     }
 
     // Resolve ref to commit OID
@@ -788,7 +792,7 @@ export class GitRepository {
     // Find merge base
     const baseOid = await merger.findMergeBase(headOid, theirOid);
     if (!baseOid) {
-      throw new Error("No common ancestor found");
+      throw new GitError("No common ancestor found", "no_merge_base");
     }
 
     const result = await merger.mergeCommits(headOid, theirOid, author, message);
@@ -808,7 +812,7 @@ export class GitRepository {
         "merge",
       );
       if (!updated) {
-        throw new Error(`HEAD moved during merge for ${headRef}`);
+        throw new RefConflictError(headRef, `HEAD moved during merge for ${headRef}`);
       }
 
       // Clear MERGE_HEAD on success

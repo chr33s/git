@@ -488,7 +488,7 @@ void describe("merge endpoint", () => {
 
     assert.equal(response.status, 400);
     const json = (await response.json()) as { error: string };
-    assert.equal(json.error, "No HEAD commit");
+    assert.equal(json.error, "Object HEAD not found");
   });
 });
 

@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { ObjectNotFoundError, ValidationError } from "./git.error.ts";
 import { GitObjectStore } from "./git.object.ts";
 import { MemoryStorage } from "./git.storage.ts";
 import { compressData, hexToBytes } from "./git.utils.ts";
@@ -162,7 +163,7 @@ void describe("GitObjectStore", () => {
         await objectStore.readObject("0000000000000000000000000000000000000000");
         assert.fail("Should have thrown error");
       } catch (error: any) {
-        assert.ok(error.message.includes("not found"));
+        assert.ok(error instanceof ObjectNotFoundError);
       }
     });
 
@@ -177,7 +178,7 @@ void describe("GitObjectStore", () => {
         await objectStore.readObject("invalid");
         assert.fail("Should have thrown error");
       } catch (error: any) {
-        assert.ok(error.message.includes("not found"));
+        assert.ok(error instanceof ValidationError);
       }
     });
   });

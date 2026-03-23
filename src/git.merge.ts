@@ -1,3 +1,4 @@
+import { ObjectNotFoundError } from "./git.error.ts";
 import { GitObjectStore } from "./git.object.ts";
 import { GitRefStore } from "./git.ref.ts";
 import { bytesToHex, hexToBytes } from "./git.utils.ts";
@@ -736,10 +737,8 @@ export class GitMerge {
         currentCommit = parsed.parent || "";
       }
     } catch (error) {
-      // Stop walking on error (e.g., commit not found)
-      console.warn(
-        `Error walking commit history: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      // Stop walking when we reach the root commit or a missing object
+      if (!(error instanceof ObjectNotFoundError)) throw error;
     }
 
     return commits;

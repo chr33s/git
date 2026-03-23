@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 
+import { GitError, PackCorruptError } from "./git.error.ts";
 import { HookRunner } from "./git.hooks.ts";
 import { GitRepository } from "./git.repository.ts";
 import { ServerApi } from "./server.api.ts";
@@ -85,8 +86,9 @@ export class Server extends DurableObject<Env> {
           if (obj.type !== "commit") return null;
           const info = this.#repository.parseCommit(obj.data);
           return { id: oid, message: info.message, author: info.author };
-        } catch {
-          return null;
+        } catch (e) {
+          if (e instanceof GitError) return null;
+          throw e;
         }
       });
       return { ok: true };
@@ -140,7 +142,7 @@ export class Server extends DurableObject<Env> {
         return await route.handler(request);
       }
 
-      return Response.json({ message: "Not Found" }, { status: 404 });
+      return Response.json({ error: "Not Found", code: "not_found" }, { status: 404 });
     } catch (error: any) {
       if (error.name === "AbortError") {
         console.info("Request aborted:", error.message);
@@ -721,7 +723,8 @@ export class Server extends DurableObject<Env> {
             }
           }
         }
-      } catch {
+      } catch (e) {
+        if (!(e instanceof GitError)) throw e;
         continue;
       }
     }
@@ -956,7 +959,8 @@ export class Server extends DurableObject<Env> {
           await this.#repository.readObject(have);
           ackLines.push(this.#pktLine(`acknowledgments\n`));
           ackLines.push(this.#pktLine(`ACK ${have}\n`));
-        } catch {
+        } catch (e) {
+          if (!(e instanceof GitError)) throw e;
           // Object not found — don't ACK
         }
       }
@@ -1071,7 +1075,7 @@ export class Server extends DurableObject<Env> {
     while (offset < data.length) {
       const packet = this.#readPktLine(data, offset);
       if (!packet) {
-        throw new Error("Malformed side-band receive-pack payload");
+        throw new PackCorruptError("Malformed side-band receive-pack payload");
       }
 
       offset = packet.nextIdx;
@@ -1094,10 +1098,10 @@ export class Server extends DurableObject<Env> {
 
       if (channel === 3) {
         const message = new TextDecoder().decode(payload).trim();
-        throw new Error(message || "Client aborted pack transfer");
+        throw new PackCorruptError(message || "Client aborted pack transfer");
       }
 
-      throw new Error(`Unsupported side-band channel ${channel}`);
+      throw new PackCorruptError(`Unsupported side-band channel ${channel}`);
     }
 
     return concatenateUint8Arrays(chunks);

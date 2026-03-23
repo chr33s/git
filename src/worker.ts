@@ -1,3 +1,5 @@
+import { GitError } from "./git.error.ts";
+
 export default {
   fetch(request, env) {
     try {
@@ -11,16 +13,16 @@ export default {
       const gitRepository = env.GIT_SERVER.getByName(repo);
       return gitRepository.fetch(request);
     } catch (error: any) {
-      // Handle AbortError specifically
       if (error.name === "AbortError") {
         console.info("Request aborted:", error.message);
-        return new Response(null, { status: 499 }); // Client Closed Request
+        return new Response(null, { status: 499 });
       }
 
       console.error("index.fetch:", error);
 
+      const code = error instanceof GitError ? error.code : "internal_error";
       return Response.json(
-        { error: error.message ?? "Internal Server Error" },
+        { error: error.message ?? "Internal Server Error", code },
         { status: error.status ?? 500 },
       );
     }

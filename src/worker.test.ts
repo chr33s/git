@@ -24,11 +24,11 @@ void describe("fetch", () => {
 
     assert.ok(!response.ok, `Expected response not to be ok, got ${response.ok}`);
     assert.strictEqual(response.status, 404, `Expected status to be 404, got: ${response.status}`);
-    assert.ok(data.message, `Expected message field to be present, got: ${data.message}`);
+    assert.ok(data.error, `Expected error field to be present, got: ${data.error}`);
     assert.strictEqual(
-      data.message,
+      data.error,
       "Not Found",
-      `Expected message to be "Not Found", got: ${data.message}`,
+      `Expected error to be "Not Found", got: ${data.error}`,
     );
   });
 

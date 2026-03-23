@@ -1,3 +1,4 @@
+import { GitError } from "./git.error.ts";
 import type { GitRepository } from "./git.repository.ts";
 import type { ServerWebhooks } from "./server.webhooks.ts";
 
@@ -342,11 +343,33 @@ export class ServerApi {
       } catch (error: any) {
         if (error.name === "AbortError") throw error;
         console.error(`API error for '${route.pathname}':`, error);
-        return Response.json({ error: error.message || "Internal error" }, { status: 500 });
+        const code = error instanceof GitError ? error.code : "internal_error";
+        const status = error instanceof GitError ? this.#statusForCode(error.code) : 500;
+        return Response.json({ error: error.message || "Internal error", code }, { status });
       }
     }
 
-    return Response.json({ error: "Not Found" }, { status: 404 });
+    return Response.json({ error: "Not Found", code: "not_found" }, { status: 404 });
+  }
+
+  #statusForCode(code: string) {
+    switch (code) {
+      case "object_not_found":
+        return 404;
+      case "ref_conflict":
+        return 409;
+      case "validation_error":
+        return 400;
+      case "pack_corrupt":
+        return 400;
+      case "storage_error":
+        return 500;
+      case "no_remote":
+      case "no_merge_base":
+        return 400;
+      default:
+        return 500;
+    }
   }
 
   async #parseBody(body: ServerApiRequest["body"]) {

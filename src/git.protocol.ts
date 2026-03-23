@@ -1,3 +1,5 @@
+import { GitError } from "./git.error.ts";
+
 export interface GitRepoInfo {
   host: string;
   repo: string;
@@ -20,7 +22,7 @@ export class GitProtocol {
 
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error(`Failed to discover refs: ${response.statusText}`);
+      throw new GitError(`Failed to discover refs: ${response.statusText}`, "protocol_error");
     }
 
     const text = await response.text();
@@ -62,11 +64,11 @@ export class GitProtocol {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch pack: ${response.statusText}`);
+      throw new GitError(`Failed to fetch pack: ${response.statusText}`, "protocol_error");
     }
 
     if (!response.body) {
-      throw new Error("No response body");
+      throw new GitError("No response body", "protocol_error");
     }
 
     return response.body;
@@ -114,7 +116,7 @@ export class GitProtocol {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to push: ${response.statusText}`);
+      throw new GitError(`Failed to push: ${response.statusText}`, "protocol_error");
     }
 
     const responseText = await response.text();
@@ -129,7 +131,7 @@ export class GitProtocol {
 
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error(`Failed to discover refs: ${response.statusText}`);
+      throw new GitError(`Failed to discover refs: ${response.statusText}`, "protocol_error");
     }
 
     const text = await response.text();
@@ -199,11 +201,11 @@ export class GitProtocol {
     }
 
     if (unpackError) {
-      throw new Error(`Push rejected: ${unpackError}`);
+      throw new GitError(`Push rejected: ${unpackError}`, "ref_conflict");
     }
 
     if (refErrors.length > 0) {
-      throw new Error(`Push rejected: ${refErrors.join("; ")}`);
+      throw new GitError(`Push rejected: ${refErrors.join("; ")}`, "ref_conflict");
     }
   }
 

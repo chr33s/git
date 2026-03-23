@@ -1,3 +1,4 @@
+import { RefConflictError, ValidationError } from "./git.error.ts";
 import type {
   GitReflogEntry,
   GitStorage,
@@ -69,7 +70,7 @@ export class GitRefStore {
     const result = results[0];
 
     if (!result?.ok) {
-      throw new Error(result?.error || `Failed to update ${refName}`);
+      throw new RefConflictError(refName, result?.error || `Failed to update ${refName}`);
     }
   }
 
@@ -126,7 +127,7 @@ export class GitRefStore {
     const result = results[0];
 
     if (!result?.ok) {
-      throw new Error(result?.error || `Failed to delete ${refName}`);
+      throw new RefConflictError(refName, result?.error || `Failed to delete ${refName}`);
     }
   }
 
@@ -327,7 +328,7 @@ export class GitRefStore {
 
   async #resolveRef(refName: string, visited: Set<string>): Promise<string | null> {
     if (visited.has(refName)) {
-      throw new Error(`Symbolic ref loop detected for ${refName}`);
+      throw new ValidationError(`Symbolic ref loop detected for ${refName}`);
     }
 
     visited.add(refName);
@@ -343,7 +344,7 @@ export class GitRefStore {
     }
 
     if (!this.#isValidOid(rawValue)) {
-      throw new Error(`Invalid ref value stored for ${refName}`);
+      throw new ValidationError(`Invalid ref value stored for ${refName}`);
     }
 
     return rawValue;
@@ -473,7 +474,7 @@ export class GitRefStore {
   #parseReflogLine(line: string) {
     const match = line.match(/^([0-9a-f]{40}) ([0-9a-f]{40}) (\S+) ?(.*)$/);
     if (!match || !match[1] || !match[2] || !match[3]) {
-      throw new Error(`Invalid reflog entry: ${line}`);
+      throw new ValidationError(`Invalid reflog entry: ${line}`);
     }
 
     return {
@@ -528,51 +529,57 @@ export class GitRefStore {
     }
 
     if (!refName.startsWith("refs/")) {
-      throw new Error(`Invalid ref name '${refName}': must begin with refs/`);
+      throw new ValidationError(`Invalid ref name '${refName}': must begin with refs/`);
     }
 
     if (refName.includes("..")) {
-      throw new Error(`Invalid ref name '${refName}': cannot contain '..'`);
+      throw new ValidationError(`Invalid ref name '${refName}': cannot contain '..'`);
     }
 
     if (refName.includes("@{")) {
-      throw new Error(`Invalid ref name '${refName}': cannot contain '@{'`);
+      throw new ValidationError(`Invalid ref name '${refName}': cannot contain '@{'`);
     }
 
     if (/[ - ~^:?*[\\]/.test(refName)) {
-      throw new Error(`Invalid ref name '${refName}': contains forbidden characters`);
+      throw new ValidationError(`Invalid ref name '${refName}': contains forbidden characters`);
     }
 
     if (refName.startsWith("/") || refName.endsWith("/") || refName.endsWith(".")) {
-      throw new Error(`Invalid ref name '${refName}': invalid boundary character`);
+      throw new ValidationError(`Invalid ref name '${refName}': invalid boundary character`);
     }
 
     if (refName.includes("//")) {
-      throw new Error(`Invalid ref name '${refName}': cannot contain empty path segments`);
+      throw new ValidationError(
+        `Invalid ref name '${refName}': cannot contain empty path segments`,
+      );
     }
 
     const segments = refName.split("/");
     if (segments.length < 3) {
-      throw new Error(`Invalid ref name '${refName}': must include a namespace and name`);
+      throw new ValidationError(`Invalid ref name '${refName}': must include a namespace and name`);
     }
 
     for (const segment of segments) {
       if (!segment) {
-        throw new Error(`Invalid ref name '${refName}': cannot contain empty path segments`);
+        throw new ValidationError(
+          `Invalid ref name '${refName}': cannot contain empty path segments`,
+        );
       }
 
       if (segment === "." || segment === "..") {
-        throw new Error(`Invalid ref name '${refName}': invalid path segment '${segment}'`);
+        throw new ValidationError(
+          `Invalid ref name '${refName}': invalid path segment '${segment}'`,
+        );
       }
 
       if (segment.startsWith(".")) {
-        throw new Error(
+        throw new ValidationError(
           `Invalid ref name '${refName}': segment '${segment}' cannot start with '.'`,
         );
       }
 
       if (segment.endsWith(".lock")) {
-        throw new Error(
+        throw new ValidationError(
           `Invalid ref name '${refName}': segment '${segment}' cannot end with '.lock'`,
         );
       }
@@ -581,7 +588,9 @@ export class GitRefStore {
 
   #assertValidOid(oid: string, label: string) {
     if (!this.#isValidOid(oid)) {
-      throw new Error(`Invalid ${label}: expected 40-character lowercase hexadecimal SHA-1`);
+      throw new ValidationError(
+        `Invalid ${label}: expected 40-character lowercase hexadecimal SHA-1`,
+      );
     }
   }
 

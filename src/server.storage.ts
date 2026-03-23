@@ -1,3 +1,4 @@
+import { StorageError } from "./git.error.ts";
 import {
   type GitReflogEntry,
   type GitStorage,
@@ -100,7 +101,7 @@ export class CloudflareStorage implements GitStorage, WebhookStorage {
     validateStoragePath(path);
 
     if (path !== ".git" && !path.startsWith(".git/")) {
-      throw new Error(`Invalid path: must be within .git/ prefix`);
+      throw new StorageError(`Invalid path: must be within .git/ prefix`);
     }
   }
 
@@ -148,7 +149,7 @@ export class CloudflareStorage implements GitStorage, WebhookStorage {
         repository,
         path,
       );
-      throw new Error(`File not found: ${path}`);
+      throw new StorageError(`File not found: ${path}`);
     }
 
     return new Uint8Array(await object.arrayBuffer());
@@ -311,7 +312,7 @@ export class CloudflareStorage implements GitStorage, WebhookStorage {
       .one();
 
     if (!result) {
-      throw new Error(`File not found: ${path}`);
+      throw new StorageError(`File not found: ${path}`);
     }
 
     return {
@@ -462,7 +463,7 @@ export class CloudflareStorage implements GitStorage, WebhookStorage {
     const prefix = `${this.#repoName}/`;
 
     if (!key.startsWith(prefix) || key.includes("/../") || key.endsWith("/..")) {
-      throw new Error(`Invalid R2 key: escapes repository namespace`);
+      throw new StorageError(`Invalid R2 key: escapes repository namespace`);
     }
 
     return key;
@@ -470,7 +471,7 @@ export class CloudflareStorage implements GitStorage, WebhookStorage {
 
   #requireRepository() {
     if (!this.#repoName) {
-      throw new Error("Storage not initialized");
+      throw new StorageError("Storage not initialized");
     }
 
     return this.#repoName;

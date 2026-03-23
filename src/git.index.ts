@@ -1,3 +1,4 @@
+import { GitError } from "./git.error.ts";
 import type { GitStorage } from "./git.storage.ts";
 import type { GitObjectStore } from "./git.object.ts";
 import { bytesToHex, hexToBytes } from "./git.utils.ts";
@@ -67,9 +68,7 @@ export class GitIndex {
     try {
       await this.#walkTreeAndAddEntries(objectStore, treeOid, "");
     } catch (error) {
-      console.warn(
-        `Failed to update from tree ${treeOid}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (!(error instanceof GitError)) throw error;
       this.#entries = [];
     }
 
@@ -99,9 +98,7 @@ export class GitIndex {
         }
       }
     } catch (error) {
-      console.warn(
-        `Failed to walk tree ${treeOid}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (!(error instanceof GitError)) throw error;
     }
   }
 

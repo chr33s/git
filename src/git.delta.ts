@@ -1,3 +1,4 @@
+import { PackCorruptError } from "./git.error.ts";
 import { readVarInt, writeVarInt } from "./git.utils.ts";
 
 export class GitDelta {
@@ -9,7 +10,9 @@ export class GitDelta {
     deltaOffset += baseSize.bytesRead;
 
     if (baseSize.value !== base.length) {
-      throw new Error(`Base size mismatch: expected ${baseSize.value}, got ${base.length}`);
+      throw new PackCorruptError(
+        `Base size mismatch: expected ${baseSize.value}, got ${base.length}`,
+      );
     }
 
     // Read target object size from delta
@@ -49,12 +52,14 @@ export class GitDelta {
         deltaOffset += insertSize;
         resultOffset += insertSize;
       } else {
-        throw new Error("Invalid delta instruction");
+        throw new PackCorruptError("Invalid delta instruction");
       }
     }
 
     if (resultOffset !== targetSize.value) {
-      throw new Error(`Result size mismatch: expected ${targetSize.value}, got ${resultOffset}`);
+      throw new PackCorruptError(
+        `Result size mismatch: expected ${targetSize.value}, got ${resultOffset}`,
+      );
     }
 
     return result;
@@ -255,7 +260,7 @@ export class GitDelta {
 
   static #encodeInsertInstruction(data: Uint8Array) {
     if (data.length === 0 || data.length > 127) {
-      throw new Error(`Invalid insert size: ${data.length}`);
+      throw new PackCorruptError(`Invalid insert size: ${data.length}`);
     }
 
     const result = new Uint8Array(1 + data.length);
