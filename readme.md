@@ -11,7 +11,7 @@ Implements the native Git Server, Client, Cli smart-HTTP protocol for fetch and 
 
 ## Architecture
 
-Native `GitServer` smart-HTTP protocol deployed at the edge, in‑browser `GitClient` and `GitCli`. Cloudflare Worker entrypoint that routes requests to a per‑repo Durable Object. Refs/trees/commits are kept in DO SQLite; large blobs live in R2. In the browser using standard Web APIs.
+Native `GitServer` smart-HTTP protocol deployed at the edge, in‑browser `GitClient` and `GitCli`. Cloudflare Worker entrypoint that routes requests to a per‑repo Durable Object. Refs/trees/commits are kept in DO SQLite; large blobs live in R2; LFS objects stored in R2. Server-side hooks and webhooks for push event notifications. In the browser using standard Web APIs.
 
 ```mermaid
 flowchart LR
@@ -25,6 +25,9 @@ flowchart LR
 		S[Durable Object]
 		DB[(DO SQLite)]
 		R2[(R2 Bucket)]
+		LFS[LFS Objects]
+		HK[Hooks]
+		WH[Webhooks]
 	end
 
 	GC --> W
@@ -33,6 +36,10 @@ flowchart LR
 	S --> GC
 	S --> DB
 	S --> R2
+	S --> LFS
+	S --> HK
+	HK --> WH
+	WH -->|push events| GC
 
 	%% Browser Web APIs used by GitClient
 	Streams[Web Streams]
@@ -49,7 +56,7 @@ flowchart LR
 
 - Cloudflare Workers runtime
 - Durable Objects with built‑in SQLite for refs, commits, trees, and tags
-- Cloudflare R2 for Git object blobs (file contents)
+- Cloudflare R2 for Git object blobs (file contents) and LFS objects
 
 ### HTTP API
 
@@ -57,7 +64,7 @@ flowchart LR
 - Upload‑pack (fetch): `POST /:repo/git-upload-pack`
 - Receive‑pack (push): `POST /:repo/git-receive-pack`
 
-See `src/index.ts` for routing and bindings.
+See `src/worker.ts` for routing and `src/server.ts` for bindings.
 
 ### JSON API
 
@@ -78,6 +85,7 @@ Base URL: `/api/:repo{.git}?/`
 | ------ | ---------------- | ---------------------------------------- |
 | GET    | `/status`        | Get working tree status                  |
 | GET    | `/refs`          | List all refs                            |
+| GET    | `/reflog/:ref`   | Read reflog for a ref                    |
 | POST   | `/log`           | Get commit history                       |
 | POST   | `/show`          | Show object by ref                       |
 | POST   | `/tree`          | Get tree entries                         |
@@ -127,6 +135,31 @@ Base URL: `/api/:repo{.git}?/`
 | POST   | `/push`   | Push to remote        |
 | POST   | `/remote` | Manage remote configs |
 
+#### Maintenance
+
+| Method | Endpoint | Description                                        |
+| ------ | -------- | -------------------------------------------------- |
+| POST   | `/fsck`  | Validate objects (optional `oid`)                  |
+| POST   | `/gc`    | Garbage collection (optional `gracePeriodMinutes`) |
+
+#### Archive Downloads
+
+| Method | Endpoint         | Description                          |
+| ------ | ---------------- | ------------------------------------ |
+| GET    | `/archive/:file` | Download repo as `.tar.gz` or `.zip` |
+
+The filename becomes the ref/branch name. Supports optional `path` query param for subdirectory exports.
+
+#### Webhooks
+
+| Method | Endpoint        | Description        |
+| ------ | --------------- | ------------------ |
+| POST   | `/webhooks`     | Register a webhook |
+| GET    | `/webhooks`     | List webhooks      |
+| DELETE | `/webhooks/:id` | Remove a webhook   |
+
+Webhooks deliver signed `push` events to HTTPS endpoints with HMAC-SHA256 signatures (`X-Signature-256` header) and automatic retries.
+
 #### Streaming Commits
 
 The `/commit-pack` endpoint accepts newline-delimited JSON (NDJSON) for efficient large file uploads:
@@ -134,6 +167,26 @@ The `/commit-pack` endpoint accepts newline-delimited JSON (NDJSON) for efficien
 1. Send metadata first with `target_branch`, `commit_message`, `author`, and `files` array
 2. Stream blob chunks with `content_id`, base64-encoded `data` (≤4 MiB), and `eof` marker
 3. Supports async generators and ReadableStreams for memory-efficient uploads
+
+### Git LFS
+
+Server-side [Git LFS](https://git-lfs.com) support with objects stored in R2.
+
+| Method | Endpoint                            | Description                   |
+| ------ | ----------------------------------- | ----------------------------- |
+| POST   | `/:repo.git/info/lfs/objects/batch` | Batch download/upload request |
+| PUT    | `/:repo.git/info/lfs/objects/:oid`  | Upload LFS object             |
+| GET    | `/:repo.git/info/lfs/objects/:oid`  | Download LFS object           |
+
+### Hooks
+
+Server-side hook system for receive-pack operations.
+
+| Hook           | Timing             | Per-ref | Can reject |
+| -------------- | ------------------ | ------- | ---------- |
+| `pre-receive`  | Before any updates | No      | All        |
+| `update`       | Per-ref update     | Yes     | Per ref    |
+| `post-receive` | After all updates  | No      | No         |
 
 ## GitClient: Git in the browser
 
