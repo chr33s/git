@@ -5,13 +5,14 @@ import {
   type GitStorageRefChangeResult,
   validateStoragePath,
 } from "./git.storage.ts";
+import type { WebhookStorage, Webhook } from "./server.webhooks.ts";
 
 type StoredRefRow = {
   oid: string | null;
   value: string;
 };
 
-export class CloudflareStorage implements GitStorage {
+export class CloudflareStorage implements GitStorage, WebhookStorage {
   #repoName?: string;
   #r2: R2Bucket;
   #sql: SqlStorage;
@@ -80,6 +81,18 @@ export class CloudflareStorage implements GitStorage {
 
       CREATE INDEX IF NOT EXISTS idx_git_lfs_objects_repo
       ON git_lfs_objects(repository);
+
+      CREATE TABLE IF NOT EXISTS git_webhooks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repository TEXT NOT NULL,
+        url TEXT NOT NULL,
+        secret TEXT NOT NULL,
+        events TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_git_webhooks_repo
+      ON git_webhooks(repository);
     `);
   }
 
@@ -641,5 +654,55 @@ export class CloudflareStorage implements GitStorage {
 
   getR2() {
     return this.#r2;
+  }
+
+  // --- Webhook storage methods ---
+
+  createWebhook(repository: string, url: string, secret: string, events: string[]): number {
+    const repo = this.#requireRepository();
+    this.#sql.exec(
+      /* SQL */ `INSERT INTO git_webhooks (repository, url, secret, events, active) VALUES (?, ?, ?, ?, 1)`,
+      repo,
+      url,
+      secret,
+      JSON.stringify(events),
+    );
+    const row = this.#sql.exec(/* SQL */ `SELECT last_insert_rowid() AS id`).toArray()[0] as {
+      id: number;
+    };
+    return row.id;
+  }
+
+  deleteWebhook(repository: string, id: number): boolean {
+    const repo = this.#requireRepository();
+    this.#sql.exec(/* SQL */ `DELETE FROM git_webhooks WHERE repository = ? AND id = ?`, repo, id);
+    // SQLite doesn't return affected rows directly via exec, check if it existed
+    const remaining = this.#sql
+      .exec(/* SQL */ `SELECT 1 FROM git_webhooks WHERE id = ? LIMIT 1`, id)
+      .toArray();
+    // If it's gone, deletion succeeded (or it never existed in this repo)
+    return remaining.length === 0;
+  }
+
+  listWebhooks(_repository: string): Webhook[] {
+    const repo = this.#requireRepository();
+    const rows = this.#sql
+      .exec(
+        /* SQL */ `SELECT id, url, secret, events, active FROM git_webhooks WHERE repository = ?`,
+        repo,
+      )
+      .toArray();
+
+    return rows.map((row) => ({
+      id: (row as any).id as number,
+      url: (row as any).url as string,
+      secret: (row as any).secret as string,
+      events: JSON.parse((row as any).events as string) as string[],
+      active: (row as any).active === 1,
+    }));
+  }
+
+  getWebhooksByEvent(repository: string, event: string): Webhook[] {
+    return this.listWebhooks(repository).filter((w) => w.active && w.events.includes(event));
   }
 }

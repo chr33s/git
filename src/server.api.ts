@@ -1,4 +1,5 @@
 import type { GitRepository } from "./git.repository.ts";
+import type { ServerWebhooks } from "./server.webhooks.ts";
 
 export interface ServerApiRequest {
   url: string;
@@ -79,6 +80,7 @@ type Route = JsonRoute | StreamRoute;
 
 export class ServerApi {
   #repository: GitRepository;
+  #webhooks: ServerWebhooks | null;
   #routes: Route[] = [
     {
       handler: (...args) => this.#status(...args),
@@ -290,10 +292,27 @@ export class ServerApi {
       pathname: "/api/:repo{.git}?/commit-pack",
       streaming: true,
     },
+    // Webhook endpoints
+    {
+      handler: (...args) => this.#registerWebhook(...args),
+      method: "POST",
+      pathname: "/api/:repo{.git}?/webhooks",
+    },
+    {
+      handler: (...args) => this.#listWebhooks(...args),
+      method: "GET",
+      pathname: "/api/:repo{.git}?/webhooks",
+    },
+    {
+      handler: (...args) => this.#deleteWebhook(...args),
+      method: "DELETE",
+      pathname: "/api/:repo{.git}?/webhooks/:id",
+    },
   ];
 
-  constructor(repository: GitRepository) {
+  constructor(repository: GitRepository, webhooks?: ServerWebhooks) {
     this.#repository = repository;
+    this.#webhooks = webhooks ?? null;
   }
 
   async fetch(request: ServerApiRequest, signal?: AbortSignal) {
@@ -2306,6 +2325,34 @@ export class ServerApi {
     };
 
     return Response.json(result, { status: 201 });
+  }
+
+  async #registerWebhook(payload: Payload, _signal?: AbortSignal) {
+    if (!this.#webhooks) {
+      return Response.json({ error: "Webhooks not configured" }, { status: 501 });
+    }
+    const repo = payload.repo as string;
+    return this.#webhooks.register(repo, payload);
+  }
+
+  async #listWebhooks(payload: Payload, _signal?: AbortSignal) {
+    if (!this.#webhooks) {
+      return Response.json({ error: "Webhooks not configured" }, { status: 501 });
+    }
+    const repo = payload.repo as string;
+    return this.#webhooks.list(repo);
+  }
+
+  async #deleteWebhook(payload: Payload, _signal?: AbortSignal) {
+    if (!this.#webhooks) {
+      return Response.json({ error: "Webhooks not configured" }, { status: 501 });
+    }
+    const repo = payload.repo as string;
+    const id = parseInt(payload.id as string, 10);
+    if (isNaN(id)) {
+      return Response.json({ error: "Invalid webhook id" }, { status: 422 });
+    }
+    return this.#webhooks.remove(repo, id);
   }
 }
 

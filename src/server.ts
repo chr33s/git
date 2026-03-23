@@ -1,10 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 
+import { HookRunner } from "./git.hooks.ts";
 import { GitRepository } from "./git.repository.ts";
 import { ServerApi } from "./server.api.ts";
 import { ServerLfs } from "./server.lfs.ts";
 import { CloudflareStorage as Storage } from "./server.storage.ts";
 import { concatenateUint8Arrays } from "./git.utils.ts";
+import { ServerWebhooks } from "./server.webhooks.ts";
 
 interface Route {
   handler: (request: Request) => Promise<Response>;
@@ -15,8 +17,10 @@ interface Route {
 
 export class Server extends DurableObject<Env> {
   #api: ServerApi;
+  #hooks: HookRunner = new HookRunner();
   #lfs: ServerLfs;
   #repository: GitRepository;
+  #webhooks: ServerWebhooks;
   #routes: Route[] = [
     {
       handler: (req) => this.#head(req),
@@ -63,7 +67,6 @@ export class Server extends DurableObject<Env> {
     const storage = new Storage(ctx, env);
     const config = { repoName: ctx.id.toString() };
     this.#repository = new GitRepository(storage, config);
-    this.#api = new ServerApi(this.#repository);
     this.#lfs = new ServerLfs({
       hasObject: (repo, oid) => storage.hasLfsObject(oid),
       getObjectSize: (repo, oid) => storage.getLfsObjectSize(oid),
@@ -71,6 +74,28 @@ export class Server extends DurableObject<Env> {
       deleteObjectMeta: (repo, oid) => storage.deleteLfsObjectMeta(oid),
       getR2: () => storage.getR2(),
     });
+    this.#webhooks = new ServerWebhooks(storage);
+    this.#api = new ServerApi(this.#repository, this.#webhooks);
+
+    // Wire webhooks as a post-receive hook
+    this.#hooks.register("post-receive", async (ctx) => {
+      await this.#webhooks.deliver(ctx.repository, ctx.updates, async (oid) => {
+        try {
+          const obj = await this.#repository.readObject(oid);
+          if (obj.type !== "commit") return null;
+          const info = this.#repository.parseCommit(obj.data);
+          return { id: oid, message: info.message, author: info.author };
+        } catch {
+          return null;
+        }
+      });
+      return { ok: true };
+    });
+  }
+
+  /** Access the hook runner to register hooks externally. */
+  get hooks(): HookRunner {
+    return this.#hooks;
   }
 
   async fetch(request: Request) {
@@ -326,12 +351,46 @@ export class Server extends DurableObject<Env> {
         }
       }
 
-      // Update refs
+      const repo = this.#urlPattern?.pathname.groups.repo!;
+      const ZERO = "0000000000000000000000000000000000000000";
+      const hookUpdates = refUpdates.map((u) => ({
+        ref: u.ref,
+        oldOid: u.old,
+        newOid: u.new,
+      }));
+      const hookContext = {
+        repository: repo,
+        updates: hookUpdates,
+        capabilities,
+      };
+
+      // Run pre-receive hook — can reject the entire push
+      const preResult = await this.#hooks.runPreReceive(hookContext);
+      if (!preResult.ok) {
+        const msg = preResult.message || "pre-receive hook declined";
+        const response =
+          this.#pktLine("unpack ok\n") +
+          refUpdates.map((u) => this.#pktLine(`ng ${u.ref} ${msg}\n`)).join("") +
+          "0000";
+        return new Response(response, {
+          headers: { "Content-Type": "application/x-git-receive-pack-result" },
+        });
+      }
+
+      // Run per-ref update hooks
+      const updateHookResults = await this.#hooks.runUpdate(hookContext);
+
+      // Update refs (skip refs rejected by update hooks)
+      const acceptedUpdates = refUpdates.filter((u) => {
+        const hookResult = updateHookResults.get(u.ref);
+        return !hookResult || hookResult.ok;
+      });
+
       const updateResults = await this.#repository.updateRefs(
-        refUpdates.map((update) => ({
+        acceptedUpdates.map((update) => ({
           message: "push",
-          new: update.new === "0000000000000000000000000000000000000000" ? null : update.new,
-          old: update.old === "0000000000000000000000000000000000000000" ? null : update.old,
+          new: update.new === ZERO ? null : update.new,
+          old: update.old === ZERO ? null : update.old,
           ref: update.ref,
         })),
         {
@@ -340,14 +399,46 @@ export class Server extends DurableObject<Env> {
         },
       );
 
-      const refResults = updateResults.map((result: { ok: boolean; ref: string; error?: string }) =>
-        result.ok
-          ? this.#pktLine(`ok ${result.ref}\n`)
-          : this.#pktLine(`ng ${result.ref} ${result.error || "update rejected"}\n`),
+      // Build per-ref result lines
+      const updateResultMap = new Map(
+        updateResults.map((r: { ok: boolean; ref: string; error?: string }) => [r.ref, r]),
       );
+      const refResults = refUpdates.map((u) => {
+        const hookResult = updateHookResults.get(u.ref);
+        if (hookResult && !hookResult.ok) {
+          return this.#pktLine(`ng ${u.ref} ${hookResult.message || "update hook declined"}\n`);
+        }
+        const result = updateResultMap.get(u.ref);
+        if (!result) return this.#pktLine(`ng ${u.ref} update rejected\n`);
+        return result.ok
+          ? this.#pktLine(`ok ${u.ref}\n`)
+          : this.#pktLine(`ng ${u.ref} ${result.error || "update rejected"}\n`);
+      });
 
       // Send success response (unpack ok + ref status)
       const response = this.#pktLine("unpack ok\n") + refResults.join("") + "0000";
+
+      // Run post-receive hooks (fire-and-forget, errors don't affect response)
+      const successfulUpdates = refUpdates.filter((u) => {
+        const hookResult = updateHookResults.get(u.ref);
+        if (hookResult && !hookResult.ok) return false;
+        const result = updateResultMap.get(u.ref);
+        return result?.ok;
+      });
+      if (successfulUpdates.length > 0) {
+        const postContext = {
+          repository: repo,
+          updates: successfulUpdates.map((u) => ({
+            ref: u.ref,
+            oldOid: u.old,
+            newOid: u.new,
+          })),
+          capabilities,
+        };
+        // Don't await — post-receive is best-effort
+        this.#hooks.runPostReceive(postContext).catch(() => {});
+      }
+
       return new Response(response, {
         headers: { "Content-Type": "application/x-git-receive-pack-result" },
       });
