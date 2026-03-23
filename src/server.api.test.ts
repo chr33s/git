@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { GitRepository } from "./git.repository.ts";
 import { MemoryStorage } from "./git.storage.ts";
 import { ServerApi, type ServerApiRequest } from "./server.api.ts";
-import { compressData } from "./git.utils.ts";
+import { compressData, hexToBytes } from "./git.utils.ts";
 
 function createRequest(url: string, method: string = "GET", body?: Record<string, unknown>) {
   let bodyStream: ServerApiRequest["body"] = null;
@@ -1112,5 +1112,257 @@ void describe("repository management", () => {
 
     await repo.initStorage("created-repo");
     assert.equal(await repo.getCurrentHead(), "refs/heads/develop");
+  });
+});
+
+/* ── Archive endpoint tests ────────────────────────────────── */
+
+async function collectStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let result = await reader.read();
+  while (!result.done) {
+    chunks.push(result.value);
+    result = await reader.read();
+  }
+  const total = chunks.reduce((s, c) => s + c.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
+async function decompressGzip(data: Uint8Array): Promise<Uint8Array> {
+  const stream = new ReadableStream({
+    start(c) {
+      c.enqueue(data);
+      c.close();
+    },
+  }).pipeThrough(new DecompressionStream("gzip"));
+  return collectStream(stream);
+}
+
+function stripNulls(s: string): string {
+  const idx = s.indexOf("\0");
+  return idx < 0 ? s : s.slice(0, idx);
+}
+
+function parseTarEntryNames(tar: Uint8Array): string[] {
+  const names: string[] = [];
+  let offset = 0;
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    // Empty block signals end of archive
+    if (header.every((b) => b === 0)) break;
+
+    // Read name (0-100) and prefix (345-500)
+    const decoder = new TextDecoder();
+    const rawName = stripNulls(decoder.decode(header.subarray(0, 100)));
+    const prefix = stripNulls(decoder.decode(header.subarray(345, 500)));
+    const name = prefix ? `${prefix}/${rawName}` : rawName;
+    if (name) names.push(name);
+
+    // Read size (124-136), octal
+    const sizeStr = stripNulls(decoder.decode(header.subarray(124, 136))).trim();
+    const size = parseInt(sizeStr, 8) || 0;
+
+    // Advance past header + data blocks
+    const dataBlocks = Math.ceil(size / 512);
+    offset += 512 + dataBlocks * 512;
+  }
+  return names;
+}
+
+function parseZipEntryNames(zip: Uint8Array): string[] {
+  const names: string[] = [];
+  const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  let offset = 0;
+
+  while (offset + 30 <= zip.length) {
+    const sig = view.getUint32(offset, true);
+    if (sig !== 0x04034b50) break; // Not a local file header
+
+    const nameLen = view.getUint16(offset + 26, true);
+    const extraLen = view.getUint16(offset + 28, true);
+    const compressedSize = view.getUint32(offset + 18, true);
+
+    const name = new TextDecoder().decode(zip.subarray(offset + 30, offset + 30 + nameLen));
+    names.push(name);
+
+    offset += 30 + nameLen + extraLen + compressedSize;
+  }
+  return names;
+}
+
+function buildTreeData(entries: Array<{ mode: string; name: string; oid: string }>): Uint8Array {
+  const enc = new TextEncoder();
+  const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
+  const parts: Uint8Array[] = [];
+  for (const e of sorted) {
+    const head = enc.encode(`${e.mode} ${e.name}\0`);
+    const oidBytes = hexToBytes(e.oid);
+    const combined = new Uint8Array(head.length + 20);
+    combined.set(head);
+    combined.set(oidBytes, head.length);
+    parts.push(combined);
+  }
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
+async function setupRepoWithTree() {
+  const { repo, api } = await setupRepo();
+  const enc = new TextEncoder();
+
+  // Create blobs
+  const readmeOid = await repo.writeObject("blob", enc.encode("# Hello"));
+  const mainOid = await repo.writeObject("blob", enc.encode("console.log('hi')"));
+  const utilsOid = await repo.writeObject("blob", enc.encode("export const x = 1;"));
+
+  // Build nested trees bottom-up
+  const libTreeData = buildTreeData([{ mode: "100644", name: "utils.ts", oid: utilsOid }]);
+  const libTreeOid = await repo.writeObject("tree", libTreeData);
+
+  const srcTreeData = buildTreeData([
+    { mode: "40000", name: "lib", oid: libTreeOid },
+    { mode: "100644", name: "main.ts", oid: mainOid },
+  ]);
+  const srcTreeOid = await repo.writeObject("tree", srcTreeData);
+
+  const rootTreeData = buildTreeData([
+    { mode: "100644", name: "readme.md", oid: readmeOid },
+    { mode: "40000", name: "src", oid: srcTreeOid },
+  ]);
+  const rootTreeOid = await repo.writeObject("tree", rootTreeData);
+
+  // Create commit pointing to root tree
+  const ts = Math.floor(Date.now() / 1000);
+  const commitContent = enc.encode(
+    `tree ${rootTreeOid}\nauthor Test <test@example.com> ${ts} +0000\ncommitter Test <test@example.com> ${ts} +0000\n\nInitial commit`,
+  );
+  const commitOid = await repo.writeObject("commit", commitContent);
+
+  // Point HEAD → refs/heads/main → commit
+  await repo.writeRef("refs/heads/main", commitOid);
+
+  return { repo, api, commitOid };
+}
+
+void describe("archive endpoint", () => {
+  void it("should return tar.gz archive at HEAD", async () => {
+    const { api } = await setupRepoWithTree();
+    const request = createRequest("http://localhost/api/test/archive/HEAD.tar.gz", "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Content-Type"), "application/gzip");
+    assert.ok(response.headers.get("Content-Disposition")?.includes(".tar.gz"));
+
+    const compressed = await collectStream(response.body!);
+    const tar = await decompressGzip(compressed);
+    const names = parseTarEntryNames(tar);
+
+    assert.ok(names.includes("HEAD/readme.md"));
+    assert.ok(names.includes("HEAD/src/main.ts"));
+    assert.ok(names.includes("HEAD/src/lib/utils.ts"));
+    assert.equal(names.length, 3);
+  });
+
+  void it("should return zip archive at HEAD", async () => {
+    const { api } = await setupRepoWithTree();
+    const request = createRequest("http://localhost/api/test/archive/HEAD.zip", "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Content-Type"), "application/zip");
+    assert.ok(response.headers.get("Content-Disposition")?.includes(".zip"));
+
+    const zip = await collectStream(response.body!);
+    const names = parseZipEntryNames(zip);
+
+    assert.ok(names.includes("HEAD/readme.md"));
+    assert.ok(names.includes("HEAD/src/main.ts"));
+    assert.ok(names.includes("HEAD/src/lib/utils.ts"));
+    assert.equal(names.length, 3);
+  });
+
+  void it("should archive at specific commit OID", async () => {
+    const { api, commitOid } = await setupRepoWithTree();
+    const request = createRequest(`http://localhost/api/test/archive/${commitOid}.tar.gz`, "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 200);
+    const compressed = await collectStream(response.body!);
+    const tar = await decompressGzip(compressed);
+    const names = parseTarEntryNames(tar);
+
+    assert.equal(names.length, 3);
+    assert.ok(names.some((n) => n.endsWith("/readme.md")));
+  });
+
+  void it("should archive at tag", async () => {
+    const { repo, api, commitOid } = await setupRepoWithTree();
+    await repo.writeRef("refs/tags/v1.0", commitOid!);
+
+    const request = createRequest("http://localhost/api/test/archive/v1.0.tar.gz", "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 200);
+    const compressed = await collectStream(response.body!);
+    const tar = await decompressGzip(compressed);
+    const names = parseTarEntryNames(tar);
+
+    assert.equal(names.length, 3);
+    assert.ok(names[0]!.startsWith("v1.0/"));
+  });
+
+  void it("should support path query parameter for subdirectory", async () => {
+    const { api } = await setupRepoWithTree();
+    const request = createRequest("http://localhost/api/test/archive/HEAD.zip?path=src", "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 200);
+    const zip = await collectStream(response.body!);
+    const names = parseZipEntryNames(zip);
+
+    assert.equal(names.length, 2);
+    assert.ok(names.includes("HEAD/main.ts"));
+    assert.ok(names.includes("HEAD/lib/utils.ts"));
+  });
+
+  void it("should return 404 for nonexistent ref", async () => {
+    const { api } = await setupRepoWithTree();
+    const request = createRequest("http://localhost/api/test/archive/nonexistent.tar.gz", "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 404);
+  });
+
+  void it("should return 404 for nonexistent path", async () => {
+    const { api } = await setupRepoWithTree();
+    const request = createRequest(
+      "http://localhost/api/test/archive/HEAD.zip?path=no/such/dir",
+      "GET",
+    );
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 404);
+  });
+
+  void it("should return 400 for unsupported format", async () => {
+    const { api } = await setupRepoWithTree();
+    const request = createRequest("http://localhost/api/test/archive/HEAD.rar", "GET");
+    const response = await api.fetch(request);
+
+    assert.equal(response.status, 400);
   });
 });

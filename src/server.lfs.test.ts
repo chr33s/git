@@ -122,7 +122,7 @@ function binaryStream(data: Uint8Array): ReadableStream<Uint8Array> {
   });
 }
 
-async function readJson(response: Response) {
+async function readJson(response: Response): Promise<any> {
   return response.json();
 }
 

@@ -255,7 +255,7 @@ export function parseLfsPointer(data: Uint8Array): LfsPointer | null {
     }
     const sizeMatch = line.match(/^size (\d+)$/);
     if (sizeMatch) {
-      size = parseInt(sizeMatch[1], 10);
+      size = parseInt(sizeMatch[1]!, 10);
     }
   }
 

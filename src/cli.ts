@@ -1450,7 +1450,7 @@ export class Cli {
     }
 
     const result = await this.#client.merge(branch);
-    this.#write("out", `Merged ${branch} (commit ${result.mergeCommitOid.slice(0, 7)})`);
+    this.#write("out", `Merged ${branch} (commit ${result.mergeCommitOid?.slice(0, 7)})`);
   }
 
   async #rebase(args: string[], options: CommandOptions) {

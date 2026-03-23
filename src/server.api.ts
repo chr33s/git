@@ -277,6 +277,12 @@ export class ServerApi {
       method: "DELETE",
       pathname: "/api/:repo{.git}?",
     },
+    // Archive endpoints
+    {
+      handler: (...args) => this.#archive(...args),
+      method: "GET",
+      pathname: "/api/:repo{.git}?/archive/:file",
+    },
     // Streaming endpoints
     {
       handler: (...args) => this.#commitPack(...args),
@@ -301,9 +307,11 @@ export class ServerApi {
 
       try {
         const match = pattern.exec(request.url);
+        const url = new URL(request.url);
         const routePayload = {
           ...match?.pathname.groups,
           ...match?.search.groups,
+          ...Object.fromEntries(url.searchParams.entries()),
         };
 
         if (route.streaming) {
@@ -852,6 +860,211 @@ export class ServerApi {
     }
 
     return files;
+  }
+
+  async #collectArchiveEntries(
+    treeOid: string,
+    prefix: string,
+  ): Promise<Array<{ path: string; oid: string; mode: string }>> {
+    const result: Array<{ path: string; oid: string; mode: string }> = [];
+    const tree = await this.#repository.readObject(treeOid);
+    const entries = this.#repository.parseTree(tree.data);
+
+    for (const entry of entries) {
+      const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.mode === "40000") {
+        const subEntries = await this.#collectArchiveEntries(entry.oid, fullPath);
+        result.push(...subEntries);
+      } else if (entry.mode !== "160000") {
+        result.push({ path: fullPath, oid: entry.oid, mode: entry.mode });
+      }
+    }
+
+    return result;
+  }
+
+  async #resolveRefOid(ref: string): Promise<string | null> {
+    if (ref === "HEAD") return await this.#repository.getRef("HEAD");
+    if (/^[0-9a-f]{40}$/.test(ref)) return ref;
+
+    for (const prefix of ["refs/heads/", "refs/tags/", "refs/"]) {
+      const oid = await this.#repository.getRef(prefix + ref);
+      if (oid) return oid;
+    }
+
+    const direct = await this.#repository.getRef(ref);
+    return direct;
+  }
+
+  async #archive(payload: Payload, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+
+    const file = payload.file as string;
+    if (!file) {
+      return Response.json({ error: "archive filename required" }, { status: 400 });
+    }
+
+    let ref: string;
+    let format: "tar.gz" | "zip";
+    if (file.endsWith(".tar.gz")) {
+      ref = file.slice(0, -7);
+      format = "tar.gz";
+    } else if (file.endsWith(".zip")) {
+      ref = file.slice(0, -4);
+      format = "zip";
+    } else {
+      return Response.json({ error: "Unsupported format. Use .tar.gz or .zip" }, { status: 400 });
+    }
+
+    if (!ref) {
+      return Response.json({ error: "ref required" }, { status: 400 });
+    }
+
+    let commitOid = ref;
+    const refOid = await this.#resolveRefOid(ref);
+    if (refOid) commitOid = refOid;
+
+    let obj;
+    try {
+      obj = await this.#repository.readObject(commitOid);
+    } catch {
+      return Response.json({ error: `Ref '${ref}' not found` }, { status: 404 });
+    }
+
+    while (obj.type === "tag") {
+      const target = new TextDecoder()
+        .decode(obj.data)
+        .split("\n")
+        .find((l) => l.startsWith("object "))
+        ?.slice(7);
+      if (!target) {
+        return Response.json({ error: "Invalid tag object" }, { status: 400 });
+      }
+      obj = await this.#repository.readObject(target);
+    }
+
+    if (obj.type !== "commit") {
+      return Response.json({ error: "Ref does not resolve to a commit" }, { status: 400 });
+    }
+
+    const info = this.#repository.parseCommit(obj.data);
+    let treeOid = info.tree;
+
+    const path = payload.path as string | undefined;
+    if (path) {
+      const entry = await this.#repository.findInTree(treeOid, path);
+      if (!entry) {
+        return Response.json({ error: `Path '${path}' not found` }, { status: 404 });
+      }
+      const entryObj = await this.#repository.readObject(entry.oid);
+      if (entryObj.type !== "tree") {
+        return Response.json({ error: `Path '${path}' is not a directory` }, { status: 400 });
+      }
+      treeOid = entry.oid;
+    }
+
+    const entries = await this.#collectArchiveEntries(treeOid, "");
+    const prefix = ref + "/";
+
+    if (format === "tar.gz") {
+      return await this.#buildTarGzResponse(entries, prefix, ref);
+    } else {
+      return await this.#buildZipResponse(entries, prefix, ref);
+    }
+  }
+
+  async #buildTarGzResponse(
+    entries: Array<{ path: string; oid: string; mode: string }>,
+    prefix: string,
+    ref: string,
+  ): Promise<Response> {
+    const repo = this.#repository;
+
+    const tarStream = new ReadableStream({
+      async start(controller) {
+        for (const entry of entries) {
+          const blob = await repo.readObject(entry.oid);
+          controller.enqueue(createTarHeader(prefix + entry.path, blob.data.length, entry.mode));
+          if (blob.data.length > 0) {
+            controller.enqueue(new Uint8Array(blob.data));
+            const remainder = blob.data.length % 512;
+            if (remainder > 0) {
+              controller.enqueue(new Uint8Array(512 - remainder));
+            }
+          }
+        }
+        controller.enqueue(new Uint8Array(1024)); // end-of-archive marker
+        controller.close();
+      },
+    });
+
+    const gzipStream = tarStream.pipeThrough(new CompressionStream("gzip"));
+    const filename = sanitizeFilename(ref) + ".tar.gz";
+
+    return new Response(gzipStream, {
+      headers: {
+        "Content-Type": "application/gzip",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+      },
+    });
+  }
+
+  async #buildZipResponse(
+    entries: Array<{ path: string; oid: string; mode: string }>,
+    prefix: string,
+    ref: string,
+  ): Promise<Response> {
+    const repo = this.#repository;
+    const encoder = new TextEncoder();
+
+    const zipStream = new ReadableStream({
+      async start(controller) {
+        let offset = 0;
+        const centralEntries: Array<{
+          nameBytes: Uint8Array;
+          crc: number;
+          size: number;
+          offset: number;
+        }> = [];
+
+        for (const entry of entries) {
+          const blob = await repo.readObject(entry.oid);
+          const nameBytes = encoder.encode(prefix + entry.path);
+          const crc = crc32(blob.data);
+
+          centralEntries.push({ nameBytes, crc, size: blob.data.length, offset });
+
+          const header = createZipLocalFileHeader(nameBytes, blob.data.length, crc);
+          controller.enqueue(header);
+          offset += header.length;
+
+          if (blob.data.length > 0) {
+            controller.enqueue(new Uint8Array(blob.data));
+            offset += blob.data.length;
+          }
+        }
+
+        const centralDirOffset = offset;
+        let centralDirSize = 0;
+        for (const ce of centralEntries) {
+          const cdEntry = createZipCentralDirEntry(ce.nameBytes, ce.crc, ce.size, ce.offset);
+          controller.enqueue(cdEntry);
+          centralDirSize += cdEntry.length;
+        }
+
+        controller.enqueue(createZipEOCD(centralEntries.length, centralDirSize, centralDirOffset));
+        controller.close();
+      },
+    });
+
+    const filename = sanitizeFilename(ref) + ".zip";
+
+    return new Response(zipStream, {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+      },
+    });
   }
 
   async #mv(payload: Payload, signal?: AbortSignal) {
@@ -2094,4 +2307,137 @@ export class ServerApi {
 
     return Response.json(result, { status: 201 });
   }
+}
+
+/* ── Archive format helpers ────────────────────────────────────────── */
+
+const CRC32_TABLE = /* @__PURE__ */ (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[n] = c;
+  }
+  return table;
+})();
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i++) {
+    crc = CRC32_TABLE[(crc ^ data[i]!) & 0xff]! ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function createTarHeader(name: string, size: number, mode: string): Uint8Array {
+  const header = new Uint8Array(512);
+  const enc = new TextEncoder();
+
+  let nameField = name;
+  let prefixField = "";
+  if (enc.encode(name).length > 100) {
+    const slash = name.lastIndexOf("/", 99);
+    if (slash > 0) {
+      prefixField = name.slice(0, slash);
+      nameField = name.slice(slash + 1);
+    }
+  }
+
+  header.set(enc.encode(nameField).subarray(0, 100), 0); // name
+  const tarMode = mode === "100755" ? "0000755" : "0000644";
+  header.set(enc.encode(tarMode + "\0"), 100); // mode
+  header.set(enc.encode("0000000\0"), 108); // uid
+  header.set(enc.encode("0000000\0"), 116); // gid
+  header.set(enc.encode(size.toString(8).padStart(11, "0") + "\0"), 124); // size
+  header.set(enc.encode("00000000000\0"), 136); // mtime
+  header.set(enc.encode("        "), 148); // checksum placeholder
+  header[156] = 0x30; // type '0' (regular file)
+  header.set(enc.encode("ustar\0"), 257); // magic
+  header.set(enc.encode("00"), 263); // version
+  if (prefixField) {
+    header.set(enc.encode(prefixField).subarray(0, 155), 345); // prefix
+  }
+
+  let checksum = 0;
+  for (let i = 0; i < 512; i++) checksum += header[i]!;
+  header.set(enc.encode(checksum.toString(8).padStart(6, "0") + "\0 "), 148);
+
+  return header;
+}
+
+function createZipLocalFileHeader(nameBytes: Uint8Array, size: number, crc: number): Uint8Array {
+  const header = new Uint8Array(30 + nameBytes.length);
+  const view = new DataView(header.buffer);
+
+  view.setUint32(0, 0x04034b50, true); // signature
+  view.setUint16(4, 20, true); // version needed
+  view.setUint16(6, 0, true); // flags
+  view.setUint16(8, 0, true); // compression (stored)
+  view.setUint16(10, 0, true); // mod time
+  view.setUint16(12, 0x0021, true); // mod date (1980-01-01)
+  view.setUint32(14, crc, true); // crc-32
+  view.setUint32(18, size, true); // compressed size
+  view.setUint32(22, size, true); // uncompressed size
+  view.setUint16(26, nameBytes.length, true); // name length
+  view.setUint16(28, 0, true); // extra length
+  header.set(nameBytes, 30);
+
+  return header;
+}
+
+function createZipCentralDirEntry(
+  nameBytes: Uint8Array,
+  crc: number,
+  size: number,
+  localOffset: number,
+): Uint8Array {
+  const entry = new Uint8Array(46 + nameBytes.length);
+  const view = new DataView(entry.buffer);
+
+  view.setUint32(0, 0x02014b50, true); // signature
+  view.setUint16(4, 20, true); // version made by
+  view.setUint16(6, 20, true); // version needed
+  view.setUint16(8, 0, true); // flags
+  view.setUint16(10, 0, true); // compression (stored)
+  view.setUint16(12, 0, true); // mod time
+  view.setUint16(14, 0x0021, true); // mod date
+  view.setUint32(16, crc, true); // crc-32
+  view.setUint32(20, size, true); // compressed size
+  view.setUint32(24, size, true); // uncompressed size
+  view.setUint16(28, nameBytes.length, true); // name length
+  view.setUint16(30, 0, true); // extra length
+  view.setUint16(32, 0, true); // comment length
+  view.setUint16(34, 0, true); // disk number
+  view.setUint16(36, 0, true); // internal attrs
+  view.setUint32(38, 0, true); // external attrs
+  view.setUint32(42, localOffset, true); // local header offset
+  entry.set(nameBytes, 46);
+
+  return entry;
+}
+
+function createZipEOCD(
+  count: number,
+  centralDirSize: number,
+  centralDirOffset: number,
+): Uint8Array {
+  const eocd = new Uint8Array(22);
+  const view = new DataView(eocd.buffer);
+
+  view.setUint32(0, 0x06054b50, true); // signature
+  view.setUint16(4, 0, true); // disk number
+  view.setUint16(6, 0, true); // central dir disk
+  view.setUint16(8, count, true); // entries on disk
+  view.setUint16(10, count, true); // total entries
+  view.setUint32(12, centralDirSize, true); // central dir size
+  view.setUint32(16, centralDirOffset, true); // central dir offset
+  view.setUint16(20, 0, true); // comment length
+
+  return eocd;
 }
