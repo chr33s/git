@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 
 import { GitRepository } from "./git.repository.ts";
 import { ServerApi } from "./server.api.ts";
+import { ServerLfs } from "./server.lfs.ts";
 import { CloudflareStorage as Storage } from "./server.storage.ts";
 import { concatenateUint8Arrays } from "./git.utils.ts";
 
@@ -14,6 +15,7 @@ interface Route {
 
 export class Server extends DurableObject<Env> {
   #api: ServerApi;
+  #lfs: ServerLfs;
   #repository: GitRepository;
   #routes: Route[] = [
     {
@@ -37,6 +39,21 @@ export class Server extends DurableObject<Env> {
       method: "POST",
       pathname: "/:repo{.git}?/git-upload-pack",
     },
+    {
+      handler: (req) => this.#lfsBatch(req),
+      method: "POST",
+      pathname: "/:repo{.git}?/info/lfs/objects/batch",
+    },
+    {
+      handler: (req) => this.#lfsUpload(req),
+      method: "PUT",
+      pathname: "/:repo{.git}?/info/lfs/objects/:oid",
+    },
+    {
+      handler: (req) => this.#lfsDownload(req),
+      method: "GET",
+      pathname: "/:repo{.git}?/info/lfs/objects/:oid",
+    },
   ];
   #urlPattern: URLPatternResult | null = null;
 
@@ -47,6 +64,13 @@ export class Server extends DurableObject<Env> {
     const config = { repoName: ctx.id.toString() };
     this.#repository = new GitRepository(storage, config);
     this.#api = new ServerApi(this.#repository);
+    this.#lfs = new ServerLfs({
+      hasObject: (repo, oid) => storage.hasLfsObject(oid),
+      getObjectSize: (repo, oid) => storage.getLfsObjectSize(oid),
+      putObjectMeta: (repo, oid, size) => storage.putLfsObjectMeta(oid, size),
+      deleteObjectMeta: (repo, oid) => storage.deleteLfsObjectMeta(oid),
+      getR2: () => storage.getR2(),
+    });
   }
 
   async fetch(request: Request) {
@@ -986,5 +1010,26 @@ export class Server extends DurableObject<Env> {
     }
 
     return concatenateUint8Arrays(chunks);
+  }
+
+  async #lfsBatch(request: Request) {
+    request.signal?.throwIfAborted();
+    const repo = this.#urlPattern?.pathname.groups.repo!;
+    const baseUrl = new URL(request.url).origin;
+    return this.#lfs.batch(repo, request.body, baseUrl);
+  }
+
+  async #lfsUpload(request: Request) {
+    request.signal?.throwIfAborted();
+    const repo = this.#urlPattern?.pathname.groups.repo!;
+    const oid = this.#urlPattern?.pathname.groups.oid!;
+    return this.#lfs.upload(repo, oid, request.body);
+  }
+
+  async #lfsDownload(request: Request) {
+    request.signal?.throwIfAborted();
+    const repo = this.#urlPattern?.pathname.groups.repo!;
+    const oid = this.#urlPattern?.pathname.groups.oid!;
+    return this.#lfs.download(repo, oid);
   }
 }

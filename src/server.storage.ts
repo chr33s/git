@@ -70,6 +70,16 @@ export class CloudflareStorage implements GitStorage {
 
       CREATE INDEX IF NOT EXISTS idx_git_reflogs_ref
       ON git_reflogs(repository, ref_name, seq);
+
+      CREATE TABLE IF NOT EXISTS git_lfs_objects (
+        repository TEXT NOT NULL,
+        oid TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        PRIMARY KEY (repository, oid)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_git_lfs_objects_repo
+      ON git_lfs_objects(repository);
     `);
   }
 
@@ -582,5 +592,54 @@ export class CloudflareStorage implements GitStorage {
       repository,
       refName,
     );
+  }
+
+  // --- LFS storage methods ---
+
+  hasLfsObject(oid: string) {
+    const repository = this.#requireRepository();
+    const rows = this.#sql
+      .exec(
+        /* SQL */ `SELECT 1 FROM git_lfs_objects WHERE repository = ? AND oid = ? LIMIT 1`,
+        repository,
+        oid,
+      )
+      .toArray();
+    return rows.length > 0;
+  }
+
+  getLfsObjectSize(oid: string) {
+    const repository = this.#requireRepository();
+    const row = this.#sql
+      .exec(
+        /* SQL */ `SELECT size FROM git_lfs_objects WHERE repository = ? AND oid = ?`,
+        repository,
+        oid,
+      )
+      .toArray()[0] as { size: number } | undefined;
+    return row?.size ?? null;
+  }
+
+  putLfsObjectMeta(oid: string, size: number) {
+    const repository = this.#requireRepository();
+    this.#sql.exec(
+      /* SQL */ `INSERT OR REPLACE INTO git_lfs_objects (repository, oid, size) VALUES (?, ?, ?)`,
+      repository,
+      oid,
+      size,
+    );
+  }
+
+  deleteLfsObjectMeta(oid: string) {
+    const repository = this.#requireRepository();
+    this.#sql.exec(
+      /* SQL */ `DELETE FROM git_lfs_objects WHERE repository = ? AND oid = ?`,
+      repository,
+      oid,
+    );
+  }
+
+  getR2() {
+    return this.#r2;
   }
 }
