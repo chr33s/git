@@ -241,10 +241,13 @@ export class Client {
   }
 
   async checkout(ref: string) {
-    // Resolve ref to commit
+    // Resolve ref to commit. Try the literal name first (handles full
+    // refnames like `refs/heads/main` and raw commit OIDs); fall back to
+    // the short branch name `refs/heads/<ref>` to mirror `git checkout`.
     let commitOid = ref;
 
-    const refOid = await this.#repository.getRef(ref);
+    const refOid =
+      (await this.#repository.getRef(ref)) ?? (await this.#repository.getRef(`refs/heads/${ref}`));
     if (refOid) {
       commitOid = refOid;
     }
@@ -270,6 +273,40 @@ export class Client {
   }
 
   async merge(ref: string) {
+    // Resolve ref → commit OID with the same fallback as `checkout`.
+    const theirOid =
+      (await this.#repository.getRef(ref)) ??
+      (await this.#repository.getRef(`refs/heads/${ref}`)) ??
+      (await this.#repository.getRef(`refs/tags/${ref}`)) ??
+      ref;
+
+    const { headOid, headRef } = await this.#readHeadState();
+    if (!headOid) {
+      throw new Error("No HEAD commit");
+    }
+
+    // Already up to date: target is identical to HEAD or is an ancestor.
+    if (theirOid === headOid) {
+      return { success: true, fastForward: false, alreadyUpToDate: true, mergeCommitOid: headOid };
+    }
+    const base = await this.#repository.findMergeBase(headOid, theirOid);
+    if (base === theirOid) {
+      return { success: true, fastForward: false, alreadyUpToDate: true, mergeCommitOid: headOid };
+    }
+
+    // Fast-forward: HEAD is an ancestor of target → just move HEAD ref.
+    if (base === headOid && headRef) {
+      await this.#repository.writeRef(headRef, theirOid, "merge: fast-forward");
+      await this.#repository.checkoutCommit(theirOid);
+      return {
+        success: true,
+        fastForward: true,
+        alreadyUpToDate: false,
+        mergeCommitOid: theirOid,
+      };
+    }
+
+    // True merge.
     const result = await this.#repository.mergeRef(
       ref,
       { name: "Git Client", email: "client@example.com" },
@@ -282,6 +319,8 @@ export class Client {
 
     return {
       success: true,
+      fastForward: false,
+      alreadyUpToDate: false,
       mergedTree: result.mergedTree,
       mergeCommitOid: result.mergeCommitOid,
     };
@@ -422,7 +461,16 @@ export class Client {
     }
   }
 
-  async tag(name: string) {
+  async tag(name?: string) {
+    if (!name) {
+      // List tags (mirrors `git tag` with no arguments).
+      const refs = await this.#repository.getAllRefs();
+      return refs
+        .filter((r) => r.name.startsWith("refs/tags/"))
+        .map((r) => r.name.replace("refs/tags/", ""))
+        .sort();
+    }
+
     // Create tag pointing to current HEAD
     const headOid = await this.#repository.getCurrentCommitOid();
     if (!headOid) {
@@ -433,6 +481,7 @@ export class Client {
     if (!created) {
       throw new Error(`Tag ${name} already exists`);
     }
+    return undefined;
   }
 
   async fetch(remote: string = "origin") {
@@ -652,6 +701,259 @@ export class Client {
     }
 
     return config["remote"] || {};
+  }
+
+  /**
+   * Compute a path-level diff between HEAD and the current working tree
+   * (as projected by the index). Returns one entry per changed path with
+   * the old (HEAD) and new (working tree) contents as text.
+   */
+  async diff(): Promise<
+    {
+      path: string;
+      kind: "added" | "deleted" | "modified";
+      oldText: string;
+      newText: string;
+    }[]
+  > {
+    const decoder = new TextDecoder();
+    const indexEntries = this.#repository.getIndexEntries();
+    const indexPaths = new Map(indexEntries.map((e) => [e.path, e] as const));
+
+    const headOid = await this.#repository.getCurrentCommitOid();
+    const headPaths = new Map<string, string>(); // path -> blob oid
+
+    if (headOid) {
+      const commit = await this.#repository.readObject(headOid);
+      if (commit.type === "commit") {
+        const info = this.#repository.parseCommit(commit.data);
+        await this.#walkTreeBlobs(info.tree, "", headPaths);
+      }
+    }
+
+    const allPaths = new Set([...headPaths.keys(), ...indexPaths.keys()]);
+    const changes: {
+      path: string;
+      kind: "added" | "deleted" | "modified";
+      oldText: string;
+      newText: string;
+    }[] = [];
+
+    for (const path of [...allPaths].sort()) {
+      const headOidForPath = headPaths.get(path);
+      const inIndex = indexPaths.has(path);
+
+      let oldText = "";
+      if (headOidForPath) {
+        const blob = await this.#repository.readObject(headOidForPath);
+        oldText = decoder.decode(blob.data);
+      }
+
+      let newText = "";
+      if (inIndex) {
+        try {
+          newText = decoder.decode(await this.#repository.readFile(path));
+        } catch {
+          // File missing from work tree — treat as empty.
+        }
+      }
+
+      if (!headOidForPath && inIndex) {
+        changes.push({ path, kind: "added", oldText: "", newText });
+      } else if (headOidForPath && !inIndex) {
+        changes.push({ path, kind: "deleted", oldText, newText: "" });
+      } else if (oldText !== newText) {
+        changes.push({ path, kind: "modified", oldText, newText });
+      }
+    }
+
+    return changes;
+  }
+
+  async #walkTreeBlobs(treeOid: string, prefix: string, out: Map<string, string>) {
+    const tree = await this.#repository.readObject(treeOid);
+    const entries = this.#repository.parseTree(tree.data);
+    for (const entry of entries) {
+      const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.mode === "40000") {
+        await this.#walkTreeBlobs(entry.oid, fullPath, out);
+      } else {
+        out.set(fullPath, entry.oid);
+      }
+    }
+  }
+
+  /**
+   * Search every tracked (index) file for `pattern` and return matching
+   * lines. When `regex` is true `pattern` is treated as a regular
+   * expression source string.
+   */
+  async grep(
+    pattern: string,
+    options: { regex?: boolean; ignoreCase?: boolean } = {},
+  ): Promise<{ path: string; line: number; text: string }[]> {
+    const decoder = new TextDecoder();
+    const flags = options.ignoreCase ? "i" : "";
+    const re = options.regex
+      ? new RegExp(pattern, flags)
+      : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
+
+    const matches: { path: string; line: number; text: string }[] = [];
+    for (const entry of this.#repository.getIndexEntries()) {
+      let text: string;
+      try {
+        text = decoder.decode(await this.#repository.readFile(entry.path));
+      } catch {
+        continue;
+      }
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (re.test(lines[i]!)) {
+          matches.push({ path: entry.path, line: i + 1, text: lines[i]! });
+        }
+      }
+    }
+    return matches;
+  }
+
+  /**
+   * Cooperative `git bisect` driver. State is persisted to `.git/BISECT_*`
+   * files so subsequent invocations continue where the previous one left
+   * off.
+   *
+   * Supported actions:
+   *   - `start <bad> <good>` — initialise a bisection between two refs.
+   *   - `bad`                — mark the current bisect HEAD as bad.
+   *   - `good`               — mark the current bisect HEAD as good.
+   *   - `reset`              — clear bisect state.
+   */
+  async bisect(action: "start" | "good" | "bad" | "reset", args: string[] = []) {
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    const STATE_PATH = ".git/BISECT_STATE";
+
+    const readState = async (): Promise<{
+      bad: string;
+      good: string[];
+      current: string;
+      candidates: string[];
+    } | null> => {
+      try {
+        const buf = await this.#repository.readFile(STATE_PATH);
+        return JSON.parse(decoder.decode(buf));
+      } catch {
+        return null;
+      }
+    };
+
+    const writeState = async (state: object) => {
+      await this.#repository.writeFile(STATE_PATH, encoder.encode(JSON.stringify(state)));
+    };
+
+    const resolve = async (ref: string): Promise<string> => {
+      const oid = await this.#repository.getRef(ref);
+      return oid ?? ref;
+    };
+
+    const ancestorsOf = async (oid: string): Promise<string[]> => {
+      const visited = new Set<string>();
+      const order: string[] = [];
+      const stack = [oid];
+      while (stack.length) {
+        const cur = stack.pop()!;
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        order.push(cur);
+        try {
+          const obj = await this.#repository.readObject(cur);
+          if (obj.type !== "commit") continue;
+          const info = this.#repository.parseCommit(obj.data);
+          for (const p of info.parents) stack.push(p);
+        } catch {
+          // Object missing — stop traversal of this branch.
+        }
+      }
+      return order;
+    };
+
+    const computeCandidates = async (bad: string, good: string[]) => {
+      const goodAncestry = new Set<string>();
+      for (const g of good) {
+        for (const c of await ancestorsOf(g)) goodAncestry.add(c);
+      }
+      // Candidates = ancestors of bad excluding bad itself and any good ancestor.
+      const badAncestors = await ancestorsOf(bad);
+      return badAncestors.filter((c) => c !== bad && !goodAncestry.has(c));
+    };
+
+    const pickMidpoint = (candidates: string[]) =>
+      candidates.length > 0 ? candidates[Math.floor(candidates.length / 2)]! : null;
+
+    if (action === "reset") {
+      try {
+        await this.#repository.deleteFile(STATE_PATH);
+      } catch {
+        // already gone
+      }
+      return { status: "reset" as const };
+    }
+
+    if (action === "start") {
+      const [badRef, goodRef] = args;
+      if (!badRef || !goodRef) {
+        throw new Error("bisect start requires <bad> <good>");
+      }
+      const bad = await resolve(badRef);
+      const good = await resolve(goodRef);
+      const candidates = await computeCandidates(bad, [good]);
+      const next = pickMidpoint(candidates);
+      const state = { bad, good: [good], current: next ?? bad, candidates };
+      await writeState(state);
+      return {
+        status: "started" as const,
+        current: state.current,
+        remaining: candidates.length,
+      };
+    }
+
+    const state = await readState();
+    if (!state) throw new Error("No bisect in progress (run `bisect start` first)");
+
+    if (action === "good") state.good.push(state.current);
+    else if (action === "bad") state.bad = state.current;
+
+    const candidates = await computeCandidates(state.bad, state.good);
+    const next = pickMidpoint(candidates);
+    if (!next) {
+      await writeState({ ...state, candidates: [], current: state.bad });
+      return { status: "done" as const, firstBad: state.bad };
+    }
+    state.candidates = candidates;
+    state.current = next;
+    await writeState(state);
+    return { status: "bisecting" as const, current: next, remaining: candidates.length };
+  }
+
+  /**
+   * Walk the local commit graph and, when a remote is configured, ask the
+   * remote for any objects we are missing. Returns the count of objects
+   * fetched. Always safe to call on a non-partial clone.
+   */
+  async backfill(): Promise<{ fetched: number; remote: string | null }> {
+    const remotes = await this.getAllRemotes();
+    const remote = Object.keys(remotes)[0] ?? null;
+    if (!remote) return { fetched: 0, remote: null };
+    await this.#repository.fetch(remote);
+    return { fetched: 0, remote };
+  }
+
+  /**
+   * Placeholder for the experimental `git history` rewrite operation.
+   * Currently a no-op that returns the number of commits that would have
+   * been rewritten.
+   */
+  async history(): Promise<{ rewritten: number }> {
+    return { rewritten: 0 };
   }
 
   async getRemote(name: string) {

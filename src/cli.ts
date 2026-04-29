@@ -885,6 +885,102 @@ export class Cli {
       },
     },
     {
+      command: "bisect",
+      description: "Use binary search to find the commit that introduced a bug",
+      handler: (...args) => this.#bisect(...args),
+      options: {
+        term: {
+          description: "Custom term for good/bad",
+          type: "string",
+        },
+      },
+    },
+    {
+      command: "diff",
+      description: "Show changes between commits, commit and working tree, etc",
+      handler: (...args) => this.#diff(...args),
+      options: {
+        cached: {
+          description: "Show staged changes",
+          type: "boolean",
+        },
+        staged: {
+          description: "Alias for --cached",
+          type: "boolean",
+        },
+        "name-only": {
+          description: "Show only names of changed files",
+          type: "boolean",
+        },
+        "name-status": {
+          description: "Show name and status of changed files",
+          type: "boolean",
+        },
+        stat: {
+          description: "Show diffstat",
+          type: "boolean",
+        },
+      },
+    },
+    {
+      command: "grep",
+      description: "Print lines matching a pattern",
+      handler: (...args) => this.#grep(...args),
+      options: {
+        "ignore-case": {
+          description: "Case-insensitive match",
+          short: "i",
+          type: "boolean",
+        },
+        "extended-regexp": {
+          description: "Treat pattern as POSIX ERE",
+          short: "E",
+          type: "boolean",
+        },
+        "fixed-strings": {
+          description: "Treat pattern as a literal string",
+          short: "F",
+          type: "boolean",
+        },
+        "line-number": {
+          description: "Prefix matches with line number",
+          short: "n",
+          type: "boolean",
+        },
+        "files-with-matches": {
+          description: "Only print filenames containing matches",
+          short: "l",
+          type: "boolean",
+        },
+      },
+    },
+    {
+      command: "backfill",
+      description: "Download missing objects in a partial clone",
+      handler: (...args) => this.#backfill(...args),
+      options: {
+        "min-batch-size": {
+          description: "Minimum objects per batch",
+          type: "string",
+        },
+        sparse: {
+          description: "Restrict to sparse-checkout cone",
+          type: "boolean",
+        },
+      },
+    },
+    {
+      command: "history",
+      description: "EXPERIMENTAL: Rewrite history",
+      handler: (...args) => this.#history(...args),
+      options: {
+        "dry-run": {
+          description: "Show what would be rewritten",
+          type: "boolean",
+        },
+      },
+    },
+    {
       command: "fetch", // [-r remote]
       description: "Download objects and refs from remote",
       handler: (...args) => this.#fetch(...args),
@@ -1162,6 +1258,13 @@ export class Cli {
     const command = this.commands.find((cmd) => cmd.command === positionals[0]);
     if (command) {
       if (values.help) return this.#help(command);
+      // Re-hydrate client state from disk for any subcommand other than
+      // `init`/`clone`. Each CLI invocation is a fresh process, so the
+      // in-memory index/refs need to be reloaded. `client.init()` is
+      // idempotent: it preserves any existing HEAD/refs/index.
+      if (command.command !== "init" && command.command !== "clone") {
+        await this.#client.init();
+      }
       try {
         return await command.handler(args.slice(1), command.options);
       } catch (error) {
@@ -1344,8 +1447,28 @@ export class Cli {
     this.#write("out", `restored '${positionals[0]}'`);
   }
 
-  async #rm(_args: string[], _options: CommandOptions) {
-    this.#write("out", "Not Implemented");
+  async #rm(args: string[], options: CommandOptions) {
+    const { positionals, values } = parseArgs({
+      allowPositionals: true,
+      args,
+      options,
+    });
+
+    if (positionals.length === 0) {
+      this.#write("err", "Error: pathspec required");
+      process.exit(1);
+    }
+
+    await this.#client.rm(positionals, {
+      cached: Boolean(values.cached),
+      recursive: Boolean(values.r ?? values.recursive),
+    });
+
+    if (!values.quiet) {
+      for (const path of positionals) {
+        this.#write("out", `rm '${path}'`);
+      }
+    }
   }
 
   async #commit(args: string[], options: CommandOptions) {
@@ -1450,7 +1573,13 @@ export class Cli {
     }
 
     const result = await this.#client.merge(branch);
-    this.#write("out", `Merged ${branch} (commit ${result.mergeCommitOid?.slice(0, 7)})`);
+    if (result.alreadyUpToDate) {
+      this.#write("out", "Already up to date.");
+    } else if (result.fastForward) {
+      this.#write("out", `Fast-forward to ${result.mergeCommitOid?.slice(0, 7)}`);
+    } else {
+      this.#write("out", `Merged ${branch} (commit ${result.mergeCommitOid?.slice(0, 7)})`);
+    }
   }
 
   async #rebase(args: string[], options: CommandOptions) {
@@ -1485,20 +1614,163 @@ export class Cli {
   }
 
   async #tag(args: string[], options: CommandOptions) {
-    const { positionals } = parseArgs({
+    const { positionals, values } = parseArgs({
       allowPositionals: true,
       args,
       options,
     });
 
     const tagName = positionals[0];
-    if (!tagName) {
-      this.#write("err", "Error: tag name required");
-      process.exit(1);
+    if (!tagName || values.list) {
+      // `git tag` with no name (or `-l`) lists tags.
+      const tags = (await this.#client.tag()) ?? [];
+      for (const t of tags) {
+        this.#write("out", t);
+      }
+      return;
     }
 
     await this.#client.tag(tagName);
     this.#write("out", `Created tag ${tagName}`);
+  }
+
+  async #bisect(args: string[], options: CommandOptions) {
+    const { positionals } = parseArgs({
+      allowPositionals: true,
+      args,
+      options,
+    });
+
+    const sub = positionals[0];
+    if (!sub) {
+      this.#write("err", "Error: bisect subcommand required (start|good|bad|reset)");
+      process.exit(1);
+    }
+
+    if (sub !== "start" && sub !== "good" && sub !== "bad" && sub !== "reset") {
+      this.#write("err", `Error: unknown bisect subcommand '${sub}'`);
+      process.exit(1);
+    }
+
+    const result = await this.#client.bisect(sub, positionals.slice(1));
+    if (result.status === "started") {
+      this.#write(
+        "out",
+        `Bisecting: ${result.remaining} revisions left to test (roughly ${Math.ceil(Math.log2(result.remaining + 1))} steps)`,
+      );
+      this.#write("out", `[${result.current}] checked out`);
+    } else if (result.status === "bisecting") {
+      this.#write(
+        "out",
+        `Bisecting: ${result.remaining} revisions left to test (roughly ${Math.ceil(Math.log2(result.remaining + 1))} steps)`,
+      );
+      this.#write("out", `[${result.current}] checked out`);
+    } else if (result.status === "done") {
+      this.#write("out", `${result.firstBad} is the first bad commit`);
+    } else if (result.status === "reset") {
+      this.#write("out", "Bisect state cleared");
+    }
+  }
+
+  async #diff(args: string[], options: CommandOptions) {
+    const { values } = parseArgs({
+      allowPositionals: true,
+      args,
+      options,
+    });
+
+    const changes = await this.#client.diff();
+
+    if (changes.length === 0) return;
+
+    if (values["name-only"]) {
+      for (const c of changes) this.#write("out", c.path);
+      return;
+    }
+    if (values["name-status"]) {
+      for (const c of changes) {
+        const code = c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : "M";
+        this.#write("out", `${code}\t${c.path}`);
+      }
+      return;
+    }
+    if (values.stat) {
+      for (const c of changes) {
+        const oldLines = c.oldText ? c.oldText.split("\n").length : 0;
+        const newLines = c.newText ? c.newText.split("\n").length : 0;
+        const ins = Math.max(0, newLines - oldLines);
+        const del = Math.max(0, oldLines - newLines);
+        this.#write("out", ` ${c.path} | ${ins + del} ${"+".repeat(ins)}${"-".repeat(del)}`);
+      }
+      return;
+    }
+
+    for (const c of changes) {
+      this.#write("out", `diff --git a/${c.path} b/${c.path}`);
+      if (c.kind === "added") this.#write("out", "new file");
+      else if (c.kind === "deleted") this.#write("out", "deleted file");
+      this.#write("out", `--- a/${c.path}`);
+      this.#write("out", `+++ b/${c.path}`);
+      const oldLines = c.oldText.length > 0 ? c.oldText.split("\n") : [];
+      const newLines = c.newText.length > 0 ? c.newText.split("\n") : [];
+      this.#write("out", `@@ -1,${oldLines.length} +1,${newLines.length} @@`);
+      for (const l of oldLines) this.#write("out", `-${l}`);
+      for (const l of newLines) this.#write("out", `+${l}`);
+    }
+  }
+
+  async #grep(args: string[], options: CommandOptions) {
+    const { positionals, values } = parseArgs({
+      allowPositionals: true,
+      args,
+      options,
+    });
+
+    const pattern = positionals[0];
+    if (!pattern) {
+      this.#write("err", "Error: pattern required");
+      process.exit(1);
+    }
+
+    const matches = await this.#client.grep(pattern, {
+      regex: Boolean(values["extended-regexp"]) && !values["fixed-strings"],
+      ignoreCase: Boolean(values["ignore-case"]),
+    });
+
+    if (values["files-with-matches"]) {
+      const seen = new Set<string>();
+      for (const m of matches) {
+        if (seen.has(m.path)) continue;
+        seen.add(m.path);
+        this.#write("out", m.path);
+      }
+      return;
+    }
+
+    for (const m of matches) {
+      const prefix = values["line-number"] ? `${m.path}:${m.line}:` : `${m.path}:`;
+      this.#write("out", `${prefix}${m.text}`);
+    }
+  }
+
+  async #backfill(args: string[], options: CommandOptions) {
+    parseArgs({ allowPositionals: true, args, options });
+    const result = await this.#client.backfill();
+    if (!result.remote) {
+      this.#write("out", "Nothing to backfill (no remote configured)");
+      return;
+    }
+    this.#write("out", `Backfilled ${result.fetched} objects from ${result.remote}`);
+  }
+
+  async #history(args: string[], options: CommandOptions) {
+    const { values } = parseArgs({ allowPositionals: true, args, options });
+    const result = await this.#client.history();
+    const prefix = values["dry-run"] ? "[dry-run] " : "";
+    this.#write(
+      "out",
+      `${prefix}history: ${result.rewritten} commits rewritten (experimental, no-op)`,
+    );
   }
 
   async #fetch(args: string[], options: CommandOptions) {
@@ -1551,6 +1823,25 @@ export class Cli {
       args,
       options,
     });
+
+    // Map real-git positional sub-actions (`remote add NAME URL`,
+    // `remote remove NAME`, `remote rm NAME`, `remote set-url NAME URL`,
+    // `remote get-url NAME`, `remote show [NAME]`) onto our flag-based
+    // dispatch.
+    const sub = positionals[0];
+    const flagFromSub: Record<string, keyof typeof values> = {
+      add: "add",
+      remove: "delete",
+      rm: "delete",
+      "set-url": "set-url",
+      "get-url": "get-url",
+      show: "show",
+    };
+    if (sub && sub in flagFromSub) {
+      const flag = flagFromSub[sub];
+      if (flag) values[flag] = true;
+      positionals.shift();
+    }
 
     if (values.add) {
       const name = positionals[0];
