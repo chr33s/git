@@ -799,6 +799,8 @@ export class ServerApi {
     const refOid = await this.#repository.getRef(ref);
     if (refOid) {
       commitOid = refOid;
+    } else if (!/^[0-9a-f]{40}$/.test(commitOid)) {
+      return Response.json({ error: `Ref '${ref}' not found` }, { status: 404 });
     }
 
     const commit = await this.#repository.readObject(commitOid);
