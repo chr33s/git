@@ -81,7 +81,7 @@ const batch = (request: Request): Effect.Effect<Response, never, LfsStore> =>
     const store = yield* LfsStore;
 
     const parsed = yield* Effect.tryPromise(() => request.json() as Promise<BatchRequest>).pipe(
-      Effect.catch(() => Effect.succeed(null)),
+      Effect.orElseSucceed((): BatchRequest | null => null),
     );
     if (parsed === null) return failure(400, "malformed batch request");
 
@@ -152,7 +152,7 @@ const download = (oid: string): Effect.Effect<Response, never, LfsStore> =>
             },
           }),
       ),
-      Effect.catch(() => Effect.succeed(failure(404, "object not found"))),
+      Effect.orElseSucceed(() => failure(404, "object not found")),
     );
   });
 
@@ -172,10 +172,10 @@ const upload = (request: Request, oid: string): Effect.Effect<Response, never, L
 
     return yield* store.write(oid, bytes).pipe(
       Effect.map(() => new Response(null, { status: 200 })),
-      Effect.catchTag("Invalid", (error) => Effect.succeed(failure(422, error.reason))),
-      Effect.catchTag("StorageFailure", () =>
-        Effect.succeed(failure(500, "could not store object")),
-      ),
+      Effect.catchTags({
+        Invalid: (error) => Effect.succeed(failure(422, error.reason)),
+        StorageFailure: () => Effect.succeed(failure(500, "could not store object")),
+      }),
     );
   });
 

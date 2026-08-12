@@ -65,9 +65,14 @@ export class GitRepo extends DurableObject<TestEnv> {
       Layer.provide(
         Webhooks.hooksFetch({
           background: (effect) =>
-            Effect.sync(() => {
-              this.ctx.waitUntil(Effect.runPromise(Effect.ignore(effect)));
-            }),
+            // `runPromiseWith` rather than `runPromise`: the delivery is
+            // detached from this fiber, not from its services, and a fresh
+            // runtime would drop the ones it was handed.
+            Effect.context<never>().pipe(
+              Effect.map((context) => {
+                this.ctx.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
+              }),
+            ),
         }).pipe(Layer.provide(this.#registry(repo))),
       ),
       Layer.provide(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),

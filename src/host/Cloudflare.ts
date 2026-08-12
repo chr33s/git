@@ -78,9 +78,14 @@ export default Repo.make(
           Layer.provide(
             Webhooks.hooksFetch({
               background: (effect) =>
-                Effect.sync(() => {
-                  state.raw.waitUntil(Effect.runPromise(Effect.ignore(effect)));
-                }),
+                // `runPromiseWith` rather than `runPromise`: the delivery is
+                // detached from this fiber, not from its services, and a
+                // fresh runtime would drop the ones it was handed.
+                Effect.context<never>().pipe(
+                  Effect.map((context) => {
+                    state.raw.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
+                  }),
+                ),
             }).pipe(Layer.provide(subscribers(repo))),
           ),
           Layer.provide(stores({ bucket: r2, repo, storage: state.raw.storage })),
