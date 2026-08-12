@@ -654,51 +654,105 @@ export const layer = Layer.effect(
     });
 
     /**
-     * One walk per want, each stopping the moment it reaches a common
-     * commit. Wants share the budget but not the visited set: a shared set
-     * would let one want's early exit hide the path another want needed, and
-     * a wrong `false` here is only slower, never wrong — so the sets are
-     * kept independent and the budget is what bounds the cost.
+     * Two phases under one budget, both reading commit frontiers with
+     * bounded concurrency rather than one storage round-trip per commit.
+     *
+     * Phase one walks each want down to the confirmed common set — wants
+     * share the budget but not the visited set, since a shared set would
+     * let one want's early exit hide the path another want needed. A want
+     * that forked *below* a common commit never meets the set itself, so
+     * phase two expands `covered` down the common commits' own history —
+     * an ancestor of common is reachable from the client's haves, so
+     * bottoming out there covers the want just as well (git propagates its
+     * COMMON flag the same way) — and retries only the wants phase one
+     * missed. Budget exhaustion anywhere answers false, which costs
+     * another round or a larger pack, never a wrong one.
      */
     const canServe = Effect.fn("Repository.canServe")(function* (
       wants: ReadonlyArray<Oid>,
       common: ReadonlyArray<Oid>,
     ) {
       if (common.length === 0) return false;
-      const commonSet = new Set(common);
+      const covered = new Set<Oid>(common);
       let budget = 4096;
 
-      for (const want of wants) {
-        let found = false;
-        const seen = new Set<Oid>();
-        const stack = [want];
-        while (stack.length > 0) {
-          const oid = stack.pop()!;
-          if (seen.has(oid)) continue;
-          seen.add(oid);
-          if (commonSet.has(oid)) {
-            found = true;
-            break;
+      /** One frontier of tolerant reads, `null` where no commit was found. */
+      const commitsOf = (frontier: ReadonlyArray<Oid>) =>
+        Effect.forEach(
+          frontier,
+          (oid) =>
+            readCommit(oid).pipe(
+              Effect.map((value): CommitInfo | null => value),
+              Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+              Effect.map((commit) => [oid, commit] as const),
+            ),
+          { concurrency: 16 },
+        );
+
+      const reaches = (want: Oid) =>
+        Effect.gen(function* () {
+          const seen = new Set<Oid>();
+          let frontier: Oid[] = [want];
+          while (frontier.length > 0) {
+            const layer: Oid[] = [];
+            for (const oid of frontier) {
+              if (seen.has(oid)) continue;
+              seen.add(oid);
+              if (covered.has(oid)) return true;
+              layer.push(oid);
+            }
+            budget -= layer.length;
+            if (budget < 0) return false;
+
+            const next: Oid[] = [];
+            for (const [oid, commit] of yield* commitsOf(layer)) {
+              if (commit !== null) {
+                next.push(...commit.parents);
+                continue;
+              }
+              // Not a commit: an annotated tag peels to its target.
+              // Anything else has no history to reach common through, and
+              // a dead end only delays `ready` — the safe direction.
+              const tag = yield* readTyped(oid, "tag", parseTag).pipe(
+                Effect.map((value): TagInfo | null => value),
+                Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+              );
+              if (tag !== null) next.push(tag.object);
+            }
+            frontier = next;
           }
-          if (budget-- <= 0) return false;
-          const commit = yield* readCommit(oid).pipe(
-            Effect.map((value): CommitInfo | null => value),
-            Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
-          );
-          if (commit !== null) {
-            stack.push(...commit.parents);
-            continue;
+          return false;
+        });
+
+      const expandCovered = Effect.gen(function* () {
+        let frontier: Oid[] = [...common];
+        while (frontier.length > 0) {
+          budget -= frontier.length;
+          if (budget < 0) return;
+          const next: Oid[] = [];
+          for (const [, commit] of yield* commitsOf(frontier)) {
+            if (commit === null) continue;
+            for (const parent of commit.parents) {
+              if (covered.has(parent)) continue;
+              covered.add(parent);
+              next.push(parent);
+            }
           }
-          // Not a commit: an annotated tag peels to its target. Anything
-          // else has no history to reach common through, and leaving `found`
-          // false only delays `ready`, which is the safe direction.
-          const tag = yield* readTyped(oid, "tag", parseTag).pipe(
-            Effect.map((value): TagInfo | null => value),
-            Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
-          );
-          if (tag !== null) stack.push(tag.object);
+          frontier = next;
         }
-        if (!found) return false;
+      });
+
+      const missed: Oid[] = [];
+      for (const want of wants) {
+        if (!(yield* reaches(want))) missed.push(want);
+      }
+      if (missed.length === 0) return true;
+      if (budget <= 0) return false;
+
+      yield* expandCovered;
+      for (const want of missed) {
+        if (budget <= 0) return false;
+        if (!(yield* reaches(want))) return false;
       }
       return true;
     });

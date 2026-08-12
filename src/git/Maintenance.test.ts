@@ -19,7 +19,7 @@ import { stores } from "./Memory.ts";
 import * as Pack from "./Pack.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
-import { ObjectStore, type Oid } from "./Store.ts";
+import { ObjectStore, type Oid, RefStore } from "./Store.ts";
 
 const encoder = new TextEncoder();
 
@@ -30,7 +30,7 @@ const alice: Signature = {
   offset: 0,
 };
 
-const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =>
+const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore | RefStore>) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(
@@ -44,10 +44,11 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =
 
 /**
  * Three commits, each rewriting `story.txt` and twelve filler files — more
- * fillers than the delta window holds, so in walk order the story versions
- * can never see each other. Sizes are deliberately out of commit order:
- * middle version largest, so "largest first" is distinguishable from
- * "oldest first".
+ * fillers than the delta window holds, and each filler large enough to be
+ * admitted to it (tiny objects are kept out as bases), so in walk order the
+ * story versions can never see each other. Sizes are deliberately out of
+ * commit order: middle version largest, so "largest first" is
+ * distinguishable from "oldest first".
  */
 const history = Effect.gen(function* () {
   const repository = yield* Repository;
@@ -64,7 +65,7 @@ const history = Effect.gen(function* () {
         { path: "story.txt", content: encoder.encode(story) },
         ...Array.from({ length: 12 }, (_, filler) => ({
           path: `filler-${String(filler).padStart(2, "0")}.txt`,
-          content: encoder.encode(`filler ${filler} at commit ${index}\n`),
+          content: encoder.encode(`filler ${filler} at commit ${index} `.padEnd(120, "x")),
         })),
       ],
     });
@@ -75,18 +76,17 @@ const history = Effect.gen(function* () {
 
   const head = (yield* repository.resolve("refs/heads/main"))!;
   const objects = yield* ObjectStore;
-  const walk = (yield* reachable(objects, [head], { ignoreMissing: false })).order.filter(
-    (oid) => oid !== EMPTY_TREE_OID,
-  );
-  return { objects, storyOids, walk };
+  const walked = yield* reachable(objects, [head], { ignoreMissing: false, classify: true });
+  const walk = walked.order.filter((oid) => oid !== EMPTY_TREE_OID);
+  return { objects, storyOids, walk, classified: walked.classified };
 });
 
 describe("Maintenance.deltaOrder", () => {
   it("groups same-named objects adjacently, largest first, types apart", async () => {
     const { ordered, storyOids, types } = await scenario(
       Effect.gen(function* () {
-        const { objects, storyOids, walk } = yield* history;
-        const ordered = yield* deltaOrder(objects, walk);
+        const { classified, objects, storyOids } = yield* history;
+        const ordered = deltaOrder(classified);
         const types: string[] = [];
         for (const oid of ordered) types.push((yield* objects.read(oid)).type);
         return { ordered, storyOids, types };
@@ -111,8 +111,8 @@ describe("Maintenance.deltaOrder", () => {
   it("is worth real bytes against the same writer fed walk order", async () => {
     const { orderedSize, walkSize } = await scenario(
       Effect.gen(function* () {
-        const { objects, walk } = yield* history;
-        const ordered = yield* deltaOrder(objects, walk);
+        const { classified, objects, walk } = yield* history;
+        const ordered = deltaOrder(classified);
         const packed = (oids: ReadonlyArray<Oid>) =>
           Stream.runCollect(
             Pack.pack(oids, { deltify: {} }).pipe(Stream.provideService(ObjectStore, objects)),
@@ -127,6 +127,37 @@ describe("Maintenance.deltaOrder", () => {
     assert.ok(
       orderedSize < walkSize,
       `ordered pack (${orderedSize}) should undercut walk order (${walkSize})`,
+    );
+  });
+});
+
+describe("Maintenance.gc with repack", () => {
+  it("tolerates a dangling ref: everything readable is packed, nothing fails", async () => {
+    const { packed, refs } = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const refStore = yield* RefStore;
+        yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "real",
+          author: alice,
+        });
+        // The exact case gc's tolerance comment promises to survive: a ref
+        // whose target no store holds. The walk records the oid as seen but
+        // never classifies it, so repack must neither pack nor trip on it.
+        const fake = "a".repeat(40) as Oid;
+        yield* refStore.apply([{ name: "refs/heads/dangling", value: fake, reason: "test" }]);
+        const report = yield* repository.gc({ repack: true });
+        return { packed: report.packed, refs: yield* repository.fsck };
+      }),
+    );
+
+    assert.notEqual(packed, undefined);
+    assert.equal(packed!.objects, 1);
+    assert.deepEqual(
+      refs.danglingRefs.map((entry) => entry.ref),
+      ["refs/heads/dangling"],
     );
   });
 });

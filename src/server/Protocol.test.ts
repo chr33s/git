@@ -11,6 +11,7 @@ import { Effect, Layer } from "effect";
 
 import { stores } from "../git/Memory.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
+import { DELIM, FLUSH, pkt } from "../git/Pkt.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -50,7 +51,16 @@ const history = Effect.gen(function* () {
   return { a, b, c, side };
 });
 
-const pktLine = (line: string) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
+/** Request bodies framed by the same `pkt` the server and client use. */
+const body = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayBuffer> => {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out as Uint8Array<ArrayBuffer>;
+};
 
 const v0Request = (input: {
   readonly wants: ReadonlyArray<Oid>;
@@ -60,31 +70,33 @@ const v0Request = (input: {
 }): Request =>
   new Request("http://host/repo/git-upload-pack", {
     method: "POST",
-    body: [
+    body: body([
       ...input.wants.map((oid, index) =>
-        pktLine(
+        pkt(
           `want ${oid}${index === 0 && input.capabilities !== undefined ? ` ${input.capabilities}` : ""}\n`,
         ),
       ),
-      "0000",
-      ...(input.haves ?? []).map((oid) => pktLine(`have ${oid}\n`)),
-      input.done === true ? pktLine("done\n") : "0000",
-    ].join(""),
+      FLUSH,
+      ...(input.haves ?? []).map((oid) => pkt(`have ${oid}\n`)),
+      input.done === true ? pkt("done\n") : FLUSH,
+    ]),
   });
 
 const v2Request = (args: ReadonlyArray<string>): Request =>
   new Request("http://host/repo/git-upload-pack", {
     method: "POST",
     headers: { "git-protocol": "version=2" },
-    body: [
-      pktLine("command=fetch"),
-      "0001",
-      ...args.map((arg) => pktLine(`${arg}\n`)),
-      "0000",
-    ].join(""),
+    body: body([pkt("command=fetch"), DELIM, ...args.map((arg) => pkt(`${arg}\n`)), FLUSH]),
   });
 
-/** The response's pkt-lines up to where a packfile (or the body) ends. */
+/**
+ * The response's pkt-lines up to where a packfile (or the body) ends.
+ *
+ * Hand-parsed for the same reason `client/Fetch.ts`'s prelude is:
+ * `PktReader` treats a header it cannot parse as corruption, and by the
+ * time it says so the four bytes are gone — here those four bytes are the
+ * pack's own magic, which is exactly what the assertions need to see.
+ */
 const linesOf = (bytes: Uint8Array): { lines: string[]; sawPack: boolean } => {
   const lines: string[] = [];
   let at = 0;

@@ -147,14 +147,14 @@ const negotiation = (input: {
   readonly done: boolean;
   readonly depth?: number | undefined;
   /** Requested on the first `want`, space-separated after the oid. */
-  readonly capabilities?: ReadonlyArray<string> | undefined;
+  readonly capabilities: ReadonlyArray<string>;
 }): Uint8Array<ArrayBuffer> =>
   encoder.encode(
     [
       ...input.wants.map((oid, index) =>
         pktLine(
           `want ${oid}${
-            index === 0 ? (input.capabilities ?? []).map((name) => ` ${name}`).join("") : ""
+            index === 0 ? input.capabilities.map((name) => ` ${name}`).join("") : ""
           }\n`,
         ),
       ),
@@ -383,12 +383,15 @@ export const requestPack = (input: {
       const response = await uploadPack(
         input.url,
         input.token,
+        // The one place `undefined` becomes "request nothing": callers like
+        // `server/Sync.ts` fetch in a single done round and never negotiate
+        // capabilities at all.
         negotiation({
           wants: input.wants,
           haves: input.haves,
           done: true,
           depth: input.depth,
-          capabilities: input.capabilities,
+          capabilities: input.capabilities ?? [],
         }),
       );
       const { rest } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);

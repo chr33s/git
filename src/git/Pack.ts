@@ -291,7 +291,7 @@ const MAX_COPY = 0x10000;
 const MAX_INSERT = 127;
 
 /** The little-endian 7-bit varint `applyDelta` reads sizes with. */
-const sizeVarint = (value: number): number[] => {
+export const sizeVarint = (value: number): number[] => {
   const bytes: number[] = [];
   let rest = value;
   for (;;) {
@@ -316,23 +316,13 @@ const blockHash = (bytes: Uint8Array, at: number): number => {
 };
 
 /**
- * Produce a delta whose application to `base` yields `target` — the inverse
- * of `applyDelta`, in the same copy/insert vocabulary — or `null` when the
- * result is not worth a chain link: a delta that saves less than a tenth of
- * the target costs a base read at every future access of the object and
- * buys almost nothing back.
- *
- * The search is greedy: the base is indexed in 16-byte blocks, the target
- * scanned front to back, and the longest block-anchored match at each point
- * becomes a copy. Bytes no block matches accumulate into inserts. This is
- * the shape of git's own delta search, without its heuristics for sliding
- * the anchor — simplicity over the last few percent.
+ * The block index `createDelta` searches. Computed once per base and reused
+ * across every target that tries it — a window slot outlives roughly a
+ * window's worth of targets, and indexing is the O(base) half of the search.
  */
-export const createDelta = (base: Uint8Array, target: Uint8Array): Uint8Array | null => {
-  if (base.length === 0 || target.length < DELTA_BLOCK) return null;
+export type DeltaIndex = ReadonlyMap<number, ReadonlyArray<number>>;
 
-  const budget = Math.floor(target.length * 0.9);
-
+export const indexBase = (base: Uint8Array): DeltaIndex => {
   const index = new Map<number, number[]>();
   for (let at = 0; at + DELTA_BLOCK <= base.length; at += DELTA_BLOCK) {
     const key = blockHash(base, at);
@@ -343,8 +333,44 @@ export const createDelta = (base: Uint8Array, target: Uint8Array): Uint8Array | 
     // good as all of them.
     else if (slot.length < 64) slot.push(at);
   }
+  return index;
+};
 
-  const out: number[] = [...sizeVarint(base.length), ...sizeVarint(target.length)];
+/**
+ * Produce a delta whose application to `base` yields `target` — the inverse
+ * of `applyDelta`, in the same copy/insert vocabulary — or `null` when the
+ * result is not worth having: a delta that saves less than a tenth of the
+ * target costs a base read at every future access of the object and buys
+ * almost nothing back, and `options.limit` lets a caller holding a better
+ * candidate cap the size tighter still, so a losing search aborts early.
+ *
+ * The search is greedy: the base's 16-byte block index (`options.index`, or
+ * computed here) is probed at each target position, and the longest
+ * block-anchored match becomes a copy. Bytes no block matches accumulate
+ * into inserts, written into a buffer pre-sized to the budget — exceeding
+ * it is the bail-out, not a resize. This is the shape of git's own delta
+ * search, without its heuristics for sliding the anchor — simplicity over
+ * the last few percent.
+ */
+export const createDelta = (
+  base: Uint8Array,
+  target: Uint8Array,
+  options?: { readonly index?: DeltaIndex; readonly limit?: number },
+): Uint8Array | null => {
+  if (base.length === 0 || target.length < DELTA_BLOCK) return null;
+
+  const budget = Math.min(
+    Math.floor(target.length * 0.9),
+    options?.limit ?? Number.MAX_SAFE_INTEGER,
+  );
+  const header = [...sizeVarint(base.length), ...sizeVarint(target.length)];
+  if (header.length >= budget) return null;
+
+  const index = options?.index ?? indexBase(base);
+
+  const out = new Uint8Array(budget);
+  out.set(header, 0);
+  let written = header.length;
   let pendingStart = 0;
   let position = 0;
 
@@ -352,16 +378,17 @@ export const createDelta = (base: Uint8Array, target: Uint8Array): Uint8Array | 
     let from = pendingStart;
     while (from < upTo) {
       const length = Math.min(MAX_INSERT, upTo - from);
-      out.push(length);
-      for (let index = 0; index < length; index++) out.push(target[from + index]!);
+      if (written + 1 + length > budget) return false;
+      out[written++] = length;
+      out.set(target.subarray(from, from + length), written);
+      written += length;
       from += length;
-      if (out.length > budget) return false;
     }
     pendingStart = upTo;
     return true;
   };
 
-  const emitCopy = (offset: number, size: number): void => {
+  const emitCopy = (offset: number, size: number): boolean => {
     let command = 0x80;
     const operands: number[] = [];
     for (let bit = 0; bit < 4; bit++) {
@@ -381,7 +408,10 @@ export const createDelta = (base: Uint8Array, target: Uint8Array): Uint8Array | 
         operands.push(byte);
       }
     }
-    out.push(command, ...operands);
+    if (written + 1 + operands.length > budget) return false;
+    out[written++] = command;
+    for (const byte of operands) out[written++] = byte;
+    return true;
   };
 
   while (position < target.length) {
@@ -412,17 +442,16 @@ export const createDelta = (base: Uint8Array, target: Uint8Array): Uint8Array | 
     let remaining = bestLength;
     while (remaining > 0) {
       const size = Math.min(MAX_COPY, remaining);
-      emitCopy(offset, size);
+      if (!emitCopy(offset, size)) return null;
       offset += size;
       remaining -= size;
     }
     position += bestLength;
     pendingStart = position;
-    if (out.length > budget) return null;
   }
 
   if (!flushInsert(target.length)) return null;
-  return out.length > budget ? null : Uint8Array.from(out);
+  return out.slice(0, written);
 };
 
 /**
@@ -553,7 +582,7 @@ export interface PackOptions {
 }
 
 /** The reverse of `objectHeader`'s ofs-delta distance read. */
-const encodeOfsDistance = (distance: number): Uint8Array => {
+export const encodeOfsDistance = (distance: number): Uint8Array => {
   const bytes = [distance % 128];
   let rest = Math.floor(distance / 128) - 1;
   while (rest >= 0) {
@@ -599,14 +628,18 @@ export const pack = (
       const maxDepth = deltify?.maxDepth ?? 50;
 
       /**
-       * The window: recent objects kept raw, with the offset a delta
-       * against them will name and the chain depth one would inherit.
-       * Bases must already be in the pack — an ofs-delta points backwards —
-       * so candidacy and emission order agree by construction.
+       * The window: recent objects kept raw with their block index built
+       * once on admission, the offset a delta against them will name, and
+       * the chain depth one would inherit. Bases must already be in the
+       * pack — an ofs-delta points backwards — so candidacy and emission
+       * order agree by construction. Objects too small to ever be a delta
+       * target are also kept out as bases: they would only evict candidates
+       * that can actually win.
        */
       interface Candidate {
         readonly type: ObjectType;
         readonly data: Uint8Array;
+        readonly index: DeltaIndex;
         readonly offset: number;
         readonly depth: number;
       }
@@ -621,13 +654,24 @@ export const pack = (
           object.data.length <= maxSize
         ) {
           let best: { readonly delta: Uint8Array; readonly base: Candidate } | null = null;
-          for (const base of window) {
+          // Newest first, and each candidate is capped by the best delta
+          // found so far: a later candidate that cannot beat it aborts its
+          // scan early instead of completing a delta only to be discarded.
+          // The half-of-target cap is the acceptance rule — a delta that
+          // wins by less keeps a base resolution on every future read for
+          // very little saved.
+          for (let at = window.length - 1; at >= 0; at--) {
+            const base = window[at]!;
             if (base.type !== object.type || base.depth >= maxDepth) continue;
-            const delta = createDelta(base.data, object.data);
-            // Wins by at least half, else the full spelling keeps reads
-            // free of a base resolution for very little saved.
-            if (delta === null || delta.length * 2 > object.data.length) continue;
-            if (best === null || delta.length < best.delta.length) best = { delta, base };
+            const delta = createDelta(base.data, object.data, {
+              index: base.index,
+              limit: Math.min(
+                Math.floor(object.data.length / 2),
+                (best?.delta.length ?? Number.MAX_SAFE_INTEGER) - 1,
+              ),
+            });
+            if (delta === null) continue;
+            best = { delta, base };
           }
           if (best !== null) {
             return {
@@ -656,8 +700,18 @@ export const pack = (
               Effect.promise(async () => {
                 const { bytes, depth } = await spell(object);
                 options?.onObject?.({ oid, offset, crc32: crc32(bytes) });
-                if (deltify !== undefined && object.data.length <= maxSize) {
-                  window.push({ type: object.type, data: object.data, offset, depth });
+                if (
+                  deltify !== undefined &&
+                  object.data.length >= MIN_DELTA_TARGET &&
+                  object.data.length <= maxSize
+                ) {
+                  window.push({
+                    type: object.type,
+                    data: object.data,
+                    index: indexBase(object.data),
+                    offset,
+                    depth,
+                  });
                   if (window.length > windowSize) window.shift();
                 }
                 offset += bytes.length;

@@ -12,7 +12,7 @@
  */
 import { Effect, Result, Stream } from "effect";
 
-import { Invalid, ObjectNotFound } from "./Error.ts";
+import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 import {
   bytesToHex,
   EMPTY_TREE_OID,
@@ -22,6 +22,7 @@ import {
   parseTree,
 } from "./Format.ts";
 import * as Pack from "./Pack.ts";
+import { bufferSource, readAt } from "./PackFile.ts";
 import { buildPackIndex } from "./PackIndex.ts";
 import type { PackStore } from "./Packed.ts";
 import { isOid, ObjectStore, type Oid, type RawObject, type RefStore } from "./Store.ts";
@@ -32,12 +33,40 @@ export interface Stores {
   readonly refs: RefStore["Service"];
 }
 
+const encoder = new TextEncoder();
+
 /** A tag's target, from the header alone — enough to keep walking. */
 const tagTarget = (data: Uint8Array): Oid | null => {
   const line = new TextDecoder().decode(data.subarray(0, 47));
   const target = line.startsWith("object ") ? line.slice(7, 47) : "";
   return isOid(target) ? target : null;
 };
+
+/**
+ * git's `pack_name_hash`, over a tree entry's name: whitespace skipped, and
+ * each byte shifted in so the tail of the name dominates. Same-named files
+ * across commits — the best delta pairs a repository has — land on the same
+ * hash, which is all `deltaOrder` needs from it.
+ */
+const nameHash = (name: string): number => {
+  let hash = 0;
+  for (const byte of encoder.encode(name)) {
+    if (byte === 0x20 || (byte >= 0x09 && byte <= 0x0d)) continue;
+    hash = ((hash >>> 2) + ((byte << 24) >>> 0)) >>> 0;
+  }
+  return hash;
+};
+
+/**
+ * What a classifying walk learned about the objects it read — enough for
+ * `deltaOrder` to sort delta candidates without reading anything again.
+ * An object the walk could not read is simply absent.
+ */
+export interface Classified {
+  readonly kinds: ReadonlyMap<Oid, { readonly type: RawObject["type"]; readonly size: number }>;
+  /** Tree-entry name hash per child oid, for the objects trees name. */
+  readonly names: ReadonlyMap<Oid, number>;
+}
 
 /**
  * Everything reachable from `roots`: commits pull in their tree and parents,
@@ -57,11 +86,20 @@ export const reachable = (
      * had" that the client has never seen.
      */
     readonly boundary?: ReadonlySet<Oid>;
+    /**
+     * Also record type/size per object and a name hash per tree entry —
+     * the walk reads every object anyway, so classification is free here
+     * and spares repack a second full read pass. Off on the fetch path,
+     * which runs this walk per request and never deltifies.
+     */
+    readonly classify?: boolean;
   },
 ) =>
   Effect.gen(function* () {
     const seen = new Set<Oid>();
     const order: Oid[] = [];
+    const kinds = new Map<Oid, { type: RawObject["type"]; size: number }>();
+    const names = new Map<Oid, number>();
     const stack = [...roots];
 
     while (stack.length > 0) {
@@ -78,6 +116,9 @@ export const reachable = (
       );
       if (object === null) continue;
       order.push(oid);
+      if (options.classify === true) {
+        kinds.set(oid, { type: object.type, size: object.data.length });
+      }
 
       switch (object.type) {
         case "commit": {
@@ -92,7 +133,11 @@ export const reachable = (
           const entries = yield* Effect.fromResult(parseTree(object.data)).pipe(
             Effect.mapError(() => new ObjectNotFound({ oid })),
           );
-          for (const entry of entries) if (entry.mode !== "160000") stack.push(entry.oid);
+          for (const entry of entries) {
+            if (entry.mode === "160000") continue;
+            stack.push(entry.oid);
+            if (options.classify === true) names.set(entry.oid, nameHash(entry.name));
+          }
           break;
         }
         case "tag": {
@@ -105,7 +150,7 @@ export const reachable = (
       }
     }
 
-    return { order, seen };
+    return { order, seen, classified: { kinds, names } satisfies Classified };
   });
 
 export interface FsckProblem {
@@ -174,23 +219,6 @@ export const fsck = Effect.fn("Maintenance.fsck")(function* (stores: Stores) {
   return { checked, problems, danglingRefs } satisfies FsckReport;
 });
 
-const encoder = new TextEncoder();
-
-/**
- * git's `pack_name_hash`, over a tree entry's name: whitespace skipped, and
- * each byte shifted in so the tail of the name dominates. Same-named files
- * across commits — the best delta pairs a repository has — land on the same
- * hash, which is all the sort below needs from it.
- */
-const nameHash = (name: string): number => {
-  let hash = 0;
-  for (const byte of encoder.encode(name)) {
-    if (byte === 0x20 || (byte >= 0x09 && byte <= 0x0d)) continue;
-    hash = ((hash >>> 2) + ((byte << 24) >>> 0)) >>> 0;
-  }
-  return hash;
-};
-
 /**
  * The emission order the delta window wants: same-type objects grouped,
  * trees and blobs sorted by the name their tree entry gives them and then
@@ -198,37 +226,15 @@ const nameHash = (name: string): number => {
  * with the biggest as the natural base. Commits and tags keep their walk
  * order, which already puts a commit next to its parent.
  *
- * The name is the entry's, not the full path: `pack_name_hash` weights the
- * tail of a path, so the entry name carries most of the signal, and the
- * full path would need a root-down walk this classification pass — one
- * read per object, contents dropped as soon as they are classified — gets
- * to skip. Repack is the background caller that can afford the second
- * read the writer then does.
+ * A pure sort over what the classifying walk already read — ordering costs
+ * no I/O of its own. The name is the entry's rather than the full path:
+ * `pack_name_hash` weights the tail of a path, so the entry name carries
+ * most of the signal without a root-down walk. Objects the walk could not
+ * read (a dangling ref's target, tolerated by `ignoreMissing`) were never
+ * classified and so are never ordered — which is what keeps a repack from
+ * failing on damage that is fsck's to report.
  */
-export const deltaOrder = Effect.fn("Maintenance.deltaOrder")(function* (
-  objects: ObjectStore["Service"],
-  oids: ReadonlyArray<Oid>,
-) {
-  interface Classified {
-    readonly oid: Oid;
-    readonly type: RawObject["type"];
-    readonly size: number;
-  }
-  const inventory: Classified[] = [];
-  const names = new Map<Oid, number>();
-
-  for (const oid of oids) {
-    const object = yield* objects.read(oid);
-    inventory.push({ oid, type: object.type, size: object.data.length });
-    if (object.type !== "tree") continue;
-    const entries = parseTree(object.data);
-    // A malformed tree is fsck's finding; here it only means its children
-    // sort with the nameless.
-    if (Result.isSuccess(entries)) {
-      for (const entry of entries.success) names.set(entry.oid, nameHash(entry.name));
-    }
-  }
-
+export const deltaOrder = (classified: Classified): ReadonlyArray<Oid> => {
   interface Sortable {
     readonly oid: Oid;
     readonly hash: number;
@@ -238,12 +244,12 @@ export const deltaOrder = Effect.fn("Maintenance.deltaOrder")(function* (
   const tags: Oid[] = [];
   const trees: Sortable[] = [];
   const blobs: Sortable[] = [];
-  for (const item of inventory) {
-    if (item.type === "commit") commits.push(item.oid);
-    else if (item.type === "tag") tags.push(item.oid);
+  for (const [oid, kind] of classified.kinds) {
+    if (kind.type === "commit") commits.push(oid);
+    else if (kind.type === "tag") tags.push(oid);
     else {
-      const sortable = { oid: item.oid, hash: names.get(item.oid) ?? 0, size: item.size };
-      (item.type === "tree" ? trees : blobs).push(sortable);
+      const sortable = { oid, hash: classified.names.get(oid) ?? 0, size: kind.size };
+      (kind.type === "tree" ? trees : blobs).push(sortable);
     }
   }
 
@@ -253,15 +259,16 @@ export const deltaOrder = Effect.fn("Maintenance.deltaOrder")(function* (
   blobs.sort(grouped);
 
   return [...commits, ...tags, ...trees.map((tree) => tree.oid), ...blobs.map((blob) => blob.oid)];
-});
+};
 
 /**
  * Everything reachable into one `.pack`/`.idx` pair, loose copies deleted.
  *
- * Order is the whole safety argument: the pack and its index are written
- * and verified readable *before* anything is deleted, so an interruption
- * leaves the repository with both copies rather than neither. `packed`
- * prefers loose objects for the same reason.
+ * Order is the whole safety argument: the pack is written and every entry
+ * verified readable — delta chains applied, bytes hashed back to the oid
+ * the index claims — *before* anything is deleted, so an interruption or a
+ * writer bug leaves the repository with both copies rather than neither.
+ * `packed` prefers loose objects for the same reason.
  *
  * The pack is built in memory. That is the honest cost of writing an
  * `.idx`, which cannot be finished until every offset is known — and
@@ -271,21 +278,23 @@ export const deltaOrder = Effect.fn("Maintenance.deltaOrder")(function* (
 const repack = Effect.fn("Maintenance.repack")(function* (
   objects: ObjectStore["Service"],
   packs: PackStore["Service"],
-  keep: ReadonlySet<Oid>,
+  classified: Classified,
 ) {
-  const oids = [...keep].filter((oid) => oid !== EMPTY_TREE_OID);
-  if (oids.length === 0) return null;
+  const ordered = deltaOrder(classified).filter((oid) => oid !== EMPTY_TREE_OID);
+  if (ordered.length === 0) return null;
 
   const entries: Pack.PackedEntry[] = [];
-  const ordered = yield* deltaOrder(objects, oids);
   const chunks = yield* Stream.runCollect(
     // Deltified here and nowhere else: repack is background work whose
     // output is storage, so the window's CPU and pinned memory buy smaller
     // packs at rest without costing any request a first byte. `PackFile.ts`
-    // resolves the ofs-deltas on read.
-    Pack.pack(ordered, { onObject: (entry) => entries.push(entry), deltify: {} }).pipe(
-      Stream.provideService(ObjectStore, objects),
-    ),
+    // resolves the ofs-deltas on every later read with no cross-read base
+    // cache, so the chain cap is what bounds that read amplification —
+    // hence 16 here rather than the writer's format-conventional 50.
+    Pack.pack(ordered, {
+      onObject: (entry) => entries.push(entry),
+      deltify: { maxDepth: 16 },
+    }).pipe(Stream.provideService(ObjectStore, objects)),
   );
 
   const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
@@ -301,12 +310,31 @@ const repack = Effect.fn("Maintenance.repack")(function* (
   const name = `pack-${bytesToHex(checksum)}`;
   const index = buildPackIndex(entries, checksum);
 
+  // The verification the deletion below leans on: resolve every entry back
+  // out of the in-memory bytes and hash it. The loose copies these bytes
+  // are about to replace are the last other copy of the repository, so the
+  // delta writer is not trusted — it is checked, before the pack is even
+  // stored. Pure CPU on bytes already held.
+  const source = bufferSource(bytes);
+  for (const entry of entries) {
+    const unreadable = (cause: unknown) =>
+      new StorageFailure({ operation: "repack verify", path: entry.oid, cause });
+    const object = yield* Effect.tryPromise({
+      try: () => readAt(source, entry.offset, () => Promise.resolve(null)),
+      catch: unreadable,
+    });
+    const actual = yield* hashObject(object);
+    if (actual !== entry.oid) {
+      return yield* unreadable(`entry resolves to ${actual}`);
+    }
+  }
+
   yield* packs.write({ name, pack: bytes, index });
 
-  // Only now: the objects are in the pack and the pack is stored.
-  yield* Effect.forEach(oids, (oid) => objects.delete(oid), { discard: true });
+  // Only now: the objects are in the pack, verified, and the pack is stored.
+  yield* Effect.forEach(ordered, (oid) => objects.delete(oid), { discard: true });
 
-  return { name, objects: oids.length };
+  return { name, objects: ordered.length };
 });
 
 export interface GcReport {
@@ -328,8 +356,15 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   if (head !== null) roots.push(head);
 
   // Tolerant: a ref pointing at a missing object is fsck's problem to
-  // report, not a reason to refuse to collect everything else.
-  const keep = (yield* reachable(objects, roots, { ignoreMissing: true })).seen;
+  // report, not a reason to refuse to collect everything else. Classified
+  // only when a repack will consume it — classification is free inside the
+  // walk but pointless without one.
+  const willRepack = options?.repack === true && options.dryRun !== true;
+  const walked = yield* reachable(objects, roots, {
+    ignoreMissing: true,
+    classify: willRepack,
+  });
+  const keep = walked.seen;
 
   const removed: Oid[] = [];
   let scanned = 0;
@@ -343,8 +378,8 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   );
 
   const report: GcReport = { scanned, reachable: keep.size, removed };
-  if (options?.repack !== true || options.dryRun === true) return report;
+  if (!willRepack) return report;
 
-  const written = yield* repack(objects, packs, keep);
+  const written = yield* repack(objects, packs, walked.classified);
   return written === null ? report : ({ ...report, packed: written } satisfies GcReport);
 });

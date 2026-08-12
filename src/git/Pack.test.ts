@@ -7,7 +7,7 @@ import { Effect, Result, Stream } from "effect";
 
 import { encodeCommit, encodeTree } from "./Format.ts";
 import { stores } from "./Memory.ts";
-import { applyDelta, createDelta, pack, unpack } from "./Pack.ts";
+import { applyDelta, createDelta, encodeOfsDistance, pack, sizeVarint, unpack } from "./Pack.ts";
 import { ObjectStore, type Oid, type RawObject } from "./Store.ts";
 
 const encoder = new TextEncoder();
@@ -54,27 +54,6 @@ const objectHeader = (code: number, size: number): number[] => {
   }
   bytes.push(current);
   return bytes;
-};
-
-/** The ofs-delta distance encoding — the offset-excess form git uses. */
-const ofsDistance = (distance: number): number[] => {
-  const bytes = [distance & 0x7f];
-  let rest = Math.floor(distance / 128) - 1;
-  while (rest >= 0) {
-    bytes.unshift((rest & 0x7f) | 0x80);
-    rest = Math.floor(rest / 128) - 1;
-  }
-  return bytes;
-};
-
-const deltaVarint = (value: number): number[] => {
-  const bytes: number[] = [];
-  let rest = value;
-  do {
-    bytes.push(rest & 0x7f);
-    rest = Math.floor(rest / 128);
-  } while (rest > 0);
-  return bytes.map((byte, index) => (index < bytes.length - 1 ? byte | 0x80 : byte));
 };
 
 /** copy: offset and size both < 256 keeps the instruction two operand bytes. */
@@ -162,8 +141,8 @@ describe("Pack", () => {
     // copy "quick brown fox" + insert " XY " + copy "lazy dog" = expected
     const expected = "quick brown fox XY lazy dog";
     const delta = Uint8Array.from([
-      ...deltaVarint(base.data.length),
-      ...deltaVarint(expected.length),
+      ...sizeVarint(base.data.length),
+      ...sizeVarint(expected.length),
       ...copy(4, 15),
       ...insert(" XY "),
       ...copy(35, 8),
@@ -189,7 +168,7 @@ describe("Pack", () => {
       // ofs-delta entry starts after base and ref entries.
       const ofsEntry = concat([
         Uint8Array.from(objectHeader(6, delta.length)),
-        Uint8Array.from(ofsDistance(baseEntry.length + refEntry.length)),
+        encodeOfsDistance(baseEntry.length + refEntry.length),
         new Uint8Array(deflateSync(delta)),
       ]);
 
@@ -212,7 +191,7 @@ describe("Pack", () => {
     });
 
     it("rejects the reserved opcode 0", () => {
-      const bad = Uint8Array.from([...deltaVarint(base.data.length), ...deltaVarint(1), 0]);
+      const bad = Uint8Array.from([...sizeVarint(base.data.length), ...sizeVarint(1), 0]);
       const result = applyDelta(base.data, bad);
       assert.ok(Result.isFailure(result));
       assert.equal(result.failure._tag, "PackCorrupt");
