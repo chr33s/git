@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "git-test",
+  "main": "src/git/Durable.ts",
+  "compatibility_date": "2025-12-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "class_name": "GitRepo", "name": "GIT_REPO" }]
+  },
+  "r2_buckets": [{ "binding": "GIT_OBJECTS", "bucket_name": "git-objects-test" }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GitRepo"] }]
+}

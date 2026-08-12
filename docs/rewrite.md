@@ -1,6 +1,7 @@
 # Sketch: Effect v4 + alchemy@next rewrite
 
-Status: **phases 0–2 have landed** in `src/git/`; the rest is still a sketch.
+Status: **phases 0–2 have landed** in `src/git/`, with integration tests
+running inside workerd; the rest is still a sketch.
 
 What is real code today, running under the repo's own test runner:
 
@@ -12,13 +13,22 @@ What is real code today, running under the repo's own test runner:
 | `src/git/Memory.ts` | in-memory backend |
 | `src/git/Node.ts` | filesystem backend, git's own on-disk layout |
 | `src/git/Repository.ts` | the domain service |
-| `src/git/Store.contract.ts` | one contract suite, run against **both** backends |
+| `src/git/Cloudflare.ts` | R2 + Durable Object SQLite backend |
+| `src/git/Durable.ts` | the repository as a Durable Object |
+| `src/git/Store.contract.ts` | one contract suite, run against **all three** backends |
 
-58 tests pass. Two of them check oids against values real `git` produces, and
-`Node.interop.test.ts` writes a repository through the ports and then has the
-real `git` binary read it — `fsck --strict`, `log`, `cat-file`, `ls-tree`,
-`show` all agree. The old implementation is untouched and still the one wired
-into the Worker.
+80 tests pass: 58 under `node:test` (`npm test`) and 22 inside workerd
+(`npm run test:integration`). Three kinds of evidence, deliberately:
+
+- **oids match real git** — the empty tree and `hello\n` are pinned to the
+  values `git hash-object` produces;
+- **the repository is really a git repository** — `Node.interop.test.ts` writes
+  one through the ports and has the `git` binary read it: `fsck --strict`,
+  `log`, `cat-file`, `ls-tree`, `show` all agree;
+- **the contract holds on the backend that ships** — the same suite runs
+  against DO SQLite and R2 inside workerd, not against a mock.
+
+The old implementation is untouched and still the one wired into the Worker.
 
 The code in [`sketch/`](../sketch) is illustrative, but it is not hand-waved: it
 typechecks against the real `effect@4.0.0-beta.107` and `alchemy@2.0.0-beta.70`
@@ -307,6 +317,27 @@ on close) and a local runtime that runs the same program against emulated R2/DO
 — so `test.helpers.ts` stops spawning `wrangler dev` on port 8080 for the e2e
 suite.
 
+### Integration tests
+
+`@cloudflare/vitest-pool-workers` boots the Worker from `wrangler.test.json`
+under Miniflare and runs the test files **in the same isolate**, so
+`runInDurableObject` hands back the real `DurableObjectState` — real SQLite —
+and `env.GIT_OBJECTS` is a real R2 binding. That is what makes it possible to
+run the storage contract against the backend that ships instead of trusting it
+to behave like the in-memory one.
+
+Two things it buys that unit tests cannot reach:
+
+- the contract suite runs on DO SQLite + R2, so "atomic ref update" is verified
+  where the input gate provides it rather than where a `Map` does;
+- `evictDurableObject` tears an instance down mid-test, which is how you catch
+  state that was living in the instance rather than in storage. The layer graph
+  is rebuilt on the next call and the refs are still there.
+
+The two runners own separate file patterns — `*.test.ts` for `node:test`,
+`*.spec.ts` for Vitest — because node's built-in runner claims `*.test.ts` by
+default and would try to import `cloudflare:test` outside workerd.
+
 ### Tests
 
 [`sketch/testing/Repository.sketch.ts`](../sketch/testing/Repository.sketch.ts). `@effect/vitest`,
@@ -326,7 +357,8 @@ the ratchet: it runs against both implementations until the last phase.
 | ----- | -------------------------------------------------------------------- | ------ |
 | 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests          | done   |
 | 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite | done   |
-| 2 ◑   | `Repository` service — landed; re-pointing `server.ts` at it is next   | medium |
+| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests | done |
+| 2b    | re-point `server.ts`/`worker.ts` at `GitRepo` and retire the old path  | medium |
 | 3     | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed | high  |
 | 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types | medium |
 | 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages | medium |

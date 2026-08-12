@@ -1,26 +1,31 @@
 /**
  * The filesystem backend against the same contract as the in-memory one.
  *
- * Two backends, one suite: that is the check on whether `ObjectStore` and
- * `RefStore` are real ports or just an interface the in-memory version happens
- * to satisfy.
+ * Two backends, one suite — and with `Cloudflare.integration.test.ts`, three.
  */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { describe, it } from "node:test";
+
+import { Effect } from "effect";
 
 import { stores } from "./Node.ts";
 import { storeContract } from "./Store.contract.ts";
 
-let directory = "";
-
-storeContract("Node", {
-  make: async () => {
-    directory = await fs.mkdtemp(path.join(os.tmpdir(), "git-store-"));
-    return stores(directory);
+storeContract(
+  "Node",
+  {
+    run: async (effect) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-store-"));
+      try {
+        return await Effect.runPromise(
+          effect.pipe(Effect.provide(stores(root))) as Effect.Effect<never>,
+        );
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    },
   },
-  cleanup: async () => {
-    if (directory !== "") await fs.rm(directory, { force: true, recursive: true });
-    directory = "";
-  },
-});
+  { describe, it },
+);

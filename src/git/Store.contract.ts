@@ -7,12 +7,17 @@
  * and races itself. Here the guarantee is written once and run against every
  * implementation, so a backend either provides it or fails.
  *
- * Not a `*.test.ts` file: it is imported by `Memory.test.ts` and `Node.test.ts`.
+ * The suite is parameterised over both the backend *and* the test runner, so
+ * the same assertions run under `node:test` for the in-memory and filesystem
+ * backends, and inside workerd under Vitest for the Cloudflare one. A contract
+ * that only holds on the runtime it was written for is not much of a contract.
+ *
+ * Not a `*.test.ts` file: it is imported by `Memory.test.ts`, `Node.test.ts`
+ * and `Cloudflare.integration.spec.ts`.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
 
-import { Effect, type Layer, Stream } from "effect";
+import { Effect, Stream } from "effect";
 
 import { ObjectStore, type Oid, RefStore } from "./Store.ts";
 
@@ -20,22 +25,24 @@ const a = "a".repeat(40) as Oid;
 const b = "b".repeat(40) as Oid;
 
 export interface Backend {
-  /** A fresh, empty pair of stores. Called once per test. */
-  readonly make: () =>
-    | Promise<Layer.Layer<ObjectStore | RefStore>>
-    | Layer.Layer<ObjectStore | RefStore>;
-  readonly cleanup?: () => Promise<void> | void;
+  /**
+   * Run one effect against a fresh, empty pair of stores.
+   *
+   * Freshness is the backend's business — a temp directory here, isolated
+   * per-test storage there. Each test calls this exactly once.
+   */
+  readonly run: <A, E>(effect: Effect.Effect<A, E, ObjectStore | RefStore>) => Promise<A>;
 }
 
-export const storeContract = (label: string, backend: Backend): void => {
-  const run = async <A, E>(effect: Effect.Effect<A, E, ObjectStore | RefStore>): Promise<A> => {
-    const layer = await backend.make();
-    try {
-      return await Effect.runPromise(effect.pipe(Effect.provide(layer)) as Effect.Effect<A, E>);
-    } finally {
-      await backend.cleanup?.();
-    }
-  };
+/** Just enough of a runner for this suite; `node:test` and Vitest both fit. */
+export interface Runner {
+  readonly describe: (name: string, body: () => void) => void;
+  readonly it: (name: string, body: () => Promise<void> | void) => void;
+}
+
+export const storeContract = (label: string, backend: Backend, runner: Runner): void => {
+  const { describe, it } = runner;
+  const { run } = backend;
 
   describe(`${label}: ObjectStore contract`, () => {
     it("writes content-addressed and reads back", async () => {
