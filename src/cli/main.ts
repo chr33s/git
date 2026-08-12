@@ -28,6 +28,7 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import { fetchRepository } from "../client/Fetch.ts";
 import { push } from "../client/Push.ts";
 import * as Checkout from "../git/Checkout.ts";
+import { next as bisectNext } from "../git/Bisect.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid } from "../git/Error.ts";
 import type { Signature } from "../git/Format.ts";
@@ -690,6 +691,77 @@ const archiveCommand = Command.make(
     ),
 );
 
+/**
+ * One bisect step, stateless.
+ *
+ * `git bisect` keeps a session in `.git`; this takes the known state as
+ * arguments and prints the next commit to test. A shell loop is then the
+ * whole session, and the same call works over HTTP where there is nothing to
+ * keep a session in.
+ */
+const bisectCommand = Command.make(
+  "bisect",
+  {
+    root: rootFlag,
+    repo: repoArgument,
+    bad: Flag.string("bad").pipe(Flag.withDescription("A revision known to have the problem")),
+    good: Flag.string("good").pipe(
+      Flag.atLeast(1),
+      Flag.withDescription("A revision known not to; repeat for more than one"),
+    ),
+  },
+  ({ bad, good, repo, root }) =>
+    withRepo(
+      root,
+      repo,
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const step = yield* bisectNext({
+          bad: yield* mustResolve(repository, bad),
+          good: yield* Effect.forEach(good, (rev) => mustResolve(repository, rev)),
+        });
+
+        if (step.kind === "found") {
+          yield* Console.log(`${step.commit} is the first bad commit`);
+          return;
+        }
+        yield* Console.log(
+          `${step.commit}\t${step.remaining} revision(s) left, roughly ${step.steps} step(s)`,
+        );
+      }),
+    ),
+);
+
+const reset = Command.make(
+  "reset",
+  {
+    root: rootFlag,
+    repo: repoArgument,
+    ref: Argument.string("ref"),
+    to: Argument.string("to"),
+    expected: Flag.string("expected").pipe(
+      Flag.optional,
+      Flag.withDescription("Refuse unless the ref is currently this oid"),
+    ),
+  },
+  ({ expected, ref, repo, root, to }) =>
+    withRepo(
+      root,
+      repo,
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const moved = yield* repository.setRef({
+          name: refNameOf(ref),
+          to: yield* mustResolve(repository, to),
+          ...(expected._tag === "Some"
+            ? { expected: expected.value === "" ? null : (expected.value as Oid) }
+            : {}),
+        });
+        yield* Console.log(`${moved.ref} ${moved.previous ?? "(new)"} -> ${moved.oid}`);
+      }),
+    ),
+);
+
 /** Both replay commands print the same ledger, so they share the printer. */
 const reportReplay = (outcome: {
   readonly kind: string;
@@ -912,6 +984,7 @@ const git = Command.make("chr33s-git").pipe(
   Command.withSubcommands([
     addCommand,
     archiveCommand,
+    bisectCommand,
     branch,
     cherryPickCommand,
     clone,
@@ -928,6 +1001,7 @@ const git = Command.make("chr33s-git").pipe(
     pushCommand,
     rebaseCommand,
     refs,
+    reset,
     restore,
     rm,
     serveCommand,
