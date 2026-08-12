@@ -70,6 +70,7 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it  |
 | `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable     |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag     |
+| `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers |
 | `src/git/Store.contract.ts`  | one storage contract suite, run against all three backends         |
 
 The Worker (`wrangler.json` → `src/git/Durable.ts`) serves the git smart-HTTP
@@ -85,6 +86,11 @@ The same handlers self-host on plain node — no Cloudflare account required:
 GIT_ROOT=repos node src/host/Node.ts      # or: npx wrangler dev
 git clone http://127.0.0.1:8080/my-repo
 ```
+
+Both hosts are open by default and enforce scoped read/write tokens when told
+to: set the `GIT_AUTH_SECRET` binding on the Worker (stateless HMAC tokens via
+`Auth.hmacMint`), or pass `serve({ verify })` on node. `git` presents the
+token as `http://<token>@host/repo`.
 
 ### The design sketches
 

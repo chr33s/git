@@ -31,6 +31,7 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
+import * as Auth from "../server/Auth.ts";
 import * as Protocol from "../server/Protocol.ts";
 
 /** No traversal, no hidden files; `.git` suffixes are part of the name. */
@@ -42,6 +43,13 @@ export interface ServeOptions {
   /** Defaults to an ephemeral port; the return value carries the real one. */
   readonly port?: number;
   readonly hostname?: string;
+  /**
+   * When present, every request passes `server/Auth.ts`'s guard with this
+   * verifier — `Auth.hmacVerify` for stateless tokens, or the Artifacts
+   * provider's `Tokens.verify` for revocable ones. Absent means open, which
+   * is what local development wants.
+   */
+  readonly verify?: (repo: string, credential: string | null) => Promise<Auth.Scope | null>;
 }
 
 export interface Server {
@@ -111,7 +119,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       }
 
       const headers = new Headers();
-      for (const name of ["content-type", "content-encoding", "accept"]) {
+      for (const name of ["content-type", "content-encoding", "accept", "authorization"]) {
         const value = incoming.headers[name];
         if (typeof value === "string") headers.set(name, value);
       }
@@ -125,7 +133,14 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           : { body: Readable.toWeb(incoming) as ReadableStream<Uint8Array>, duplex: "half" }),
       } as RequestInit);
 
-      const response = await dispatch(repo, request);
+      const verify = options.verify;
+      const denied =
+        verify === undefined
+          ? null
+          : await Effect.runPromise(
+              Auth.guard(request, (credential) => Effect.promise(() => verify(repo, credential))),
+            );
+      const response = denied ?? (await dispatch(repo, request));
       outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
       if (response.body === null) outgoing.end();
       else await pipeline(Readable.fromWeb(response.body as never), outgoing);

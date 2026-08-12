@@ -3,8 +3,9 @@
 **Short answer: yes — and the local provider now exists
 (`src/artifacts/Namespace.ts`), satisfying alchemy's binding tag over this
 server's stores. The one upstream interface change it needed is applied as a
-local patch. What remains is durability (the registry lives in memory) and
-enforcement (tokens exist but the HTTP routes do not check them yet).**
+local patch, and both server surfaces enforce scoped tokens through
+`src/server/Auth.ts`. What remains is durability: the registry and token
+store live in memory.**
 
 Evaluated against the code, not the docs (`alchemy.run` is unreachable from this
 sandbox): `alchemy@2.0.0-beta.70`'s `src/Cloudflare/Artifacts/*` and the
@@ -47,30 +48,35 @@ Repo metadata is fixed: `id`, `name`, `description`, `defaultBranch`,
 | repo metadata                                  | **have (local)** | registry rows carry every `ArtifactsRepoInfo` field                                                            |
 | `list` with cursor                             | **have (local)** | the `Registry` port; in-memory today, an index DO or D1 later                                                  |
 | `fork`                                         | **have (local)** | alternates — child reads fall through to the parent, `defaultBranchOnly` copies one ref                        |
-| tokens / any auth                              | **partial**      | issue/list/revoke/`verify` live in `Tokens` (SHA-256 at rest); the HTTP routes do not enforce them yet         |
+| tokens / any auth                              | **have (local)** | `Tokens` issue/list/revoke + `server/Auth.ts` guard on both surfaces; stock `git` passes 401/403 interop tests |
 
 **The local provider landed**: [`src/artifacts/Namespace.ts`](../src/artifacts/Namespace.ts)
 implements `ReadWriteNamespaceClient` over this repository's stores and
 provides alchemy's own `ReadWriteNamespace` binding tag, so a stack swaps the
 native provider for it with one `Layer.provide`. Its tests drive create /
 cursor list / delete, the token lifecycle, fork over alternates, and an import
-over real smart HTTP from the node host. What remains of the gaps below is the
-durable form (registry in a DO or D1 instead of memory) and enforcement
-(wiring `Tokens.verify` into the protocol and JSON routes).
+over real smart HTTP from the node host. Enforcement landed with it:
+`src/server/Auth.ts` guards both the smart-HTTP and JSON surfaces — 401 with
+the Basic challenge, 403 on insufficient scope, token accepted as the Basic
+password the way git sends it — with two verifiers, the provider's revocable
+`Tokens.verify` and a stateless HMAC scheme the Durable Object enforces when
+its `GIT_AUTH_SECRET` binding is set. What remains of the gaps below is the
+durable form: registry and token rows in a DO or D1 instead of memory.
 
 ### The three gaps, in order of cost
 
-**1. Auth and tokens — the big one.** There is no authentication anywhere in the
-codebase today: any caller who can reach the worker can push to any repo. The
-Artifacts contract needs scoped (`read`/`write`), TTL'd, revocable per-repo
-tokens, returned in plaintext exactly once at creation. That means an issuance
-scheme (HMAC over `repo|scope|exp` with a stack secret, or random tokens hashed
-at rest), a revocation table, and verification middleware on _both_ the JSON API
-and the smart-HTTP endpoints.
+**1. Auth and tokens — the big one, now landed.** The Artifacts contract needs
+scoped (`read`/`write`), TTL'd, revocable per-repo tokens, returned in
+plaintext exactly once at creation. Both proposed schemes were built: HMAC
+over `repo|scope|exp` with a server secret (`Auth.hmacMint`/`hmacVerify` —
+stateless, what the Durable Object enforces), and random tokens hashed at rest
+with revocation (`Tokens` in the provider). The guard sits on _both_ the JSON
+API and the smart-HTTP endpoints.
 
-One detail that matters for compatibility: `git` sends credentials as HTTP Basic
-over HTTPS, so the token has to be accepted as the password field of
-`Authorization: Basic`, not only as a bearer token. Get that wrong and
+The compatibility detail held up under test: `git` sends credentials as HTTP
+Basic, so the token is accepted as the password field of
+`Authorization: Basic`, not only as a bearer token — the interop suite clones
+with `http://<token>@host/repo` and is refused without it. Get that wrong and
 `git clone` fails while `curl` works.
 
 **2. A namespace registry.** Repos are addressed by

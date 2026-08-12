@@ -21,6 +21,7 @@ import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
 import * as Api from "../server/Api.ts";
+import * as Auth from "../server/Auth.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { stores } from "./Cloudflare.ts";
 import { collector } from "./Conformance.ts";
@@ -37,6 +38,8 @@ import { storeContract } from "./Store.contract.ts";
  */
 interface TestEnv {
   readonly ENABLE_CONFORMANCE?: string;
+  /** When set, every request must carry an `Auth.hmacMint`-issued token. */
+  readonly GIT_AUTH_SECRET?: string;
   readonly GIT_OBJECTS: R2Bucket;
   readonly GIT_REPO: DurableObjectNamespace<GitRepo>;
 }
@@ -71,6 +74,16 @@ export class GitRepo extends DurableObject<TestEnv> {
 
   override async fetch(request: Request): Promise<Response> {
     const [, repo = "default", route = ""] = new URL(request.url).pathname.split("/");
+
+    // Stateless auth, on when the secret binding exists: nothing to store,
+    // nothing to look up, and a token minted for one repo verifies nowhere else.
+    const secret = this.env.GIT_AUTH_SECRET;
+    if (secret !== undefined && secret.length > 0) {
+      const denied = await Effect.runPromise(
+        Auth.guard(request, (credential) => Auth.hmacVerify(secret, repo, credential)),
+      );
+      if (denied !== null) return denied;
+    }
 
     if (route === "conformance") return this.#conformance(repo);
 
