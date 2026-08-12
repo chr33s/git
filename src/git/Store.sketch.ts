@@ -1,15 +1,10 @@
 /**
  * Storage ports.
  *
- * Today: one wide `GitStorage` interface (`src/git.storage.ts`) with 16 methods
- * shaped like a filesystem — `readFile(".git/refs/heads/main")` — implemented
- * three times (DO+R2, OPFS, node:fs) and threaded through every constructor.
- * Ref atomicity is bolted on as an optional `applyRefChanges?` method that only
- * the Cloudflare implementation provides, so callers branch on its presence.
- *
- * Sketch: three narrow services, addressed by git concepts instead of paths.
- * Atomic ref update is part of `RefStore`, not an optional extra, so the
- * OPFS/node layers have to answer for it and callers stop branching.
+ * Three narrow services, addressed by git concepts instead of paths. Atomic
+ * ref update is part of `RefStore`, not an optional extra, so the OPFS/node
+ * layers have to answer for it and callers never branch on whether a method
+ * exists.
  */
 import { Context, type Effect, type Layer, type Stream } from "effect";
 import type { Invalid, ObjectNotFound, StorageFailure } from "./Error.sketch.ts";

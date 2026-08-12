@@ -1,16 +1,11 @@
 /**
  * Packfile transport.
  *
- * Today `GitPackParser.parsePack` calls `#readFullStream` and concatenates the
- * whole packfile into one `Uint8Array` before it looks at the header
- * (`src/git.pack.ts:547`). A Durable Object gets 128 MiB; a push of a repo with
- * a few large blobs takes the isolate out, and there is no backpressure signal
- * to the client on the way down either.
- *
- * Sketch: the pack is a `Stream`. Chunks are pulled as the parser consumes
- * them, each object is written to `ObjectStore` as it resolves, and only the
- * delta base window stays resident. The same shape runs on the client, where
- * the constraint is the tab's memory instead of the isolate's.
+ * The pack is a `Stream`. Chunks are pulled as the parser consumes them, each
+ * object is written to `ObjectStore` as it resolves, and only the delta base
+ * window stays resident — a Durable Object gets 128 MiB, and a push must not
+ * be bounded by it. The same shape runs on the client, where the constraint
+ * is the tab's memory instead of the isolate's.
  */
 import { Effect, Stream } from "effect";
 import { PackCorrupt } from "./Error.sketch.ts";
@@ -41,8 +36,8 @@ export const parse = (
 
     return yield* pack.pipe(
       // `decodeObjects` is a Channel: it owns the incremental inflate + header
-      // state machine that `#parsePackObject` runs today, but yields objects
-      // instead of indexing into a buffer it already holds in full.
+      // state machine, yielding objects as they resolve instead of indexing
+      // into a fully buffered pack.
       decodeObjects,
       Stream.mapEffect((object) =>
         Effect.gen(function* () {
@@ -74,8 +69,7 @@ declare const decodeObjects: (
  *
  * The response body is this stream handed straight to `HttpServerResponse`, so
  * the first bytes reach the client while the object walk is still running and
- * a client that hangs up cancels the walk — today the walk completes into an
- * array regardless.
+ * a client that hangs up cancels the walk.
  */
 export const write = (
   oids: Stream.Stream<Oid, PackCorrupt>,

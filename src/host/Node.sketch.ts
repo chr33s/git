@@ -7,8 +7,7 @@
  *
  * It is also immediately useful, independent of any provider story:
  *
- *   - `npm run dev` stops needing `wrangler dev` on port 8080, and so does the
- *     e2e suite (`test.helpers.ts` spawns one today);
+ *   - `npm run dev` and a future e2e suite need no `wrangler dev` on port 8080;
  *   - self-hosting `@chr33s/git` on a box or in a container becomes a supported
  *     shape rather than a fork;
  *   - the CLI can run the server in-process for offline work.

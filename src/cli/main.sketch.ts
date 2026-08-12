@@ -2,13 +2,9 @@
 /**
  * CLI.
  *
- * Today `src/cli.ts` is 1,991 lines, and most of it is not git: it is a
- * hand-written argv parser, per-command flag validation, usage text, help
- * output, and `console.log` formatting, repeated 21 times.
- *
- * Sketch: `effect/unstable/cli` owns parsing, flags, help, completions and
- * exit codes. What is left is one handler per command calling the same
- * `Repository` service the server uses — the CLI stops being a third
+ * `effect/unstable/cli` owns parsing, flags, help, completions and exit
+ * codes. What is left is one handler per command calling the same
+ * `Repository` service the server uses — the CLI is not another
  * implementation of anything.
  */
 import { Effect, Layer, Stream } from "effect";
@@ -46,8 +42,7 @@ const log = Command.make(
       const head = yield* resolveHead;
       yield* repository.log(head, { limit }).pipe(
         // Streamed to stdout: `git log` on a large repo prints the first
-        // commit immediately instead of collecting the walk first
-        // (`cli.ts` buffers today).
+        // commit immediately instead of collecting the walk first.
         Stream.runForEach((entry) => Effect.log(`${entry.oid} ${entry.message.split("\n")[0]}`)),
       );
     }),
@@ -62,8 +57,7 @@ const git = Command.make("git").pipe(Command.withSubcommands([clone, commit, log
 /**
  * The failure channel reaches `main`, so exit codes come from the error type:
  * `RefConflict` is 1 with a diagnostic, an interrupt is 130, an unexpected
- * defect prints a `Cause` with the fiber trace. `cli.ts` today catches
- * everything into `console.error` + `process.exit(1)`.
+ * defect prints a `Cause` with the fiber trace.
  */
 const main = Command.runWith(git, { version: "0.0.0" });
 

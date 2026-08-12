@@ -3,13 +3,11 @@
  *
  * The third implementation of the ports, and the one that runs in production.
  * It passes the same `Store.contract.ts` suite as the in-memory and filesystem
- * backends — see `src/git/Cloudflare.integration.spec.ts`, which runs that
- * suite inside workerd against real bindings.
+ * backends — see `src/git/Cloudflare.integration.ts`, which runs that suite
+ * inside workerd against real bindings.
  *
- * Replaces the storage half of `CloudflareStorage` (`src/server.storage.ts`),
- * where R2 blobs, DO SQLite refs, LFS metadata and webhook rows all live behind
- * one path-shaped interface. Here refs are rows and objects are keys, with no
- * `.git/refs/heads/main` string in the middle.
+ * Refs are rows and objects are keys, with no `.git/refs/heads/main` path
+ * string in the middle.
  *
  * Two properties come from the platform rather than from this code:
  *

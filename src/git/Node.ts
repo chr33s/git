@@ -15,8 +15,8 @@
  * Atomicity comes from `rename(2)`, which is atomic within a filesystem: a ref
  * update writes a temp file and renames it over the target. That is the same
  * guarantee `RefStore.apply` promises on Workers via the DO input gate, which
- * is why the port could demand it of every backend instead of leaving it
- * optional the way `GitStorage.applyRefChanges?` does today.
+ * is why the port can demand it of every backend instead of leaving it
+ * optional.
  */
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";

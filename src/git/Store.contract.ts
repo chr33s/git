@@ -1,19 +1,18 @@
 /**
  * The storage contract, as one suite every backend has to pass.
  *
- * This is the payoff for narrowing `GitStorage` into ports. Today each backend
- * has its own tests and `applyRefChanges?` is optional, so "atomic ref update"
- * means whatever each one happens to do — the browser client simply omits it
- * and races itself. Here the guarantee is written once and run against every
- * implementation, so a backend either provides it or fails.
+ * "Atomic ref update" is written once here and run against every
+ * implementation, so a backend either provides the guarantee or fails the
+ * suite — it cannot quietly mean something different per backend.
  *
  * The suite is parameterised over both the backend *and* the test runner, so
  * the same assertions run under `node:test` for the in-memory and filesystem
- * backends, and inside workerd under Vitest for the Cloudflare one. A contract
- * that only holds on the runtime it was written for is not much of a contract.
+ * backends, and inside workerd via the `Conformance.ts` collector for the
+ * Cloudflare one. A contract that only holds on the runtime it was written for
+ * is not much of a contract.
  *
  * Not a `*.test.ts` file: it is imported by `Memory.test.ts`, `Node.test.ts`
- * and `Cloudflare.integration.spec.ts`.
+ * and `Durable.ts`'s conformance route.
  */
 import assert from "node:assert/strict";
 

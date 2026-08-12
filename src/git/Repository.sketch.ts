@@ -1,16 +1,10 @@
 /**
  * Repository operations.
  *
- * Today: `GitRepository` (874 lines) is constructed with a storage instance and
- * a config object, and every one of its ~50 methods is `async` returning a
- * value or throwing. Callers cannot tell from a signature whether `commit` can
- * fail with a ref conflict, and the receive-pack path re-implements
- * compare-and-swap because `writeRef` does not.
- *
- * Sketch: a service whose methods declare what they can fail with. The
- * interesting change is not the syntax — it is that ref updates, hooks and
- * webhooks become one transactional pipeline instead of three sequential
- * `await`s with partial-failure holes between them.
+ * A service whose methods declare what they can fail with. The interesting
+ * part is not the syntax — it is that ref updates, hooks and webhooks form
+ * one transactional pipeline instead of three sequential steps with
+ * partial-failure holes between them.
  */
 import { Context, Effect, Layer, Option, Schedule, Stream } from "effect";
 import {
@@ -72,8 +66,7 @@ export class Repository extends Context.Service<
      * receive-pack, whole: ingest the pack, run the hooks, move the refs.
      *
      * One method because it is one transaction as far as a client is
-     * concerned. Today the pack parse, the hook run and the ref update are
-     * three awaits in `server.ts` with partial-failure holes between them.
+     * concerned.
      */
     readonly receive: (
       updates: ReadonlyArray<RefUpdate>,
@@ -184,7 +177,7 @@ export const layer = Layer.effect(
           return oid;
         },
         // Optimistic concurrency: re-read the parent and retry a few times
-        // before surfacing the conflict. Today this is a caller problem.
+        // before surfacing the conflict.
         Effect.retry({
           while: (error) => error._tag === "RefConflict",
           times: 3,

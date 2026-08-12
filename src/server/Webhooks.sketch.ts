@@ -1,17 +1,11 @@
 /**
  * Webhook delivery.
  *
- * Today `ServerWebhooks.deliver` (`src/server.webhooks.ts`) loops subscribers,
- * signs the body, `fetch`es with a hand-written retry (`for` loop + `setTimeout`
- * backoff), and swallows failures so a slow endpoint cannot fail a push. It
- * runs inside the receive-pack request, so a subscriber that takes 10s makes
- * the push take 10s.
- *
- * Sketch: the retry policy is a `Schedule` value, delivery is handed to
- * `RepoHost.background`, and concurrency across subscribers is a parameter.
- * Same behaviour, but the policy is testable with `TestClock` instead of a real
- * 8-second wait — and this file no longer knows whether "background" means
- * `waitUntil` or a daemon fiber.
+ * The retry policy is a `Schedule` value, delivery is handed to
+ * `RepoHost.background`, and concurrency across subscribers is a parameter —
+ * a slow subscriber cannot fail or stall a push. The policy is testable with
+ * `TestClock` instead of a real 8-second wait, and this file never knows
+ * whether "background" means `waitUntil` or a daemon fiber.
  */
 import { Duration, Effect, Layer, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";

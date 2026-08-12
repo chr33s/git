@@ -2,8 +2,8 @@
  * Infrastructure.
  *
  * Today: `wrangler.json` declares the R2 bucket, the DO binding, the migration
- * tag and the compat date; `worker.ts` re-derives the repo name from the URL
- * and calls `env.GIT_SERVER.getByName(repo)`; `Env` comes from a generated
+ * tag and the compat date; `git/Durable.ts` re-derives the repo name from the
+ * URL and calls `env.GIT_REPO.idFromName(repo)`; `Env` comes from a generated
  * `worker-configuration.d.ts` that `postinstall` regenerates. Three sources of
  * truth for one binding, and the type only exists after a codegen step.
  *
@@ -29,7 +29,7 @@ export const Objects = Alchemy.R2.Bucket("git-objects");
 
 /**
  * The Worker is a router: resolve `/:repo` to a DO stub and forward. That is
- * all `worker.ts` does today too — the difference is that `repos` is a typed
+ * all `git/Durable.ts`'s router does today too — the difference is that `repos` is a typed
  * stub derived from the DO class, so a renamed method is a compile error rather
  * than a 500 at the edge. `Repo` in the third type argument is the Worker's
  * public contract: this script hosts the DO, and other scripts may bind it.

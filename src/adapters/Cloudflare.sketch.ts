@@ -1,12 +1,7 @@
 /**
  * Cloudflare store implementations.
  *
- * Today `CloudflareStorage` (`src/server.storage.ts`, 709 lines) is one class
- * doing four jobs — object blobs in R2, refs and reflog in DO SQLite, LFS
- * metadata, webhook rows — behind a filesystem-shaped interface, so a ref read
- * is spelled `readFile(".git/refs/heads/main")` and then re-parsed.
- *
- * Sketch: one layer per port. The SQL stays hand-written (it is a handful of
+ * One layer per port. The SQL stays hand-written (it is a handful of
  * statements against DO SQLite and it is the hot path), but it is scoped to
  * `RefStore` instead of leaking through a path-string API.
  */
@@ -131,8 +126,7 @@ export const objectStoreLayer = (repo: string) =>
 /**
  * Refs in DO SQLite. The DO's input gate already serializes calls, so `apply`
  * is one transaction with a compare-and-swap per row — which is what makes
- * `atomic` a parameter instead of the second code path it is today
- * (`server.storage.ts:324`).
+ * `atomic` a parameter rather than a separate code path.
  */
 export const refStoreLayer = (repo: string) =>
   Layer.effect(

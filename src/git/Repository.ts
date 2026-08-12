@@ -1,11 +1,9 @@
 /**
  * Repository operations.
  *
- * Replaces `GitRepository` (`src/git.repository.ts`), whose ~50 `async` methods
- * throw on failure, so no caller can tell from a signature that `commit` can
- * lose a race. Here every failure is in the type, ref updates go through one
- * compare-and-swap path, and the hooks run inside the same pipeline as the ref
- * update instead of beside it.
+ * Every failure is in the type — a signature says that `commit` can lose a
+ * race — ref updates go through one compare-and-swap path, and the hooks run
+ * inside the same pipeline as the ref update instead of beside it.
  *
  * Storage reads go through this service rather than the stores directly — that
  * is what keeps `ObjectStore`/`RefStore` out of the HTTP handlers' requirements

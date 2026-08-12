@@ -1,14 +1,9 @@
 /**
  * Git smart-HTTP endpoints.
  *
- * Today `Server` (`src/server.ts`) holds a hand-rolled `#routes` array matched
- * with `URLPattern`, plus a second table in `ServerApi` (`src/server.api.ts`,
- * 2.5k lines) with its own dispatch, its own JSON parsing and its own
- * try/catch-to-status mapping repeated per handler.
- *
- * Sketch: the raw protocol lives in an `HttpRouter` (it is byte-oriented — no
- * schema buys you anything on a packfile), and the JSON API moves to `HttpApi`
- * where the schema does earn its keep. Both mount into the same web handler.
+ * The raw protocol lives in an `HttpRouter` (it is byte-oriented — no schema
+ * buys you anything on a packfile), and the JSON API lives in `HttpApi` where
+ * the schema does earn its keep. Both mount into the same web handler.
  */
 import { Effect, Layer, Stream } from "effect";
 import {

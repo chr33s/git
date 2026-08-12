@@ -18,7 +18,7 @@ import { Effect, Result } from "effect";
 import { Invalid, PackCorrupt } from "./Error.sketch.ts";
 import type { ObjectType, Oid, RawObject } from "./Store.sketch.ts";
 
-/** Pure — same body as today's `parseCommit`, returning a Result. */
+/** Pure — same body as the landed `Format.ts` `parseCommit`, returning a Result. */
 export declare const parseCommit: (data: Uint8Array) => Result.Result<CommitInfo, Invalid>;
 export declare const parseTree: (
   data: Uint8Array,

@@ -1,10 +1,9 @@
 /**
  * In-memory stores.
  *
- * Replaces the legacy `MemoryStorage` (`git.storage.ts`), which had to be threaded
- * into a constructor by hand. As a layer it is a one-line swap at the edge of a
- * test, and everything under it — `Repository`, and later the HTTP handlers —
- * is the same code that runs on Workers.
+ * As a layer it is a one-line swap at the edge of a test, and everything under
+ * it — `Repository`, and later the HTTP handlers — is the same code that runs
+ * on Workers.
  *
  * `RefStore.apply` here is a real implementation of the atomic contract, not a
  * stub: the checks and the writes happen in one synchronous pass, and under

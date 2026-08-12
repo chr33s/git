@@ -1,12 +1,7 @@
 /**
  * JSON API.
  *
- * Today: 45 endpoints in `src/server.api.ts` (2,515 lines). Payloads are
- * `Record<string, any>`; each handler re-checks its own fields, builds its own
- * `Response.json`, and the browser client re-declares the same shapes by hand
- * in `src/client.ts`. Pagination is copy-pasted per list endpoint.
- *
- * Sketch: one `HttpApi` definition. From it you get the server handlers (with
+ * One `HttpApi` definition. From it you get the server handlers (with
  * decoded, typed payloads), a derived client for `client.ts` and the CLI, and
  * an OpenAPI document — all from the same declaration, so they cannot drift.
  */

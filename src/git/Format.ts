@@ -7,9 +7,8 @@
  * stores) is effectful. Hashing is the exception: Web Crypto is async on every
  * runtime this targets.
  *
- * The parsing is a faithful port of `GitRepository#parseCommit` / `#parseTree`,
- * with the signature line split into its parts and failures returned instead of
- * silently defaulting to `""`.
+ * Parsing splits the signature line into its parts and returns failures
+ * instead of silently defaulting to `""`.
  */
 import { Effect, Result } from "effect";
 import { Invalid } from "./Error.ts";

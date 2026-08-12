@@ -1,15 +1,11 @@
 /**
  * Browser client.
  *
- * Today `Client` (`src/client.ts`, 1,007 lines) is a class that both (a) does
- * local git — objects, index, merges, rebases against OPFS — and (b) re-declares
- * every server payload shape by hand to talk to the JSON API. Half of its bulk
- * is request/response plumbing that duplicates `server.api.ts`.
- *
- * Sketch: (b) is derived from the same `HttpApi` value the server implements,
- * so it disappears. (a) is the local `Repository` service over the OPFS layer —
- * the *same* `Repository` the server runs, because it only ever talked to the
- * three store ports.
+ * Two halves. The remote half is derived from the same `HttpApi` value the
+ * server implements, so there is no request/response plumbing to write. The
+ * local half — objects, index, merges, rebases against OPFS — is the *same*
+ * `Repository` service the server runs, because it only ever talks to the
+ * store ports.
  */
 import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";

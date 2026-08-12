@@ -5,14 +5,7 @@
  * Cloudflare resources, not provider-neutral ones (see `Host.ts`). Confining
  * them to this module is what keeps the rest of the sketch portable.
  *
- * Today `Server extends DurableObject<Env>` (`src/server.ts`, 1,130 lines)
- * constructs `Storage`, `GitRepository`, `ServerApi`, `ServerLfs`,
- * `ServerWebhooks` and a `HookRunner` in its constructor, wires webhooks to
- * hooks by hand, and dispatches with a `URLPattern` table. Every dependency is
- * `new`-ed at exactly one place and cannot be substituted in a test without
- * standing up a DO.
- *
- * Sketch: the DO is a host, not an application. It supplies isolation,
+ * The DO is a host, not an application. It supplies isolation,
  * serialization and background work; the application it serves is
  * `server/App.ts`, unchanged from what runs under node.
  */
@@ -102,9 +95,7 @@ declare const bindings: Layer.Layer<Alchemy.R2.ReadWriteBucket>;
 declare const subscribers: Layer.Layer<Webhooks.Subscribers>;
 
 /**
- * Cancellation, which today is `request.signal?.throwIfAborted()` at two entry
- * points and nothing below them: an aborted clone keeps walking objects until
- * it finishes. Under Effect the handler runs on a fiber tied to the request —
+ * Cancellation: the handler runs on a fiber tied to the request —
  * when the client hangs up, the object walk, the R2 reads and the SQL cursor
  * are interrupted together, and any `Scope` releases in order.
  *

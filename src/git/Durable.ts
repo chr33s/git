@@ -7,8 +7,7 @@
  * that shape — an object with durable state, addressed by name, that processes
  * one request at a time.
  *
- * The existing `Server` in `src/server.ts` is untouched and still serves
- * traffic. This class is the new path, driven end to end by
+ * This class is the Worker entry point, driven end to end by
  * `Cloudflare.integration.ts` through wrangler's test harness.
  *
  * What the platform gives us here, and what the other backends have to build:
@@ -80,8 +79,7 @@ export class GitRepo extends DurableObject<TestEnv> {
 
   /**
    * The only place a failure becomes a status code, and it does so from the
-   * error's own `httpApiStatus` annotation rather than a mapping table —
-   * `worker.ts` and `server.api.ts` each keep their own today.
+   * error's own `httpApiStatus` annotation rather than a mapping table.
    */
   #respond(repo: string, effect: Effect.Effect<Response, GitError, Repository>): Promise<Response> {
     return Effect.runPromise(

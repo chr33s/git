@@ -1,13 +1,7 @@
 /**
  * Local stores: browser (OPFS), node (fs), and in-memory.
  *
- * Today these are `OpfsStorage` (`src/client.storage.ts`) and `NodeStorage`
- * (`src/cli.storage.ts`), two more implementations of the same 16-method
- * filesystem interface — including `applyRefChanges`, which neither provides,
- * so the client hand-rolls read-then-write ref updates
- * (`client.ts#writeRefIfUnchanged`) and races itself across tabs.
- *
- * Sketch: same three ports as the server. OPFS gets real atomicity from
+ * The same three ports as the server. OPFS gets real atomicity from
  * `createSyncAccessHandle` locks; Node gets it from `rename(2)`. The layers are
  * the only thing that changes between environments — nothing above them knows
  * which one is loaded.
@@ -28,7 +22,7 @@ export declare const opfs: (repo: string) => Layer.Layer<Stores>;
 /**
  * Node: built on the platform `FileSystem`/`Path` services rather than direct
  * `node:fs` imports, so CLI tests run against an in-memory filesystem layer and
- * stop needing a temp directory per test (`test.helpers.ts` today).
+ * never need a temp directory per test.
  */
 export const node = (
   root: string,
@@ -48,9 +42,7 @@ export const node = (
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         // Atomic ref update is `write temp + rename(2)` per ref, under the
-        // host's per-repo lock for the batch. The port made this mandatory —
-        // today `NodeStorage` simply omits `applyRefChanges` and the caller
-        // races.
+        // host's per-repo lock for the batch. The port makes this mandatory.
         return makeNodeRefStore(fs, path, root);
       }),
     ),
@@ -68,9 +60,7 @@ declare const makeNodeRefStore: (
 ) => RefStore["Service"];
 
 /**
- * In-memory, for tests. Today the equivalent is `MemoryStorage` in
- * `git.storage.ts`, reachable only by passing it into a constructor by hand;
- * here it is a layer swap at the edge of a test, and everything under it —
- * including `Repository` and the HTTP handlers — is unchanged.
+ * In-memory, for tests: a layer swap at the edge of a test, and everything
+ * under it — including `Repository` and the HTTP handlers — is unchanged.
  */
 export declare const memory: Layer.Layer<Stores>;

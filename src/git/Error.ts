@@ -1,8 +1,7 @@
 /**
  * Typed failures.
  *
- * Replaces the `GitError` class hierarchy in `src/git.error.ts`. These are
- * schema-backed, so the same class is the server's failure, its wire
+ * Schema-backed, so the same class is the server's failure, its wire
  * representation, and the type a client matches on. The HTTP status lives as an
  * `httpApiStatus` annotation — the same one `HttpApiError` uses — so response
  * mapping is not a hand-written switch.

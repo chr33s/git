@@ -1,15 +1,10 @@
 /**
  * Tests.
  *
- * Today: 22 `*.test.ts` files on `node:test`, run with
- * `--test-concurrency=1` because they share global state, plus
- * `test.helpers.ts` which spawns `wrangler dev` on port 8080 for `e2e.test.ts`.
- * Timing-dependent paths (webhook retry backoff, gc grace period) either sleep
- * or are untested.
- *
- * Sketch: the same suites, but the environment is a layer. No spawned server
- * for the HTTP tests — `HttpApiTest` drives the real handler in-process — and
- * time is controlled, so the retry schedule is asserted rather than waited out.
+ * The environment is a layer. No spawned server for the HTTP tests —
+ * `HttpApiTest` drives the real handler in-process — and time is controlled,
+ * so timing-dependent paths (webhook retry backoff, gc grace period) are
+ * asserted with `TestClock` rather than waited out.
  */
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Fiber, Layer, type Scope } from "effect";

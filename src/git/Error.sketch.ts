@@ -1,10 +1,7 @@
 /**
  * Error model.
  *
- * Today: `GitError extends Error` + subclasses, `error.code`, `error.status`,
- * discovered by `instanceof` at ~40 catch sites (see `src/git.error.ts`).
- *
- * Sketch: schema-backed tagged errors. Every failure is in the `E` channel of
+ * Schema-backed tagged errors. Every failure is in the `E` channel of
  * the effect that can produce it, so the compiler — not a code review — decides
  * whether a handler is exhaustive. Because they are `Schema` classes they also
  * serialize over the wire unchanged, which is what lets the JSON API and the
