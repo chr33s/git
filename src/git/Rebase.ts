@@ -276,12 +276,15 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
   // parted, so everything after it on `branch` is what `onto` lacks. A branch
   // already contained in `onto` yields nothing here and settles as up-to-date.
   //
-  // The walk follows first parents, so a merge commit's side branch is not
-  // replayed on its own; `git rebase` flattens the same way unless asked to
-  // preserve merges.
+  // `firstParent` is asked for rather than inherited: a merge commit's side
+  // branch is not replayed on its own, which is how `git rebase` flattens
+  // unless asked to preserve merges. `log` walks every parent by default, and
+  // that walk would replay the side branch's commits individually here.
   const base = yield* repository.mergeBase(branch, onto);
   const history = yield* Stream.runCollect(
-    repository.log(branch).pipe(Stream.takeWhile((commit) => commit.oid !== base)),
+    repository
+      .log(branch, { firstParent: true })
+      .pipe(Stream.takeWhile((commit) => commit.oid !== base)),
   );
 
   const commits: Replayed[] = [];

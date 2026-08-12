@@ -199,9 +199,23 @@ export class Repository extends Context.Service<
       readonly expected?: Oid | null;
     }) => Effect.Effect<Oid, RefConflict | ObjectNotFound | StorageFailure | Invalid>;
 
+    /**
+     * History from `from`, newest first, as `git log` orders it: every
+     * parent followed, each commit emitted once.
+     *
+     * Commits that share a committer date and sit on different branches have
+     * no right order — git falls back to its own queue discipline, and this
+     * falls back to the oid, so the output is at least stable run to run.
+     * Where dates differ, which is every real repository, the two agree.
+     *
+     * `firstParent` follows only each commit's first parent — `git log
+     * --first-parent`. It is the right walk for replaying a branch onto
+     * another, and the wrong one for anything that must not miss a commit
+     * that arrived by a merge.
+     */
     readonly log: (
       from: Oid,
-      options?: { readonly limit?: number },
+      options?: { readonly limit?: number; readonly firstParent?: boolean },
     ) => Stream.Stream<Commit, ObjectNotFound | StorageFailure>;
 
     readonly branch: (input: {
@@ -1003,14 +1017,102 @@ export const layer = Layer.effect(
         }),
       ),
 
-      log: (from, options) =>
-        Stream.paginate(from, (oid) =>
-          readCommit(oid).pipe(
-            Effect.map(
-              (commit) => [[{ ...commit, oid }], Option.fromNullishOr(commit.parents[0])] as const,
+      log: (from, options) => {
+        if (options?.firstParent === true) {
+          return Stream.paginate(from, (oid) =>
+            readCommit(oid).pipe(
+              Effect.map(
+                (commit) =>
+                  [[{ ...commit, oid }], Option.fromNullishOr(commit.parents[0])] as const,
+              ),
             ),
-          ),
-        ).pipe(options?.limit === undefined ? (self) => self : Stream.take(options.limit)),
+          ).pipe(options.limit === undefined ? (self) => self : Stream.take(options.limit));
+        }
+
+        /**
+         * A frontier ordered by committer date, not a queue.
+         *
+         * Following every parent means the walk reaches the same commit by
+         * several routes and reaches old commits on one side before newer
+         * ones on the other. Emitting in arrival order would interleave the
+         * two sides by shape of the graph rather than by time, which is not
+         * what `git log` shows; taking the newest pending commit each step
+         * is. `seen` is what keeps a commit reachable twice from being
+         * reported twice.
+         */
+        return Stream.paginate(
+          { frontier: [from] as ReadonlyArray<Oid>, seen: new Set<Oid>() },
+          (state) =>
+            Effect.gen(function* () {
+              let frontier = state.frontier.filter((oid) => !state.seen.has(oid));
+              if (frontier.length === 0) {
+                return [[] as ReadonlyArray<Commit>, Option.none<typeof state>()] as const;
+              }
+
+              const commits = yield* Effect.forEach(frontier, (oid) =>
+                readCommit(oid).pipe(Effect.map((commit) => ({ ...commit, oid }))),
+              );
+
+              const latest = Math.max(...commits.map((commit) => commit.committer.at.getTime()));
+              const tied = commits.filter((commit) => commit.committer.at.getTime() === latest);
+
+              /**
+               * Date order alone would sometimes print a parent above its
+               * child, which `git log` never does. It only can when the two
+               * share a timestamp — a parent is otherwise older — and then
+               * every commit between them shares it too, so the disagreement
+               * can be resolved by walking just the commits at this instant.
+               */
+              const reachesWithinTie = Effect.fn("Repository.log.reaches")(function* (
+                start: Oid,
+                target: Oid,
+              ) {
+                const pending = [start];
+                const visited = new Set<Oid>();
+                while (pending.length > 0) {
+                  const oid = pending.pop()!;
+                  if (oid === target) return true;
+                  if (visited.has(oid) || state.seen.has(oid)) continue;
+                  visited.add(oid);
+                  const commit = yield* readCommit(oid);
+                  if (commit.committer.at.getTime() !== latest) continue;
+                  pending.push(...commit.parents);
+                }
+                return false;
+              });
+
+              const eligible: Array<Commit> = [];
+              for (const candidate of tied) {
+                let shadowed = false;
+                for (const other of tied) {
+                  if (other.oid === candidate.oid) continue;
+                  if (yield* reachesWithinTie(other.oid, candidate.oid)) {
+                    shadowed = true;
+                    break;
+                  }
+                }
+                if (!shadowed) eligible.push(candidate);
+              }
+
+              // Oid decides only between commits that are genuinely unordered,
+              // so the output is stable run to run rather than merely valid.
+              const newest = (eligible.length > 0 ? eligible : tied).reduce((best, candidate) =>
+                candidate.oid > best.oid ? candidate : best,
+              );
+
+              state.seen.add(newest.oid);
+              frontier = [
+                ...frontier.filter((oid) => oid !== newest.oid),
+                ...newest.parents.filter((oid) => !state.seen.has(oid)),
+              ];
+
+              return [
+                [newest] as ReadonlyArray<Commit>,
+                Option.some({ frontier, seen: state.seen }),
+              ] as const;
+            }),
+        ).pipe(options?.limit === undefined ? (self) => self : Stream.take(options.limit));
+      },
 
       branch: Effect.fn("Repository.branch")(function* ({ base, name }) {
         const from = yield* refs.resolve(base);
