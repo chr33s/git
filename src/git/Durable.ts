@@ -19,6 +19,7 @@ import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Archive from "../server/Archive.ts";
+import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
@@ -123,6 +124,19 @@ export class GitRepo extends DurableObject<TestEnv> {
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
           ),
           Effect.provide(lfsR2({ bucket: this.env.GIT_OBJECTS, repo })),
+        ),
+      );
+    }
+
+    // Also ahead of the API: the body is arbitrarily large and is read as a
+    // stream, so no handler that would buffer it may see the request first.
+    if (route === "commit-pack") {
+      return this.#respond(
+        repo,
+        CommitPack.handle(request).pipe(
+          Effect.map(
+            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+          ),
         ),
       );
     }

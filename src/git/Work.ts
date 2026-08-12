@@ -126,7 +126,9 @@ export const validatePath = (path: string): Effect.Effect<string, Invalid> =>
       return Effect.fail(new Invalid({ field: "path", reason: `empty path '${path}'` }));
     }
     if (segments.some((segment) => segment === "." || segment === "..")) {
-      return Effect.fail(new Invalid({ field: "path", reason: `path escapes the tree: '${path}'` }));
+      return Effect.fail(
+        new Invalid({ field: "path", reason: `path escapes the tree: '${path}'` }),
+      );
     }
     if (segments[0] === ".git") {
       return Effect.fail(new Invalid({ field: "path", reason: "the repository is not content" }));

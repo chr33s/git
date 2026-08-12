@@ -16,14 +16,7 @@ import { Effect, Layer } from "effect";
 
 import { ObjectNotFound, StorageFailure } from "./Error.ts";
 import { decodeIndex, encodeIndex } from "./Index.ts";
-import {
-  EXECUTABLE,
-  type FileStat,
-  IndexStore,
-  REGULAR,
-  SYMLINK,
-  WorkTree,
-} from "./Work.ts";
+import { EXECUTABLE, type FileStat, IndexStore, REGULAR, SYMLINK, WorkTree } from "./Work.ts";
 
 const failed = (operation: string, target: string) => (cause: unknown) =>
   new StorageFailure({ operation, path: target, cause });

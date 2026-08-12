@@ -18,6 +18,7 @@ import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/u
 import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
+import { cherryPick, rebase } from "../git/Rebase.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
@@ -41,6 +42,31 @@ const signatureFrom = (author: (typeof SignatureWire)["Type"] | undefined): Sign
 });
 
 const RepoParam = { repo: Schema.String };
+
+/**
+ * What a replay produced, for both `cherry-pick` and `rebase`.
+ *
+ * `commits` lists every commit considered, not just the ones that produced
+ * something: a `replayed` of `null` is a commit `onto` already had, or one
+ * that conflicted, and dropping those would leave the caller unable to tell
+ * an empty pick from a skipped one.
+ */
+const ReplayOutcomeWire = Schema.Struct({
+  kind: Schema.Literals(["replayed", "up-to-date", "conflicted"]),
+  head: Schema.NullOr(OidString),
+  commits: Schema.Array(
+    Schema.Struct({
+      original: OidString,
+      replayed: Schema.NullOr(OidString),
+      conflicts: Schema.Array(
+        Schema.Struct({
+          path: Schema.String,
+          reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
+        }),
+      ),
+    }),
+  ),
+});
 
 /** Written once; every list endpoint reuses it instead of re-deriving it. */
 const Page = <A extends Schema.Top>(item: A) =>
@@ -420,6 +446,32 @@ const repo = HttpApiGroup.make("repo")
     }),
   )
   .add(
+    HttpApiEndpoint.post("cherry-pick", "/cherry-pick", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        commit: Schema.String,
+        onto: Schema.String,
+        /** Who is picking; the original commit stays the author either way. */
+        author: Schema.optional(SignatureWire),
+        into: Schema.optional(Schema.String),
+      }),
+      success: ReplayOutcomeWire,
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("rebase", "/rebase", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        branch: Schema.String,
+        onto: Schema.String,
+        into: Schema.optional(Schema.String),
+      }),
+      success: ReplayOutcomeWire,
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
     HttpApiEndpoint.post("diff", "/diff", {
       params: RepoParam,
       payload: Schema.Struct({
@@ -788,6 +840,21 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return outcome;
       }),
+    )
+    .handle("cherry-pick", ({ payload }) =>
+      cherryPick({
+        commit: payload.commit,
+        onto: payload.onto,
+        ...(payload.author === undefined ? {} : { author: signatureFrom(payload.author) }),
+        ...(payload.into === undefined ? {} : { into: payload.into }),
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("rebase", ({ payload }) =>
+      rebase({
+        branch: payload.branch,
+        onto: payload.onto,
+        ...(payload.into === undefined ? {} : { into: payload.into }),
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
     .handle("diff", ({ payload }) =>
       Effect.gen(function* () {

@@ -262,7 +262,8 @@ export const restore = Effect.fn("Checkout.restore")(function* (
     if (oid === undefined) {
       return yield* new Invalid({ field: "path", reason: `'${requested}' is not tracked` });
     }
-    const mode = fromSource === undefined ? (entry?.mode ?? REGULAR) : Number.parseInt(fromSource.mode, 8);
+    const mode =
+      fromSource === undefined ? (entry?.mode ?? REGULAR) : Number.parseInt(fromSource.mode, 8);
 
     if (toWorktree) {
       yield* work.write(path, yield* repository.readBlob(oid), mode);
@@ -331,7 +332,8 @@ export const checkout = Effect.fn("Checkout.checkout")(function* (
     const mode = Number.parseInt(file.mode, 8);
     yield* work.write(file.path, yield* repository.readBlob(file.oid), mode);
     const stat = yield* work.stat(file.path);
-    if (stat !== null) entries = addEntry(entries, entryFor(file.path, file.oid, { ...stat, mode }));
+    if (stat !== null)
+      entries = addEntry(entries, entryFor(file.path, file.oid, { ...stat, mode }));
   }
 
   yield* index.save(entries);

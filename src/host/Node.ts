@@ -25,6 +25,7 @@ import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Archive from "../server/Archive.ts";
+import * as CommitPack from "../server/CommitPack.ts";
 import { file as lfsFile } from "../server/Lfs.node.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
@@ -105,6 +106,15 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         Lfs.handle(request).pipe(Effect.provide(state.lfs)) as Effect.Effect<Response | null>,
       );
       if (lfs !== null) return lfs;
+
+      // Also ahead of the API: a bulk commit body is arbitrarily large and is
+      // consumed as a stream, so nothing that would buffer it may see it first.
+      const bulk = await Effect.runPromise(
+        CommitPack.handle(request).pipe(
+          Effect.provide(state.layer),
+        ) as Effect.Effect<Response | null>,
+      );
+      if (bulk !== null) return bulk;
 
       const exported = await Effect.runPromise(
         Archive.handle(request).pipe(Effect.provide(state.layer)) as Effect.Effect<Response | null>,

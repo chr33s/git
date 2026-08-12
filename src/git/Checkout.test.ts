@@ -221,9 +221,7 @@ describe.skipIf(!hasGit)("working tree, against git", () => {
     await fs.writeFile(path.join(root, "run.sh"), "#!/bin/sh\n");
     await fs.chmod(path.join(root, "run.sh"), 0o755);
 
-    await Effect.runPromise(
-      Checkout.add(["."]).pipe(Effect.provide(layerFor(root)), Effect.orDie),
-    );
+    await Effect.runPromise(Checkout.add(["."]).pipe(Effect.provide(layerFor(root)), Effect.orDie));
 
     // git's own reader on the index we wrote: paths, modes and oids.
     const listed = git(root, "ls-files", "--stage");
