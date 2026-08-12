@@ -1,6 +1,24 @@
 # Sketch: Effect v4 + alchemy@next rewrite
 
-Status: **design sketch**, not a migration. Nothing under `src/` is touched.
+Status: **phases 0–2 have landed** in `src/git/`; the rest is still a sketch.
+
+What is real code today, running under the repo's own test runner:
+
+| module | what it is |
+| --- | --- |
+| `src/git/Error.ts` | the tagged errors, with `httpApiStatus` annotations |
+| `src/git/Store.ts` | `ObjectStore` / `RefStore` ports |
+| `src/git/Format.ts` | the pure/effectful seam — framing, commit and tree codecs, hashing |
+| `src/git/Memory.ts` | in-memory backend |
+| `src/git/Node.ts` | filesystem backend, git's own on-disk layout |
+| `src/git/Repository.ts` | the domain service |
+| `src/git/Store.contract.ts` | one contract suite, run against **both** backends |
+
+58 tests pass. Two of them check oids against values real `git` produces, and
+`Node.interop.test.ts` writes a repository through the ports and then has the
+real `git` binary read it — `fsck --strict`, `log`, `cat-file`, `ls-tree`,
+`show` all agree. The old implementation is untouched and still the one wired
+into the Worker.
 
 The code in [`sketch/`](../sketch) is illustrative, but it is not hand-waved: it
 typechecks against the real `effect@4.0.0-beta.107` and `alchemy@2.0.0-beta.70`
@@ -306,13 +324,13 @@ the ratchet: it runs against both implementations until the last phase.
 
 | phase | scope                                                                | risk   |
 | ----- | -------------------------------------------------------------------- | ------ |
-| 0     | add deps, `Format.ts` seam, port pure modules unchanged, dual-run tests | low    |
-| 1     | `Error.ts` + `Store.ts` ports; in-memory layer; keep old classes as adapters over the new ports | low |
-| 2     | `Repository` service; re-point `server.ts` at it (still a DO class)   | medium |
+| 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests          | done   |
+| 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite | done   |
+| 2 ◑   | `Repository` service — landed; re-pointing `server.ts` at it is next   | medium |
 | 3     | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed | high  |
 | 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types | medium |
 | 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages | medium |
-| 5b    | node host — drops `wrangler dev` from `npm run dev` and the e2e suite  | low    |
+| 5b ◑  | node host — the fs backend landed early (it is what proves the ports); the HTTP host is still ahead | low |
 | 6     | CLI on `effect/unstable/cli`; delete the argv parser                   | low    |
 
 Phase 3 is the one worth doing even if the rest is deferred — it is the only
