@@ -120,60 +120,59 @@ export interface FsckReport {
   readonly danglingRefs: ReadonlyArray<{ readonly ref: string; readonly oid: Oid }>;
 }
 
-export const fsck = (stores: Stores) =>
-  Effect.gen(function* () {
-    const { objects, refs } = stores;
-    const problems: FsckProblem[] = [];
-    let checked = 0;
+export const fsck = Effect.fn("Maintenance.fsck")(function* (stores: Stores) {
+  const { objects, refs } = stores;
+  const problems: FsckProblem[] = [];
+  let checked = 0;
 
-    yield* Stream.runForEach(objects.list, (oid) =>
-      Effect.gen(function* () {
-        checked++;
-        const object = yield* objects.read(oid).pipe(
-          Effect.map((value): RawObject | null => value),
-          Effect.catchTag("ObjectNotFound", () => {
-            problems.push({ oid, problem: "listed but unreadable" });
-            return Effect.succeed(null);
-          }),
-        );
-        if (object === null) return;
+  yield* Stream.runForEach(objects.list, (oid) =>
+    Effect.gen(function* () {
+      checked++;
+      const object = yield* objects.read(oid).pipe(
+        Effect.map((value): RawObject | null => value),
+        Effect.catchTag("ObjectNotFound", () => {
+          problems.push({ oid, problem: "listed but unreadable" });
+          return Effect.succeed(null);
+        }),
+      );
+      if (object === null) return;
 
-        // The name is the hash of the content: if they disagree, the
-        // bytes changed underneath the store.
-        const actual = yield* hashObject(object);
-        if (actual !== oid) {
-          problems.push({ oid, problem: `hash mismatch: content hashes to ${actual}` });
-          return;
-        }
+      // The name is the hash of the content: if they disagree, the
+      // bytes changed underneath the store.
+      const actual = yield* hashObject(object);
+      if (actual !== oid) {
+        problems.push({ oid, problem: `hash mismatch: content hashes to ${actual}` });
+        return;
+      }
 
-        // A blob is bytes and has no structure to be wrong about; the
-        // other three do, and the codec is the checker.
-        const structure: Result.Result<unknown, Invalid> | null =
-          object.type === "commit"
-            ? parseCommit(object.data)
-            : object.type === "tree"
-              ? parseTree(object.data)
-              : object.type === "tag"
-                ? parseTag(object.data)
-                : null;
-        if (structure !== null && Result.isFailure(structure)) {
-          problems.push({
-            oid,
-            problem: `malformed ${object.type}: ${structure.failure.reason}`,
-          });
-        }
-      }),
-    );
+      // A blob is bytes and has no structure to be wrong about; the
+      // other three do, and the codec is the checker.
+      const structure: Result.Result<unknown, Invalid> | null =
+        object.type === "commit"
+          ? parseCommit(object.data)
+          : object.type === "tree"
+            ? parseTree(object.data)
+            : object.type === "tag"
+              ? parseTag(object.data)
+              : null;
+      if (structure !== null && Result.isFailure(structure)) {
+        problems.push({
+          oid,
+          problem: `malformed ${object.type}: ${structure.failure.reason}`,
+        });
+      }
+    }),
+  );
 
-    // A ref pointing at nothing is the other half of integrity, and the
-    // half a per-object walk cannot see.
-    const danglingRefs: Array<{ ref: string; oid: Oid }> = [];
-    for (const [ref, oid] of yield* refs.list("refs/")) {
-      if (oid !== EMPTY_TREE_OID && !(yield* objects.has(oid))) danglingRefs.push({ ref, oid });
-    }
+  // A ref pointing at nothing is the other half of integrity, and the
+  // half a per-object walk cannot see.
+  const danglingRefs: Array<{ ref: string; oid: Oid }> = [];
+  for (const [ref, oid] of yield* refs.list("refs/")) {
+    if (oid !== EMPTY_TREE_OID && !(yield* objects.has(oid))) danglingRefs.push({ ref, oid });
+  }
 
-    return { checked, problems, danglingRefs } satisfies FsckReport;
-  }).pipe(Effect.withSpan("Maintenance.fsck"));
+  return { checked, problems, danglingRefs } satisfies FsckReport;
+});
 
 /**
  * Everything reachable into one `.pack`/`.idx` pair, loose copies deleted.

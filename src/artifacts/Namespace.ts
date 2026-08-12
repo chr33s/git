@@ -14,7 +14,7 @@
  *
  * The two `raw` escape hatches follow alchemy's `LocalR2Gateway` precedent:
  * the namespace-level one dies with guidance (its type says `never`), and
- * `RepoClient.raw` — deferred by `patches/alchemy+2.0.0-beta.70.patch` —
+ * `RepoClient.raw` — deferred by `patches/alchemy+2.0.0-beta.72.patch` —
  * fails with a typed `ArtifactsError` a caller can handle.
  */
 // Deep imports on purpose: the `alchemy/Cloudflare` barrel drags in modules

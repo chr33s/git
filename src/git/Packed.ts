@@ -90,13 +90,11 @@ export const packed = (
       for (const handle of yield* packs.list) {
         const found = findInPackIndex(handle.index, oid);
         if (found._tag === "Failure") {
-          return yield* Effect.fail(
-            new StorageFailure({
-              operation: "packs.lookup",
-              path: handle.name,
-              cause: found.failure,
-            }),
-          );
+          return yield* new StorageFailure({
+            operation: "packs.lookup",
+            path: handle.name,
+            cause: found.failure,
+          });
         }
         if (found.success !== null) return { handle, entry: found.success };
       }
@@ -107,22 +105,24 @@ export const packed = (
     Effect.gen(function* () {
       const located = yield* locate(oid);
       if (located === null) return null;
+      const context = yield* Effect.context<never>();
 
       return yield* Effect.tryPromise({
         try: () =>
-          readAt(located.handle.source, located.entry.offset, async (base) => {
+          readAt(located.handle.source, located.entry.offset, (base) =>
             // A ref-delta whose base is not in this pack: look everywhere
             // else this store can see, which is what makes a thin pack
             // readable once it has been stored.
-            const elsewhere = await Effect.runPromise(
+            Effect.runPromiseWith(context)(
               read(base).pipe(
                 Effect.map((object): RawObject | null => object),
-                Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
-                Effect.catchTag("StorageFailure", () => Effect.succeed(null)),
+                Effect.catchTags({
+                  ObjectNotFound: () => Effect.succeed(null),
+                  StorageFailure: () => Effect.succeed(null),
+                }),
               ),
-            );
-            return elsewhere;
-          }),
+            ),
+          ),
         catch: failed("packs.read", located.handle.name),
       });
     });
