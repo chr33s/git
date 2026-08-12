@@ -1,10 +1,10 @@
 # Can `@chr33s/git` be an Artifacts provider?
 
-**Short answer: yes, and the fit is closer than you'd expect — Cloudflare
-Artifacts is a git host, and so is this. Three capabilities are missing, one of
-them (auth) is missing entirely rather than partially, and one upstream
-interface change is needed before a third-party provider can satisfy the
-binding's type.**
+**Short answer: yes — and the local provider now exists
+(`src/artifacts/Namespace.ts`), satisfying alchemy's binding tag over this
+server's stores. The one upstream interface change it needed is applied as a
+local patch. What remains is durability (the registry lives in memory) and
+enforcement (tokens exist but the HTTP routes do not check them yet).**
 
 Evaluated against the code, not the docs (`alchemy.run` is unreachable from this
 sandbox): `alchemy@2.0.0-beta.70`'s `src/Cloudflare/Artifacts/*` and the
@@ -36,18 +36,27 @@ Repo metadata is fixed: `id`, `name`, `description`, `defaultBranch`,
 
 ## Fit against what exists today
 
-| capability                                     | status               | notes                                                                                                            |
-| ---------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| git smart-HTTP (`upload-pack`, `receive-pack`) | **have**             | `src/server/Protocol.ts` + `src/git/Pack.ts` — stock `git` clones and pushes against workerd in the test suite   |
-| repo `create` / `delete`                       | **partial**          | repos are conjured by first use (one DO per name); no delete endpoint in the rewrite yet                         |
-| `setDefaultBranch`                             | **partial**          | `RefStore.setHead` exists; nothing exposes it over HTTP yet                                                      |
-| HTTPS `remote` URL                             | **have**             | the worker route _is_ the remote                                                                                 |
-| LFS                                            | **bonus**            | Artifacts does not offer it; we do                                                                               |
-| `import` from a remote                         | **partial**          | `clone`/`fetch` + shallow support exist; needs `depth`/`branch` plumbing and an async `IMPORT_IN_PROGRESS` state |
-| repo metadata                                  | **partial**          | `description`, `readOnly`, `createdAt`, `lastPushAt`, `source` have nowhere to live                              |
-| `list` with cursor                             | **missing**          | see below — this is architectural                                                                                |
-| `fork`                                         | **missing**          | feasible cheaply; see below                                                                                      |
-| tokens / any auth                              | **missing entirely** | `grep -ri 'authorization\|bearer\|token' src/` returns only commit `author` lines                                |
+| capability                                     | status           | notes                                                                                                          |
+| ---------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------- |
+| git smart-HTTP (`upload-pack`, `receive-pack`) | **have**         | `src/server/Protocol.ts` + `src/git/Pack.ts` — stock `git` clones and pushes against workerd in the test suite |
+| repo `create` / `delete`                       | **have (local)** | `src/artifacts/Namespace.ts` — registry rows + store lifecycle                                                 |
+| `setDefaultBranch`                             | **have (local)** | `create(name, { setDefaultBranch })` sets `HEAD`; nothing exposes it over HTTP yet                             |
+| HTTPS `remote` URL                             | **have**         | the worker route _is_ the remote                                                                               |
+| LFS                                            | **bonus**        | Artifacts does not offer it; we do                                                                             |
+| `import` from a remote                         | **have (local)** | full clone over smart HTTP with `branch`; `depth` and async `IMPORT_IN_PROGRESS` still open                    |
+| repo metadata                                  | **have (local)** | registry rows carry every `ArtifactsRepoInfo` field                                                            |
+| `list` with cursor                             | **have (local)** | the `Registry` port; in-memory today, an index DO or D1 later                                                  |
+| `fork`                                         | **have (local)** | alternates — child reads fall through to the parent, `defaultBranchOnly` copies one ref                        |
+| tokens / any auth                              | **partial**      | issue/list/revoke/`verify` live in `Tokens` (SHA-256 at rest); the HTTP routes do not enforce them yet         |
+
+**The local provider landed**: [`src/artifacts/Namespace.ts`](../src/artifacts/Namespace.ts)
+implements `ReadWriteNamespaceClient` over this repository's stores and
+provides alchemy's own `ReadWriteNamespace` binding tag, so a stack swaps the
+native provider for it with one `Layer.provide`. Its tests drive create /
+cursor list / delete, the token lifecycle, fork over alternates, and an import
+over real smart HTTP from the node host. What remains of the gaps below is the
+durable form (registry in a DO or D1 instead of memory) and enforcement
+(wiring `Tokens.verify` into the protocol and JSON routes).
 
 ### The three gaps, in order of cost
 
@@ -139,11 +148,11 @@ instance per repo is `ArtifactsRepo`, and the git protocol is already there. The
 work is not in the git internals — it is the three things around them.
 
 | work                                                                    | rough size                |
-| ----------------------------------------------------------------------- | ------------------------- |
+| ----------------------------------------------------------------------- | ------------------------- | --------------------------------------------------------------------------------------- |
 | upstream: make `RepoClient.raw` an Effect                               | a PR, plus review latency |
 | registry + metadata (one index DO or D1)                                | ~1 week                   |
 | tokens: issuance, storage, revocation, Basic + Bearer middleware, tests | ~2 weeks                  |
-| `fork` via alternates, `import` with depth/branch + progress state      | ~1 week                   |
+| `fork`                                                                  | **have (local)**          | alternates — child reads fall through to the parent, `defaultBranchOnly` copies one ref |
 | the binding layer itself + conformance tests against the interface      | ~1 week                   |
 
 Call it 5–6 weeks to a credible local/self-hosted Artifacts provider, of which

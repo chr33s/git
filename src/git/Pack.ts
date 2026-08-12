@@ -162,19 +162,40 @@ class Source {
     return new Promise((resolve, reject) => {
       const inflater = createInflate();
       const fed: Uint8Array[] = [];
-      let inFlight: Uint8Array | null = null;
       const out: Uint8Array[] = [];
-      let done = false;
+      let ended = false;
+      let failed: unknown = null;
+      let settled = false;
 
-      const finish = (error?: unknown) => {
-        if (done) return;
-        done = true;
+      inflater.on("error", (error) => {
+        failed ??= error;
+      });
+      inflater.on("data", (chunk: Uint8Array) => out.push(chunk));
+      inflater.on("end", () => {
+        ended = true;
+      });
+
+      /**
+       * The single settlement point, reached only after the pump has stopped
+       * pulling — `end` can fire while a pull is in flight, and a chunk that
+       * arrives after it was never fed, so it must be pushed back whole.
+       */
+      const settle = (unfed: Uint8Array | null) => {
+        if (settled) return;
+        settled = true;
         const consumed = inflater.bytesWritten;
         inflater.removeAllListeners();
         inflater.close();
-        if (error !== undefined) {
-          if (error instanceof PackCorrupt) reject(error);
-          else reject(this.corrupt(error instanceof Error ? error.message : JSON.stringify(error)));
+
+        if (failed !== null) {
+          if (failed instanceof PackCorrupt) reject(failed);
+          else {
+            reject(this.corrupt(failed instanceof Error ? failed.message : JSON.stringify(failed)));
+          }
+          return;
+        }
+        if (!ended) {
+          reject(this.corrupt("truncated: deflate stream did not end"));
           return;
         }
 
@@ -189,36 +210,46 @@ class Source {
           }
           seen += chunk.length;
         }
-        if (inFlight !== null) leftovers.push(inFlight);
+        if (unfed !== null) leftovers.push(unfed);
         this.#pushBack(leftovers);
         resolve(concat(out));
       };
 
-      inflater.on("error", (error) => finish(error));
-      inflater.on("data", (chunk: Uint8Array) => out.push(chunk));
-      inflater.on("end", () => finish());
+      /** Wait for any of the events — `end` can arrive instead of the one hoped for. */
+      const waitFor = (...events: ReadonlyArray<string>) =>
+        new Promise<void>((next) => {
+          const fire = () => {
+            for (const event of events) inflater.off(event, fire);
+            next();
+          };
+          for (const event of events) inflater.once(event, fire);
+        });
 
       const pump = async () => {
-        while (!done) {
+        while (!ended && failed === null) {
           const chunk = await this.#next();
-          if (done) {
-            // `end` fired while we were pulling; the chunk was never fed.
-            inFlight = chunk;
+          if (ended || failed !== null) {
+            settle(chunk);
             return;
           }
           if (chunk === null) {
-            // Upstream is exhausted; let zlib decide whether the stream was
-            // complete (`end`) or cut short (`error`).
+            // Upstream is exhausted; the flush decides whether the stream was
+            // complete (`end` fires) or cut short (`error` fires).
             inflater.end();
-            return;
+            if (!ended && failed === null) await waitFor("end", "error");
+            break;
           }
           fed.push(chunk);
-          if (!inflater.write(chunk)) {
-            await new Promise<void>((drained) => inflater.once("drain", drained));
+          if (!inflater.write(chunk) && !ended && failed === null) {
+            await waitFor("drain", "end", "error");
           }
         }
+        settle(null);
       };
-      void pump().catch((error: unknown) => finish(error));
+      void pump().catch((error: unknown) => {
+        failed ??= error;
+        settle(null);
+      });
     });
   }
 

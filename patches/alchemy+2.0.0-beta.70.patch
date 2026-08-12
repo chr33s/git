@@ -1,3 +1,42 @@
+diff --git a/node_modules/alchemy/lib/Auth/AuthProvider.js b/node_modules/alchemy/lib/Auth/AuthProvider.js
+index a3d52904..4ee1a777 100644
+--- a/node_modules/alchemy/lib/Auth/AuthProvider.js
++++ b/node_modules/alchemy/lib/Auth/AuthProvider.js
+@@ -36,7 +36,7 @@ const LOCKED_METHODS = new Set(["read", "login", "logout", "configure"]);
+  */
+ const INTERACTIVE_METHODS = new Set(["login", "configure"]);
+ const interactiveMutex = Semaphore.makeUnsafe(1);
+-export class AuthError extends Schema.TaggedErrorClass()("AuthError", {
++export class AuthError extends Schema.TaggedError()("AuthError", {
+     message: Schema.String,
+     cause: Schema.optional(Schema.Defect()),
+ }) {
+diff --git a/node_modules/alchemy/lib/Bundle/Bundle.js b/node_modules/alchemy/lib/Bundle/Bundle.js
+index e237b2b4..6b287a72 100644
+--- a/node_modules/alchemy/lib/Bundle/Bundle.js
++++ b/node_modules/alchemy/lib/Bundle/Bundle.js
+@@ -15,7 +15,7 @@ import { rawPlugin } from "./RawPlugin.js";
+  * nothing must not require the native bundler to be loadable (#562).
+  */
+ const loadRolldown = () => import("rolldown");
+-export class BundleError extends Schema.TaggedErrorClass()("BundleError", {
++export class BundleError extends Schema.TaggedError()("BundleError", {
+     message: Schema.String,
+     cause: Schema.optional(Schema.Defect({ includeStack: true })),
+ }) {
+diff --git a/node_modules/alchemy/lib/Cloudflare/Access.js b/node_modules/alchemy/lib/Cloudflare/Access.js
+index 5aec9ac4..90a777e1 100644
+--- a/node_modules/alchemy/lib/Cloudflare/Access.js
++++ b/node_modules/alchemy/lib/Cloudflare/Access.js
+@@ -7,7 +7,7 @@ import * as Stream from "effect/Stream";
+ import * as ChildProcess from "effect/unstable/process/ChildProcess";
+ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+ import { cachedFunction } from "../Util/cached-function.js";
+-export class AccessError extends Schema.TaggedErrorClass()("AccessError", {
++export class AccessError extends Schema.TaggedError()("AccessError", {
+     message: Schema.String,
+     cause: Schema.optional(Schema.Defect()),
+ }) {
 diff --git a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts b/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
 index a3a59be4..4cfff68b 100644
 --- a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
@@ -30,6 +69,58 @@ index c321e75d..d8cd6f1f 100644
      createToken: (scope, ttl) => tryPromise(() => raw.createToken(scope, ttl)),
      listTokens: () => tryPromise(() => raw.listTokens()),
      revokeToken: (tokenOrId) => tryPromise(() => raw.revokeToken(tokenOrId)),
+diff --git a/node_modules/alchemy/lib/Cloudflare/Workers/RuntimeBindings.js b/node_modules/alchemy/lib/Cloudflare/Workers/RuntimeBindings.js
+index c6c87458..64b83ee1 100644
+--- a/node_modules/alchemy/lib/Cloudflare/Workers/RuntimeBindings.js
++++ b/node_modules/alchemy/lib/Cloudflare/Workers/RuntimeBindings.js
+@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
+ import * as Redacted from "effect/Redacted";
+ import * as Schema from "effect/Schema";
+ import { isLocalId } from "../LocalRuntime.js";
+-export class WorkerValidationError extends Schema.TaggedErrorClass()("WorkerValidationError", {
++export class WorkerValidationError extends Schema.TaggedError()("WorkerValidationError", {
+     message: Schema.String,
+     hint: Schema.optional(Schema.String),
+     value: Schema.Unknown,
+diff --git a/node_modules/alchemy/src/Auth/AuthProvider.ts b/node_modules/alchemy/src/Auth/AuthProvider.ts
+index c4d8394e..9a146a99 100644
+--- a/node_modules/alchemy/src/Auth/AuthProvider.ts
++++ b/node_modules/alchemy/src/Auth/AuthProvider.ts
+@@ -40,7 +40,7 @@ const LOCKED_METHODS = new Set(["read", "login", "logout", "configure"]);
+ const INTERACTIVE_METHODS = new Set(["login", "configure"]);
+ const interactiveMutex = Semaphore.makeUnsafe(1);
+ 
+-export class AuthError extends Schema.TaggedErrorClass<AuthError>()(
++export class AuthError extends Schema.TaggedError<AuthError>()(
+   "AuthError",
+   {
+     message: Schema.String,
+diff --git a/node_modules/alchemy/src/Bundle/Bundle.ts b/node_modules/alchemy/src/Bundle/Bundle.ts
+index 4e8af036..3aa996e0 100644
+--- a/node_modules/alchemy/src/Bundle/Bundle.ts
++++ b/node_modules/alchemy/src/Bundle/Bundle.ts
+@@ -95,7 +95,7 @@ export interface BundleFile {
+   readonly hash: string;
+ }
+ 
+-export class BundleError extends Schema.TaggedErrorClass<BundleError>()(
++export class BundleError extends Schema.TaggedError<BundleError>()(
+   "BundleError",
+   {
+     message: Schema.String,
+diff --git a/node_modules/alchemy/src/Cloudflare/Access.ts b/node_modules/alchemy/src/Cloudflare/Access.ts
+index 0d8d6850..94193074 100644
+--- a/node_modules/alchemy/src/Cloudflare/Access.ts
++++ b/node_modules/alchemy/src/Cloudflare/Access.ts
+@@ -8,7 +8,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
+ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+ import { cachedFunction } from "../Util/cached-function.ts";
+ 
+-export class AccessError extends Schema.TaggedErrorClass<AccessError>()(
++export class AccessError extends Schema.TaggedError<AccessError>()(
+   "AccessError",
+   {
+     message: Schema.String,
 diff --git a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts b/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
 index a1210aa4..215238c9 100644
 --- a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
@@ -62,3 +153,16 @@ index 22253736..9852c5fc 100644
    createToken: (scope, ttl) => tryPromise(() => raw.createToken(scope, ttl)),
    listTokens: () => tryPromise(() => raw.listTokens()),
    revokeToken: (tokenOrId) => tryPromise(() => raw.revokeToken(tokenOrId)),
+diff --git a/node_modules/alchemy/src/Cloudflare/Workers/RuntimeBindings.ts b/node_modules/alchemy/src/Cloudflare/Workers/RuntimeBindings.ts
+index 4344de60..9c96fe2e 100644
+--- a/node_modules/alchemy/src/Cloudflare/Workers/RuntimeBindings.ts
++++ b/node_modules/alchemy/src/Cloudflare/Workers/RuntimeBindings.ts
+@@ -42,7 +42,7 @@ import * as Schema from "effect/Schema";
+ import { isLocalId } from "../LocalRuntime.ts";
+ import type { WorkerBinding } from "./WorkerBinding.ts";
+ 
+-export class WorkerValidationError extends Schema.TaggedErrorClass<WorkerValidationError>()(
++export class WorkerValidationError extends Schema.TaggedError<WorkerValidationError>()(
+   "WorkerValidationError",
+   {
+     message: Schema.String,

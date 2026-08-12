@@ -90,8 +90,12 @@ const body = (request: Request): AsyncIterable<Uint8Array> => {
   })();
 };
 
-/** Pull-based pkt-line reader; `rest()` hands the remainder to the pack parser. */
-class PktReader {
+/**
+ * Pull-based pkt-line reader; `rest()` hands the remainder to the pack
+ * parser. Exported because the client side of the protocol (`artifacts`
+ * import) reads the same framing.
+ */
+export class PktReader {
   readonly #iterator: AsyncIterator<Uint8Array>;
   #pending: Uint8Array[] = [];
 

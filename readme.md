@@ -55,21 +55,22 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 
 ### What runs today
 
-| module                      | what it is                                                         |
-| --------------------------- | ------------------------------------------------------------------ |
-| `src/git/Error.ts`          | tagged errors with `httpApiStatus` annotations                     |
-| `src/git/Store.ts`          | `ObjectStore` / `RefStore` ports                                   |
-| `src/git/Format.ts`         | the pure/effectful seam — framing, commit and tree codecs, hashing |
-| `src/git/Memory.ts`         | in-memory backend                                                  |
-| `src/git/Node.ts`           | filesystem backend, git's own on-disk layout                       |
-| `src/git/Repository.ts`     | the domain service                                                 |
-| `src/git/Cloudflare.ts`     | R2 + Durable Object SQLite backend                                 |
-| `src/git/Durable.ts`        | the Worker entry: one Durable Object per repository                |
-| `src/git/Pack.ts`           | streaming packfile transport, interop-tested against real `git`    |
-| `src/server/Protocol.ts`    | git smart-HTTP: advertisement, upload-pack, receive-pack           |
-| `src/server/Api.ts`         | JSON API as one `HttpApi` declaration; the client derives from it  |
-| `src/host/Node.ts`          | node host: the same handlers behind `node:http`, self-hostable     |
-| `src/git/Store.contract.ts` | one storage contract suite, run against all three backends         |
+| module                       | what it is                                                         |
+| ---------------------------- | ------------------------------------------------------------------ |
+| `src/git/Error.ts`           | tagged errors with `httpApiStatus` annotations                     |
+| `src/git/Store.ts`           | `ObjectStore` / `RefStore` ports                                   |
+| `src/git/Format.ts`          | the pure/effectful seam — framing, commit and tree codecs, hashing |
+| `src/git/Memory.ts`          | in-memory backend                                                  |
+| `src/git/Node.ts`            | filesystem backend, git's own on-disk layout                       |
+| `src/git/Repository.ts`      | the domain service                                                 |
+| `src/git/Cloudflare.ts`      | R2 + Durable Object SQLite backend                                 |
+| `src/git/Durable.ts`         | the Worker entry: one Durable Object per repository                |
+| `src/git/Pack.ts`            | streaming packfile transport, interop-tested against real `git`    |
+| `src/server/Protocol.ts`     | git smart-HTTP: advertisement, upload-pack, receive-pack           |
+| `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it  |
+| `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable     |
+| `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag     |
+| `src/git/Store.contract.ts`  | one storage contract suite, run against all three backends         |
 
 The Worker (`wrangler.json` → `src/git/Durable.ts`) serves the git smart-HTTP
 protocol — stock `git` clones from and pushes to it — plus a schema-typed JSON
@@ -91,14 +92,14 @@ Everything not yet landed lives beside its future home as a `*.sketch.ts`
 file: illustrative code that typechecks against the real `effect` and
 `alchemy@next` type definitions but is excluded from the build and checks.
 
-| area                          | sketch                                             |
-| ----------------------------- | -------------------------------------------------- |
-| wider JSON API + webhooks     | `src/server/*.sketch.ts`                           |
-| browser client (OPFS)         | `src/client/Client.sketch.ts`                      |
-| CLI (`effect/unstable/cli`)   | `src/cli/main.sketch.ts`                           |
-| alchemy host seam             | `src/host/*.sketch.ts`, `src/adapters/*.sketch.ts` |
-| infrastructure as effects     | `src/alchemy.run.sketch.ts`                        |
-| Cloudflare Artifacts provider | `src/artifacts/Namespace.sketch.ts`                |
+| area                           | sketch                                             |
+| ------------------------------ | -------------------------------------------------- |
+| wider JSON API + webhooks      | `src/server/*.sketch.ts`                           |
+| browser client (OPFS)          | `src/client/Client.sketch.ts`                      |
+| CLI (`effect/unstable/cli`)    | `src/cli/main.sketch.ts`                           |
+| alchemy host seam              | `src/host/*.sketch.ts`, `src/adapters/*.sketch.ts` |
+| infrastructure as effects      | `src/alchemy.run.sketch.ts`                        |
+| durable registry / auth wiring | `src/artifacts/Namespace.sketch.ts`                |
 
 ## Development
 
