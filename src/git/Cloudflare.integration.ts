@@ -99,6 +99,23 @@ describe("Cloudflare storage conformance", () => {
   });
 });
 
+describe("Artifacts registry conformance", () => {
+  it("passes the registry and token contract on Durable Object SQLite", async () => {
+    // The durable form of the provider's `Registry`/`Tokens`, running the
+    // same suite as the in-memory and JSON-file backends — inside workerd.
+    const response = await harness.fetch(`/${repoName()}/registry-conformance`);
+    assert.equal(response.status, 200);
+
+    const report = await json<ConformanceReport>(response);
+    assert.deepEqual(
+      report.results.filter((result) => !result.ok).map((f) => `${f.name}: ${f.error ?? ""}`),
+      [],
+      "the contract must hold on DO SQLite, not just in memory",
+    );
+    assert.ok(report.passed >= 10, `expected the full suite, ran ${report.passed}`);
+  });
+});
+
 describe("GitRepo over HTTP", () => {
   it("commits, lists refs and reads the commit back", async () => {
     const repo = repoName();

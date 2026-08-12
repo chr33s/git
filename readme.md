@@ -70,12 +70,14 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it  |
 | `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable     |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag     |
+| `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite          |
 | `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, runs anywhere         |
 | `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token — `npx chr33s-git`       |
 | `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend  |
 | `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`     |
 | `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers |
 | `src/git/Store.contract.ts`  | one storage contract suite, run against all four backends          |
+| `src/git/Inflate.ts`         | pull-based zlib inflate — exact stream boundaries, no `node:*`     |
 
 The Worker (`wrangler.json` → `src/git/Durable.ts`) serves the git smart-HTTP
 protocol — stock `git` clones from and pushes to it — plus a schema-typed JSON

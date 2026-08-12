@@ -4,9 +4,10 @@
 (`src/artifacts/Namespace.ts`), satisfying alchemy's binding tag over this
 server's stores. The one upstream interface change it needed is applied as a
 local patch, and both server surfaces enforce scoped tokens through
-`src/server/Auth.ts`. The self-hosted form is durable (`localNode` persists
-registry, tokens and fork links on disk); a Workers-hosted provider still
-wants those rows in a DO or D1.**
+`src/server/Auth.ts`. Durability is covered on both hosts: `localNode`
+persists to disk, `artifacts/Sqlite.ts` puts the same rows in Durable Object
+SQLite, and one contract suite holds all four backends to identical
+behaviour.**
 
 Evaluated against the code, not the docs (`alchemy.run` is unreachable from this
 sandbox): `alchemy@2.0.0-beta.70`'s `src/Cloudflare/Artifacts/*` and the
@@ -38,18 +39,18 @@ Repo metadata is fixed: `id`, `name`, `description`, `defaultBranch`,
 
 ## Fit against what exists today
 
-| capability                                     | status           | notes                                                                                                          |
-| ---------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------- |
-| git smart-HTTP (`upload-pack`, `receive-pack`) | **have**         | `src/server/Protocol.ts` + `src/git/Pack.ts` — stock `git` clones and pushes against workerd in the test suite |
-| repo `create` / `delete`                       | **have (local)** | `src/artifacts/Namespace.ts` — registry rows + store lifecycle                                                 |
-| `setDefaultBranch`                             | **have (local)** | `create(name, { setDefaultBranch })` sets `HEAD`; nothing exposes it over HTTP yet                             |
-| HTTPS `remote` URL                             | **have**         | the worker route _is_ the remote                                                                               |
-| LFS                                            | **bonus**        | Artifacts does not offer it; we do                                                                             |
-| `import` from a remote                         | **have (local)** | full clone over smart HTTP with `branch`; `depth` and async `IMPORT_IN_PROGRESS` still open                    |
-| repo metadata                                  | **have (local)** | registry rows carry every `ArtifactsRepoInfo` field                                                            |
-| `list` with cursor                             | **have (local)** | the `Registry` port; in-memory today, an index DO or D1 later                                                  |
-| `fork`                                         | **have (local)** | alternates — child reads fall through to the parent, `defaultBranchOnly` copies one ref                        |
-| tokens / any auth                              | **have (local)** | `Tokens` issue/list/revoke + `server/Auth.ts` guard on both surfaces; stock `git` passes 401/403 interop tests |
+| capability                                     | status           | notes                                                                                                           |
+| ---------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------- |
+| git smart-HTTP (`upload-pack`, `receive-pack`) | **have**         | `src/server/Protocol.ts` + `src/git/Pack.ts` — stock `git` clones and pushes against workerd in the test suite  |
+| repo `create` / `delete`                       | **have (local)** | `src/artifacts/Namespace.ts` — registry rows + store lifecycle                                                  |
+| `setDefaultBranch`                             | **have (local)** | `create(name, { setDefaultBranch })` sets `HEAD`; nothing exposes it over HTTP yet                              |
+| HTTPS `remote` URL                             | **have**         | the worker route _is_ the remote                                                                                |
+| LFS                                            | **bonus**        | Artifacts does not offer it; we do                                                                              |
+| `import` from a remote                         | **have (local)** | full clone over smart HTTP with `branch`; `depth` and async `IMPORT_IN_PROGRESS` still open                     |
+| repo metadata                                  | **have (local)** | registry rows carry every `ArtifactsRepoInfo` field                                                             |
+| `list` with cursor                             | **have**         | the `Registry` port; in-memory, on disk, and on DO SQLite — one contract, four backends                         |
+| `fork`                                         | **have (local)** | alternates — child reads fall through to the parent, `defaultBranchOnly` copies one ref                         |
+| tokens / any auth                              | **have**         | `Tokens` issue/list/revoke (memory, disk, DO SQLite) + `server/Auth.ts` guard; stock `git` passes 401/403 tests |
 
 **The local provider landed**: [`src/artifacts/Namespace.ts`](../src/artifacts/Namespace.ts)
 implements `ReadWriteNamespaceClient` over this repository's stores and
@@ -61,10 +62,13 @@ over real smart HTTP from the node host. Enforcement landed with it:
 the Basic challenge, 403 on insufficient scope, token accepted as the Basic
 password the way git sends it — with two verifiers, the provider's revocable
 `Tokens.verify` and a stateless HMAC scheme the Durable Object enforces when
-its `GIT_AUTH_SECRET` binding is set. Durability followed: `localNode` keeps
-the registry, token digests and fork links in dot-files under the repository
-root and survives a provider restart in its tests — a Workers-hosted provider
-would put the same rows in a DO or D1.
+its `GIT_AUTH_SECRET` binding is set. Durability followed on both hosts:
+`localNode` keeps the registry, token digests and fork links in dot-files
+under the repository root and survives a provider restart in its tests, and
+[`src/artifacts/Sqlite.ts`](../src/artifacts/Sqlite.ts) is the index DO this
+document called for — the same two tables in Durable Object SQLite. One
+`Registry.contract.ts` suite runs against memory, the JSON files, `node:sqlite`
+and, through the conformance route, the real Durable Object.
 
 ### The three gaps, in order of cost
 
@@ -82,7 +86,9 @@ Basic, so the token is accepted as the password field of
 with `http://<token>@host/repo` and is refused without it. Get that wrong and
 `git clone` fails while `curl` works.
 
-**2. A namespace registry.** Repos are addressed by
+**2. A namespace registry — landed.** `artifacts/Sqlite.ts` is the index DO
+described below, and `artifacts/Namespace.ts`'s `registryNode` the disk form.
+The original problem statement, for the record: repos are addressed by
 `env.GIT_REPO.idFromName(repo)` — a Durable Object per repo, and DO namespaces
 cannot be enumerated. `list({ limit, cursor })` therefore has nothing to read.
 The fix is a registry keyed by namespace holding one row per repo (name, id,

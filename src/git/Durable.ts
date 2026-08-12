@@ -20,6 +20,8 @@ import { DurableObject } from "cloudflare:workers";
 import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
+import { registryContract } from "../artifacts/Registry.contract.ts";
+import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Protocol from "../server/Protocol.ts";
@@ -86,6 +88,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     }
 
     if (route === "conformance") return this.#conformance(repo);
+    if (route === "registry-conformance") return this.#registryConformance();
 
     // The smart-HTTP endpoints; everything else is the JSON API.
     if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
@@ -137,6 +140,38 @@ export class GitRepo extends DurableObject<TestEnv> {
               Effect.provide(stores({ bucket, repo: `${repo}/${crypto.randomUUID()}`, storage })),
             ) as Effect.Effect<never>,
           ),
+      },
+      runner,
+    );
+
+    return Response.json(await report());
+  }
+
+  /**
+   * The registry/token contract against this instance's own SQLite — the
+   * durable form a Workers-hosted Artifacts provider would use, proven in
+   * the runtime that would host it rather than against `node:sqlite`.
+   */
+  async #registryConformance(): Promise<Response> {
+    if (this.env.ENABLE_CONFORMANCE !== "1") {
+      return Response.json({ error: "NotFound" }, { status: 404 });
+    }
+
+    const sql = this.ctx.storage.sql;
+    const { report, runner } = collector();
+
+    registryContract(
+      "Durable Object SQLite",
+      {
+        run: (effect) => {
+          // Empty tables per test — before the layer is built, since building
+          // it is what creates them. One DO instance runs every case.
+          sql.exec(`DROP TABLE IF EXISTS repos`);
+          sql.exec(`DROP TABLE IF EXISTS tokens`);
+          return Effect.runPromise(
+            effect.pipe(Effect.provide(sqlite(sql))) as Effect.Effect<never>,
+          );
+        },
       },
       runner,
     );
