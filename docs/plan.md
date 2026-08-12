@@ -21,8 +21,8 @@ accepted:
   even for the narrowed scope.
 
 If instead full parity is required, this plan's phase 1–2 still apply first, but the swap
-moves out until merge/index/CLI land; that is a much longer project (~13k lines of legacy
-surface) and not scheduled here.
+moves out until merge/index/CLI land — see [§6, the full-parity track](#6-full-parity-track-only-if-mains-broader-scope-is-a-goal):
+roughly 8–10k lines of porting, a second project comparable in size to the rewrite itself.
 
 ## 1. Must-fix before the swap (regressions within the rewrite's own scope)
 
@@ -121,3 +121,96 @@ Force-pushing over `main` without flipping the default first will orphan open PR
   over the derived client.
 - Readme/rewrite doc updated per §3; feature-completeness review updated to reflect closed
   gaps.
+
+## 6. Full-parity track (only if main's broader scope is a goal)
+
+Everything below is *out of scope* for the swap under §0's assumed scope decision. It is the
+inventory of what porting main's broader surface actually takes, in dependency order — five
+layers, gated by one architectural decision. All-in it is roughly **8–10k lines to port** of
+main's ~13.8k non-test surface (the rest already has artifacts counterparts), against the
+branch's current ~9.6k total: full parity approximately doubles the branch.
+
+### 6.1 The gating piece: a working-tree/index seam (~600 lines + port design)
+
+The artifacts stores are deliberately git-concept-shaped (`ObjectStore`/`RefStore`, oid- and
+ref-keyed) with no path-level file API — which is exactly why `add`, `status`, `checkout`
+and `.git/config` have no home. Required first:
+
+- **The `IndexStore` port** `docs/rewrite.md` already sketches (the diagram draws it;
+  `git/Store.ts` does not export it) — or a broader `WorkTree` port with path-level
+  read/write/list.
+- **The index codec** (legacy `git.index.ts`, 294 lines): real `DIRC` v2 read/write — main's
+  is genuine enough that `git ls-files` reads it. Pure byte work; ports behind the
+  `Format.ts` seam.
+- **Repository ops that hang off it**: `add`, `checkoutCommit`, `createTreeFromIndex`,
+  `findInTree`, work-tree `readFile`/`writeFile`/`deleteFile`, and a `.git/config`
+  parser/serializer (legacy `client.ts:964-1010`) for remotes.
+
+Every path-touching item in 6.3–6.5 depends on this landing first.
+
+### 6.2 Git core engines (pure; port mostly as-is)
+
+- **Merge engine** (legacy `git.merge.ts`, 950 lines) — the single largest gap: diff3 with
+  LCS, `threeWayMerge` with four strategies, `mergeTrees`/`mergeCommits`, `findMergeBase`,
+  octopus merge, conflict detection/markers/`ConflictResolver`, rename detection,
+  `cherryPick`, `rebase`, `MERGE_HEAD` handling. Almost all pure byte/graph work — it ports
+  behind the same pure/effectful seam as `Format.ts`; `Repository.closure` is a starting
+  point for merge-base.
+- **fsck** (`git.object.ts:212-260`): hash verification + per-type structural checks.
+- **gc** (`git.repository.ts:579-672`): reachability, grace period, loose pruning, repack.
+- **Pack `.idx` + packs at rest** (~250 lines): `buildPackIndex` (v2 fanout, CRC32, 64-bit
+  offsets), `parsePackIndex`, binary-search lookup, and an object-read fallback into stored
+  packs. Without this, gc's repack half has no target.
+- **Annotated tag codec**: parse/encode/validate in `git/Format.ts` (today only the target
+  oid is read).
+- **Delta *creation*** (legacy `git.delta.ts`, ~230 lines) — optional: main never wired it
+  into its pack writer either, so skipping it loses no shipped behavior.
+
+### 6.3 Protocol width
+
+- **Shallow**: `shallow`/`deepen`/`deepen-since`/`deepen-not` parsing, boundary computation,
+  `shallow`/`unshallow` lines, plus shallow-commit state (legacy `server.ts:524-576`,
+  `git.repository.ts:739-767`). (§1 already schedules the minimum `--depth` case.)
+- **`side-band-64k`**, **`multi_ack_detailed`**, **thin-pack**, advertised **`ofs-delta`**.
+- **Protocol v2**: `Git-Protocol` detection, v2 advertisement, `ls-refs`
+  (prefixes/symrefs), v2 `fetch` (legacy `server.ts:765-1029`).
+- Small: `GET /:repo/HEAD`, 499-on-abort (also §2.9).
+
+Parallelizable with everything else — nothing here depends on 6.1.
+
+### 6.4 Server surface (36 missing endpoints + LFS, grouped by dependency)
+
+- **Needs nothing new** (core ops exist; just declare endpoints): `/tree`, `/object`,
+  `/read`, `/write`, `/files`, `/file`, `/reflog/:ref`, repo create/delete. Cheap wins.
+- **Needs 6.2**: `/tag`, `/fsck`, `/gc`, `/merge`, `/rebase`, `/reset`, `/restore-commit`.
+- **Needs 6.1**: `/status`, `/add`, `/rm`, `/mv`, `/restore`, `/checkout`, `/switch`.
+- **Needs a diff engine**: `/diff`, `/branches/diff`, `/commits/diff` — main reuses the
+  merge module's LCS, so this falls out of 6.2.
+- **Needs client-side transport on the server** (acting as a git client against another
+  remote): `/fetch`, `/pull`, `/push`, `/remote`.
+- **Standalone ports**, parallelizable any time: **LFS** (batch API, R2 streaming
+  upload/download, pointer codec, metadata — legacy `server.lfs.ts`, 272 lines; also §2.6),
+  **archive** (`.tar.gz`/`.zip` writers, ~160 lines), **`/commit-pack`** NDJSON streaming
+  bulk-commit, **`/grep`**, **webhook CRUD + persistence** (already §1.2).
+
+### 6.5 Client and CLI porcelain (the long tail)
+
+- **Push first**: `Client.push`/`pushDelete` (send-pack over HTTP with CAS on
+  remote-tracking refs, legacy `client.ts:504-648`) — today nothing on artifacts can
+  originate a push. Then **incremental fetch** with real haves negotiation (the current
+  `fetchRepository` does one `want…done` round), remote-tracking refs, and remotes config.
+- The remaining ~20 client methods and **20 CLI commands** (add, rm, mv, restore, commit,
+  status, show, branch-write, checkout, switch, merge, rebase, reset, tag, bisect, diff,
+  grep, backfill, history, fetch, pull, push, remote) with their ~200 flags — mechanical
+  once 6.1–6.4 exist, but the bulk of the line count (legacy `cli.ts` 1,991 +
+  `client.ts` 1,007 lines).
+- **The e2e parity suite** (legacy `e2e.test.ts`, 617 lines, 26 command suites against the
+  system `git` binary) — the ratchet that made main's porcelain trustworthy; porting the
+  commands without it would be parity in name only.
+
+### Sequencing
+
+**6.1 → 6.2 → 6.4/6.5 porcelain**, with 6.3 and the standalone server ports (LFS, archive,
+grep, commit-pack) parallelizable throughout. The working-tree port is the first domino: if
+6.1 is rejected, most of 6.4–6.5 is unreachable and the §0 narrowed scope is the honest
+statement of what this codebase is.
