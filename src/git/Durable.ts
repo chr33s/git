@@ -17,16 +17,17 @@
  *   - isolation: one instance per repo name.
  */
 import { DurableObject } from "cloudflare:workers";
-import { Effect, Layer, Stream } from "effect";
+import { Effect, Layer } from "effect";
+import { HttpRouter } from "effect/unstable/http";
 
+import * as Api from "../server/Api.ts";
+import * as Protocol from "../server/Protocol.ts";
 import { stores } from "./Cloudflare.ts";
 import { collector } from "./Conformance.ts";
 import { type GitError, statusOf } from "./Error.ts";
-import { EMPTY_TREE_OID, type Signature } from "./Format.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
 import { storeContract } from "./Store.contract.ts";
-import type { Oid } from "./Store.ts";
 
 /**
  * This worker's bindings, as both `wrangler.json` and `wrangler.test.json`
@@ -40,33 +41,9 @@ interface TestEnv {
   readonly GIT_REPO: DurableObjectNamespace<GitRepo>;
 }
 
-/**
- * The wire shape, which is not the domain shape: JSON has no `Date`, so
- * `author.at` arrives as a string and has to be parsed. Decoding at the
- * boundary is what `HttpApi` schemas do for the JSON API in the sketch; this
- * handler does it by hand until that lands.
- */
-interface CommitBody {
-  readonly author?: {
-    readonly at?: string;
-    readonly email?: string;
-    readonly name?: string;
-    readonly offset?: number;
-  };
-  readonly branch?: string;
-  readonly expected?: string | null;
-  readonly message?: string;
-}
-
-const signatureFrom = (author: CommitBody["author"]): Signature => ({
-  name: author?.name ?? "Anonymous",
-  email: author?.email ?? "anonymous@example.com",
-  at: author?.at === undefined ? new Date() : new Date(author.at),
-  offset: author?.offset ?? 0,
-});
-
 export class GitRepo extends DurableObject<TestEnv> {
   #layer: Layer.Layer<Repository> | null = null;
+  #api: ((request: Request) => Promise<Response>) | null = null;
 
   /** Built once per instance: the DO is the unit of isolation, not the request. */
   #live(repo: string): Layer.Layer<Repository> {
@@ -93,64 +70,30 @@ export class GitRepo extends DurableObject<TestEnv> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    const [, repo = "default", route = "refs", argument] = new URL(request.url).pathname.split("/");
+    const [, repo = "default", route = ""] = new URL(request.url).pathname.split("/");
 
     if (route === "conformance") return this.#conformance(repo);
 
-    if (route === "commit" && request.method === "POST") {
-      const body = (await request.json()) as CommitBody;
+    // The smart-HTTP endpoints; everything else is the JSON API.
+    if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
       return this.#respond(
         repo,
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const oid = yield* repository.commit({
-            author: signatureFrom(body.author),
-            branch: body.branch ?? "main",
-            message: body.message ?? "",
-            tree: EMPTY_TREE_OID,
-            ...(body.expected === undefined ? {} : { expected: body.expected as Oid | null }),
-          });
-          return Response.json({ oid });
-        }),
+        Protocol.handle(request).pipe(
+          Effect.map(
+            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+          ),
+        ),
       );
     }
 
-    if (route === "commit" && argument !== undefined) {
-      return this.#respond(
-        repo,
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const commit = yield* repository.readCommit(argument as Oid);
-          return Response.json({
-            message: commit.message,
-            parents: commit.parents,
-            tree: commit.tree,
-          });
-        }),
-      );
-    }
-
-    if (route === "log" && argument !== undefined) {
-      return this.#respond(
-        repo,
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const commits = yield* Stream.runCollect(repository.log(argument as Oid, { limit: 50 }));
-          return Response.json({
-            commits: commits.map((commit) => ({ message: commit.message, oid: commit.oid })),
-          });
-        }),
-      );
-    }
-
-    return this.#respond(
-      repo,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const refs = yield* repository.refs;
-        return Response.json({ refs: refs.map(([name, oid]) => ({ name, oid })) });
-      }),
-    );
+    // The `HttpApi` handler, built once per instance like the layer it wraps.
+    // Never disposed: its lifetime is the Durable Object's. `provideMerge`
+    // rather than `provide` — handler contexts are request-scoped, so the
+    // router looks for `Repository` among the app layer's outputs.
+    this.#api ??= HttpRouter.toWebHandler(Api.layer.pipe(Layer.provideMerge(this.#live(repo))), {
+      disableLogger: true,
+    }).handler;
+    return this.#api(request);
   }
 
   /**

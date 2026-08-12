@@ -14,6 +14,7 @@ import {
   type HookRejected,
   Invalid,
   ObjectNotFound,
+  type PackCorrupt,
   RefConflict,
   type StorageFailure,
 } from "./Error.ts";
@@ -27,7 +28,8 @@ import {
   type Signature,
   type TreeEntry,
 } from "./Format.ts";
-import { ObjectStore, type Oid, RefStore, type RefUpdate } from "./Store.ts";
+import * as Pack from "./Pack.ts";
+import { isOid, ObjectStore, type Oid, type RawObject, RefStore, type RefUpdate } from "./Store.ts";
 
 export interface Commit extends CommitInfo {
   readonly oid: Oid;
@@ -81,6 +83,23 @@ export class Repository extends Context.Service<
       updates: ReadonlyArray<RefUpdate>,
       options?: { readonly atomic?: boolean },
     ) => Effect.Effect<ReadonlyArray<ReceiveResult>, HookRejected | StorageFailure | Invalid>;
+
+    readonly contains: (oid: Oid) => Effect.Effect<boolean, StorageFailure>;
+
+    /** receive-pack's object phase: ingest a packfile into the store. */
+    readonly unpack: <E>(
+      pack: Stream.Stream<Uint8Array, E>,
+    ) => Effect.Effect<ReadonlyArray<Oid>, PackCorrupt | ObjectNotFound | StorageFailure>;
+
+    /**
+     * upload-pack's answer: a pack of everything reachable from `wants` that
+     * is not reachable from `haves`. Lazy — objects are read and deflated as
+     * the consumer pulls.
+     */
+    readonly packOf: (
+      wants: ReadonlyArray<Oid>,
+      haves: ReadonlyArray<Oid>,
+    ) => Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure>;
   }
 >()("git/Repository") {}
 
@@ -126,6 +145,79 @@ export const layer = Layer.effect(
       );
 
     const readCommit = (oid: Oid) => readTyped(oid, "commit", parseCommit);
+
+    /** An annotated tag's target: the `object <oid>` header line. */
+    const tagTarget = (data: Uint8Array): Oid | null => {
+      const line = new TextDecoder().decode(data.subarray(0, 47));
+      const target = line.startsWith("object ") ? line.slice(7, 47) : "";
+      return isOid(target) ? target : null;
+    };
+
+    /**
+     * Everything reachable from `roots`: commits pull in their tree and
+     * parents, trees their entries (gitlinks excepted — those live in another
+     * repository), tags their target. The empty tree is git's one virtual
+     * object; a commit may reference it without any store holding it.
+     */
+    const walk = (
+      roots: ReadonlyArray<Oid>,
+      options: { readonly ignoreMissing: boolean; readonly skip?: ReadonlySet<Oid> },
+    ) =>
+      Effect.gen(function* () {
+        const seen = new Set<Oid>();
+        const order: Oid[] = [];
+        const stack = [...roots];
+
+        while (stack.length > 0) {
+          const oid = stack.pop()!;
+          if (seen.has(oid) || options.skip?.has(oid)) continue;
+          seen.add(oid);
+
+          const tolerant = options.ignoreMissing || oid === EMPTY_TREE_OID;
+          const object = yield* objects.read(oid).pipe(
+            Effect.map((value): RawObject | null => value),
+            Effect.catchTag("ObjectNotFound", (error) =>
+              tolerant ? Effect.succeed(null) : Effect.fail(error),
+            ),
+          );
+          if (object === null) continue;
+          order.push(oid);
+
+          switch (object.type) {
+            case "commit": {
+              const commit = yield* Effect.fromResult(parseCommit(object.data)).pipe(
+                Effect.mapError(() => new ObjectNotFound({ oid })),
+              );
+              stack.push(commit.tree, ...commit.parents);
+              break;
+            }
+            case "tree": {
+              const entries = yield* Effect.fromResult(parseTree(object.data)).pipe(
+                Effect.mapError(() => new ObjectNotFound({ oid })),
+              );
+              for (const entry of entries) if (entry.mode !== "160000") stack.push(entry.oid);
+              break;
+            }
+            case "tag": {
+              const target = tagTarget(object.data);
+              if (target !== null) stack.push(target);
+              break;
+            }
+            case "blob":
+              break;
+          }
+        }
+
+        return { order, seen };
+      });
+
+    const closure = (wants: ReadonlyArray<Oid>, haves: ReadonlyArray<Oid>) =>
+      Effect.gen(function* () {
+        // What the client has is walked tolerantly: a `have` can reference
+        // history this repository never saw, and that is not an error.
+        const excluded = (yield* walk(haves, { ignoreMissing: true })).seen;
+        return (yield* walk(wants, { ignoreMissing: false, skip: excluded })).order;
+      });
 
     return Repository.of({
       refs: refs.list("refs/"),
@@ -235,6 +327,17 @@ export const layer = Layer.effect(
         yield* hooks.postReceive(results);
         return results;
       }),
+
+      contains: objects.has,
+
+      unpack: (pack) => Pack.unpack(pack).pipe(Effect.provideService(ObjectStore, objects)),
+
+      packOf: (wants, haves) =>
+        Stream.unwrap(
+          closure(wants, haves).pipe(
+            Effect.map((oids) => Pack.pack(oids).pipe(Stream.provideService(ObjectStore, objects))),
+          ),
+        ),
     });
   }),
 );

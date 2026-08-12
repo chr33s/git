@@ -1,7 +1,11 @@
 # Sketch: Effect v4 + alchemy@next rewrite
 
-Status: **phases 0–3 have landed** in `src/git/`, with integration tests
-running inside workerd; the rest is still a sketch.
+Status: **phases 0–4 have landed** — the git core in `src/git/`, the
+smart-HTTP protocol in `src/server/Protocol.ts` (stock `git` clones from and
+pushes to the Durable Object in the integration suite), and the JSON API as an
+`HttpApi` in `src/server/Api.ts` with a derived client driving it in the
+tests. The hosts and CLI are still sketches: their dependencies (`alchemy`,
+`@effect/platform-node`) are deliberately not installed.
 
 What is real code today, running under the repo's own test runner:
 
@@ -16,9 +20,11 @@ What is real code today, running under the repo's own test runner:
 | `src/git/Cloudflare.ts`     | R2 + Durable Object SQLite backend                                       |
 | `src/git/Durable.ts`        | the repository as a Durable Object                                       |
 | `src/git/Pack.ts`           | streaming packfile transport — reader (full, ofs- and ref-delta), writer |
+| `src/server/Protocol.ts`    | smart-HTTP v0: advertisement, upload-pack, receive-pack                  |
+| `src/server/Api.ts`         | the JSON API as one `HttpApi` declaration, client derived from it        |
 | `src/git/Store.contract.ts` | one contract suite, run against **all three** backends                   |
 
-79 tests pass: 70 unit (`npm test`) and 9 integration (`npm run test:integration`),
+87 tests pass: 77 unit (`npm test`) and 10 integration (`npm run test:integration`),
 the latter driving a real Workers runtime and itself running a 15-case
 conformance suite inside it. Three kinds of evidence, deliberately:
 
@@ -257,12 +263,20 @@ silent runtime surprises in a hand-written port.
 
 Two edges, deliberately:
 
-- **Smart-HTTP** ([`src/server/Protocol.sketch.ts`](../src/server/Protocol.sketch.ts))
-  stays byte-oriented on `HttpRouter`. A schema buys nothing on a packfile.
-- **JSON API** ([`src/server/Api.sketch.ts`](../src/server/Api.sketch.ts)) becomes one
-  `HttpApi` declaration. From it: typed handlers, a derived client for both
-  `client.ts` and the CLI, and `/api/openapi.json`. The 45 endpoint tables in
-  `readme.md` become generated output.
+- **Smart-HTTP** — **landed** as [`src/server/Protocol.ts`](../src/server/Protocol.ts):
+  protocol v0, stateless-rpc, web `Request` in and web `Response` out with
+  `Repository` as the only requirement, so the same handlers serve from the
+  Durable Object and from `node:http`. Stock `git` clones, pushes, deletes
+  branches and fetches incrementally against both in the test suites. Stays
+  byte-oriented — a schema buys nothing on a packfile.
+- **JSON API** — **landed** as [`src/server/Api.ts`](../src/server/Api.ts): one
+  `HttpApi` declaration for the current surface (create/read commit, log,
+  refs), payloads decoded by schema at the boundary, errors on the wire as the
+  tagged classes themselves with statuses from their `httpApiStatus`
+  annotations. `Api.test.ts` drives it through a client derived from the same
+  declaration — the no-drift property, demonstrated. The wider surface in
+  [`src/server/Api.sketch.ts`](../src/server/Api.sketch.ts) lands endpoint by
+  endpoint as the domain operations behind it do.
 
 Both mount into one `HttpRouter.toWebHandler(...)` in
 [`src/server/App.sketch.ts`](../src/server/App.sketch.ts), which no host-specific code
@@ -379,7 +393,7 @@ the in-workerd conformance run.
 | 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness` | done   |
 | 2b ✅ | re-point the Worker at `GitRepo` and retire the old path — resolved by removing the legacy stack outright    | done   |
 | 3 ✅  | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                      | done   |
-| 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types                                       | medium |
+| 4 ✅  | smart-HTTP protocol + `HttpApi` for the JSON API, client derived from the same declaration                   | done   |
 | 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages                            | medium |
 | 5b ◑  | node host — the fs backend landed early (it is what proves the ports); the HTTP host is still ahead          | low    |
 | 6     | CLI on `effect/unstable/cli`; delete the argv parser                                                         | low    |

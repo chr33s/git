@@ -36,18 +36,18 @@ Repo metadata is fixed: `id`, `name`, `description`, `defaultBranch`,
 
 ## Fit against what exists today
 
-| capability                                     | status               | notes                                                                                                             |
-| ---------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| git smart-HTTP (`upload-pack`, `receive-pack`) | **partial**          | pack transport landed (`src/git/Pack.ts`, git-interop tested); the HTTP endpoints are `server/Protocol.sketch.ts` |
-| repo `create` / `delete`                       | **have**             | `POST` / `DELETE /api/:repo`                                                                                      |
-| `setDefaultBranch`                             | **have**             | `initStorage(repo, branch)`                                                                                       |
-| HTTPS `remote` URL                             | **have**             | the worker route _is_ the remote                                                                                  |
-| LFS                                            | **bonus**            | Artifacts does not offer it; we do                                                                                |
-| `import` from a remote                         | **partial**          | `clone`/`fetch` + shallow support exist; needs `depth`/`branch` plumbing and an async `IMPORT_IN_PROGRESS` state  |
-| repo metadata                                  | **partial**          | `description`, `readOnly`, `createdAt`, `lastPushAt`, `source` have nowhere to live                               |
-| `list` with cursor                             | **missing**          | see below — this is architectural                                                                                 |
-| `fork`                                         | **missing**          | feasible cheaply; see below                                                                                       |
-| tokens / any auth                              | **missing entirely** | `grep -ri 'authorization\|bearer\|token' src/` returns only commit `author` lines                                 |
+| capability                                     | status               | notes                                                                                                            |
+| ---------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| git smart-HTTP (`upload-pack`, `receive-pack`) | **have**             | `src/server/Protocol.ts` + `src/git/Pack.ts` — stock `git` clones and pushes against workerd in the test suite   |
+| repo `create` / `delete`                       | **partial**          | repos are conjured by first use (one DO per name); no delete endpoint in the rewrite yet                         |
+| `setDefaultBranch`                             | **partial**          | `RefStore.setHead` exists; nothing exposes it over HTTP yet                                                      |
+| HTTPS `remote` URL                             | **have**             | the worker route _is_ the remote                                                                                 |
+| LFS                                            | **bonus**            | Artifacts does not offer it; we do                                                                               |
+| `import` from a remote                         | **partial**          | `clone`/`fetch` + shallow support exist; needs `depth`/`branch` plumbing and an async `IMPORT_IN_PROGRESS` state |
+| repo metadata                                  | **partial**          | `description`, `readOnly`, `createdAt`, `lastPushAt`, `source` have nowhere to live                              |
+| `list` with cursor                             | **missing**          | see below — this is architectural                                                                                |
+| `fork`                                         | **missing**          | feasible cheaply; see below                                                                                      |
+| tokens / any auth                              | **missing entirely** | `grep -ri 'authorization\|bearer\|token' src/` returns only commit `author` lines                                |
 
 ### The three gaps, in order of cost
 
@@ -65,7 +65,7 @@ over HTTPS, so the token has to be accepted as the password field of
 `git clone` fails while `curl` works.
 
 **2. A namespace registry.** Repos are addressed by
-`env.GIT_SERVER.getByName(repo)` — a Durable Object per repo, and DO namespaces
+`env.GIT_REPO.idFromName(repo)` — a Durable Object per repo, and DO namespaces
 cannot be enumerated. `list({ limit, cursor })` therefore has nothing to read.
 The fix is a registry keyed by namespace holding one row per repo (name, id,
 metadata, timestamps): a single index DO, or D1 if you want cross-region reads.

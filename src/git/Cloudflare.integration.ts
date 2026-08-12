@@ -12,11 +12,35 @@
  * `npm run test:integration`.
  */
 import assert from "node:assert/strict";
+import { execFile, execFileSync } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { promisify } from "node:util";
 
 import { createTestHarness, type TestHarness } from "wrangler";
 
 import type { ConformanceReport } from "./Conformance.ts";
+
+const hasGit = (() => {
+  try {
+    execFileSync("git", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+const execFileAsync = promisify(execFile);
+const git = async (cwd: string, ...args: string[]): Promise<string> => {
+  const result = await execFileAsync(
+    "git",
+    ["-c", "user.name=Test", "-c", "user.email=test@example.com", ...args],
+    { cwd, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+  );
+  return result.stdout;
+};
 
 const alice = {
   name: "Alice",
@@ -26,6 +50,7 @@ const alice = {
 };
 
 let harness: TestHarness;
+let base: URL;
 
 /** One repo (and so one Durable Object instance) per test. */
 const repoName = () => `repo-${crypto.randomUUID()}`;
@@ -41,12 +66,13 @@ const json = async <T>(response: { json(): Promise<unknown> }): Promise<T> =>
 const commit = (repo: string, body: Record<string, unknown>) =>
   harness.fetch(`/${repo}/commit`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ author: alice, branch: "main", ...body }),
   });
 
 before(async () => {
   harness = createTestHarness({ workers: [{ configPath: "./wrangler.test.json" }] });
-  await harness.listen();
+  base = (await harness.listen()).url;
 });
 
 after(async () => {
@@ -109,10 +135,14 @@ describe("GitRepo over HTTP", () => {
     const repo = repoName();
 
     // `ObjectNotFound` is annotated `httpApiStatus: 404`; no handler maps tags
-    // to codes.
+    // to codes. The body is the schema-encoded error itself — a value a client
+    // can match on, not a code string it has to sniff.
     const missing = await harness.fetch(`/${repo}/commit/${"0".repeat(40)}`);
     assert.equal(missing.status, 404);
-    assert.deepEqual(await json(missing), { error: "ObjectNotFound" });
+    assert.deepEqual(await json(missing), {
+      _tag: "ObjectNotFound",
+      oid: "0".repeat(40),
+    });
   });
 
   it("returns RefConflict when the caller pins a stale head", async () => {
@@ -121,12 +151,53 @@ describe("GitRepo over HTTP", () => {
 
     const conflict = await commit(repo, { message: "two", expected: null });
     assert.equal(conflict.status, 409);
-    assert.deepEqual(await json(conflict), { error: "RefConflict" });
+    // The full conflict crosses the wire: which ref, what the caller pinned,
+    // where the ref actually is.
+    const body = await json<{ _tag: string; ref: string; expected: null; actual: string }>(
+      conflict,
+    );
+    assert.equal(body._tag, "RefConflict");
+    assert.equal(body.ref, "refs/heads/main");
+    assert.equal(body.expected, null);
+    assert.match(body.actual, /^[0-9a-f]{40}$/);
   });
 
   it("rejects a request with no repository", async () => {
     const response = await harness.fetch("/");
     assert.equal(response.status, 400);
+  });
+});
+
+describe("smart HTTP against workerd", { skip: hasGit ? false : "git not installed" }, () => {
+  it("clones from and pushes to the Durable Object with the real git binary", async () => {
+    const repo = repoName();
+    await commit(repo, { message: "seed" });
+
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-workerd-"));
+    const work = path.join(root, "clone");
+    await git(root, "clone", "--quiet", new URL(repo, base).href, work);
+    assert.match(await git(work, "log", "--format=%s"), /^seed$/m);
+
+    await fs.writeFile(path.join(work, "pushed.txt"), "from git, into workerd\n");
+    await git(work, "add", ".");
+    await git(work, "commit", "--quiet", "-m", "pushed");
+    await git(work, "push", "--quiet", "origin", "main");
+
+    // The JSON surface and the smart-HTTP surface agree on where main is.
+    const pushed = (await git(work, "rev-parse", "HEAD")).trim();
+    const refs = await json<{ refs: Array<{ name: string; oid: string }> }>(
+      await harness.fetch(`/${repo}/refs`),
+    );
+    assert.deepEqual(refs.refs, [{ name: "refs/heads/main", oid: pushed }]);
+
+    const verify = path.join(root, "verify");
+    await git(root, "clone", "--quiet", new URL(repo, base).href, verify);
+    assert.equal(
+      await fs.readFile(path.join(verify, "pushed.txt"), "utf8"),
+      "from git, into workerd\n",
+    );
+
+    await fs.rm(root, { recursive: true, force: true });
   });
 });
 

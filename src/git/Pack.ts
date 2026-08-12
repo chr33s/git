@@ -22,7 +22,7 @@ import { createInflate, deflateSync } from "node:zlib";
 
 import { Effect, Result, Stream } from "effect";
 
-import { ObjectNotFound, PackCorrupt, StorageFailure } from "./Error.ts";
+import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
 import { bytesToHex } from "./Format.ts";
 import { ObjectStore, type ObjectType, type Oid, type RawObject } from "./Store.ts";
 
