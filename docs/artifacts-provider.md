@@ -176,6 +176,6 @@ lifecycle. Auth is worth doing regardless of whether the provider ships: the
 server is currently open by construction, and that is the single most important
 thing to know from this evaluation.
 
-[`src/artifacts/Namespace.sketch.ts`](../src/artifacts/Namespace.sketch.ts) sketches the
+[`src/artifacts/Namespace.ts`](../src/artifacts/Namespace.ts) sketches the
 binding implementation, with the missing pieces named as ports rather than
 hand-waved.

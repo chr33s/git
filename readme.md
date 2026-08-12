@@ -9,8 +9,8 @@ Universal Git smart-HTTP protocol server, browser client & unix cli — built on
 The repository is a ground-up rewrite in progress: the git core, the
 smart-HTTP server, the JSON API and the node host are real, tested code —
 stock `git` clones from and pushes to it, on Workers or self-hosted — while
-the wider JSON API surface and webhooks remain typechecked design sketches. See [`docs/rewrite.md`](./docs/rewrite.md) for the full plan and
-rationale.
+every phase of it has landed. See [`docs/rewrite.md`](./docs/rewrite.md) for
+the plan, the rationale, and the designs deliberately not built.
 
 ## Prerequisites
 
@@ -55,30 +55,31 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 
 ### What runs today
 
-| module                       | what it is                                                         |
-| ---------------------------- | ------------------------------------------------------------------ |
-| `src/git/Error.ts`           | tagged errors with `httpApiStatus` annotations                     |
-| `src/git/Store.ts`           | `ObjectStore` / `RefStore` ports                                   |
-| `src/git/Format.ts`          | the pure/effectful seam — framing, commit and tree codecs, hashing |
-| `src/git/Memory.ts`          | in-memory backend                                                  |
-| `src/git/Node.ts`            | filesystem backend, git's own on-disk layout                       |
-| `src/git/Repository.ts`      | the domain service                                                 |
-| `src/git/Cloudflare.ts`      | R2 + Durable Object SQLite backend                                 |
-| `src/git/Durable.ts`         | the Worker entry: one Durable Object per repository                |
-| `src/git/Pack.ts`            | streaming packfile transport, platform-neutral, git-interop-tested |
-| `src/server/Protocol.ts`     | git smart-HTTP: advertisement, upload-pack, receive-pack           |
-| `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it  |
-| `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable     |
-| `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag     |
-| `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite          |
-| `src/alchemy.run.ts`         | deployment stack: bucket, DO and Worker as values, not config      |
-| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, runs anywhere         |
-| `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token — `npx chr33s-git`       |
-| `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend  |
-| `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`     |
-| `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers |
-| `src/git/Store.contract.ts`  | one storage contract suite, run against all four backends          |
-| `src/git/Inflate.ts`         | pull-based zlib inflate — exact stream boundaries, no `node:*`     |
+| module                       | what it is                                                           |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `src/git/Error.ts`           | tagged errors with `httpApiStatus` annotations                       |
+| `src/git/Store.ts`           | `ObjectStore` / `RefStore` ports                                     |
+| `src/git/Format.ts`          | the pure/effectful seam — framing, commit and tree codecs, hashing   |
+| `src/git/Memory.ts`          | in-memory backend                                                    |
+| `src/git/Node.ts`            | filesystem backend, git's own on-disk layout                         |
+| `src/git/Repository.ts`      | the domain service                                                   |
+| `src/git/Cloudflare.ts`      | R2 + Durable Object SQLite backend                                   |
+| `src/git/Durable.ts`         | the Worker entry: one Durable Object per repository                  |
+| `src/git/Pack.ts`            | streaming packfile transport, platform-neutral, git-interop-tested   |
+| `src/server/Protocol.ts`     | git smart-HTTP: advertisement, upload-pack, receive-pack             |
+| `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it    |
+| `src/server/Webhooks.ts`     | signed push delivery: `Schedule` retry, backgrounded, per-subscriber |
+| `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable       |
+| `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag       |
+| `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite            |
+| `src/alchemy.run.ts`         | deployment stack: bucket, DO and Worker as values, not config        |
+| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, runs anywhere           |
+| `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token — `npx chr33s-git`         |
+| `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend    |
+| `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`       |
+| `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers   |
+| `src/git/Store.contract.ts`  | one storage contract suite, run against all four backends            |
+| `src/git/Inflate.ts`         | pull-based zlib inflate — exact stream boundaries, no `node:*`       |
 
 The Worker (`wrangler.json` → `src/git/Durable.ts`) serves the git smart-HTTP
 protocol — stock `git` clones from and pushes to it — plus a schema-typed JSON
@@ -106,18 +107,6 @@ npx chr33s-git init my-repo && npx chr33s-git serve --secret s3cret &
 npx chr33s-git token my-repo --secret s3cret --scope write
 npx chr33s-git clone --token <token> http://127.0.0.1:8080/my-repo my-copy
 ```
-
-### The design sketches
-
-Everything not yet landed lives beside its future home as a `*.sketch.ts`
-file: illustrative code that typechecks against the real `effect` and
-`alchemy@next` type definitions but is excluded from the build and checks.
-
-| area                       | sketch                     |
-| -------------------------- | -------------------------- |
-| wider JSON API + webhooks  | `src/server/*.sketch.ts`   |
-| host seam abstraction      | `src/host/Host.sketch.ts`  |
-| OPFS/node adapter sketches | `src/adapters/*.sketch.ts` |
 
 ## Development
 

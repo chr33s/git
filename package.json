@@ -12,8 +12,7 @@
     "tsconfig.json",
     "!src/**/*.test.ts",
     "!src/**/*.spec.ts",
-    "!src/**/*.contract.ts",
-    "!src/**/*.sketch.ts"
+    "!src/**/*.contract.ts"
   ],
   "type": "module",
   "scripts": {

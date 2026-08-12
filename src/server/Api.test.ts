@@ -68,6 +68,50 @@ describe("Api", () => {
         const refs = yield* client.repo.refs({ params: { repo: "r" } });
         assert.deepEqual(refs.refs, [{ name: "refs/heads/main", oid: second.oid }]);
 
+        // Paged endpoints: the cursor walks, `has_more` closes.
+        const firstPage = yield* client.repo.commits({
+          params: { repo: "r", oid: second.oid },
+          query: { limit: "1" },
+        });
+        assert.deepEqual(
+          firstPage.items.map((commit) => commit.message),
+          ["second"],
+        );
+        assert.equal(firstPage.has_more, true);
+        const nextPage = yield* client.repo.commits({
+          params: { repo: "r", oid: second.oid },
+          query: { limit: "1", cursor: firstPage.next_cursor! },
+        });
+        assert.deepEqual(
+          nextPage.items.map((commit) => commit.message),
+          ["first"],
+        );
+        assert.equal(nextPage.has_more, false);
+
+        // Branch creation, and the paged branch list that follows it.
+        const created2 = yield* client.repo.branch({
+          params: { repo: "r" },
+          payload: { name: "feature", base: "refs/heads/main" },
+        });
+        assert.equal(created2.name, "refs/heads/feature");
+        assert.equal(created2.oid, second.oid);
+
+        const branches = yield* client.repo.branches({ params: { repo: "r" }, query: {} });
+        assert.deepEqual(
+          branches.items.map((ref) => ref.name),
+          ["refs/heads/feature", "refs/heads/main"],
+        );
+        assert.equal(branches.has_more, false);
+
+        // Creating it twice is a conflict, typed.
+        const conflict2 = yield* client.repo
+          .branch({
+            params: { repo: "r" },
+            payload: { name: "feature", base: "refs/heads/main" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(conflict2._tag, "RefConflict");
+
         // The failure channel carries the domain error, decoded.
         const conflict = yield* client.repo
           .create({

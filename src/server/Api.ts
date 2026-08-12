@@ -40,6 +40,30 @@ const signatureFrom = (author: (typeof SignatureWire)["Type"] | undefined): Sign
 
 const RepoParam = { repo: Schema.String };
 
+/** Written once; every list endpoint reuses it instead of re-deriving it. */
+const Page = <A extends Schema.Top>(item: A) =>
+  Schema.Struct({
+    items: Schema.Array(item),
+    next_cursor: Schema.NullOr(Schema.String),
+    has_more: Schema.Boolean,
+  });
+
+const Cursor = {
+  cursor: Schema.optional(Schema.String),
+  limit: Schema.optional(Schema.String),
+};
+
+const Ref = Schema.Struct({ name: Schema.String, oid: OidString });
+
+/** Cursors are opaque to clients; here they are simply an offset. */
+const page = <A>(items: ReadonlyArray<A>, query: { cursor?: string; limit?: string }) => {
+  const start = query.cursor === undefined ? 0 : Number.parseInt(query.cursor, 10);
+  const size = query.limit === undefined ? 50 : Number.parseInt(query.limit, 10);
+  const slice = items.slice(start, start + size);
+  const more = start + size < items.length;
+  return { items: slice, next_cursor: more ? String(start + size) : null, has_more: more };
+};
+
 const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.post("create", "/commit", {
@@ -78,9 +102,32 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("refs", "/refs", {
       params: RepoParam,
-      success: Schema.Struct({
-        refs: Schema.Array(Schema.Struct({ name: Schema.String, oid: OidString })),
-      }),
+      success: Schema.Struct({ refs: Schema.Array(Ref) }),
+    }),
+  )
+  .add(
+    // The paged form. `refs` stays as it is: the smart-HTTP advertisement
+    // needs every ref anyway, and breaking it would buy nothing.
+    HttpApiEndpoint.get("branches", "/branches", {
+      params: RepoParam,
+      query: Cursor,
+      success: Page(Ref),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("branch", "/branches/create", {
+      params: RepoParam,
+      payload: Schema.Struct({ name: Schema.String, base: Schema.String }),
+      success: Ref,
+      error: [RefConflict, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("commits", "/commits/:oid", {
+      params: { ...RepoParam, oid: OidString },
+      query: Cursor,
+      success: Page(Schema.Struct({ message: Schema.String, oid: OidString })),
+      error: ObjectNotFound,
     }),
   )
   .prefix("/:repo");
@@ -130,6 +177,43 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const repository = yield* Repository;
         const refs = yield* repository.refs.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { refs: refs.map(([name, oid]) => ({ name, oid })) };
+      }),
+    )
+    .handle("branches", ({ query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const refs = yield* repository.refs.pipe(Effect.catchTag("StorageFailure", Effect.die));
+        // Sorted, because a cursor over an unstable order skips rows: two
+        // requests must see the same sequence.
+        const branches = refs
+          .filter(([name]) => name.startsWith("refs/heads/"))
+          .map(([name, oid]) => ({ name, oid }))
+          .sort((left, right) => left.name.localeCompare(right.name));
+        return page(branches, query);
+      }),
+    )
+    .handle("branch", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const oid = yield* repository
+          .branch(payload)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { name: `refs/heads/${payload.name}`, oid };
+      }),
+    )
+    .handle("commits", ({ params, query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const start = query.cursor === undefined ? 0 : Number.parseInt(query.cursor, 10);
+        const size = query.limit === undefined ? 50 : Number.parseInt(query.limit, 10);
+        // Walk only as far as this page needs, plus one to answer `has_more`.
+        const walked = yield* Stream.runCollect(
+          repository.log(params.oid as Oid, { limit: start + size + 1 }),
+        ).pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return page(
+          walked.map((commit) => ({ message: commit.message, oid: commit.oid })),
+          query,
+        );
       }),
     ),
 );

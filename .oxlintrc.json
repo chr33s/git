@@ -1,6 +1,5 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "ignorePatterns": ["**/*.sketch.ts"],
   "options": {
     "typeAware": true,
     "typeCheck": true

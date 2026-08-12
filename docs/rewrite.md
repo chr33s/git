@@ -11,8 +11,8 @@ self-hosting is one command. Phase 6's CLI landed in `src/cli/main.ts` on
 `src/host/Cloudflare.ts` are real code against real alchemy types, unblocked
 by a one-symbol patch (`patches/effect+4.0.0-beta.107.patch` aliases
 `Schema.TaggedErrorClass`, the name `@distilled.cloud/*` is built against).
-Every phase has landed; the only sketches left are the wider JSON API surface
-and webhooks.
+Every phase has landed, webhooks included, and the sketches are gone — each
+one either shipped or is recorded under "paths not taken" below.
 
 What is real code today, running under the repo's own test runner:
 
@@ -52,7 +52,7 @@ The legacy implementation — the flat `git.*.ts`, `server.*`, `client.*` and
 `cli.*` files and their tests — has been removed; the Worker now serves the
 Durable Object path (`src/git/Durable.ts`).
 
-The sketch code (the `*.sketch.ts` files under [`src/`](../src)) is illustrative, but it is not hand-waved: it
+The sketch code (the `*.ts` files under [`src/`](../src)) is illustrative, but it is not hand-waved: it
 typechecks against the real `effect@4.0.0-beta.107` and `alchemy@2.0.0-beta.70`
 type definitions (`tsc --noEmit`, strict, no `any` escapes). Bodies that would
 just be ported code are `declare const` stubs, so the shapes and the wiring are
@@ -126,7 +126,7 @@ lookup) for one binding.
 — 2,351 lines of pure, synchronous byte work with no I/O. Effect buys nothing
 there and costs an allocation per call. They port over with two edits: functions
 that `throw` return a `Result`, and anything that reached for storage moves up
-into `Repository`. See [`src/git/Format.sketch.ts`](../src/git/Format.sketch.ts) — that
+into `Repository`. See [`src/git/Format.ts`](../src/git/Format.ts) — that
 file is the seam, pure below and effectful above.
 
 Being explicit about this is what keeps the rewrite from being a rewrite of
@@ -139,7 +139,7 @@ to be the part with the subtlest bugs.
 
 ```mermaid
 flowchart TB
-	subgraph ports["ports (src/git/Store.sketch.ts)"]
+	subgraph ports["ports (src/git/Store.ts)"]
 		OS[ObjectStore]
 		RS[RefStore]
 		IS[IndexStore]
@@ -210,7 +210,7 @@ moves.
 
 ### Errors
 
-[`src/git/Error.sketch.ts`](../src/git/Error.sketch.ts). Six `Schema.TaggedError`
+[`src/git/Error.ts`](../src/git/Error.ts). Six `Schema.TaggedError`
 classes replace six `Error` subclasses. Being schema-backed is what matters:
 the same class is the server's failure, the wire representation, and the type
 the browser client matches on. `RefConflict` arrives at the client as
@@ -223,14 +223,14 @@ disappear.
 
 ### Ports
 
-[`src/git/Store.sketch.ts`](../src/git/Store.sketch.ts). Three narrow services addressed
+[`src/git/Store.ts`](../src/git/Store.ts). Three narrow services addressed
 by git concepts (`read(oid)`), not paths (`readFile(".git/refs/heads/main")`).
 `RefStore.apply` is the only writer and is transactional, with `atomic` as a
 parameter — so receive-pack's atomic mode stops being a separate code path, and
 OPFS and node have to answer for atomicity instead of silently omitting it.
 
 `ObjectStore` has both `read` and `readStream`. The Cloudflare layer
-([`src/adapters/Cloudflare.sketch.ts`](../src/adapters/Cloudflare.sketch.ts)) maps
+(`src/adapters/Cloudflare.ts`) maps
 `readStream` onto R2's body stream and `writeStream` onto `bucket.put(stream)`,
 which alchemy's binding accepts directly — a large blob never materializes.
 
@@ -259,11 +259,11 @@ silent runtime surprises in a hand-written port.
 ### Concurrency and lifetime
 
 - Ref updates: optimistic CAS with a retry `Schedule` on `RefConflict`
-  ([`Repository.commit`](../src/git/Repository.sketch.ts)), rather than each caller
+  ([`Repository.commit`](../src/git/Repository.ts)), rather than each caller
   reinventing read-then-write.
 - Per-ref `update` hooks run concurrently; one rejection interrupts the siblings.
 - `post-receive` / webhooks go through `RepoHost.background`
-  ([`src/server/Webhooks.sketch.ts`](../src/server/Webhooks.sketch.ts)) — `waitUntil` on
+  ([`src/server/Webhooks.ts`](../src/server/Webhooks.ts)) — `waitUntil` on
   Workers, a detached fiber under node — so a slow subscriber no longer adds its
   latency to the push.
 - Webhook backoff is `Schedule.exponential |> jittered`, capped at four
@@ -288,11 +288,11 @@ Two edges, deliberately:
   tagged classes themselves with statuses from their `httpApiStatus`
   annotations. `Api.test.ts` drives it through a client derived from the same
   declaration — the no-drift property, demonstrated. The wider surface in
-  [`src/server/Api.sketch.ts`](../src/server/Api.sketch.ts) lands endpoint by
+  [`src/server/Api.ts`](../src/server/Api.ts) lands endpoint by
   endpoint as the domain operations behind it do.
 
 Both mount into one `HttpRouter.toWebHandler(...)` in
-[`src/server/App.sketch.ts`](../src/server/App.sketch.ts), which no host-specific code
+`src/server/App.ts`, which no host-specific code
 touches.
 
 One thing the group prefix `/api/:repo` forces: the `repo` path parameter has to
@@ -313,7 +313,7 @@ and `alchemy/Http`'s `NodeHttpServer` / `BunHttpServer` take the same
 `HttpEffect`.
 
 So portability is not a framework feature to switch on — it is one file,
-[`src/host/Host.sketch.ts`](../src/host/Host.sketch.ts), naming the three things a git
+`src/host/Host.ts`, naming the three things a git
 server actually needs from a host:
 
 | capability   | why it exists                                   | Cloudflare                  | node / bun             |
@@ -323,14 +323,14 @@ server actually needs from a host:
 | `background` | webhook delivery outliving the response         | `state.waitUntil`           | `Effect.forkDetach`    |
 
 Above that line — `server/*`, `git/*` — nothing names a provider; `grep -l
-alchemy` over the `*.sketch.ts` files hits only `host/`, `adapters/Cloudflare.ts` and the stack file.
+alchemy` over the `*.ts` files hits only `host/`, `adapters/Cloudflare.ts` and the stack file.
 
 The unit that moves between hosts is **one app instance bound to one
-repository** ([`App.forRepo`](../src/server/App.sketch.ts)). That is not an
+repository** ([`App.forRepo`](../src/server/App.ts)). That is not an
 arbitrary choice: `Repository` is _constructed_ from `ObjectStore` and
 `RefStore`, so storage resolves when the layer is built, not when a request
 arrives — which is exactly the Durable Object model. Cloudflare gets an instance
-per repo from the platform; [`host/Node.ts`](../src/host/Node.sketch.ts) reproduces
+per repo from the platform; [`host/Node.ts`](../src/host/Node.ts) reproduces
 it with a `Map` keyed by repo name and a lock around dispatch.
 
 The node host is worth having on its own merits, provider story aside: `npm run
@@ -384,7 +384,7 @@ belong behind their own script.
 
 ### Tests
 
-[`src/testing/Repository.sketch.ts`](../src/testing/Repository.sketch.ts). `@effect/vitest`,
+`src/testing/Repository.ts`. `@effect/vitest`,
 environment as a layer swap, `HttpApiTest` driving the real handler in-process.
 `--test-concurrency=1` goes away (the global setup file already has). The 9,125
 lines of legacy tests were removed with the old implementation; their
@@ -419,6 +419,41 @@ integration suite drives. Two local patches hold it up (`patches/`): one
 defers `RepoClient.raw` for the Artifacts provider, one aliases
 `Schema.TaggedErrorClass` in `effect`. Both are upstream-shaped; delete them
 when the versions catch up.
+
+---
+
+## Paths not taken
+
+The sketches are gone — every one either shipped or is recorded here. Three
+designs were written, considered and _not_ built; the reasoning is worth more
+than the files were.
+
+**A provider-neutral `RepoHost` seam** (`host/Host.ts`,
+`server/App.ts`). The plan was one `App` value that named only the
+storage ports plus a `RepoHost` supplying `stores`, `serialize` and
+`background`, with each host implementing that port. What shipped instead is
+two concrete hosts — `host/Node.ts` and `host/Cloudflare.ts` — sharing
+`Protocol.handle` and `Api.layer` directly. The seam turned out to be
+unnecessary: the handlers already require nothing but `Repository`, so
+host-neutrality came for free from the effect requirements, and an extra
+service would only have restated it. The sketch's own header had noticed the
+first half of this: alchemy has no provider-neutral `Worker`/`DurableObject`
+either. If a third host ever needs the three capabilities as one value, the
+port is a twenty-line file away.
+
+**`@effect/vitest` with `TestClock` for the suite** (`testing/Repository.ts`).
+The repo runs on `node:test` throughout, and the one thing `TestClock` was
+wanted for — asserting webhook backoff without waiting out real seconds — is
+handled by making the retry policy a parameter: `Webhooks.test.ts` passes a
+1ms base delay and counts attempts against a real receiver, which tests the
+schedule _and_ the HTTP behaviour in one pass.
+
+**An `IndexStore` port** (`adapters/Local.ts`, `git/Store.ts`).
+A staging area is a working-tree concept, and everything here serves bare
+repositories: the server, the CLI and the browser client all commit trees
+they have already built. A port with no caller is the dead code this section
+exists to avoid, so it waits for the feature that needs it — a browser work
+tree — rather than shipping ahead of it.
 
 ---
 
@@ -459,7 +494,7 @@ system, since nothing in `src/` reads an `Authorization` header today.
   through the port signatures; the typechecker then dragged it into the CLI and
   the test suite, neither of which runs on Workers. The fix is that the
   Cloudflare layer captures the context with `Effect.context` and provides it
-  inward ([`adapters/Cloudflare.ts`](../src/adapters/Cloudflare.sketch.ts)), so the
+  inward ([`adapters/Cloudflare.ts`](../src/adapters/Cloudflare.ts)), so the
   ports stay `R = never`. The cost is real and should be measured: that layer
   must be built inside the invocation rather than memoized per DO instance,
   because a cached context would pin a stale `ExecutionContext`.
