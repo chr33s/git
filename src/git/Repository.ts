@@ -146,6 +146,8 @@ export class Repository extends Context.Service<
     readonly refs: Effect.Effect<ReadonlyArray<readonly [string, Oid]>, StorageFailure>;
     readonly resolve: (name: string) => Effect.Effect<Oid | null, StorageFailure>;
     readonly head: Effect.Effect<string, StorageFailure>;
+    /** Point HEAD at a ref — what a checkout does last. */
+    readonly setHead: (ref: string) => Effect.Effect<void, StorageFailure>;
 
     readonly readCommit: (oid: Oid) => Effect.Effect<CommitInfo, ObjectNotFound | StorageFailure>;
     readonly readTree: (
@@ -170,6 +172,22 @@ export class Repository extends Context.Service<
       readonly base?: Oid;
       readonly changes: ReadonlyArray<FileChange>;
     }) => Effect.Effect<Oid, ObjectNotFound | StorageFailure | Invalid>;
+
+    /**
+     * Nested trees from a flat list of paths whose blobs already exist.
+     *
+     * `writeFiles` is the same shape for content a caller is holding; this is
+     * for content already in the store — an index, where every entry is a
+     * path and an oid and re-reading the bytes to write them back would be
+     * the only cost.
+     */
+    readonly writePaths: (
+      entries: ReadonlyArray<{
+        readonly path: string;
+        readonly oid: Oid;
+        readonly mode: string;
+      }>,
+    ) => Effect.Effect<Oid, StorageFailure | Invalid>;
 
     readonly commit: (input: {
       readonly branch: string;
@@ -722,6 +740,59 @@ export const layer = Layer.effect(
       return { name, objects: oids.length };
     });
 
+    const writePaths = Effect.fn("Repository.writePaths")(function* (
+      entries: ReadonlyArray<{ readonly path: string; readonly oid: Oid; readonly mode: string }>,
+    ) {
+      /** Directory prefix -> its entries, filled in as paths are placed. */
+      const directories = new Map<string, Map<string, TreeEntry>>([["", new Map()]]);
+
+      const directoryAt = (prefix: string) => {
+        let existing = directories.get(prefix);
+        if (existing !== undefined) return existing;
+        existing = new Map();
+        directories.set(prefix, existing);
+        return existing;
+      };
+
+      for (const entry of entries) {
+        const segments = entry.path.split("/").filter((segment) => segment !== "");
+        const name = segments.at(-1);
+        if (name === undefined) {
+          return yield* new Invalid({ field: "path", reason: `empty path '${entry.path}'` });
+        }
+        if (!FILE_MODES.has(entry.mode)) {
+          return yield* new Invalid({
+            field: "mode",
+            reason: `unsupported file mode '${entry.mode}'`,
+          });
+        }
+        directoryAt(segments.slice(0, -1).join("/")).set(name, {
+          mode: entry.mode,
+          name,
+          oid: entry.oid,
+        });
+      }
+
+      const depth = (prefix: string) => (prefix === "" ? 0 : prefix.split("/").length);
+      const prefixes = [...directories.keys()].sort((left, right) => depth(right) - depth(left));
+
+      let root = EMPTY_TREE_OID;
+      for (const prefix of prefixes) {
+        const contents = [...directories.get(prefix)!.values()];
+        if (prefix === "") {
+          root = yield* writeTree(contents);
+          continue;
+        }
+        const slash = prefix.lastIndexOf("/");
+        const name = slash === -1 ? prefix : prefix.slice(slash + 1);
+        const parent = directoryAt(slash === -1 ? "" : prefix.slice(0, slash));
+        if (contents.length === 0) parent.delete(name);
+        else parent.set(name, { mode: TREE_MODE, name, oid: yield* writeTree(contents) });
+      }
+
+      return root;
+    });
+
     const closure = (
       wants: ReadonlyArray<Oid>,
       haves: ReadonlyArray<Oid>,
@@ -866,6 +937,7 @@ export const layer = Layer.effect(
       refs: refs.list("refs/"),
       resolve: refs.resolve,
       head: refs.head,
+      setHead: refs.setHead,
 
       readCommit,
       readTree: readTreeEntries,
@@ -882,6 +954,7 @@ export const layer = Layer.effect(
           ),
 
       writeTree,
+      writePaths,
       writeBlob: (data) => objects.write({ type: "blob", data }),
       writeFiles,
 
