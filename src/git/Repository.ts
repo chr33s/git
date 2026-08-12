@@ -87,6 +87,12 @@ export interface FsckReport {
   readonly danglingRefs: ReadonlyArray<{ readonly ref: string; readonly oid: Oid }>;
 }
 
+export interface GcReport {
+  readonly scanned: number;
+  readonly reachable: number;
+  readonly removed: ReadonlyArray<Oid>;
+}
+
 export interface FetchPlan {
   /** New boundaries the client must record. */
   readonly shallow: ReadonlyArray<Oid>;
@@ -210,6 +216,23 @@ export class Repository extends Context.Service<
      * the only one that catches corruption underneath the port.
      */
     readonly fsck: Effect.Effect<FsckReport, StorageFailure>;
+
+    /**
+     * Delete what no ref can reach.
+     *
+     * Safe without a grace period only because every host serializes requests
+     * per repository — the Durable Object input gate, a mutex on node — so a
+     * collection cannot interleave with the window in a push between writing
+     * objects and moving the ref that makes them reachable. A host that
+     * dropped that property would need one.
+     *
+     * Fails rather than collects when the reachability walk cannot finish: a
+     * partial answer would name live objects as garbage, and `fsck` is where
+     * a repository in that state gets diagnosed.
+     */
+    readonly gc: (options?: {
+      readonly dryRun?: boolean;
+    }) => Effect.Effect<GcReport, ObjectNotFound | StorageFailure>;
   }
 >()("git/Repository") {}
 
@@ -828,6 +851,29 @@ export const layer = Layer.effect(
 
         return { checked, problems, danglingRefs };
       }).pipe(Effect.withSpan("Repository.fsck")),
+
+      gc: Effect.fn("Repository.gc")(function* (options) {
+        const roots = (yield* refs.list("refs/")).map(([, oid]) => oid);
+        const head = yield* refs.resolve("HEAD");
+        if (head !== null) roots.push(head);
+
+        // Tolerant: a ref pointing at a missing object is fsck's problem to
+        // report, not a reason to refuse to collect everything else.
+        const reachable = (yield* walk(roots, { ignoreMissing: true })).seen;
+
+        const removed: Oid[] = [];
+        let scanned = 0;
+        yield* Stream.runForEach(objects.list, (oid) =>
+          Effect.gen(function* () {
+            scanned++;
+            if (reachable.has(oid) || oid === EMPTY_TREE_OID) return;
+            removed.push(oid);
+            if (options?.dryRun !== true) yield* objects.delete(oid);
+          }),
+        );
+
+        return { scanned, reachable: reachable.size, removed };
+      }),
     });
   }),
 );

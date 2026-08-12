@@ -307,6 +307,18 @@ const repo = HttpApiGroup.make("repo")
     }),
   )
   .add(
+    HttpApiEndpoint.post("gc", "/gc", {
+      params: RepoParam,
+      payload: Schema.Struct({ dry_run: Schema.optional(Schema.Boolean) }),
+      success: Schema.Struct({
+        scanned: Schema.Finite,
+        reachable: Schema.Finite,
+        removed: Schema.Array(OidString),
+      }),
+      error: ObjectNotFound,
+    }),
+  )
+  .add(
     // Registration, because a delivery engine nobody can subscribe to never
     // fires. The secret goes in and never comes back out.
     HttpApiEndpoint.post("webhookAdd", "/webhooks", {
@@ -509,6 +521,15 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           problems: report.problems,
           dangling_refs: report.danglingRefs,
         };
+      }),
+    )
+    .handle("gc", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const report = yield* repository
+          .gc(payload.dry_run === undefined ? {} : { dryRun: payload.dry_run })
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { scanned: report.scanned, reachable: report.reachable, removed: report.removed };
       }),
     )
     .handle("webhookAdd", ({ payload }) =>

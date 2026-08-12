@@ -332,6 +332,52 @@ describe("Api", () => {
   );
 
   it.live(
+    "collects what no ref can reach, and nothing else",
+    () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const kept = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "keep",
+            author: alice,
+            files: [{ path: "kept.txt", content: "k\n" }],
+          },
+        });
+
+        // A blob written but never committed is exactly what gc is for.
+        const orphan = yield* client.repo.blob({
+          params: { repo: "r" },
+          payload: { content: "nobody references this\n" },
+        });
+
+        const dry = yield* client.repo.gc({ params: { repo: "r" }, payload: { dry_run: true } });
+        assert.deepEqual(dry.removed, [orphan.oid]);
+        // A dry run reports and keeps.
+        yield* client.repo.readBlob({ params: { repo: "r", oid: orphan.oid } });
+
+        const swept = yield* client.repo.gc({ params: { repo: "r" }, payload: {} });
+        assert.deepEqual(swept.removed, [orphan.oid]);
+
+        const gone = yield* client.repo
+          .readBlob({ params: { repo: "r", oid: orphan.oid } })
+          .pipe(Effect.flip);
+        assert.equal(gone._tag, "ObjectNotFound");
+
+        // Everything reachable survived, and the repository still checks out.
+        const commit = yield* client.repo.read({ params: { repo: "r", oid: kept.oid } });
+        assert.equal(commit.message, "keep");
+        const report = yield* client.repo.fsck({ params: { repo: "r" } });
+        assert.equal(report.ok, true);
+
+        // A second pass has nothing left to do.
+        const again = yield* client.repo.gc({ params: { repo: "r" }, payload: {} });
+        assert.deepEqual(again.removed, []);
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+  );
+
+  it.live(
     "registers, lists and removes webhooks without ever echoing the secret",
     () =>
       Effect.gen(function* () {
