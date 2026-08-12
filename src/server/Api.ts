@@ -15,6 +15,7 @@ import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
 import { Etag, HttpPlatform } from "effect/unstable/http";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 
+import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
@@ -65,6 +66,7 @@ const Ref = Schema.Struct({ name: Schema.String, oid: OidString });
 const Encoding = Schema.Literals(["utf8", "base64"]);
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 const decodeContent = (content: string, encoding: "utf8" | "base64" | undefined): Uint8Array => {
   if (encoding !== "base64") return encoder.encode(content);
@@ -357,6 +359,57 @@ const repo = HttpApiGroup.make("repo")
         problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
         dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
       }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("merge", "/merge", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        ours: Schema.String,
+        theirs: Schema.String,
+        author: Schema.optional(SignatureWire),
+        message: Schema.optional(Schema.String),
+        strategy: Schema.optional(Schema.Literals(["recursive", "ours", "theirs"])),
+        /** The ref to move on success; absent computes and stops. */
+        into: Schema.optional(Schema.String),
+        no_fast_forward: Schema.optional(Schema.Boolean),
+      }),
+      success: Schema.Struct({
+        kind: Schema.Literals(["up-to-date", "fast-forward", "merged", "conflicted"]),
+        commit: Schema.NullOr(OidString),
+        tree: Schema.NullOr(OidString),
+        base: Schema.NullOr(OidString),
+        conflicts: Schema.Array(
+          Schema.Struct({
+            path: Schema.String,
+            reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
+          }),
+        ),
+      }),
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("diff", "/diff", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        /** Refs, oids or trees. */
+        from: Schema.String,
+        to: Schema.String,
+        path: Schema.optional(Schema.String),
+        context: Schema.optional(Schema.Finite),
+      }),
+      success: Schema.Struct({
+        files: Schema.Array(
+          Schema.Struct({
+            path: Schema.String,
+            status: Schema.Literals(["added", "removed", "modified"]),
+            binary: Schema.Boolean,
+            patch: Schema.String,
+          }),
+        ),
+      }),
+      error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -658,6 +711,80 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           problems: report.problems,
           dangling_refs: report.danglingRefs,
         };
+      }),
+    )
+    .handle("merge", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const outcome = yield* repository
+          .merge({
+            ours: payload.ours,
+            theirs: payload.theirs,
+            author: signatureFrom(payload.author),
+            ...(payload.message === undefined ? {} : { message: payload.message }),
+            ...(payload.strategy === undefined ? {} : { strategy: payload.strategy }),
+            ...(payload.into === undefined ? {} : { into: payload.into }),
+            ...(payload.no_fast_forward === undefined
+              ? {}
+              : { noFastForward: payload.no_fast_forward }),
+          })
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return outcome;
+      }),
+    )
+    .handle("diff", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+
+        const before = yield* treeOfRef(repository, payload.from);
+        const after = yield* treeOfRef(repository, payload.to);
+
+        const listing = (tree: Oid) =>
+          repository.listFiles(tree).pipe(
+            Effect.catchTag("StorageFailure", Effect.die),
+            Effect.map((files) => new Map(files.map((file) => [file.path, file]))),
+          );
+        const from = yield* listing(before);
+        const to = yield* listing(after);
+
+        const paths = [...new Set([...from.keys(), ...to.keys()])]
+          .filter((path) => payload.path === undefined || path.startsWith(payload.path))
+          .sort();
+
+        const files = yield* Effect.forEach(paths, (path) =>
+          Effect.gen(function* () {
+            const old = from.get(path);
+            const now = to.get(path);
+            if (old?.oid === now?.oid) return null;
+
+            const read = (oid: Oid | undefined) =>
+              oid === undefined
+                ? Effect.succeed(new Uint8Array(0))
+                : repository.readBlob(oid).pipe(Effect.catchTag("StorageFailure", Effect.die));
+
+            const oldBytes = yield* read(old?.oid);
+            const newBytes = yield* read(now?.oid);
+            const status = old === undefined ? "added" : now === undefined ? "removed" : "modified";
+
+            // A binary patch would be noise; git says "differ" and so do we.
+            if (isBinary(oldBytes) || isBinary(newBytes)) {
+              return { path, status, binary: true, patch: "" } as const;
+            }
+
+            return {
+              path,
+              status,
+              binary: false,
+              patch: unified(decoder.decode(oldBytes), decoder.decode(newBytes), {
+                beforeName: path,
+                afterName: path,
+                ...(payload.context === undefined ? {} : { context: payload.context }),
+              }),
+            } as const;
+          }),
+        );
+
+        return { files: files.filter((file) => file !== null) };
       }),
     )
     .handle("files", ({ query }) =>

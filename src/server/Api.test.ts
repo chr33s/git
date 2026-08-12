@@ -332,6 +332,236 @@ describe("Api", () => {
   );
 
   it.live(
+    "merges: fast-forward, clean three-way, and a reported conflict",
+    () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const base = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "base",
+            author: alice,
+            files: [
+              { path: "shared.txt", content: "one\ntwo\nthree\n" },
+              { path: "untouched.txt", content: "stable\n" },
+            ],
+          },
+        });
+
+        yield* client.repo.branch({
+          params: { repo: "r" },
+          payload: { name: "feature", base: "refs/heads/main" },
+        });
+
+        // Only the branch moves: main can fast-forward onto it.
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "feature",
+            message: "add a file",
+            author: alice,
+            files: [{ path: "new.txt", content: "added\n" }],
+          },
+        });
+
+        const forward = yield* client.repo.merge({
+          params: { repo: "r" },
+          payload: {
+            ours: "refs/heads/main",
+            theirs: "refs/heads/feature",
+            into: "refs/heads/main",
+          },
+        });
+        assert.equal(forward.kind, "fast-forward");
+        assert.equal(forward.base, base.oid);
+
+        const afterForward = yield* client.repo.files({ params: { repo: "r" }, query: {} });
+        assert.deepEqual(
+          afterForward.files.map((file) => file.path),
+          ["new.txt", "shared.txt", "untouched.txt"],
+        );
+
+        // Merging again has nothing to do.
+        const idempotent = yield* client.repo.merge({
+          params: { repo: "r" },
+          payload: { ours: "refs/heads/main", theirs: "refs/heads/feature" },
+        });
+        assert.equal(idempotent.kind, "up-to-date");
+
+        // Now diverge on different files: a clean three-way merge.
+        yield* client.repo.branch({
+          params: { repo: "r" },
+          payload: { name: "side", base: "refs/heads/main" },
+        });
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "side",
+            message: "theirs edits shared",
+            author: alice,
+            files: [{ path: "shared.txt", content: "one\nTWO\nthree\n" }],
+          },
+        });
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "main",
+            message: "ours adds another",
+            author: alice,
+            files: [{ path: "ours.txt", content: "mine\n" }],
+          },
+        });
+
+        const merged = yield* client.repo.merge({
+          params: { repo: "r" },
+          payload: {
+            ours: "refs/heads/main",
+            theirs: "refs/heads/side",
+            author: alice,
+            into: "refs/heads/main",
+          },
+        });
+        assert.equal(merged.kind, "merged");
+        assert.deepEqual(merged.conflicts, []);
+
+        // The merge commit has both parents, which is what makes it a merge.
+        const commit = yield* client.repo.read({
+          params: { repo: "r", oid: merged.commit! },
+        });
+        assert.equal(commit.parents.length, 2);
+
+        // Their edit to shared.txt survived, and our file is still there.
+        const shared = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: "refs/heads/main", path: "shared.txt" },
+        });
+        assert.equal(atob(shared.content), "one\nTWO\nthree\n");
+        yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: "refs/heads/main", path: "ours.txt" },
+        });
+
+        // Both sides edit the same line: a conflict, reported not thrown.
+        yield* client.repo.branch({
+          params: { repo: "r" },
+          payload: { name: "clash", base: "refs/heads/main" },
+        });
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "clash",
+            message: "theirs",
+            author: alice,
+            files: [{ path: "shared.txt", content: "one\nTHEIRS\nthree\n" }],
+          },
+        });
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "main",
+            message: "ours",
+            author: alice,
+            files: [{ path: "shared.txt", content: "one\nOURS\nthree\n" }],
+          },
+        });
+
+        const conflicted = yield* client.repo.merge({
+          params: { repo: "r" },
+          payload: { ours: "refs/heads/main", theirs: "refs/heads/clash", author: alice },
+        });
+        assert.equal(conflicted.kind, "conflicted");
+        assert.deepEqual(
+          conflicted.conflicts.map((conflict) => [conflict.path, conflict.reason]),
+          [["shared.txt", "content"]],
+        );
+        assert.equal(conflicted.commit, null);
+
+        // A conflicted merge still writes a tree, with the markers in it —
+        // otherwise there is nothing for a caller to resolve against.
+        const markers = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: conflicted.tree!, path: "shared.txt" },
+        });
+        assert.match(atob(markers.content), /<<<<<<</);
+        assert.match(atob(markers.content), />>>>>>>/);
+
+        // Choosing a side resolves it without markers.
+        const theirs = yield* client.repo.merge({
+          params: { repo: "r" },
+          payload: {
+            ours: "refs/heads/main",
+            theirs: "refs/heads/clash",
+            author: alice,
+            strategy: "theirs",
+          },
+        });
+        assert.equal(theirs.kind, "merged");
+        const resolved = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: theirs.tree!, path: "shared.txt" },
+        });
+        assert.equal(atob(resolved.content), "one\nTHEIRS\nthree\n");
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+  );
+
+  it.live(
+    "diffs two revisions as unified patches",
+    () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const first = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "first",
+            author: alice,
+            files: [
+              { path: "kept.txt", content: "same\n" },
+              { path: "edited.txt", content: "one\ntwo\nthree\n" },
+              { path: "removed.txt", content: "bye\n" },
+            ],
+          },
+        });
+
+        const second = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "second",
+            author: alice,
+            files: [
+              { path: "edited.txt", content: "one\nTWO\nthree\n" },
+              { path: "removed.txt", content: null },
+              { path: "added.txt", content: "new\n" },
+            ],
+          },
+        });
+
+        const diff = yield* client.repo.diff({
+          params: { repo: "r" },
+          payload: { from: first.oid, to: second.oid },
+        });
+
+        // Unchanged files are absent; that is what makes a diff a diff.
+        assert.deepEqual(
+          diff.files.map((file) => [file.path, file.status]),
+          [
+            ["added.txt", "added"],
+            ["edited.txt", "modified"],
+            ["removed.txt", "removed"],
+          ],
+        );
+
+        const edited = diff.files.find((file) => file.path === "edited.txt")!;
+        assert.match(edited.patch, /^--- a\/edited\.txt$/m);
+        assert.match(edited.patch, /^\+\+\+ b\/edited\.txt$/m);
+        assert.match(edited.patch, /^-two$/m);
+        assert.match(edited.patch, /^\+TWO$/m);
+        assert.match(edited.patch, /^@@ -1,3 \+1,3 @@$/m);
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+  );
+
+  it.live(
     "reads the tree by path: files, one file, raw objects, reflog and grep",
     () =>
       Effect.gen(function* () {

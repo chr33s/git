@@ -32,6 +32,8 @@ import {
   type TagInfo,
   type TreeEntry,
 } from "./Format.ts";
+import { isBinary } from "./Diff.ts";
+import { mergeText, type Strategy as MergeStrategy } from "./Merge.ts";
 import * as Pack from "./Pack.ts";
 import {
   isOid,
@@ -42,6 +44,9 @@ import {
   RefStore,
   type RefUpdate,
 } from "./Store.ts";
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 export interface Commit extends CommitInfo {
   readonly oid: Oid;
@@ -93,6 +98,21 @@ export interface FsckReport {
   readonly problems: ReadonlyArray<FsckProblem>;
   /** Refs pointing at objects the store does not hold. */
   readonly danglingRefs: ReadonlyArray<{ readonly ref: string; readonly oid: Oid }>;
+}
+
+export interface MergeConflict {
+  readonly path: string;
+  /** Why it could not be resolved, in the vocabulary git uses for it. */
+  readonly reason: "content" | "add/add" | "modify/delete" | "binary";
+}
+
+export interface MergeOutcome {
+  readonly kind: "up-to-date" | "fast-forward" | "merged" | "conflicted";
+  /** The commit the merge produced, or `null` when it conflicted. */
+  readonly commit: Oid | null;
+  readonly tree: Oid | null;
+  readonly base: Oid | null;
+  readonly conflicts: ReadonlyArray<MergeConflict>;
 }
 
 export interface TreeFile {
@@ -279,6 +299,36 @@ export class Repository extends Context.Service<
 
     /** The reflog for a ref, newest last, as the stores recorded it. */
     readonly reflog: (name: string) => Effect.Effect<ReadonlyArray<ReflogEntry>, StorageFailure>;
+
+    /** A commit object with any number of parents — a merge has two. */
+    readonly commitTree: (input: {
+      readonly tree: Oid;
+      readonly parents: ReadonlyArray<Oid>;
+      readonly message: string;
+      readonly author: Signature;
+      readonly committer?: Signature;
+    }) => Effect.Effect<Oid, StorageFailure>;
+
+    /**
+     * Three-way merge of two commits.
+     *
+     * Reports rather than throws: a conflict is an outcome a caller acts on,
+     * not a failure. When `into` is given and the merge succeeds, that ref is
+     * moved with a compare-and-swap, so a merge that raced another push loses
+     * cleanly instead of overwriting it.
+     */
+    readonly merge: (input: {
+      /** Refs or oids. */
+      readonly ours: string;
+      readonly theirs: string;
+      readonly author: Signature;
+      readonly message?: string;
+      readonly strategy?: MergeStrategy;
+      /** The ref to move on success; absent computes the merge and stops. */
+      readonly into?: string;
+      /** A fast-forward is the default when history allows one. */
+      readonly noFastForward?: boolean;
+    }) => Effect.Effect<MergeOutcome, RefConflict | ObjectNotFound | Invalid | StorageFailure>;
   }
 >()("git/Repository") {}
 
@@ -510,6 +560,40 @@ export const layer = Layer.effect(
       }
 
       return root;
+    });
+
+    const readBlobAt = (oid: Oid) =>
+      objects
+        .read(oid)
+        .pipe(
+          Effect.flatMap((object) =>
+            object.type === "blob"
+              ? Effect.succeed(object.data)
+              : Effect.fail(new ObjectNotFound({ oid })),
+          ),
+        );
+
+    const listFilesOf = Effect.fn("Repository.listFiles")(function* (
+      tree: Oid,
+      options?: { readonly prefix?: string },
+    ) {
+      const files: TreeFile[] = [];
+      // Depth-first with an explicit stack rather than recursion: a deep tree
+      // is data, and data should not size the call stack.
+      const stack: Array<{ oid: Oid; prefix: string }> = [
+        { oid: tree, prefix: options?.prefix ?? "" },
+      ];
+
+      while (stack.length > 0) {
+        const { oid, prefix } = stack.pop()!;
+        for (const entry of yield* readTreeEntries(oid)) {
+          const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+          if (entry.mode === TREE_MODE) stack.push({ oid: entry.oid, prefix: path });
+          else files.push({ path, mode: entry.mode, oid: entry.oid });
+        }
+      }
+
+      return files.sort((left, right) => left.path.localeCompare(right.path));
     });
 
     /** Every commit reachable from `roots`, the commit graph only. */
@@ -949,25 +1033,7 @@ export const layer = Layer.effect(
         return { checked, problems, danglingRefs };
       }).pipe(Effect.withSpan("Repository.fsck")),
 
-      listFiles: Effect.fn("Repository.listFiles")(function* (tree, options) {
-        const files: TreeFile[] = [];
-        // Depth-first with an explicit stack rather than recursion: a deep
-        // tree is data, and data should not size the call stack.
-        const stack: Array<{ oid: Oid; prefix: string }> = [
-          { oid: tree, prefix: options?.prefix ?? "" },
-        ];
-
-        while (stack.length > 0) {
-          const { oid, prefix } = stack.pop()!;
-          for (const entry of yield* readTreeEntries(oid)) {
-            const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
-            if (entry.mode === TREE_MODE) stack.push({ oid: entry.oid, prefix: path });
-            else files.push({ path, mode: entry.mode, oid: entry.oid });
-          }
-        }
-
-        return files.sort((left, right) => left.path.localeCompare(right.path));
-      }),
+      listFiles: listFilesOf,
 
       findPath: Effect.fn("Repository.findPath")(function* (tree, path) {
         const segments = path.split("/").filter((segment) => segment !== "");
@@ -986,6 +1052,181 @@ export const layer = Layer.effect(
       }),
 
       reflog: refs.reflog,
+
+      commitTree: ({ author, committer, message, parents, tree }) =>
+        objects.write({
+          type: "commit",
+          data: encodeCommit({ tree, parents, author, committer: committer ?? author, message }),
+        }),
+
+      merge: Effect.fn("Repository.merge")(function* (input) {
+        const resolveCommit = (name: string) =>
+          Effect.gen(function* () {
+            const oid = isOid(name) ? name : yield* refs.resolve(name);
+            if (oid === null) {
+              return yield* new Invalid({ field: "ref", reason: `unknown ref '${name}'` });
+            }
+            return oid;
+          });
+
+        const ours = yield* resolveCommit(input.ours);
+        const theirs = yield* resolveCommit(input.theirs);
+        const strategy = input.strategy ?? "recursive";
+
+        const settled = (kind: MergeOutcome["kind"], commit: Oid, tree: Oid, base: Oid | null) =>
+          Effect.gen(function* () {
+            if (input.into !== undefined && kind !== "up-to-date") {
+              const expected = isOid(input.into) ? undefined : yield* refs.read(input.into);
+              const [result] = yield* refs.apply([
+                {
+                  name: input.into,
+                  value: commit,
+                  ...(expected === undefined ? {} : { expected }),
+                  reason: `merge: ${input.theirs}`,
+                },
+              ]);
+              if (result === undefined || !result.applied) {
+                return yield* new RefConflict({
+                  ref: input.into,
+                  expected: expected ?? null,
+                  actual: result?.current ?? null,
+                });
+              }
+            }
+            return { kind, commit, tree, base, conflicts: [] } satisfies MergeOutcome;
+          });
+
+        const base = yield* mergeBase(ours, theirs);
+
+        // Already contained: there is nothing of theirs we do not have.
+        if (base === theirs) {
+          return {
+            kind: "up-to-date",
+            commit: ours,
+            tree: (yield* readCommit(ours)).tree,
+            base,
+            conflicts: [],
+          };
+        }
+
+        // Ours is an ancestor of theirs, so the merge is a ref move — unless
+        // the caller wants the merge commit recorded anyway.
+        if (base === ours && input.noFastForward !== true) {
+          return yield* settled("fast-forward", theirs, (yield* readCommit(theirs)).tree, base);
+        }
+
+        const flatten = (tree: Oid) =>
+          Effect.gen(function* () {
+            const map = new Map<string, TreeFile>();
+            for (const file of yield* listFilesOf(tree)) map.set(file.path, file);
+            return map;
+          });
+
+        const baseFiles =
+          base === null
+            ? new Map<string, TreeFile>()
+            : yield* flatten((yield* readCommit(base)).tree);
+        const ourFiles = yield* flatten((yield* readCommit(ours)).tree);
+        const theirFiles = yield* flatten((yield* readCommit(theirs)).tree);
+
+        const conflicts: MergeConflict[] = [];
+        const changes: FileChange[] = [];
+
+        for (const path of new Set([
+          ...ourFiles.keys(),
+          ...theirFiles.keys(),
+          ...baseFiles.keys(),
+        ])) {
+          const inBase = baseFiles.get(path);
+          const mine = ourFiles.get(path);
+          const yours = theirFiles.get(path);
+
+          // Same on both sides, or only one side moved: no decision to make.
+          if (mine?.oid === yours?.oid && mine?.mode === yours?.mode) continue;
+          if (inBase?.oid === mine?.oid && inBase?.mode === mine?.mode) {
+            changes.push(
+              yours === undefined
+                ? { path, content: null }
+                : { path, content: yield* readBlobAt(yours.oid), mode: yours.mode },
+            );
+            continue;
+          }
+          if (inBase?.oid === yours?.oid && inBase?.mode === yours?.mode) continue;
+
+          // Both sides moved. A deletion on one side against an edit on the
+          // other has no content to merge, so it is reported rather than
+          // silently resolved either way.
+          if (mine === undefined || yours === undefined) {
+            if (strategy === "ours") {
+              if (mine === undefined) changes.push({ path, content: null });
+              continue;
+            }
+            if (strategy === "theirs") {
+              changes.push(
+                yours === undefined
+                  ? { path, content: null }
+                  : { path, content: yield* readBlobAt(yours.oid), mode: yours.mode },
+              );
+              continue;
+            }
+            conflicts.push({ path, reason: inBase === undefined ? "add/add" : "modify/delete" });
+            continue;
+          }
+
+          const ourBytes = yield* readBlobAt(mine.oid);
+          const theirBytes = yield* readBlobAt(yours.oid);
+
+          if (strategy === "ours") continue;
+          if (strategy === "theirs") {
+            changes.push({ path, content: theirBytes, mode: yours.mode });
+            continue;
+          }
+
+          // Conflict markers only make sense in text; a binary file has to be
+          // chosen by a human, so it is reported and ours is left in place.
+          if (isBinary(ourBytes) || isBinary(theirBytes)) {
+            conflicts.push({ path, reason: "binary" });
+            continue;
+          }
+
+          const baseBytes =
+            inBase === undefined ? new Uint8Array(0) : yield* readBlobAt(inBase.oid);
+          const merged = mergeText({
+            base: decoder.decode(baseBytes),
+            ours: decoder.decode(ourBytes),
+            theirs: decoder.decode(theirBytes),
+          });
+
+          if (merged.conflicted) {
+            conflicts.push({ path, reason: inBase === undefined ? "add/add" : "content" });
+            // The markers still go into the tree: a conflicted merge that
+            // wrote nothing would leave the caller with no way to resolve it.
+          }
+          changes.push({ path, content: encoder.encode(merged.content), mode: mine.mode });
+        }
+
+        const tree = yield* writeFiles({
+          base: (yield* readCommit(ours)).tree,
+          changes,
+        });
+
+        if (conflicts.length > 0)
+          return { kind: "conflicted", commit: null, tree, base, conflicts };
+
+        const message = input.message ?? `Merge ${input.theirs} into ${input.into ?? input.ours}\n`;
+        const commit = yield* objects.write({
+          type: "commit",
+          data: encodeCommit({
+            tree,
+            parents: [ours, theirs],
+            author: input.author,
+            committer: input.author,
+            message,
+          }),
+        });
+
+        return yield* settled("merged", commit, tree, base);
+      }),
 
       mergeBase,
       isAncestor: (ancestor, descendant) =>
