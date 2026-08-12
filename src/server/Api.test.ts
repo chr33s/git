@@ -260,6 +260,78 @@ describe("Api", () => {
   );
 
   it.live(
+    "tags, annotated and lightweight, and checks its own integrity",
+    () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const commit = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: { message: "release", author: alice, files: [{ path: "a", content: "a\n" }] },
+        });
+
+        // Annotated: a tag object of its own, so the ref points at the tag
+        // rather than at the commit.
+        const annotated = yield* client.repo.tagCreate({
+          params: { repo: "r" },
+          payload: {
+            name: "v1.0.0",
+            target: "refs/heads/main",
+            message: "first release\n",
+            tagger: alice,
+          },
+        });
+        assert.equal(annotated.ref, "refs/tags/v1.0.0");
+        assert.equal(annotated.target, commit.oid);
+        assert.notEqual(annotated.oid, commit.oid);
+
+        const read = yield* client.repo.tagRead({ params: { repo: "r", oid: annotated.oid } });
+        assert.equal(read.tag, "v1.0.0");
+        assert.equal(read.type, "commit");
+        assert.equal(read.object, commit.oid);
+        assert.equal(read.message, "first release\n");
+
+        // Lightweight: no message, so the ref points straight at the commit.
+        const light = yield* client.repo.tagCreate({
+          params: { repo: "r" },
+          payload: { name: "latest", target: "refs/heads/main" },
+        });
+        assert.equal(light.oid, commit.oid);
+
+        const tags = yield* client.repo.tags({ params: { repo: "r" }, query: {} });
+        assert.deepEqual(
+          tags.items.map((tag) => tag.name),
+          ["refs/tags/latest", "refs/tags/v1.0.0"],
+        );
+
+        // A tag is meant to be stable: replacing one is opt-in.
+        const clash = yield* client.repo
+          .tagCreate({
+            params: { repo: "r" },
+            payload: { name: "latest", target: "refs/heads/main" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(clash._tag, "RefConflict");
+
+        const forced = yield* client.repo.tagCreate({
+          params: { repo: "r" },
+          payload: { name: "latest", target: "refs/heads/main", force: true },
+        });
+        assert.equal(forced.oid, commit.oid);
+
+        // Everything written so far hashes to its own name.
+        const report = yield* client.repo.fsck({ params: { repo: "r" } });
+        assert.equal(report.ok, true);
+        assert.deepEqual(report.problems, []);
+        assert.deepEqual(report.dangling_refs, []);
+        assert.equal(report.checked > 0, true);
+
+        const removed = yield* client.repo.tagRemove({ params: { repo: "r", name: "latest" } });
+        assert.equal(removed.deleted, true);
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+  );
+
+  it.live(
     "registers, lists and removes webhooks without ever echoing the secret",
     () =>
       Effect.gen(function* () {

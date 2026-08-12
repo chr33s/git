@@ -145,6 +145,33 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
     return oids;
   };
 
+  it("writes annotated tags the git binary reads back", async () => {
+    const commit = await seed("tagged");
+
+    const tag = await inRepo(
+      "tagged",
+      Effect.gen(function* () {
+        return yield* (yield* Repository).tag({
+          name: "v1.0.0",
+          target: "refs/heads/main",
+          message: "the first release\n",
+          tagger: author,
+        });
+      }),
+    );
+
+    const work = path.join(root, "work-tag");
+    await git(root, "clone", "--quiet", `${base}/tagged`, work);
+    await git(work, "fetch", "--quiet", "--tags", "origin");
+
+    // git's own reader on our bytes: the type, the target and the message.
+    assert.equal((await git(work, "cat-file", "-t", tag.oid)).trim(), "tag");
+    assert.equal((await git(work, "rev-parse", "v1.0.0^{commit}")).trim(), commit);
+    assert.match(await git(work, "cat-file", "tag", tag.oid), /^the first release$/m);
+    assert.match(await git(work, "tag", "-l", "-n1"), /v1\.0\.0\s+the first release/);
+    await git(work, "fsck", "--strict");
+  });
+
   it("serves a shallow clone, and deepens it on request", async () => {
     await seedHistory("shallowme", 5);
 

@@ -12,7 +12,7 @@
  */
 import { Effect, Result } from "effect";
 import { Invalid } from "./Error.ts";
-import { isOid, type Oid, type RawObject } from "./Store.ts";
+import { isOid, type ObjectType, type Oid, type RawObject } from "./Store.ts";
 
 export interface Signature {
   readonly name: string;
@@ -34,6 +34,17 @@ export interface TreeEntry {
   readonly mode: string;
   readonly name: string;
   readonly oid: Oid;
+}
+
+/** An annotated tag: a real object, unlike a lightweight tag's bare ref. */
+export interface TagInfo {
+  readonly object: Oid;
+  readonly type: ObjectType;
+  /** The short name, as `refs/tags/<tag>` spells it. */
+  readonly tag: string;
+  /** git tolerates a tag with no tagger, and old repositories have them. */
+  readonly tagger?: Signature;
+  readonly message: string;
 }
 
 const encoder = new TextEncoder();
@@ -162,6 +173,49 @@ export const encodeCommit = (commit: CommitInfo): Uint8Array => {
     `committer ${formatSignature(commit.committer)}`,
   ];
   return encoder.encode(`${lines.join("\n")}\n\n${commit.message}`);
+};
+
+export const parseTag = (data: Uint8Array): Result.Result<TagInfo, Invalid> => {
+  const text = decoder.decode(data);
+  const split = text.indexOf("\n\n");
+  const headerText = split === -1 ? text : text.slice(0, split);
+  const message = split === -1 ? "" : text.slice(split + 2);
+  const lines = headerText.split("\n");
+
+  const object = lines.find((line) => line.startsWith("object "))?.slice(7);
+  if (object === undefined || !isOid(object))
+    return invalid("object", "missing or malformed object");
+
+  const type = lines.find((line) => line.startsWith("type "))?.slice(5);
+  if (type !== "blob" && type !== "tree" && type !== "commit" && type !== "tag") {
+    return invalid("type", `unknown tagged type '${type}'`);
+  }
+
+  const name = lines.find((line) => line.startsWith("tag "))?.slice(4);
+  if (name === undefined || name === "") return invalid("tag", "missing tag name");
+
+  // git allows a tag without a tagger — older repositories have them.
+  const taggerLine = lines.find((line) => line.startsWith("tagger "))?.slice(7);
+  let tagger: Signature | undefined;
+  if (taggerLine !== undefined) {
+    const parsed = parseSignature(taggerLine, "tagger");
+    if (Result.isFailure(parsed)) return Result.fail(parsed.failure);
+    tagger = parsed.success;
+  }
+
+  return Result.succeed({
+    object,
+    type,
+    tag: name,
+    ...(tagger === undefined ? {} : { tagger }),
+    message,
+  });
+};
+
+export const encodeTag = (tag: TagInfo): Uint8Array => {
+  const lines = [`object ${tag.object}`, `type ${tag.type}`, `tag ${tag.tag}`];
+  if (tag.tagger !== undefined) lines.push(`tagger ${formatSignature(tag.tagger)}`);
+  return encoder.encode(`${lines.join("\n")}\n\n${tag.message}`);
 };
 
 export const parseTree = (data: Uint8Array): Result.Result<ReadonlyArray<TreeEntry>, Invalid> => {

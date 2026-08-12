@@ -9,7 +9,7 @@
  * is what keeps `ObjectStore`/`RefStore` out of the HTTP handlers' requirements
  * later on. See `docs/rewrite.md`.
  */
-import { Context, Effect, Layer, Option, Schedule, Stream } from "effect";
+import { Context, Effect, Layer, Option, Result, Schedule, Stream } from "effect";
 import {
   type HookRejected,
   Invalid,
@@ -22,10 +22,14 @@ import {
   type CommitInfo,
   EMPTY_TREE_OID,
   encodeCommit,
+  encodeTag,
   encodeTree,
+  hashObject,
   parseCommit,
+  parseTag,
   parseTree,
   type Signature,
+  type TagInfo,
   type TreeEntry,
 } from "./Format.ts";
 import * as Pack from "./Pack.ts";
@@ -69,6 +73,18 @@ export interface FetchRequest {
   readonly since?: Date;
   /** `deepen-not <ref>`: nothing reachable from these. */
   readonly notRefs?: ReadonlyArray<string>;
+}
+
+export interface FsckProblem {
+  readonly oid: Oid;
+  readonly problem: string;
+}
+
+export interface FsckReport {
+  readonly checked: number;
+  readonly problems: ReadonlyArray<FsckProblem>;
+  /** Refs pointing at objects the store does not hold. */
+  readonly danglingRefs: ReadonlyArray<{ readonly ref: string; readonly oid: Oid }>;
 }
 
 export interface FetchPlan {
@@ -163,6 +179,37 @@ export class Repository extends Context.Service<
     readonly packOids: (
       oids: ReadonlyArray<Oid>,
     ) => Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure>;
+
+    readonly readTag: (oid: Oid) => Effect.Effect<TagInfo, ObjectNotFound | StorageFailure>;
+
+    /**
+     * A tag ref, annotated when a message is given and lightweight otherwise —
+     * the same distinction `git tag` makes, and the reason the return says
+     * which object the ref points at as well as what it names.
+     */
+    readonly tag: (input: {
+      readonly name: string;
+      /** Anything resolvable: a ref, or an oid. */
+      readonly target: string;
+      readonly message?: string;
+      readonly tagger?: Signature;
+      /** Move a tag that already exists. */
+      readonly force?: boolean;
+    }) => Effect.Effect<
+      { readonly ref: string; readonly oid: Oid; readonly target: Oid },
+      RefConflict | ObjectNotFound | Invalid | StorageFailure
+    >;
+
+    readonly deleteTag: (name: string) => Effect.Effect<boolean, StorageFailure | Invalid>;
+
+    /**
+     * Every object read back and checked against its own name.
+     *
+     * The storage contract proves the store keeps what it was given; this
+     * proves what it kept is still a git object — a different question, and
+     * the only one that catches corruption underneath the port.
+     */
+    readonly fsck: Effect.Effect<FsckReport, StorageFailure>;
   }
 >()("git/Repository") {}
 
@@ -192,8 +239,8 @@ export const layer = Layer.effect(
 
     const readTyped = <A>(
       oid: Oid,
-      type: "commit" | "tree",
-      parse: (data: Uint8Array) => import("effect").Result.Result<A, Invalid>,
+      type: "commit" | "tree" | "tag",
+      parse: (data: Uint8Array) => Result.Result<A, Invalid>,
     ) =>
       objects.read(oid).pipe(
         Effect.flatMap((object) =>
@@ -672,6 +719,115 @@ export const layer = Layer.effect(
 
       fetch: fetchPlan,
       packOids: (oids) => Pack.pack(oids).pipe(Stream.provideService(ObjectStore, objects)),
+
+      readTag: (oid) => readTyped(oid, "tag", parseTag),
+
+      tag: Effect.fn("Repository.tag")(function* ({ force, message, name, tagger, target }) {
+        if (name === "" || name.includes(" ") || name.startsWith("refs/")) {
+          return yield* new Invalid({ field: "name", reason: `bad tag name '${name}'` });
+        }
+
+        const resolved = isOid(target) ? target : yield* refs.resolve(target);
+        if (resolved === null) {
+          return yield* new Invalid({ field: "target", reason: `unknown ref '${target}'` });
+        }
+        const object = yield* objects.read(resolved);
+
+        // An annotated tag is an object of its own; a lightweight one is the
+        // ref alone, pointing straight at the target.
+        const oid =
+          message === undefined
+            ? resolved
+            : yield* objects.write({
+                type: "tag",
+                data: encodeTag({
+                  object: resolved,
+                  type: object.type,
+                  tag: name,
+                  ...(tagger === undefined ? {} : { tagger }),
+                  message,
+                }),
+              });
+
+        const ref = `refs/tags/${name}`;
+        const [result] = yield* refs.apply([
+          {
+            name: ref,
+            value: oid,
+            // A tag is meant to be stable, so replacing one is opt-in.
+            ...(force === true ? {} : { expected: null }),
+            reason: `tag: ${name}`,
+          },
+        ]);
+
+        if (result === undefined || !result.applied) {
+          return yield* new RefConflict({
+            ref,
+            expected: null,
+            actual: result?.current ?? null,
+          });
+        }
+
+        return { ref, oid, target: resolved };
+      }),
+
+      deleteTag: (name) =>
+        refs
+          .apply([{ name: `refs/tags/${name}`, value: null, reason: "tag: delete" }])
+          .pipe(Effect.map(([result]) => result?.applied === true)),
+
+      fsck: Effect.gen(function* () {
+        const problems: FsckProblem[] = [];
+        let checked = 0;
+
+        yield* Stream.runForEach(objects.list, (oid) =>
+          Effect.gen(function* () {
+            checked++;
+            const object = yield* objects.read(oid).pipe(
+              Effect.map((value): RawObject | null => value),
+              Effect.catchTag("ObjectNotFound", () => {
+                problems.push({ oid, problem: "listed but unreadable" });
+                return Effect.succeed(null);
+              }),
+            );
+            if (object === null) return;
+
+            // The name is the hash of the content: if they disagree, the
+            // bytes changed underneath the store.
+            const actual = yield* hashObject(object);
+            if (actual !== oid) {
+              problems.push({ oid, problem: `hash mismatch: content hashes to ${actual}` });
+              return;
+            }
+
+            // A blob is bytes and has no structure to be wrong about; the
+            // other three do, and the codec is the checker.
+            const structure: Result.Result<unknown, Invalid> | null =
+              object.type === "commit"
+                ? parseCommit(object.data)
+                : object.type === "tree"
+                  ? parseTree(object.data)
+                  : object.type === "tag"
+                    ? parseTag(object.data)
+                    : null;
+            if (structure !== null && Result.isFailure(structure)) {
+              problems.push({
+                oid,
+                problem: `malformed ${object.type}: ${structure.failure.reason}`,
+              });
+            }
+          }),
+        );
+
+        // A ref pointing at nothing is the other half of integrity, and the
+        // half a per-object walk cannot see.
+        const danglingRefs: Array<{ ref: string; oid: Oid }> = [];
+        for (const [ref, oid] of yield* refs.list("refs/")) {
+          if (oid !== EMPTY_TREE_OID && !(yield* objects.has(oid))) danglingRefs.push({ ref, oid });
+        }
+
+        return { checked, problems, danglingRefs };
+      }).pipe(Effect.withSpan("Repository.fsck")),
     });
   }),
 );

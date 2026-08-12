@@ -251,6 +251,62 @@ const repo = HttpApiGroup.make("repo")
     }),
   )
   .add(
+    HttpApiEndpoint.post("tagCreate", "/tags", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        name: Schema.String,
+        /** A ref or an oid. */
+        target: Schema.String,
+        /** Present makes it annotated; absent makes it lightweight. */
+        message: Schema.optional(Schema.String),
+        tagger: Schema.optional(SignatureWire),
+        force: Schema.optional(Schema.Boolean),
+      }),
+      success: Schema.Struct({ ref: Schema.String, oid: OidString, target: OidString }),
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("tags", "/tags", {
+      params: RepoParam,
+      query: Cursor,
+      success: Page(Ref),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("tagRead", "/tag/:oid", {
+      params: { ...RepoParam, oid: OidString },
+      success: Schema.Struct({
+        object: OidString,
+        type: Schema.Literals(["blob", "tree", "commit", "tag"]),
+        tag: Schema.String,
+        message: Schema.String,
+      }),
+      error: ObjectNotFound,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.delete("tagRemove", "/tags/:name", {
+      params: { ...RepoParam, name: Schema.String },
+      success: Schema.Struct({ deleted: Schema.Boolean }),
+      error: Invalid,
+    }),
+  )
+  .add(
+    // Integrity, which the storage contract cannot answer: it proves the
+    // store returns what it was given, not that what it kept is still a git
+    // object.
+    HttpApiEndpoint.post("fsck", "/fsck", {
+      params: RepoParam,
+      success: Schema.Struct({
+        checked: Schema.Finite,
+        ok: Schema.Boolean,
+        problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
+        dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
+      }),
+    }),
+  )
+  .add(
     // Registration, because a delivery engine nobody can subscribe to never
     // fires. The secret goes in and never comes back out.
     HttpApiEndpoint.post("webhookAdd", "/webhooks", {
@@ -398,6 +454,61 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           .branch(payload)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { name: `refs/heads/${payload.name}`, oid };
+      }),
+    )
+    .handle("tagCreate", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        return yield* repository
+          .tag({
+            name: payload.name,
+            target: payload.target,
+            ...(payload.message === undefined ? {} : { message: payload.message }),
+            ...(payload.tagger === undefined ? {} : { tagger: signatureFrom(payload.tagger) }),
+            ...(payload.force === undefined ? {} : { force: payload.force }),
+          })
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+      }),
+    )
+    .handle("tags", ({ query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const refs = yield* repository.refs.pipe(Effect.catchTag("StorageFailure", Effect.die));
+        const tags = refs
+          .filter(([name]) => name.startsWith("refs/tags/"))
+          .map(([name, oid]) => ({ name, oid }))
+          .sort((left, right) => left.name.localeCompare(right.name));
+        return page(tags, query);
+      }),
+    )
+    .handle("tagRead", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const tag = yield* repository
+          .readTag(params.oid as Oid)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { object: tag.object, type: tag.type, tag: tag.tag, message: tag.message };
+      }),
+    )
+    .handle("tagRemove", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const deleted = yield* repository
+          .deleteTag(params.name)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { deleted };
+      }),
+    )
+    .handle("fsck", () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const report = yield* repository.fsck.pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return {
+          checked: report.checked,
+          ok: report.problems.length === 0 && report.danglingRefs.length === 0,
+          problems: report.problems,
+          dangling_refs: report.danglingRefs,
+        };
       }),
     )
     .handle("webhookAdd", ({ payload }) =>

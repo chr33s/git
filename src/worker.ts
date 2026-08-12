@@ -71,7 +71,19 @@ export default Git.make(
         );
         if (denied !== null) return HttpServerResponse.raw(denied);
 
-        const response = yield* repos.getByName(route.repo).fetch(raw);
+        // A client that hangs up mid-clone is not a server error. 499 is
+        // nginx's code for it, and it keeps aborted fetches out of the 5xx
+        // rate that pages someone.
+        const response = yield* repos
+          .getByName(route.repo)
+          .fetch(raw)
+          .pipe(
+            Effect.catchCause((cause) =>
+              raw.signal.aborted
+                ? Effect.succeed(new Response(null, { status: 499 }))
+                : Effect.failCause(cause),
+            ),
+          );
         return HttpServerResponse.raw(response);
       }),
     };
