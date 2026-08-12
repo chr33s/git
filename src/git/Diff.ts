@@ -154,11 +154,24 @@ const range = (start: number, count: number): string => {
 
 const NO_NEWLINE = "\\ No newline at end of file";
 
+/**
+ * Put the terminators back before matching, so a file ending without a newline
+ * genuinely differs from one ending with it — the distinction `splitLines`
+ * drops, and the only reason git has a "\ No newline" line at all.
+ */
+const terminated = (lines: ReadonlyArray<string>, missing: boolean): ReadonlyArray<string> =>
+  lines.map((line, index) => (missing && index === lines.length - 1 ? line : `${line}\n`));
+
 export const unified = (before: string, after: string, options?: UnifiedOptions): string => {
   const context = options?.context ?? 3;
   const beforeLines = splitLines(before);
   const afterLines = splitLines(after);
-  const hunks = diffLines(beforeLines, afterLines);
+  const missingBefore = before !== "" && !before.endsWith("\n");
+  const missingAfter = after !== "" && !after.endsWith("\n");
+  const hunks = diffLines(
+    terminated(beforeLines, missingBefore),
+    terminated(afterLines, missingAfter),
+  );
   if (hunks.length === 0) return "";
 
   const beforeName = options?.beforeName ?? "file";
@@ -191,9 +204,6 @@ export const unified = (before: string, after: string, options?: UnifiedOptions)
     group.newTo = hunk.newStart + hunk.newLines.length;
   }
 
-  const missingBefore = before !== "" && !before.endsWith("\n");
-  const missingAfter = after !== "" && !after.endsWith("\n");
-
   for (const entry of groups) {
     // The runs on either side of a change have the same length in both files,
     // so one `min` keeps the two ranges aligned.
@@ -212,18 +222,20 @@ export const unified = (before: string, after: string, options?: UnifiedOptions)
 
     let oldIndex = oldStart;
     let newIndex = newStart;
+    // The hunks index the terminated copies, so the text printed comes back
+    // out of the split lines at those indices.
     for (const hunk of entry.hunks) {
       for (const line of beforeLines.slice(oldIndex, hunk.oldStart)) out.push(` ${line}`);
       newIndex += hunk.oldStart - oldIndex;
       oldIndex = hunk.oldStart + hunk.oldLines.length;
 
-      for (const line of hunk.oldLines) out.push(`-${line}`);
+      for (const line of beforeLines.slice(hunk.oldStart, oldIndex)) out.push(`-${line}`);
       if (hunk.oldLines.length > 0 && oldIndex === beforeLines.length && missingBefore) {
         out.push(NO_NEWLINE);
       }
 
-      for (const line of hunk.newLines) out.push(`+${line}`);
       newIndex += hunk.newLines.length;
+      for (const line of afterLines.slice(hunk.newStart, newIndex)) out.push(`+${line}`);
       if (hunk.newLines.length > 0 && newIndex === afterLines.length && missingAfter) {
         out.push(NO_NEWLINE);
       }

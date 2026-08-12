@@ -12,8 +12,8 @@ describe("Diff", () => {
   it("matches the longest common subsequence, not the first one it finds", () => {
     // Myers' own example: the greedy prefix match ("A") is a dead end, the
     // longest run is 4 lines.
-    const a = [..."ABCABBA"];
-    const b = [..."CBABAC"];
+    const a = "ABCABBA".split("");
+    const b = "CBABAC".split("");
     const pairs = lcs(a, b);
 
     assert.equal(pairs.length, 4);
