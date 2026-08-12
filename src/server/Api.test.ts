@@ -134,4 +134,127 @@ describe("Api", () => {
         // the type cannot see discharged here.
       }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
   );
+
+  it.live(
+    "commits real content, and reads it back",
+    () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        // The path the API exists for: files in, a commit whose tree holds
+        // them out. Nested, because a flat tree would not exercise the
+        // bottom-up write.
+        const first = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "add sources",
+            author: alice,
+            files: [
+              { path: "readme.md", content: "hello\n" },
+              { path: "src/index.ts", content: "export const answer = 42;\n" },
+              { path: "src/lib/util.ts", content: "export const noop = () => {};\n" },
+            ],
+          },
+        });
+
+        const root = yield* client.repo.readTree({ params: { repo: "r", oid: first.tree } });
+        assert.deepEqual(
+          root.entries.map((entry) => entry.name),
+          ["readme.md", "src"],
+        );
+        const src = root.entries.find((entry) => entry.name === "src")!;
+        assert.equal(src.mode, "40000");
+
+        const inner = yield* client.repo.readTree({ params: { repo: "r", oid: src.oid } });
+        assert.deepEqual(
+          inner.entries.map((entry) => entry.name),
+          ["index.ts", "lib"],
+        );
+
+        const blob = inner.entries.find((entry) => entry.name === "index.ts")!;
+        const content = yield* client.repo.readBlob({ params: { repo: "r", oid: blob.oid } });
+        assert.equal(atob(content.content), "export const answer = 42;\n");
+        assert.equal(content.size, 26);
+
+        // A second commit carries the first's tree forward: touching one path
+        // must not drop the others.
+        const second = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "edit one file",
+            author: alice,
+            files: [{ path: "src/index.ts", content: "export const answer = 43;\n" }],
+          },
+        });
+        const nextRoot = yield* client.repo.readTree({ params: { repo: "r", oid: second.tree } });
+        assert.deepEqual(
+          nextRoot.entries.map((entry) => entry.name),
+          ["readme.md", "src"],
+        );
+        assert.equal(
+          nextRoot.entries.find((entry) => entry.name === "readme.md")!.oid,
+          root.entries.find((entry) => entry.name === "readme.md")!.oid,
+        );
+
+        // Removing the last file in a directory removes the directory: git
+        // has no empty trees.
+        const third = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "drop lib",
+            author: alice,
+            files: [{ path: "src/lib/util.ts", content: null }],
+          },
+        });
+        const afterSrc = yield* client.repo.readTree({
+          params: {
+            repo: "r",
+            oid: (yield* client.repo.readTree({
+              params: { repo: "r", oid: third.tree },
+            })).entries.find((entry) => entry.name === "src")!.oid,
+          },
+        });
+        assert.deepEqual(
+          afterSrc.entries.map((entry) => entry.name),
+          ["index.ts"],
+        );
+
+        // Binary survives the round trip, which is what base64 is for.
+        const bytes = new Uint8Array([0, 1, 2, 250, 251, 252]);
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        const written = yield* client.repo.blob({
+          params: { repo: "r" },
+          payload: { content: btoa(binary), encoding: "base64" },
+        });
+        const readBack = yield* client.repo.readBlob({
+          params: { repo: "r", oid: written.oid },
+        });
+        assert.equal(readBack.content, btoa(binary));
+
+        // A tree can also be stated outright, and a commit can name it.
+        const tree = yield* client.repo.tree({
+          params: { repo: "r" },
+          payload: { files: [{ path: "only.txt", content: "one\n" }] },
+        });
+        const explicit = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: { message: "explicit tree", author: alice, tree: tree.oid },
+        });
+        assert.equal(explicit.tree, tree.oid);
+
+        // A path that escapes the root is refused rather than normalised.
+        const escaped = yield* client.repo
+          .create({
+            params: { repo: "r" },
+            payload: {
+              message: "nope",
+              author: alice,
+              files: [{ path: "../outside", content: "x" }],
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(escaped._tag, "Invalid");
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+  );
 });

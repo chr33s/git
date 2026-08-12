@@ -9,7 +9,7 @@ Grounded in [`docs/artifacts-feature-completeness.md`](./artifacts-feature-compl
 
 ## 0. Scope decision (do this first)
 
-The rewrite is a deliberate narrowing: a bare-repository git *server* (plus client/CLI enough
+The rewrite is a deliberate narrowing: a bare-repository git _server_ (plus client/CLI enough
 to drive it), not a working-tree git reimplementation. This plan assumes that scope is
 accepted:
 
@@ -87,7 +87,7 @@ Order matters; do it in a quiet window:
 2. Preserve legacy history under a new name:
    - Rename `main` → `legacy` (GitHub UI/API). Existing clones keep working; GitHub shows the
      rename notice. Optionally also tag the tip: `git tag legacy/final 9a08166 && git push
-     origin legacy/final`.
+origin legacy/final`.
 3. Promote the rewrite:
    - Rename `artifacts` → `main` (GitHub UI/API). This makes it the default branch
      automatically if done as a rename of the default; otherwise set default branch to the
@@ -124,7 +124,7 @@ Force-pushing over `main` without flipping the default first will orphan open PR
 
 ## 6. Full-parity track (only if main's broader scope is a goal)
 
-Everything below is *out of scope* for the swap under §0's assumed scope decision. It is the
+Everything below is _out of scope_ for the swap under §0's assumed scope decision. It is the
 inventory of what porting main's broader surface actually takes, in dependency order — five
 layers, gated by one architectural decision. All-in it is roughly **8–10k lines to port** of
 main's ~13.8k non-test surface (the rest already has artifacts counterparts), against the
@@ -163,7 +163,7 @@ Every path-touching item in 6.3–6.5 depends on this landing first.
   packs. Without this, gc's repack half has no target.
 - **Annotated tag codec**: parse/encode/validate in `git/Format.ts` (today only the target
   oid is read).
-- **Delta *creation*** (legacy `git.delta.ts`, ~230 lines) — optional: main never wired it
+- **Delta _creation_** (legacy `git.delta.ts`, ~230 lines) — optional: main never wired it
   into its pack writer either, so skipping it loses no shipped behavior.
 
 ### 6.3 Protocol width

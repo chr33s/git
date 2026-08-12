@@ -55,6 +55,51 @@ const Cursor = {
 
 const Ref = Schema.Struct({ name: Schema.String, oid: OidString });
 
+/**
+ * Blob content crosses as text by default and base64 when asked, because a
+ * JSON API that demands base64 for a README is unusable and one that cannot
+ * carry a PNG is incomplete. Reads always answer base64: the server cannot
+ * know a blob is text, and guessing would corrupt the bytes that are not.
+ */
+const Encoding = Schema.Literals(["utf8", "base64"]);
+
+const encoder = new TextEncoder();
+
+const decodeContent = (content: string, encoding: "utf8" | "base64" | undefined): Uint8Array => {
+  if (encoding !== "base64") return encoder.encode(content);
+  const binary = atob(content);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+};
+
+const toBase64 = (bytes: Uint8Array): string => {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+};
+
+const TreeEntryWire = Schema.Struct({
+  mode: Schema.String,
+  name: Schema.String,
+  oid: OidString,
+});
+
+/** A path to write, or — with `content: null` — to remove. */
+const FileWire = Schema.Struct({
+  path: Schema.String,
+  content: Schema.NullOr(Schema.String),
+  encoding: Schema.optional(Encoding),
+  mode: Schema.optional(Schema.String),
+});
+
+const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>) =>
+  files.map((file) => ({
+    path: file.path,
+    content: file.content === null ? null : decodeContent(file.content, file.encoding),
+    ...(file.mode === undefined ? {} : { mode: file.mode }),
+  }));
+
 /** Cursors are opaque to clients; here they are simply an offset. */
 const page = <A>(items: ReadonlyArray<A>, query: { cursor?: string; limit?: string }) => {
   const start = query.cursor === undefined ? 0 : Number.parseInt(query.cursor, 10);
@@ -63,6 +108,34 @@ const page = <A>(items: ReadonlyArray<A>, query: { cursor?: string; limit?: stri
   const more = start + size < items.length;
   return { items: slice, next_cursor: more ? String(start + size) : null, has_more: more };
 };
+
+/**
+ * What a commit's tree should be: stated outright, built from paths on top of
+ * whatever the branch already holds, or empty. The middle case is the one that
+ * makes the JSON API able to create content at all — it reads the branch tip
+ * so a commit adds to the tree instead of replacing it.
+ */
+const treeFor = (
+  repository: Repository["Service"],
+  branch: string,
+  payload: {
+    readonly tree?: string | undefined;
+    readonly files?: ReadonlyArray<(typeof FileWire)["Type"]> | undefined;
+  },
+) =>
+  Effect.gen(function* () {
+    if (payload.tree !== undefined) return payload.tree as Oid;
+    if (payload.files === undefined) return EMPTY_TREE_OID;
+
+    const ref = branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
+    const tip = yield* repository.resolve(ref);
+    const base = tip === null ? undefined : (yield* repository.readCommit(tip)).tree;
+
+    return yield* repository.writeFiles({
+      ...(base === undefined ? {} : { base }),
+      changes: changesOf(payload.files),
+    });
+  });
 
 const repo = HttpApiGroup.make("repo")
   .add(
@@ -74,9 +147,56 @@ const repo = HttpApiGroup.make("repo")
         message: Schema.optional(Schema.String),
         /** absent = append to the branch; `null` = branch must not exist. */
         expected: Schema.optional(Schema.NullOr(OidString)),
+        /**
+         * The content, three ways: an explicit `tree`, or `files` applied to
+         * the branch's current tree, or neither for an empty commit.
+         */
+        tree: Schema.optional(OidString),
+        files: Schema.optional(Schema.Array(FileWire)),
+      }),
+      success: Schema.Struct({ oid: OidString, tree: OidString }),
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("blob", "/blob", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        content: Schema.String,
+        encoding: Schema.optional(Encoding),
       }),
       success: Schema.Struct({ oid: OidString }),
-      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("readBlob", "/blob/:oid", {
+      params: { ...RepoParam, oid: OidString },
+      success: Schema.Struct({
+        content: Schema.String,
+        encoding: Schema.Literals(["base64"]),
+        size: Schema.Finite,
+      }),
+      error: ObjectNotFound,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("tree", "/tree", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        /** Entries as they are, or `files` to build them from paths. */
+        entries: Schema.optional(Schema.Array(TreeEntryWire)),
+        files: Schema.optional(Schema.Array(FileWire)),
+        base: Schema.optional(OidString),
+      }),
+      success: Schema.Struct({ oid: OidString }),
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("readTree", "/tree/:oid", {
+      params: { ...RepoParam, oid: OidString },
+      success: Schema.Struct({ entries: Schema.Array(TreeEntryWire) }),
+      error: ObjectNotFound,
     }),
   )
   .add(
@@ -140,16 +260,65 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("create", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        const branch = payload.branch ?? "main";
+
+        const tree = yield* treeFor(repository, branch, payload).pipe(
+          Effect.catchTag("StorageFailure", Effect.die),
+        );
+
         const oid = yield* repository
           .commit({
             author: signatureFrom(payload.author),
-            branch: payload.branch ?? "main",
+            branch,
             message: payload.message ?? "",
-            tree: EMPTY_TREE_OID,
+            tree,
             ...(payload.expected === undefined ? {} : { expected: payload.expected as Oid | null }),
           })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { oid, tree };
+      }),
+    )
+    .handle("blob", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const oid = yield* repository
+          .writeBlob(decodeContent(payload.content, payload.encoding))
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { oid };
+      }),
+    )
+    .handle("readBlob", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const data = yield* repository
+          .readBlob(params.oid as Oid)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { content: toBase64(data), encoding: "base64" as const, size: data.length };
+      }),
+    )
+    .handle("tree", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const oid = yield* (
+          payload.entries === undefined
+            ? repository.writeFiles({
+                ...(payload.base === undefined ? {} : { base: payload.base as Oid }),
+                changes: changesOf(payload.files ?? []),
+              })
+            : repository.writeTree(
+                payload.entries.map((entry) => ({ ...entry, oid: entry.oid as Oid })),
+              )
+        ).pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { oid };
+      }),
+    )
+    .handle("readTree", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const entries = yield* repository
+          .readTree(params.oid as Oid)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { entries };
       }),
     )
     .handle("read", ({ params }) =>

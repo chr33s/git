@@ -17,19 +17,19 @@ and the Cloudflare Artifacts provider that gives the branch its name). But it ca
 the merge/rebase/cherry-pick engine, the index/staging layer, 20 of main's 26 CLI commands,
 most of the browser client, protocol v2, and shallow clones are missing. Webhooks and
 server-side hooks are implemented on artifacts but wired to no-ops in every host, so they never
-fire. The rewrite doc's claim that "every phase has landed" is true of the *phases it defined*,
+fire. The rewrite doc's claim that "every phase has landed" is true of the _phases it defined_,
 not of parity with main.
 
 ## Scale
 
-| | main | artifacts |
-| --- | ---: | ---: |
-| non-test + test LOC in `src/` | ~22,900 | ~9,600 |
-| JSON API endpoints | 44 | 7 |
-| smart-HTTP routes | 4 (+3 LFS) | 3 |
-| CLI commands | 26 | 6 |
-| browser client public methods | ~29 | ~4 |
-| storage backends | 4 (1 with atomic refs) | 4 (all with atomic refs, contract-tested) |
+|                               |                   main |                                 artifacts |
+| ----------------------------- | ---------------------: | ----------------------------------------: |
+| non-test + test LOC in `src/` |                ~22,900 |                                    ~9,600 |
+| JSON API endpoints            |                     44 |                                         7 |
+| smart-HTTP routes             |             4 (+3 LFS) |                                         3 |
+| CLI commands                  |                     26 |                                         6 |
+| browser client public methods |                    ~29 |                                        ~4 |
+| storage backends              | 4 (1 with atomic refs) | 4 (all with atomic refs, contract-tested) |
 
 ## Missing on `artifacts` (present on `main`)
 
@@ -87,16 +87,16 @@ not of parity with main.
 - **`GET /:repo/HEAD` route** — gone.
 - **`.git` suffix routing regression**: main strips `{.git}?` in every route; artifacts routers
   split on `/` verbatim (`worker.ts:55`, `host/Cloudflare.ts:82`, `git/Durable.ts:72`), so
-  `git clone …/repo.git` addresses a *different* Durable Object than `…/repo`.
+  `git clone …/repo.git` addresses a _different_ Durable Object than `…/repo`.
 
 ### Maintenance & integrity
 
 - **`gc`** (grace period, repack, prune) — no counterpart, and no endpoint.
 - **`fsck`** (`validateObject`/`fsckAll`, per-type structural checks) — no counterpart.
-  Artifacts' conformance suite tests the *storage contract*, not object integrity.
+  Artifacts' conformance suite tests the _storage contract_, not object integrity.
 - **Pack storage at rest** — main writes packs + v2 `.idx` (fanout, CRC32, 64-bit offsets) and
   reads objects out of stored packs; artifacts explodes every pack to loose objects on ingest
-  and keeps nothing packed. Delta *creation* is also gone (though main's pack writer never
+  and keeps nothing packed. Delta _creation_ is also gone (though main's pack writer never
   actually used it either — both branches send full objects on the wire).
 - **Annotated tags** — main validates/parses tag objects; artifacts only reads the target oid
   for reachability. No tag create/list anywhere (API or CLI).
@@ -115,7 +115,7 @@ not of parity with main.
 
 ## Added on `artifacts` (absent on `main`)
 
-1. **Auth — the largest net-new server feature.** Main has *zero* authentication; every
+1. **Auth — the largest net-new server feature.** Main has _zero_ authentication; every
    endpoint including receive-pack is open. Artifacts adds scoped (`read`/`write`) stateless
    HMAC tokens with TTL and repo-bound signatures (`git1.<scope>.<expiry>.<hmac>`), correct
    401/403 + `WWW-Authenticate` semantics, Basic/Bearer extraction that matches how `git`
@@ -168,6 +168,6 @@ Ordered by value-for-effort:
 5. **Shallow clone + side-band-64k** — the two protocol drops most likely to bite real users
    (CI does `--depth=1` by default in many systems).
 6. Decide explicitly whether merge/rebase/index/working-tree and the wide JSON + CLI surface
-   are *goals* or *non-goals* of the rewrite, and update the readme/rewrite doc to match —
+   are _goals_ or _non-goals_ of the rewrite, and update the readme/rewrite doc to match —
    today the branch note says "rewrite" while four-fifths of the application surface has no
    landing plan.

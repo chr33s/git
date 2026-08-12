@@ -183,8 +183,6 @@ export default {
     if (route === null) return new Response("No repository in URL", { status: 400 });
     // The instance is keyed on the stripped name, so `/repo` and `/repo.git`
     // reach the same Durable Object rather than two empty ones.
-    return env.GIT_REPO.get(env.GIT_REPO.idFromName(route.repo)).fetch(
-      normalize(request, route),
-    );
+    return env.GIT_REPO.get(env.GIT_REPO.idFromName(route.repo)).fetch(normalize(request, route));
   },
 } satisfies ExportedHandler<TestEnv>;

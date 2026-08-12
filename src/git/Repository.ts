@@ -43,6 +43,20 @@ export interface ReceiveResult {
   readonly reason?: string;
 }
 
+/** One path's worth of change against a tree. */
+export interface FileChange {
+  /** Slash-separated, relative to the tree root. */
+  readonly path: string;
+  /** `null` removes the path. */
+  readonly content: Uint8Array | null;
+  /** git file mode; `100644` unless said otherwise. */
+  readonly mode?: string;
+}
+
+/** The modes a blob may carry. Directories are written by `writeFiles` itself. */
+const FILE_MODES = new Set(["100644", "100755", "120000", "160000"]);
+const TREE_MODE = "40000";
+
 export class Repository extends Context.Service<
   Repository,
   {
@@ -54,9 +68,23 @@ export class Repository extends Context.Service<
     readonly readTree: (
       oid: Oid,
     ) => Effect.Effect<ReadonlyArray<TreeEntry>, ObjectNotFound | StorageFailure>;
+    readonly readBlob: (oid: Oid) => Effect.Effect<Uint8Array, ObjectNotFound | StorageFailure>;
 
     readonly writeTree: (entries: ReadonlyArray<TreeEntry>) => Effect.Effect<Oid, StorageFailure>;
     readonly writeBlob: (data: Uint8Array) => Effect.Effect<Oid, StorageFailure>;
+
+    /**
+     * A tree with `changes` applied to `base`, written bottom-up.
+     *
+     * The unit a caller actually has is a path, not a tree object — this is
+     * what lets an API create content without a staging area, and only the
+     * directories on a changed path are read.
+     */
+    readonly writeFiles: (input: {
+      /** Absent starts from the empty tree. */
+      readonly base?: Oid;
+      readonly changes: ReadonlyArray<FileChange>;
+    }) => Effect.Effect<Oid, ObjectNotFound | StorageFailure | Invalid>;
 
     readonly commit: (input: {
       readonly branch: string;
@@ -211,6 +239,118 @@ export const layer = Layer.effect(
         return { order, seen };
       });
 
+    const readTreeEntries = (oid: Oid) =>
+      oid === EMPTY_TREE_OID
+        ? Effect.succeed<ReadonlyArray<TreeEntry>>([])
+        : readTyped(oid, "tree", parseTree);
+
+    const writeTree = (entries: ReadonlyArray<TreeEntry>) =>
+      objects.write({ type: "tree", data: encodeTree(entries) });
+
+    /** `a/b/c.txt` -> `["a","b","c.txt"]`, or a failure naming the path. */
+    const segmentsOf = (path: string) =>
+      Effect.suspend(() => {
+        const segments = path.split("/").filter((segment) => segment !== "");
+        if (segments.length === 0) {
+          return Effect.fail(new Invalid({ field: "path", reason: `empty path '${path}'` }));
+        }
+        if (segments.some((segment) => segment === "." || segment === "..")) {
+          return Effect.fail(
+            new Invalid({ field: "path", reason: `path escapes root: '${path}'` }),
+          );
+        }
+        return Effect.succeed(segments);
+      });
+
+    /**
+     * The write is bottom-up because a tree names its children by oid: a
+     * directory cannot be written until every directory inside it has been.
+     * Only directories on a changed path are ever read.
+     */
+    const writeFiles = Effect.fn("Repository.writeFiles")(function* (input: {
+      readonly base?: Oid;
+      readonly changes: ReadonlyArray<FileChange>;
+    }) {
+      /** Keyed by directory prefix; `""` is the root. */
+      const directories = new Map<string, Map<string, TreeEntry>>();
+
+      const load = (prefix: string, oid: Oid | null) =>
+        Effect.gen(function* () {
+          const cached = directories.get(prefix);
+          if (cached !== undefined) return cached;
+
+          const entries = new Map<string, TreeEntry>();
+          if (oid !== null) {
+            for (const entry of yield* readTreeEntries(oid)) entries.set(entry.name, entry);
+          }
+          directories.set(prefix, entries);
+          return entries;
+        });
+
+      yield* load("", input.base ?? null);
+
+      /** Walk to a directory, reading (or inventing) each level on the way. */
+      const directoryFor = (segments: ReadonlyArray<string>) =>
+        Effect.gen(function* () {
+          let prefix = "";
+          let current = directories.get("")!;
+          for (const segment of segments) {
+            const next = prefix === "" ? segment : `${prefix}/${segment}`;
+            if (!directories.has(next)) {
+              // A path may replace a file with a directory; then there is no
+              // tree to read and the new directory starts empty.
+              const entry = current.get(segment);
+              yield* load(next, entry?.mode === TREE_MODE ? entry.oid : null);
+            }
+            current = directories.get(next)!;
+            prefix = next;
+          }
+          return current;
+        });
+
+      for (const change of input.changes) {
+        const segments = yield* segmentsOf(change.path);
+        const name = segments.at(-1)!;
+        const parent = yield* directoryFor(segments.slice(0, -1));
+
+        if (change.content === null) {
+          parent.delete(name);
+          continue;
+        }
+
+        const mode = change.mode ?? "100644";
+        if (!FILE_MODES.has(mode)) {
+          return yield* new Invalid({ field: "mode", reason: `unsupported file mode '${mode}'` });
+        }
+        const oid = yield* objects.write({ type: "blob", data: change.content });
+        parent.set(name, { mode, name, oid });
+      }
+
+      const depth = (prefix: string) => (prefix === "" ? 0 : prefix.split("/").length);
+      const prefixes = [...directories.keys()].sort((left, right) => depth(right) - depth(left));
+
+      let root = EMPTY_TREE_OID;
+      for (const prefix of prefixes) {
+        const entries = [...directories.get(prefix)!.values()];
+
+        if (prefix === "") {
+          root = yield* writeTree(entries);
+          continue;
+        }
+
+        const slash = prefix.lastIndexOf("/");
+        const parent = directories.get(slash === -1 ? "" : prefix.slice(0, slash))!;
+        const name = slash === -1 ? prefix : prefix.slice(slash + 1);
+
+        // git has no empty directories: one whose last entry went away is
+        // dropped from its parent rather than written.
+        if (entries.length === 0) parent.delete(name);
+        else parent.set(name, { mode: TREE_MODE, name, oid: yield* writeTree(entries) });
+      }
+
+      return root;
+    });
+
     const closure = (wants: ReadonlyArray<Oid>, haves: ReadonlyArray<Oid>) =>
       Effect.gen(function* () {
         // What the client has is walked tolerantly: a `have` can reference
@@ -225,11 +365,21 @@ export const layer = Layer.effect(
       head: refs.head,
 
       readCommit,
-      readTree: (oid) =>
-        oid === EMPTY_TREE_OID ? Effect.succeed([]) : readTyped(oid, "tree", parseTree),
+      readTree: readTreeEntries,
+      readBlob: (oid) =>
+        objects
+          .read(oid)
+          .pipe(
+            Effect.flatMap((object) =>
+              object.type === "blob"
+                ? Effect.succeed(object.data)
+                : Effect.fail(new ObjectNotFound({ oid })),
+            ),
+          ),
 
-      writeTree: (entries) => objects.write({ type: "tree", data: encodeTree(entries) }),
+      writeTree,
       writeBlob: (data) => objects.write({ type: "blob", data }),
+      writeFiles,
 
       commit: Effect.fn("Repository.commit")(
         function* ({ author, branch, committer, expected, message, tree }) {
