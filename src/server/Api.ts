@@ -15,12 +15,11 @@ import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
 import { Etag, HttpPlatform } from "effect/unstable/http";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 
-import { lsRemote } from "../client/Fetch.ts";
+import { lsRemote, requestPack } from "../client/Fetch.ts";
 import { push as pushToRemote } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
-import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
@@ -325,69 +324,6 @@ const trackingOf = (remote: string, name: string): string =>
     ? `refs/remotes/${remote}/${name.slice("refs/heads/".length)}`
     : name;
 
-const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayBuffer> => {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-};
-
-/**
- * One `want … done` round against upload-pack, its prelude consumed.
- *
- * Everything in a single request, so the reply is the boundary section (only
- * when deepening), one ACK or NAK, and then the pack — no second round to
- * hold state for. The `have` lines are this repository's own tips, which is
- * what keeps a second fetch from re-downloading the whole history.
- */
-const uploadPack = (input: {
-  readonly url: string;
-  readonly token: string | undefined;
-  readonly wants: ReadonlyArray<Oid>;
-  readonly haves: ReadonlyArray<Oid>;
-  readonly depth: number | undefined;
-}) =>
-  Effect.tryPromise({
-    try: async () => {
-      const body = concat([
-        ...input.wants.map((oid) => pkt(`want ${oid}\n`)),
-        ...(input.depth === undefined ? [] : [pkt(`deepen ${input.depth}\n`)]),
-        FLUSH,
-        ...input.haves.map((oid) => pkt(`have ${oid}\n`)),
-        pkt("done\n"),
-      ]);
-
-      const response = await fetch(`${input.url}/git-upload-pack`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-git-upload-pack-request",
-          ...(input.token === undefined ? {} : { authorization: `Bearer ${input.token}` }),
-        },
-        body,
-      });
-      if (!response.ok || response.body === null) {
-        throw new Error(`upload-pack returned ${response.status}`);
-      }
-
-      const reader = new PktReader(response.body as unknown as AsyncIterable<Uint8Array>);
-      for (;;) {
-        const item = await reader.next();
-        if (item === "eof") throw new Error("upload-pack answered with no pack");
-        // The flush that closes the boundary section, and the `shallow` lines
-        // before it: nothing to record here, because these stores keep no
-        // shallow list — see `fetchFrom` on what that costs.
-        if (typeof item === "string") continue;
-        const line = decoder.decode(item);
-        if (line.startsWith("ACK") || line.startsWith("NAK")) break;
-      }
-      return reader.rest();
-    },
-    catch: (cause) => new Invalid({ field: "remote", reason: String(cause) }),
-  });
-
 /**
  * A fetch into this repository: advertisement, one pack, then the tracking
  * refs.
@@ -458,7 +394,10 @@ const fetchFrom = Effect.fn("Api.fetchFrom")(function* (input: {
       ? []
       : yield* repository.unpack(
           Stream.fromAsyncIterable(
-            yield* uploadPack({
+            // The shared client transport, not a local copy: its prelude
+            // reader is the one that survives a server acknowledging more
+            // than one have before the pack.
+            yield* requestPack({
               url: input.url,
               token,
               wants,

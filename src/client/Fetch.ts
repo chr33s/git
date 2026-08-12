@@ -123,21 +123,23 @@ const pktLine = (line: string) => `${(line.length + 4).toString(16).padStart(4, 
  * The whole prefix repeats every round because smart HTTP is stateless-rpc —
  * the server that answers the second round has no memory of the first.
  */
-const negotiation = (
-  wants: ReadonlyArray<Oid>,
-  haves: ReadonlyArray<Oid>,
-  done: boolean,
-): Uint8Array<ArrayBuffer> =>
+const negotiation = (input: {
+  readonly wants: ReadonlyArray<Oid>;
+  readonly haves: ReadonlyArray<Oid>;
+  readonly done: boolean;
+  readonly depth?: number | undefined;
+}): Uint8Array<ArrayBuffer> =>
   encoder.encode(
     [
-      ...wants.map((oid, index) =>
+      ...input.wants.map((oid, index) =>
         pktLine(
           `want ${oid}${index === 0 ? CAPABILITIES.map((name) => ` ${name}`).join("") : ""}\n`,
         ),
       ),
+      ...(input.depth === undefined ? [] : [pktLine(`deepen ${input.depth}\n`)]),
       "0000",
-      ...haves.map((oid) => pktLine(`have ${oid}\n`)),
-      done ? pktLine("done\n") : "0000",
+      ...input.haves.map((oid) => pktLine(`have ${oid}\n`)),
+      input.done ? pktLine("done\n") : "0000",
     ].join(""),
   );
 
@@ -315,7 +317,7 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
         const response = await uploadPack(
           url,
           token,
-          negotiation(wants, haves.slice(0, next), false),
+          negotiation({ wants, haves: haves.slice(0, next), done: false }),
         );
         const { lines } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);
         return acknowledged(lines);
@@ -327,6 +329,41 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
   }
   return offered;
 });
+
+/**
+ * One `want … done` round against upload-pack, the acknowledgments consumed,
+ * the pack bytes returned.
+ *
+ * This is the transport every fetch shares — `fetchRepository` below for its
+ * final round, and the server acting as a client (`server/Sync.ts`) for its
+ * single-round fetch. It exists as one function because the prelude parsing
+ * above is easy to get wrong in exactly one way: reading a single ACK/NAK
+ * line where a server that recognised several haves sends several, which
+ * feeds the remaining acknowledgments to the pack parser as pack bytes.
+ *
+ * `depth` becomes a `deepen` line; the resulting `shallow` boundary lines
+ * arrive in the prelude and are consumed with the acknowledgments, since the
+ * callers keep no shallow list to record them in.
+ */
+export const requestPack = (input: {
+  readonly url: string;
+  readonly token?: string | undefined;
+  readonly wants: ReadonlyArray<Oid>;
+  readonly haves: ReadonlyArray<Oid>;
+  readonly depth?: number | undefined;
+}): Effect.Effect<AsyncIterable<Uint8Array>, Invalid> =>
+  Effect.tryPromise({
+    try: async () => {
+      const response = await uploadPack(
+        input.url,
+        input.token,
+        negotiation({ wants: input.wants, haves: input.haves, done: true, depth: input.depth }),
+      );
+      const { rest } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);
+      return rest;
+    },
+    catch: (cause) => unreachable(String(cause)),
+  });
 
 /**
  * Fetch everything reachable from the remote's branches (or one `branch`)
@@ -364,18 +401,7 @@ export const fetchRepository = (options: {
     const haves = yield* localHaves(stores);
     const offered = yield* negotiate({ url, token, wants, haves });
 
-    const packBody = yield* Effect.tryPromise({
-      try: async () => {
-        const response = await uploadPack(
-          url,
-          token,
-          negotiation(wants, haves.slice(0, offered), true),
-        );
-        const { rest } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);
-        return rest;
-      },
-      catch: (cause) => unreachable(String(cause)),
-    });
+    const packBody = yield* requestPack({ url, token, wants, haves: haves.slice(0, offered) });
 
     yield* Pack.unpack(
       Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),
