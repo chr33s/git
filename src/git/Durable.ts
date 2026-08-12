@@ -19,6 +19,7 @@ import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Protocol from "../server/Protocol.ts";
+import { normalize, routeOf } from "../server/Route.ts";
 import { stores } from "./Cloudflare.ts";
 import { collector } from "./Conformance.ts";
 import { type GitError, statusOf } from "./Error.ts";
@@ -69,7 +70,10 @@ export class GitRepo extends DurableObject<TestEnv> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    const [, repo = "default", route = ""] = new URL(request.url).pathname.split("/");
+    const matched = routeOf(new URL(request.url).pathname);
+    if (matched === null) return Response.json({ error: "Invalid" }, { status: 400 });
+    const { repo, route } = matched;
+    request = normalize(request, matched);
 
     // Stateless auth, on when the secret binding exists: nothing to store,
     // nothing to look up, and a token minted for one repo verifies nowhere else.
@@ -175,10 +179,12 @@ export class GitRepo extends DurableObject<TestEnv> {
 /** Router: resolve `/:repo` to its instance. */
 export default {
   async fetch(request: Request, env: TestEnv): Promise<Response> {
-    const repo = new URL(request.url).pathname.split("/")[1];
-    if (repo === undefined || repo === "") {
-      return new Response("No repository in URL", { status: 400 });
-    }
-    return env.GIT_REPO.get(env.GIT_REPO.idFromName(repo)).fetch(request);
+    const route = routeOf(new URL(request.url).pathname);
+    if (route === null) return new Response("No repository in URL", { status: 400 });
+    // The instance is keyed on the stripped name, so `/repo` and `/repo.git`
+    // reach the same Durable Object rather than two empty ones.
+    return env.GIT_REPO.get(env.GIT_REPO.idFromName(route.repo)).fetch(
+      normalize(request, route),
+    );
   },
 } satisfies ExportedHandler<TestEnv>;

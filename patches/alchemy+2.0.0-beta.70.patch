@@ -82,6 +82,23 @@ index c6c87458..64b83ee1 100644
      message: Schema.String,
      hint: Schema.optional(Schema.String),
      value: Schema.Unknown,
+diff --git a/node_modules/alchemy/package.json b/node_modules/alchemy/package.json
+index ff3d725b..2d8a3112 100644
+--- a/node_modules/alchemy/package.json
++++ b/node_modules/alchemy/package.json
+@@ -157,6 +157,12 @@
+       "worker": "./src/Cloudflare/Live.ts",
+       "import": "./lib/Cloudflare/Live.js"
+     },
++    "./Cloudflare/Artifacts/*": {
++      "types": "./lib/Cloudflare/Artifacts/*.d.ts",
++      "bun": "./src/Cloudflare/Artifacts/*.ts",
++      "worker": "./src/Cloudflare/Artifacts/*.ts",
++      "import": "./lib/Cloudflare/Artifacts/*.js"
++    },
+     "./Cloudflare/*": {
+       "types": "./lib/Cloudflare/*/index.d.ts",
+       "bun": "./src/Cloudflare/*/index.ts",
 diff --git a/node_modules/alchemy/src/Auth/AuthProvider.ts b/node_modules/alchemy/src/Auth/AuthProvider.ts
 index c4d8394e..9a146a99 100644
 --- a/node_modules/alchemy/src/Auth/AuthProvider.ts

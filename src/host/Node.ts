@@ -25,9 +25,7 @@ import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Protocol from "../server/Protocol.ts";
-
-/** No traversal, no hidden files; `.git` suffixes are part of the name. */
-const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+import { routeOf } from "../server/Route.ts";
 
 export interface ServeOptions {
   /** Directory holding one bare repository per subdirectory. */
@@ -103,12 +101,16 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const server = http.createServer((incoming, outgoing) => {
     void (async () => {
       const url = new URL(incoming.url ?? "/", `http://${hostname}`);
-      const repo = url.pathname.split("/")[1] ?? "";
-      if (!REPO_NAME.test(repo) || repo.includes("..")) {
+      const matched = routeOf(url.pathname);
+      if (matched === null) {
         outgoing.writeHead(400);
         outgoing.end("bad repository name");
         return;
       }
+      const repo = matched.repo;
+      // `/repo.git/info/refs` and `/repo/info/refs` are the same request;
+      // the handlers see the second spelling either way.
+      url.pathname = `/${repo}${matched.rest === "" ? "" : `/${matched.rest}`}`;
 
       const headers = new Headers();
       for (const name of ["content-type", "content-encoding", "accept", "authorization"]) {

@@ -16,6 +16,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import Repos from "./host/Cloudflare.ts";
 import { Repo } from "./host/Cloudflare.ts";
 import * as Auth from "./server/Auth.ts";
+import { normalize, routeOf } from "./server/Route.ts";
 
 /** The Worker's public contract: it serves HTTP, nothing more. */
 export type GitShape = {
@@ -52,24 +53,25 @@ export default Git.make(
     return {
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
-        const name = new URL(request.url, "http://x").pathname.split("/")[1];
-        if (name === undefined || name === "") {
+        const route = routeOf(new URL(request.url, "http://x").pathname);
+        if (route === null) {
           return HttpServerResponse.text("No repository in URL", { status: 400 });
         }
 
         // The platform request, headers and body intact — the effect wrapper
         // was built from it (`HttpServerRequest.fromWeb`), so this is the
-        // same object, not a reconstruction.
-        const raw = request.source as Request;
+        // same object, not a reconstruction. Normalised so the DO sees one
+        // spelling of the path whichever the client used.
+        const raw = normalize(request.source as Request, route);
 
         // Auth lives at the edge: the DO trusts its callers, because the
         // only ways in are this guard and another Worker's binding.
         const denied = yield* Auth.guard(raw, (credential) =>
-          Auth.hmacVerify(Redacted.value(secret), name, credential),
+          Auth.hmacVerify(Redacted.value(secret), route.repo, credential),
         );
         if (denied !== null) return HttpServerResponse.raw(denied);
 
-        const response = yield* repos.getByName(name).fetch(raw);
+        const response = yield* repos.getByName(route.repo).fetch(raw);
         return HttpServerResponse.raw(response);
       }),
     };

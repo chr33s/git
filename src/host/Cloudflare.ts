@@ -21,6 +21,7 @@ import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Protocol from "../server/Protocol.ts";
+import { normalize, routeOf } from "../server/Route.ts";
 import { Objects } from "../objects.ts";
 
 /** What other scripts may call on a repository: it is an HTTP surface. */
@@ -79,7 +80,12 @@ export default Repo.make(
       return {
         fetch: (request: Request) =>
           Effect.suspend(() => {
-            const [, repo = "default", route = ""] = new URL(request.url).pathname.split("/");
+            const matched = routeOf(new URL(request.url).pathname);
+            if (matched === null) {
+              return Effect.succeed(Response.json({ error: "Invalid" }, { status: 400 }));
+            }
+            const { repo, route } = matched;
+            request = normalize(request, matched);
 
             if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
               return Protocol.handle(request).pipe(
