@@ -36,18 +36,18 @@ Repo metadata is fixed: `id`, `name`, `description`, `defaultBranch`,
 
 ## Fit against what exists today
 
-| capability                                     | status               | notes                                                                                                                |
-| ---------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| git smart-HTTP (`upload-pack`, `receive-pack`) | **have**             | the hard part — proven in the removed legacy `server.ts` + `git.pack.ts`; redone as `server/Protocol` in the rewrite |
-| repo `create` / `delete`                       | **have**             | `POST` / `DELETE /api/:repo`                                                                                         |
-| `setDefaultBranch`                             | **have**             | `initStorage(repo, branch)`                                                                                          |
-| HTTPS `remote` URL                             | **have**             | the worker route _is_ the remote                                                                                     |
-| LFS                                            | **bonus**            | Artifacts does not offer it; we do                                                                                   |
-| `import` from a remote                         | **partial**          | `clone`/`fetch` + shallow support exist; needs `depth`/`branch` plumbing and an async `IMPORT_IN_PROGRESS` state     |
-| repo metadata                                  | **partial**          | `description`, `readOnly`, `createdAt`, `lastPushAt`, `source` have nowhere to live                                  |
-| `list` with cursor                             | **missing**          | see below — this is architectural                                                                                    |
-| `fork`                                         | **missing**          | feasible cheaply; see below                                                                                          |
-| tokens / any auth                              | **missing entirely** | `grep -ri 'authorization\|bearer\|token' src/` returns only commit `author` lines                                    |
+| capability                                     | status               | notes                                                                                                             |
+| ---------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| git smart-HTTP (`upload-pack`, `receive-pack`) | **partial**          | pack transport landed (`src/git/Pack.ts`, git-interop tested); the HTTP endpoints are `server/Protocol.sketch.ts` |
+| repo `create` / `delete`                       | **have**             | `POST` / `DELETE /api/:repo`                                                                                      |
+| `setDefaultBranch`                             | **have**             | `initStorage(repo, branch)`                                                                                       |
+| HTTPS `remote` URL                             | **have**             | the worker route _is_ the remote                                                                                  |
+| LFS                                            | **bonus**            | Artifacts does not offer it; we do                                                                                |
+| `import` from a remote                         | **partial**          | `clone`/`fetch` + shallow support exist; needs `depth`/`branch` plumbing and an async `IMPORT_IN_PROGRESS` state  |
+| repo metadata                                  | **partial**          | `description`, `readOnly`, `createdAt`, `lastPushAt`, `source` have nowhere to live                               |
+| `list` with cursor                             | **missing**          | see below — this is architectural                                                                                 |
+| `fork`                                         | **missing**          | feasible cheaply; see below                                                                                       |
+| tokens / any auth                              | **missing entirely** | `grep -ri 'authorization\|bearer\|token' src/` returns only commit `author` lines                                 |
 
 ### The three gaps, in order of cost
 

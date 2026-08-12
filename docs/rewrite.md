@@ -1,23 +1,24 @@
 # Sketch: Effect v4 + alchemy@next rewrite
 
-Status: **phases 0–2 have landed** in `src/git/`, with integration tests
+Status: **phases 0–3 have landed** in `src/git/`, with integration tests
 running inside workerd; the rest is still a sketch.
 
 What is real code today, running under the repo's own test runner:
 
-| module                      | what it is                                                         |
-| --------------------------- | ------------------------------------------------------------------ |
-| `src/git/Error.ts`          | the tagged errors, with `httpApiStatus` annotations                |
-| `src/git/Store.ts`          | `ObjectStore` / `RefStore` ports                                   |
-| `src/git/Format.ts`         | the pure/effectful seam — framing, commit and tree codecs, hashing |
-| `src/git/Memory.ts`         | in-memory backend                                                  |
-| `src/git/Node.ts`           | filesystem backend, git's own on-disk layout                       |
-| `src/git/Repository.ts`     | the domain service                                                 |
-| `src/git/Cloudflare.ts`     | R2 + Durable Object SQLite backend                                 |
-| `src/git/Durable.ts`        | the repository as a Durable Object                                 |
-| `src/git/Store.contract.ts` | one contract suite, run against **all three** backends             |
+| module                      | what it is                                                               |
+| --------------------------- | ------------------------------------------------------------------------ |
+| `src/git/Error.ts`          | the tagged errors, with `httpApiStatus` annotations                      |
+| `src/git/Store.ts`          | `ObjectStore` / `RefStore` ports                                         |
+| `src/git/Format.ts`         | the pure/effectful seam — framing, commit and tree codecs, hashing       |
+| `src/git/Memory.ts`         | in-memory backend                                                        |
+| `src/git/Node.ts`           | filesystem backend, git's own on-disk layout                             |
+| `src/git/Repository.ts`     | the domain service                                                       |
+| `src/git/Cloudflare.ts`     | R2 + Durable Object SQLite backend                                       |
+| `src/git/Durable.ts`        | the repository as a Durable Object                                       |
+| `src/git/Pack.ts`           | streaming packfile transport — reader (full, ofs- and ref-delta), writer |
+| `src/git/Store.contract.ts` | one contract suite, run against **all three** backends                   |
 
-67 tests pass: 58 unit (`npm test`) and 9 integration (`npm run test:integration`),
+79 tests pass: 70 unit (`npm test`) and 9 integration (`npm run test:integration`),
 the latter driving a real Workers runtime and itself running a 15-case
 conformance suite inside it. Three kinds of evidence, deliberately:
 
@@ -216,9 +217,12 @@ which alchemy's binding accepts directly — a large blob never materializes.
 
 ### Streaming
 
-[`src/git/Pack.sketch.ts`](../src/git/Pack.sketch.ts). Pack parse becomes a `Stream`
+**Landed** as [`src/git/Pack.ts`](../src/git/Pack.ts), tested against packs the
+real `git` produces (both delta flavours) and validated back with
+`git index-pack --strict`. Pack parse is a `Stream`
 transformation that writes each object through to storage as it resolves, so
-only the delta base window is resident. Pack write is a lazy `Stream` handed to
+only the object being decoded is resident — delta bases are re-read from the
+store by oid. Pack write is a lazy `Stream` handed to
 `HttpServerResponse.stream`, so first-byte latency drops to the first object and
 a client hang-up interrupts the walk.
 
@@ -373,16 +377,16 @@ the in-workerd conformance run.
 | 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests                                                | done   |
 | 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite                                      | done   |
 | 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness` | done   |
-| 2b    | re-point `server.ts`/`worker.ts` at `GitRepo` and retire the old path                                        | medium |
-| 3     | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                      | high   |
+| 2b ✅ | re-point the Worker at `GitRepo` and retire the old path — resolved by removing the legacy stack outright    | done   |
+| 3 ✅  | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                      | done   |
 | 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types                                       | medium |
 | 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages                            | medium |
 | 5b ◑  | node host — the fs backend landed early (it is what proves the ports); the HTTP host is still ahead          | low    |
 | 6     | CLI on `effect/unstable/cli`; delete the argv parser                                                         | low    |
 
-Phase 3 is the one worth doing even if the rest is deferred — it is the only
-phase that fixes a bug users can hit. Phase 5b is the cheapest thing on the
-list once 5 lands, and it pays for itself in test runtime.
+Phase 4 is next: `Pack.ts` gives it the transport, so the protocol endpoints
+are wiring, not invention. Phase 5b is the cheapest thing on the list once 5
+lands, and it pays for itself in test runtime.
 
 ---
 

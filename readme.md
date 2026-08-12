@@ -62,6 +62,7 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/git/Repository.ts`     | the domain service                                                 |
 | `src/git/Cloudflare.ts`     | R2 + Durable Object SQLite backend                                 |
 | `src/git/Durable.ts`        | the Worker entry: one Durable Object per repository                |
+| `src/git/Pack.ts`           | streaming packfile transport, interop-tested against real `git`    |
 | `src/git/Store.contract.ts` | one storage contract suite, run against all three backends         |
 
 The Worker (`wrangler.json` → `src/git/Durable.ts`) currently exposes a
