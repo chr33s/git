@@ -15,32 +15,26 @@
  * `X-Signature-256: sha256=<hex>` form every git host uses, so receivers can
  * verify with the library they already have.
  */
-import { Context, Effect, Layer, Schedule, Schema } from "effect";
+import { Effect, Layer, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import { Hooks, type ReceiveResult } from "../git/Repository.ts";
+import { type Subscriber, Subscribers } from "./Subscribers.ts";
 
-export interface Subscriber {
-  readonly id: string;
-  readonly url: string;
-  /** Shared with the receiver; signs the body, never sent. */
-  readonly secret: string;
-}
-
-export class Subscribers extends Context.Service<
+/**
+ * The registry moved to `Subscribers.ts` when it grew persistence and
+ * management; the names stay here because delivery is what most callers mean
+ * by "webhooks".
+ */
+export {
+  type NewSubscriber,
+  none as subscribersNone,
+  of as subscribersOf,
+  memory as subscribersMemory,
+  sql as subscribersSql,
+  type Subscriber,
   Subscribers,
-  {
-    readonly forEvent: (event: "push") => Effect.Effect<ReadonlyArray<Subscriber>>;
-  }
->()("server/Subscribers") {}
-
-/** No subscribers: the default, and what every existing test composes. */
-export const subscribersNone = Layer.succeed(Subscribers, {
-  forEvent: () => Effect.succeed([]),
-});
-
-export const subscribersOf = (subscribers: ReadonlyArray<Subscriber>) =>
-  Layer.succeed(Subscribers, { forEvent: () => Effect.succeed(subscribers) });
+} from "./Subscribers.ts";
 
 /** What a receiver is sent: one entry per ref the push moved. */
 export interface PushEvent {

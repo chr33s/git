@@ -26,6 +26,8 @@ import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { routeOf } from "../server/Route.ts";
+import { file as subscribersFile } from "../server/Subscribers.node.ts";
+import * as Webhooks from "../server/Webhooks.ts";
 
 export interface ServeOptions {
   /** Directory holding one bare repository per subdirectory. */
@@ -59,21 +61,30 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const repos = new Map<string, RepoState>();
 
   const stateFor = (repo: string): RepoState => {
-    let state = repos.get(repo);
-    if (state === undefined) {
-      const layer = GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provide(stores(path.join(options.root, repo))),
-      );
-      state = {
-        layer,
-        api: HttpRouter.toWebHandler(Api.layer.pipe(Layer.provideMerge(layer)), {
-          disableLogger: true,
-        }).handler,
-        gate: Promise.resolve(),
-      };
-      repos.set(repo, state);
-    }
+    const cached = repos.get(repo);
+    if (cached !== undefined) return cached;
+
+    // The registry lives beside the repository it reports on, so a webhook
+    // survives a restart the same way a ref does.
+    const subscribers = subscribersFile(path.join(options.root, repo, "webhooks.json"));
+
+    const layer = GitRepository.layer.pipe(
+      // Real hooks, not `hooksNoop`: this is what makes a push deliver.
+      // `forkDetach` is the node stand-in for `waitUntil` — delivery outlives
+      // the response without the push waiting on a slow receiver.
+      Layer.provide(Webhooks.hooksFetch().pipe(Layer.provide(subscribers))),
+      Layer.provide(stores(path.join(options.root, repo))),
+    );
+
+    const state: RepoState = {
+      layer,
+      api: HttpRouter.toWebHandler(
+        Api.layer.pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
+        { disableLogger: true },
+      ).handler,
+      gate: Promise.resolve(),
+    };
+    repos.set(repo, state);
     return state;
   };
 

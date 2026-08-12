@@ -19,6 +19,7 @@ import { Invalid, ObjectNotFound, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 
 /** Wire representation of an oid; the domain's `Oid` is the branded form. */
 const OidString = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
@@ -78,6 +79,13 @@ const toBase64 = (bytes: Uint8Array): string => {
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
 };
+
+/** A registered webhook as a client may see it: no secret, ever. */
+const WebhookWire = Schema.Struct({
+  id: Schema.String,
+  url: Schema.String,
+  created_at: Schema.String,
+});
 
 const TreeEntryWire = Schema.Struct({
   mode: Schema.String,
@@ -243,6 +251,28 @@ const repo = HttpApiGroup.make("repo")
     }),
   )
   .add(
+    // Registration, because a delivery engine nobody can subscribe to never
+    // fires. The secret goes in and never comes back out.
+    HttpApiEndpoint.post("webhookAdd", "/webhooks", {
+      params: RepoParam,
+      payload: NewSubscriberWire,
+      success: WebhookWire,
+      error: Invalid,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("webhookList", "/webhooks", {
+      params: RepoParam,
+      success: Schema.Struct({ webhooks: Schema.Array(WebhookWire) }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.delete("webhookRemove", "/webhooks/:id", {
+      params: { ...RepoParam, id: Schema.String },
+      success: Schema.Struct({ deleted: Schema.Boolean }),
+    }),
+  )
+  .add(
     HttpApiEndpoint.get("commits", "/commits/:oid", {
       params: { ...RepoParam, oid: OidString },
       query: Cursor,
@@ -368,6 +398,31 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           .branch(payload)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { name: `refs/heads/${payload.name}`, oid };
+      }),
+    )
+    .handle("webhookAdd", ({ payload }) =>
+      Effect.gen(function* () {
+        const subscribers = yield* Subscribers;
+        const added = yield* subscribers
+          .add(payload)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return redact(added);
+      }),
+    )
+    .handle("webhookList", () =>
+      Effect.gen(function* () {
+        const subscribers = yield* Subscribers;
+        const rows = yield* subscribers.list.pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { webhooks: rows.map(redact) };
+      }),
+    )
+    .handle("webhookRemove", ({ params }) =>
+      Effect.gen(function* () {
+        const subscribers = yield* Subscribers;
+        const deleted = yield* subscribers
+          .remove(params.id)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { deleted };
       }),
     )
     .handle("commits", ({ params, query }) =>

@@ -17,18 +17,9 @@ import { ArtifactsError } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace"
 
 import { Registry, type RepoRecord, Tokens } from "./Namespace.ts";
 
-/**
- * The slice of `DurableObjectStorage["sql"]` these tables need. Row types are
- * `unknown`-shaped rather than workerd's `Record<string, SqlStorageValue>`, so
- * `node:sqlite` satisfies it too and the same statements can be checked
- * outside the runtime.
- */
-export interface Sql {
-  exec<Row extends Record<string, ArrayBuffer | string | number | null>>(
-    query: string,
-    ...bindings: ReadonlyArray<string | number | null>
-  ): { toArray(): Row[] };
-}
+import type { Sql } from "../git/Sql.ts";
+
+export type { Sql };
 
 const failure = (code: string, message: string) =>
   new ArtifactsError({ message: `${code}: ${message}`, cause: new Error(code) });

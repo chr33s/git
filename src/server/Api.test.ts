@@ -18,6 +18,7 @@ import { HttpApiTest } from "effect/unstable/httpapi";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Api from "./Api.ts";
+import * as Subscribers from "./Subscribers.ts";
 
 const repository = GitRepository.layer.pipe(
   Layer.provide(GitRepository.hooksNoop),
@@ -30,7 +31,7 @@ const live = Layer.mergeAll(
   Etag.layerWeak,
   FileSystem.layerNoop({}),
   Path.layer,
-).pipe(Layer.provideMerge(repository));
+).pipe(Layer.provideMerge(repository), Layer.provideMerge(Subscribers.memory));
 
 const alice = {
   name: "Alice",
@@ -255,6 +256,60 @@ describe("Api", () => {
           })
           .pipe(Effect.flip);
         assert.equal(escaped._tag, "Invalid");
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+  );
+
+  it.live(
+    "registers, lists and removes webhooks without ever echoing the secret",
+    () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const added = yield* client.repo.webhookAdd({
+          params: { repo: "r" },
+          payload: { url: "https://example.test/hook", secret: "a-long-enough-secret" },
+        });
+        assert.equal(added.url, "https://example.test/hook");
+        // The response shape has no secret field at all — it cannot leak.
+        assert.equal("secret" in added, false);
+
+        const listed = yield* client.repo.webhookList({ params: { repo: "r" } });
+        assert.deepEqual(
+          listed.webhooks.map((hook) => hook.url),
+          ["https://example.test/hook"],
+        );
+        assert.equal("secret" in listed.webhooks[0]!, false);
+
+        // A receiver that cannot be reached securely is refused at
+        // registration, not discovered at delivery.
+        const insecure = yield* client.repo
+          .webhookAdd({
+            params: { repo: "r" },
+            payload: { url: "http://example.test/hook", secret: "a-long-enough-secret" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(insecure._tag, "Invalid");
+
+        const weak = yield* client.repo
+          .webhookAdd({
+            params: { repo: "r" },
+            payload: { url: "https://example.test/hook", secret: "short" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(weak._tag, "Invalid");
+
+        const removed = yield* client.repo.webhookRemove({
+          params: { repo: "r", id: added.id },
+        });
+        assert.equal(removed.deleted, true);
+
+        const again = yield* client.repo.webhookRemove({
+          params: { repo: "r", id: added.id },
+        });
+        assert.equal(again.deleted, false);
+
+        const empty = yield* client.repo.webhookList({ params: { repo: "r" } });
+        assert.deepEqual(empty.webhooks, []);
       }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
   );
 });

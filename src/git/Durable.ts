@@ -20,7 +20,10 @@ import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { normalize, routeOf } from "../server/Route.ts";
+import * as Subscribers from "../server/Subscribers.ts";
+import * as Webhooks from "../server/Webhooks.ts";
 import { stores } from "./Cloudflare.ts";
+import type { Sql } from "./Sql.ts";
 import { collector } from "./Conformance.ts";
 import { type GitError, statusOf } from "./Error.ts";
 import * as GitRepository from "./Repository.ts";
@@ -45,10 +48,25 @@ export class GitRepo extends DurableObject<TestEnv> {
   #layer: Layer.Layer<Repository> | null = null;
   #api: ((request: Request) => Promise<Response>) | null = null;
 
+  #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
+
+  /** The registry on this instance's own SQLite, beside the refs. */
+  #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
+    this.#subscribers ??= Subscribers.sql(this.ctx.storage.sql as unknown as Sql, repo);
+    return this.#subscribers;
+  }
+
   /** Built once per instance: the DO is the unit of isolation, not the request. */
   #live(repo: string): Layer.Layer<Repository> {
     this.#layer ??= GitRepository.layer.pipe(
-      Layer.provide(GitRepository.hooksNoop),
+      Layer.provide(
+        Webhooks.hooksFetch({
+          background: (effect) =>
+            Effect.sync(() => {
+              this.ctx.waitUntil(Effect.runPromise(Effect.ignore(effect)));
+            }),
+        }).pipe(Layer.provide(this.#registry(repo))),
+      ),
       Layer.provide(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
     );
     return this.#layer;
@@ -104,9 +122,13 @@ export class GitRepo extends DurableObject<TestEnv> {
     // Never disposed: its lifetime is the Durable Object's. `provideMerge`
     // rather than `provide` — handler contexts are request-scoped, so the
     // router looks for `Repository` among the app layer's outputs.
-    this.#api ??= HttpRouter.toWebHandler(Api.layer.pipe(Layer.provideMerge(this.#live(repo))), {
-      disableLogger: true,
-    }).handler;
+    this.#api ??= HttpRouter.toWebHandler(
+      Api.layer.pipe(
+        Layer.provideMerge(this.#live(repo)),
+        Layer.provideMerge(this.#registry(repo)),
+      ),
+      { disableLogger: true },
+    ).handler;
     return this.#api(request);
   }
 

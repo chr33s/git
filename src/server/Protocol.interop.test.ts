@@ -118,6 +118,34 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
     await git(work, "fsck", "--strict");
   });
 
+  it("serves the same repository with or without the .git suffix", async () => {
+    await seed("suffixed");
+
+    // git appends `.git` to a URL that has none, so both spellings reach
+    // users. They must be one repository, not two empty ones.
+    const bare = path.join(root, "work-bare-url");
+    const suffixed = path.join(root, "work-suffixed-url");
+    await git(root, "clone", "--quiet", `${base}/suffixed`, bare);
+    await git(root, "clone", "--quiet", `${base}/suffixed.git`, suffixed);
+
+    assert.equal(
+      (await git(bare, "rev-parse", "HEAD")).trim(),
+      (await git(suffixed, "rev-parse", "HEAD")).trim(),
+    );
+
+    // And a push through the suffixed spelling is visible through the other.
+    await fs.writeFile(path.join(suffixed, "through-suffix.txt"), "pushed\n");
+    await git(suffixed, "add", ".");
+    await git(suffixed, "commit", "--quiet", "-m", "through the suffixed URL");
+    await git(suffixed, "push", "--quiet", "origin", "main");
+
+    await git(bare, "fetch", "--quiet", "origin", "main");
+    assert.equal(
+      (await git(bare, "rev-parse", "origin/main")).trim(),
+      (await git(suffixed, "rev-parse", "HEAD")).trim(),
+    );
+  });
+
   it("accepts a push and serves it back to a second clone", async () => {
     await seed("roundtrip");
     const work = path.join(root, "work-push");

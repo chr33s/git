@@ -17,11 +17,14 @@ import { HttpRouter } from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
 import { type GitError, statusOf } from "../git/Error.ts";
+import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { normalize, routeOf } from "../server/Route.ts";
+import * as Subscribers from "../server/Subscribers.ts";
+import * as Webhooks from "../server/Webhooks.ts";
 import { Objects } from "../objects.ts";
 
 /** What other scripts may call on a repository: it is an HTTP surface. */
@@ -56,11 +59,27 @@ export default Repo.make(
       const layers = new Map<string, Layer.Layer<Repository>>();
       const handlers = new Map<string, (request: Request) => Promise<Response>>();
 
+      /**
+       * The subscriber registry on this instance's own SQLite, beside the
+       * refs it reports on — and serialized by the same input gate.
+       */
+      const subscribers = (repo: string) =>
+        Subscribers.sql(state.raw.storage.sql as unknown as Sql, repo);
+
       const live = (repo: string): Layer.Layer<Repository> => {
         const existing = layers.get(repo);
         if (existing !== undefined) return existing;
         const built = GitRepository.layer.pipe(
-          Layer.provide(GitRepository.hooksNoop),
+          // Delivery runs in `waitUntil`, so a slow receiver never adds its
+          // latency to the push that triggered it.
+          Layer.provide(
+            Webhooks.hooksFetch({
+              background: (effect) =>
+                Effect.sync(() => {
+                  state.raw.waitUntil(Effect.runPromise(Effect.ignore(effect)));
+                }),
+            }).pipe(Layer.provide(subscribers(repo))),
+          ),
           Layer.provide(stores({ bucket: r2, repo, storage: state.raw.storage })),
         );
         layers.set(repo, built);
@@ -70,9 +89,10 @@ export default Repo.make(
       const api = (repo: string) => {
         const existing = handlers.get(repo);
         if (existing !== undefined) return existing;
-        const built = HttpRouter.toWebHandler(Api.layer.pipe(Layer.provideMerge(live(repo))), {
-          disableLogger: true,
-        }).handler;
+        const built = HttpRouter.toWebHandler(
+          Api.layer.pipe(Layer.provideMerge(live(repo)), Layer.provideMerge(subscribers(repo))),
+          { disableLogger: true },
+        ).handler;
         handlers.set(repo, built);
         return built;
       };
