@@ -24,11 +24,9 @@
     "fix": "oxlint --type-aware --fix && oxfmt --write",
     "postinstall": "npx wrangler types && npm run fix",
     "test": "node --test --test-concurrency=1 --test-global-setup=src/test.helpers.ts",
-    "test:integration": "vitest run"
+    "test:integration": "node --test src/git/*.integration.ts"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.21.1",
-    "@cloudflare/workers-types": "4.20260702.1",
     "@types/node": "25.6.0",
     "esbuild": "0.28.0",
     "oxfmt": "0.47.0",
@@ -36,8 +34,7 @@
     "oxlint-tsgolint": "0.22.1",
     "playwright": "1.59.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.10",
-    "wrangler": "4.86.0"
+    "wrangler": "4.121.0"
   },
   "engines": {
     "node": ">=24.12.0"

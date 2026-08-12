@@ -17,8 +17,9 @@ What is real code today, running under the repo's own test runner:
 | `src/git/Durable.ts` | the repository as a Durable Object |
 | `src/git/Store.contract.ts` | one contract suite, run against **all three** backends |
 
-80 tests pass: 58 under `node:test` (`npm test`) and 22 inside workerd
-(`npm run test:integration`). Three kinds of evidence, deliberately:
+67 tests pass: 58 unit (`npm test`) and 9 integration (`npm run test:integration`),
+the latter driving a real Workers runtime and itself running a 15-case
+conformance suite inside it. Three kinds of evidence, deliberately:
 
 - **oids match real git** — the empty tree and `hello\n` are pinned to the
   values `git hash-object` produces;
@@ -319,24 +320,34 @@ suite.
 
 ### Integration tests
 
-`@cloudflare/vitest-pool-workers` boots the Worker from `wrangler.test.json`
-under Miniflare and runs the test files **in the same isolate**, so
-`runInDurableObject` hands back the real `DurableObjectState` — real SQLite —
-and `env.GIT_OBJECTS` is a real R2 binding. That is what makes it possible to
-run the storage contract against the backend that ships instead of trusting it
-to behave like the in-memory one.
+`createTestHarness` from `wrangler` starts the Worker in `wrangler.test.json`
+as a local server — real workerd, real Durable Objects, real R2 — and
+[`src/git/Cloudflare.integration.ts`](../src/git/Cloudflare.integration.ts)
+drives it from the outside over HTTP, under plain `node:test`. No second test
+runner, and nothing mocked.
 
-Two things it buys that unit tests cannot reach:
+Because the harness is out-of-process, the test file cannot reach
+`state.storage.sql`. So the storage contract runs on the *inside*: the DO
+exposes a `/:repo/conformance` route (gated on a var only the test config sets)
+that runs `Store.contract.ts` against its own R2 and SQLite and returns the
+results as JSON. `Store.contract.ts` was already parameterised over the runner,
+so the collector in [`Conformance.ts`](../src/git/Conformance.ts) is the third
+runner it has been given — after `node:test` — with the suite itself unchanged.
 
-- the contract suite runs on DO SQLite + R2, so "atomic ref update" is verified
+Three things this reaches that unit tests cannot:
+
+- the contract holds on DO SQLite + R2, so "atomic ref update" is verified
   where the input gate provides it rather than where a `Map` does;
-- `evictDurableObject` tears an instance down mid-test, which is how you catch
-  state that was living in the instance rather than in storage. The layer graph
-  is rebuilt on the next call and the refs are still there.
+- `worker.getDurableObjectStorage("GIT_REPO", …).exec(…)` reads the instance's
+  SQLite directly from the test process, proving refs land in storage rather
+  than in a field;
+- `worker.evictDurableObject(…)` tears an instance down mid-test, which is how
+  you catch state that was living in the instance. The layer graph is rebuilt
+  on the next request and the refs are still there.
 
-The two runners own separate file patterns — `*.test.ts` for `node:test`,
-`*.spec.ts` for Vitest — because node's built-in runner claims `*.test.ts` by
-default and would try to import `cloudflare:test` outside workerd.
+Integration files are named `*.integration.ts`, not `*.test.ts`, so node's
+default discovery leaves them out of `npm test` — they boot a runtime and
+belong behind their own script.
 
 ### Tests
 
@@ -357,7 +368,7 @@ the ratchet: it runs against both implementations until the last phase.
 | ----- | -------------------------------------------------------------------- | ------ |
 | 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests          | done   |
 | 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite | done   |
-| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests | done |
+| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness` | done |
 | 2b    | re-point `server.ts`/`worker.ts` at `GitRepo` and retire the old path  | medium |
 | 3     | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed | high  |
 | 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types | medium |

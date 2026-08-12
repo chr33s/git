@@ -8,151 +8,174 @@
  * one request at a time.
  *
  * The existing `Server` in `src/server.ts` is untouched and still serves
- * traffic. This class is the new path: it holds the layer graph, and the
- * integration tests drive it inside workerd against real R2 and DO SQLite.
+ * traffic. This class is the new path, driven end to end by
+ * `Cloudflare.integration.ts` through wrangler's test harness.
  *
  * What the platform gives us here, and what the other backends have to build:
  *
  *   - serialization: the input gate, so `RefStore.apply`'s check-then-write
  *     cannot interleave with another request's;
- *   - isolation: one instance per repo name, so no repo prefix is needed on
- *     ref rows beyond bookkeeping.
+ *   - isolation: one instance per repo name.
  */
 import { DurableObject } from "cloudflare:workers";
 import { Effect, Layer, Stream } from "effect";
 
 import { stores } from "./Cloudflare.ts";
-import { statusOf, type GitError } from "./Error.ts";
-import type { Signature } from "./Format.ts";
-import { EMPTY_TREE_OID } from "./Format.ts";
+import { collector } from "./Conformance.ts";
+import { type GitError, statusOf } from "./Error.ts";
+import { EMPTY_TREE_OID, type Signature } from "./Format.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
+import { storeContract } from "./Store.contract.ts";
 import type { Oid } from "./Store.ts";
+
+/**
+ * The wire shape, which is not the domain shape: JSON has no `Date`, so
+ * `author.at` arrives as a string and has to be parsed. Decoding at the
+ * boundary is what `HttpApi` schemas do for the JSON API in the sketch; this
+ * handler does it by hand until that lands.
+ */
+interface CommitBody {
+  readonly author?: {
+    readonly at?: string;
+    readonly email?: string;
+    readonly name?: string;
+    readonly offset?: number;
+  };
+  readonly branch?: string;
+  readonly expected?: string | null;
+  readonly message?: string;
+}
+
+const signatureFrom = (author: CommitBody["author"]): Signature => ({
+  name: author?.name ?? "Anonymous",
+  email: author?.email ?? "anonymous@example.com",
+  at: author?.at === undefined ? new Date() : new Date(author.at),
+  offset: author?.offset ?? 0,
+});
 
 export class GitRepo extends DurableObject<Env> {
   #layer: Layer.Layer<Repository> | null = null;
 
-  /**
-   * Built once per instance and reused, which is what makes the DO the unit of
-   * isolation rather than the request.
-   */
+  /** Built once per instance: the DO is the unit of isolation, not the request. */
   #live(repo: string): Layer.Layer<Repository> {
     this.#layer ??= GitRepository.layer.pipe(
       Layer.provide(GitRepository.hooksNoop),
-      Layer.provide(
-        stores({
-          bucket: this.env.GIT_OBJECTS,
-          repo,
-          storage: this.ctx.storage,
-        }),
-      ),
+      Layer.provide(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
     );
     return this.#layer;
   }
 
-  #run<A>(repo: string, effect: Effect.Effect<A, GitError, Repository>): Promise<A> {
-    return Effect.runPromise(effect.pipe(Effect.provide(this.#live(repo))));
+  /**
+   * The only place a failure becomes a status code, and it does so from the
+   * error's own `httpApiStatus` annotation rather than a mapping table —
+   * `worker.ts` and `server.api.ts` each keep their own today.
+   */
+  #respond(repo: string, effect: Effect.Effect<Response, GitError, Repository>): Promise<Response> {
+    return Effect.runPromise(
+      effect.pipe(
+        Effect.catch((error: GitError) =>
+          Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
+        ),
+        Effect.provide(this.#live(repo)),
+      ),
+    );
   }
 
-  /**
-   * RPC surface. Each method returns plain data so the Worker in front stays a
-   * router — the failure channel is collapsed at this boundary because RPC
-   * cannot carry a tagged error across the isolate.
-   */
-  async refs(repo: string): Promise<Array<{ name: string; oid: string }>> {
-    return this.#run(
+  override async fetch(request: Request): Promise<Response> {
+    const [, repo = "default", route = "refs", argument] = new URL(request.url).pathname.split("/");
+
+    if (route === "conformance") return this.#conformance(repo);
+
+    if (route === "commit" && request.method === "POST") {
+      const body = (await request.json()) as CommitBody;
+      return this.#respond(
+        repo,
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const oid = yield* repository.commit({
+            author: signatureFrom(body.author),
+            branch: body.branch ?? "main",
+            message: body.message ?? "",
+            tree: EMPTY_TREE_OID,
+            ...(body.expected === undefined ? {} : { expected: body.expected as Oid | null }),
+          });
+          return Response.json({ oid });
+        }),
+      );
+    }
+
+    if (route === "commit" && argument !== undefined) {
+      return this.#respond(
+        repo,
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.readCommit(argument as Oid);
+          return Response.json({
+            message: commit.message,
+            parents: commit.parents,
+            tree: commit.tree,
+          });
+        }),
+      );
+    }
+
+    if (route === "log" && argument !== undefined) {
+      return this.#respond(
+        repo,
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commits = yield* Stream.runCollect(repository.log(argument as Oid, { limit: 50 }));
+          return Response.json({
+            commits: commits.map((commit) => ({ message: commit.message, oid: commit.oid })),
+          });
+        }),
+      );
+    }
+
+    return this.#respond(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
         const refs = yield* repository.refs;
-        return refs.map(([name, oid]) => ({ name, oid }));
-      }),
-    );
-  }
-
-  async commit(
-    repo: string,
-    input: {
-      author: Signature;
-      branch: string;
-      expected?: string | null;
-      message: string;
-      tree?: string;
-    },
-  ): Promise<{ oid: string }> {
-    return this.#run(
-      repo,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const oid = yield* repository.commit({
-          author: input.author,
-          branch: input.branch,
-          message: input.message,
-          tree: (input.tree ?? EMPTY_TREE_OID) as Oid,
-          ...(input.expected === undefined ? {} : { expected: input.expected as Oid | null }),
-        });
-        return { oid };
-      }),
-    );
-  }
-
-  async log(
-    repo: string,
-    from: string,
-    limit = 50,
-  ): Promise<Array<{ message: string; oid: string }>> {
-    return this.#run(
-      repo,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const commits = yield* Stream.runCollect(repository.log(from as Oid, { limit }));
-        return commits.map((commit) => ({ message: commit.message, oid: commit.oid }));
-      }),
-    );
-  }
-
-  async writeBlob(repo: string, data: ArrayBuffer): Promise<{ oid: string }> {
-    return this.#run(
-      repo,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const oid = yield* repository.writeBlob(new Uint8Array(data));
-        return { oid };
+        return Response.json({ refs: refs.map(([name, oid]) => ({ name, oid })) });
       }),
     );
   }
 
   /**
-   * The HTTP surface.
+   * Runs the storage contract against this instance's own R2 + SQLite and
+   * returns the results.
    *
-   * The only place a failure becomes a status code, and it does so from the
-   * error's own annotation rather than a mapping table — `worker.ts` and
-   * `server.api.ts` each keep their own today.
+   * The test process lives outside workerd and cannot reach `storage.sql`, so
+   * the suite runs here and the outcome crosses as JSON. Gated on a var that
+   * only `wrangler.test.json` sets, so it does not exist in a real deployment.
    */
-  override async fetch(request: Request): Promise<Response> {
-    const [, repo = "default", route = "refs", argument] = new URL(request.url).pathname.split("/");
+  async #conformance(repo: string): Promise<Response> {
+    if (this.env.ENABLE_CONFORMANCE !== "1") {
+      return Response.json({ error: "NotFound" }, { status: 404 });
+    }
 
-    const handler =
-      route === "commit" && argument !== undefined
-        ? Effect.gen(function* () {
-            const repository = yield* Repository;
-            const commit = yield* repository.readCommit(argument as Oid);
-            return Response.json({ message: commit.message, tree: commit.tree });
-          })
-        : Effect.gen(function* () {
-            const repository = yield* Repository;
-            const refs = yield* repository.refs;
-            return Response.json({ refs: refs.map(([name, oid]) => ({ name, oid })) });
-          });
+    const bucket = this.env.GIT_OBJECTS;
+    const storage = this.ctx.storage;
+    const { report, runner } = collector();
 
-    return this.#run(
-      repo,
-      handler.pipe(
-        Effect.catch((error: GitError) =>
-          Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
-        ),
-      ),
+    storeContract(
+      "Cloudflare",
+      {
+        run: (effect) =>
+          Effect.runPromise(
+            effect.pipe(
+              // A fresh namespace per test, so the suite starts empty without
+              // needing a fresh Durable Object each time.
+              Effect.provide(stores({ bucket, repo: `${repo}/${crypto.randomUUID()}`, storage })),
+            ) as Effect.Effect<never>,
+          ),
+      },
+      runner,
     );
+
+    return Response.json(await report());
   }
 }
 

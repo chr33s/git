@@ -188,9 +188,10 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
       const read = (name: string) =>
         Effect.try({ try: () => readSync(name), catch: failure("read", name) });
 
+      const headKey = `HEAD:${repo}`;
       const head = Effect.tryPromise({
-        try: () => storage.get<string>("HEAD"),
-        catch: failure("read", "HEAD"),
+        try: () => storage.get<string>(headKey),
+        catch: failure("read", headKey),
       }).pipe(Effect.map((value) => value ?? "refs/heads/main"));
 
       return RefStore.of({
@@ -290,8 +291,8 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
         head,
         setHead: (target) =>
           Effect.tryPromise({
-            try: () => storage.put("HEAD", target),
-            catch: failure("write", "HEAD"),
+            try: () => storage.put(headKey, target),
+            catch: failure("write", headKey),
           }),
         reflog: (name) =>
           Effect.try({
