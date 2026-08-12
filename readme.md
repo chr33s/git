@@ -1,3 +1,6 @@
+> [!NOTE]
+> [artifacts](https://github.com/chr33s/git/tree/artifacts) branch tracks effect@beta / alchemy@beta rewrite, (self hostable cloudflare Artifacts)
+
 > [!WARNING]  
 > Experimental: API is unstable and not production-ready.
 
