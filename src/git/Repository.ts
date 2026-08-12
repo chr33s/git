@@ -57,6 +57,28 @@ export interface FileChange {
 const FILE_MODES = new Set(["100644", "100755", "120000", "160000"]);
 const TREE_MODE = "40000";
 
+/** What upload-pack asks for, shallow options included. */
+export interface FetchRequest {
+  readonly wants: ReadonlyArray<Oid>;
+  readonly haves: ReadonlyArray<Oid>;
+  /** Boundaries the client already records; their parents are absent there. */
+  readonly clientShallow?: ReadonlyArray<Oid>;
+  /** `deepen <n>`: commits this far from a want keep their parents hidden. */
+  readonly depth?: number;
+  /** `deepen-since`: nothing committed before this. */
+  readonly since?: Date;
+  /** `deepen-not <ref>`: nothing reachable from these. */
+  readonly notRefs?: ReadonlyArray<string>;
+}
+
+export interface FetchPlan {
+  /** New boundaries the client must record. */
+  readonly shallow: ReadonlyArray<Oid>;
+  /** Boundaries it may forget, because their parents are in this pack. */
+  readonly unshallow: ReadonlyArray<Oid>;
+  readonly oids: ReadonlyArray<Oid>;
+}
+
 export class Repository extends Context.Service<
   Repository,
   {
@@ -128,6 +150,19 @@ export class Repository extends Context.Service<
       wants: ReadonlyArray<Oid>,
       haves: ReadonlyArray<Oid>,
     ) => Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure>;
+
+    /**
+     * The same answer with shallow options honoured, and the boundary lines
+     * the client needs before the pack. One walk produces both.
+     */
+    readonly fetch: (
+      request: FetchRequest,
+    ) => Effect.Effect<FetchPlan, ObjectNotFound | StorageFailure>;
+
+    /** A pack of exactly these objects, in this order. */
+    readonly packOids: (
+      oids: ReadonlyArray<Oid>,
+    ) => Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure>;
   }
 >()("git/Repository") {}
 
@@ -189,7 +224,16 @@ export const layer = Layer.effect(
      */
     const walk = (
       roots: ReadonlyArray<Oid>,
-      options: { readonly ignoreMissing: boolean; readonly skip?: ReadonlySet<Oid> },
+      options: {
+        readonly ignoreMissing: boolean;
+        readonly skip?: ReadonlySet<Oid>;
+        /**
+         * Commits whose parents are not followed. A shallow client's history
+         * stops at these, so walking past them would mark objects as "already
+         * had" that the client has never seen.
+         */
+        readonly boundary?: ReadonlySet<Oid>;
+      },
     ) =>
       Effect.gen(function* () {
         const seen = new Set<Oid>();
@@ -216,7 +260,8 @@ export const layer = Layer.effect(
               const commit = yield* Effect.fromResult(parseCommit(object.data)).pipe(
                 Effect.mapError(() => new ObjectNotFound({ oid })),
               );
-              stack.push(commit.tree, ...commit.parents);
+              stack.push(commit.tree);
+              if (options.boundary?.has(oid) !== true) stack.push(...commit.parents);
               break;
             }
             case "tree": {
@@ -351,13 +396,145 @@ export const layer = Layer.effect(
       return root;
     });
 
-    const closure = (wants: ReadonlyArray<Oid>, haves: ReadonlyArray<Oid>) =>
+    const closure = (
+      wants: ReadonlyArray<Oid>,
+      haves: ReadonlyArray<Oid>,
+      clientShallow?: ReadonlySet<Oid>,
+    ) =>
       Effect.gen(function* () {
         // What the client has is walked tolerantly: a `have` can reference
         // history this repository never saw, and that is not an error.
-        const excluded = (yield* walk(haves, { ignoreMissing: true })).seen;
+        const excluded = (yield* walk(haves, {
+          ignoreMissing: true,
+          ...(clientShallow === undefined ? {} : { boundary: clientShallow }),
+        })).seen;
         return (yield* walk(wants, { ignoreMissing: false, skip: excluded })).order;
       });
+
+    /**
+     * The objects a set of commits needs, without descending into what the
+     * client already has.
+     *
+     * Blobs are never read: a tree entry's mode says whether it is a subtree,
+     * so the only objects opened here are the trees that have to be walked.
+     */
+    const objectsOf = (commits: ReadonlyArray<Oid>, skip: ReadonlySet<Oid>) =>
+      Effect.gen(function* () {
+        const seen = new Set<Oid>(skip);
+        const order: Oid[] = [];
+        const take = (oid: Oid): boolean => {
+          if (seen.has(oid)) return false;
+          seen.add(oid);
+          order.push(oid);
+          return true;
+        };
+
+        for (const oid of commits) {
+          if (!take(oid)) continue;
+          const commit = yield* readCommit(oid);
+
+          const stack: Oid[] = [commit.tree];
+          while (stack.length > 0) {
+            const treeOid = stack.pop()!;
+            if (treeOid === EMPTY_TREE_OID || !take(treeOid)) continue;
+            for (const entry of yield* readTreeEntries(treeOid)) {
+              // A gitlink names a commit in another repository entirely.
+              if (entry.mode === "160000") continue;
+              if (entry.mode === "40000") stack.push(entry.oid);
+              else take(entry.oid);
+            }
+          }
+        }
+
+        return order;
+      });
+
+    /**
+     * Which commits a fetch may send, and where history is cut.
+     *
+     * A shallow request is a walk with a stop condition — depth, age, or
+     * another ref's history — and the commits whose parents the stop condition
+     * removed are exactly the new boundary the client must record. Doing it in
+     * one pass matters: the boundary lines go out before the pack, so a second
+     * walk would be the same work twice.
+     */
+    const fetchPlan = Effect.fn("Repository.fetch")(function* (input: FetchRequest) {
+      const clientShallow = new Set(input.clientShallow ?? []);
+      const deepening =
+        input.depth !== undefined || input.since !== undefined || (input.notRefs?.length ?? 0) > 0;
+
+      if (!deepening) {
+        const order = yield* closure(input.wants, input.haves, clientShallow);
+        return { shallow: [], unshallow: [], oids: order };
+      }
+
+      // `deepen-not <ref>`: everything reachable from those refs stays put.
+      const blocked = new Set<Oid>();
+      for (const name of input.notRefs ?? []) {
+        const oid = yield* refs.resolve(name);
+        if (oid === null) continue;
+        for (const seen of (yield* walk([oid], { ignoreMissing: true })).seen) blocked.add(seen);
+      }
+
+      const since = input.since?.getTime();
+      const depths = new Map<Oid, number>();
+      const boundary = new Set<Oid>();
+      const order: Oid[] = [];
+      const queue: Array<{ readonly oid: Oid; readonly depth: number }> = input.wants.map(
+        (oid) => ({
+          oid,
+          depth: 1,
+        }),
+      );
+
+      while (queue.length > 0) {
+        const { depth, oid } = queue.shift()!;
+        if (blocked.has(oid)) continue;
+
+        const already = depths.get(oid);
+        // A shallower route to the same commit can extend history past it, so
+        // it is re-examined; an equal or deeper one cannot.
+        if (already !== undefined && already <= depth) continue;
+        if (already === undefined) order.push(oid);
+        depths.set(oid, depth);
+
+        const commit = yield* readCommit(oid);
+        const atLimit = input.depth !== undefined && depth >= input.depth;
+
+        let cut = false;
+        for (const parent of commit.parents) {
+          if (atLimit || blocked.has(parent)) {
+            cut = true;
+            continue;
+          }
+          if (since !== undefined) {
+            const older = (yield* readCommit(parent)).committer.at.getTime() < since;
+            if (older) {
+              cut = true;
+              continue;
+            }
+          }
+          queue.push({ oid: parent, depth: depth + 1 });
+        }
+
+        if (cut) boundary.add(oid);
+        else boundary.delete(oid);
+      }
+
+      const excluded = (yield* walk(input.haves, {
+        ignoreMissing: true,
+        boundary: clientShallow,
+      })).seen;
+
+      return {
+        // Only boundaries the client does not already record are news to it.
+        shallow: [...boundary].filter((oid) => !clientShallow.has(oid)),
+        // A commit the client had as a boundary and whose parents are in this
+        // pack is no longer one.
+        unshallow: [...clientShallow].filter((oid) => depths.has(oid) && !boundary.has(oid)),
+        oids: yield* objectsOf(order, excluded),
+      };
+    });
 
     return Repository.of({
       refs: refs.list("refs/"),
@@ -492,6 +669,9 @@ export const layer = Layer.effect(
             Effect.map((oids) => Pack.pack(oids).pipe(Stream.provideService(ObjectStore, objects))),
           ),
         ),
+
+      fetch: fetchPlan,
+      packOids: (oids) => Pack.pack(oids).pipe(Stream.provideService(ObjectStore, objects)),
     });
   }),
 );

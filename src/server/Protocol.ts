@@ -12,15 +12,15 @@
  *
  * Deliberately not advertised: `multi_ack` (a stateless round-trip either
  * concludes with `done` or restarts, so the client sends everything it has
- * and the worst case is a larger pack, never a wrong one), `side-band-64k`
- * (progress chatter), and `shallow` (rejected explicitly).
+ * and the worst case is a larger pack, never a wrong one) and `thin-pack`
+ * (the writer emits full objects).
  */
 import { createGunzip } from "node:zlib";
 
 import { Effect, Stream } from "effect";
 
 import { type GitError, Invalid, PackCorrupt } from "../git/Error.ts";
-import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
+import { bandChunks, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
@@ -99,8 +99,8 @@ export const advertise = (
 
     const caps =
       service === "git-upload-pack"
-        ? `symref=HEAD:${head} ${AGENT}`
-        : `report-status delete-refs atomic ${AGENT}`;
+        ? `shallow deepen-since deepen-not side-band-64k symref=HEAD:${head} ${AGENT}`
+        : `report-status delete-refs atomic side-band-64k ${AGENT}`;
 
     const lines: string[] = [];
     if (service === "git-upload-pack") {
@@ -143,23 +143,59 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
 
     const wants: Oid[] = [];
     const haves: Oid[] = [];
+    const clientShallow: Oid[] = [];
+    const notRefs: string[] = [];
+    let depth: number | undefined;
+    let since: Date | undefined;
+    let sideband = false;
     let done = false;
+    let first = true;
 
     yield* step(async () => {
       for (;;) {
         const item = await reader.next();
         if (item === "eof") return;
         if (item === "flush") continue;
-        const line = text(item);
+        let line = text(item);
+
+        // Capabilities ride on the first `want`, space-separated after the
+        // oid — unlike receive-pack, which puts them after a NUL. Reading
+        // this wrong is silent: the client negotiates side-band and the
+        // server answers with a raw pack.
+        if (first && line.startsWith("want ")) {
+          const capabilities = line.slice(45).trim();
+          if (capabilities !== "") {
+            sideband = capabilities.split(" ").includes("side-band-64k");
+            line = line.slice(0, 45).trimEnd();
+          }
+          first = false;
+        }
+
         const [keyword] = line.split(" ", 1);
-        const oid = line.slice((keyword?.length ?? 0) + 1, (keyword?.length ?? 0) + 41);
+        const argument = line.slice((keyword?.length ?? 0) + 1);
+        const oid = argument.slice(0, 40);
+
         if (keyword === "want" && isOid(oid)) wants.push(oid);
         else if (keyword === "have" && isOid(oid)) haves.push(oid);
-        else if (line === "done") {
+        else if (keyword === "shallow" && isOid(oid)) clientShallow.push(oid);
+        else if (keyword === "deepen") {
+          const value = Number.parseInt(argument, 10);
+          // `deepen 0` is git's way of saying "no depth limit".
+          if (!Number.isInteger(value) || value < 0) {
+            throw new Invalid({ field: "deepen", reason: `bad depth '${argument}'` });
+          }
+          if (value > 0) depth = value;
+        } else if (keyword === "deepen-since") {
+          const seconds = Number.parseInt(argument, 10);
+          if (!Number.isInteger(seconds)) {
+            throw new Invalid({ field: "deepen-since", reason: `bad timestamp '${argument}'` });
+          }
+          since = new Date(seconds * 1000);
+        } else if (keyword === "deepen-not") {
+          notRefs.push(argument);
+        } else if (line === "done") {
           done = true;
           return;
-        } else if (keyword === "deepen" || keyword === "shallow") {
-          throw new Invalid({ field: "depth", reason: "shallow fetch is not supported" });
         } else {
           throw new Invalid({ field: "upload-pack", reason: `unexpected line '${line}'` });
         }
@@ -170,6 +206,30 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
       return yield* new Invalid({ field: "upload-pack", reason: "no 'want' lines" });
     }
 
+    const plan = yield* repository.fetch({
+      wants,
+      haves,
+      clientShallow,
+      ...(depth === undefined ? {} : { depth }),
+      ...(since === undefined ? {} : { since }),
+      ...(notRefs.length === 0 ? {} : { notRefs }),
+    });
+
+    const deepening = depth !== undefined || since !== undefined || notRefs.length > 0;
+
+    /**
+     * The boundary section comes before anything else, and only when the
+     * client asked to deepen — it is how the client learns which commits to
+     * record as having hidden parents.
+     */
+    const boundary = !deepening
+      ? []
+      : [
+          ...plan.shallow.map((oid) => pkt(`shallow ${oid}\n`)),
+          ...plan.unshallow.map((oid) => pkt(`unshallow ${oid}\n`)),
+          FLUSH,
+        ];
+
     // Protocol v0 without multi_ack: acknowledge the first `have` this
     // repository possesses, or NAK.
     let common: Oid | null = null;
@@ -178,17 +238,30 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
     }
 
     if (!done) {
-      // A pure negotiation round; with nothing more to add, NAK tells the
+      // Two shapes here, and the difference is not cosmetic. A deepen round
+      // is answered with the boundary section and its flush *alone*:
+      // fetch-pack reads exactly that much before deciding what to ask for
+      // next, and a trailing NAK leaves it reading a pack that is not there.
+      // A plain negotiation round has no boundary, and NAK is what tells a
       // stateless client to come back with `done`.
-      return new Response(asBody(pkt("NAK\n")), {
+      return new Response(asBody(concat(deepening ? boundary : [pkt("NAK\n")])), {
         headers: headers("application/x-git-upload-pack-result"),
       });
     }
 
-    const prelude = common === null ? pkt("NAK\n") : pkt(`ACK ${common}\n`);
+    const prelude = concat([...boundary, common === null ? pkt("NAK\n") : pkt(`ACK ${common}\n`)]);
+    const pack = repository.packOids(plan.oids);
+
     const packStream = Stream.concat(
       Stream.fromIterable([prelude]),
-      repository.packOf(wants, haves),
+      // Multiplexed when asked for: pack bytes on band 1, and a flush to
+      // close the stream, which an unmultiplexed body does not need.
+      sideband
+        ? Stream.concat(
+            pack.pipe(Stream.flatMap((bytes) => Stream.fromIterable(bandChunks(bytes)))),
+            Stream.fromIterable([FLUSH]),
+          )
+        : pack,
     );
 
     return new Response(Stream.toReadableStream(packStream), {
@@ -213,6 +286,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
 
     const updates: RefUpdate[] = [];
     let atomic = false;
+    let sideband = false;
     let first = true;
 
     yield* step(async () => {
@@ -226,10 +300,9 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
           const nul = line.indexOf("\0");
           if (nul !== -1) {
             command = line.slice(0, nul);
-            atomic = line
-              .slice(nul + 1)
-              .split(" ")
-              .includes("atomic");
+            const caps = line.slice(nul + 1).split(" ");
+            atomic = caps.includes("atomic");
+            sideband = caps.includes("side-band-64k");
           }
           first = false;
         }
@@ -256,10 +329,15 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       return yield* new Invalid({ field: "receive-pack", reason: "no commands" });
     }
 
-    const respond = (results: ReadonlyArray<ReceiveResult>, unpacked: string) =>
-      new Response(asBody(report(results, unpacked)), {
+    const respond = (results: ReadonlyArray<ReceiveResult>, unpacked: string) => {
+      const status = report(results, unpacked);
+      // A client that asked for side-band expects the report on band 1, and
+      // a flush to close the stream; sending it raw would desynchronise it.
+      const payload = sideband ? concat([...bandChunks(status), FLUSH]) : status;
+      return new Response(asBody(payload), {
         headers: headers("application/x-git-receive-pack-result"),
       });
+    };
     const allFailed = (reason: string): ReadonlyArray<ReceiveResult> =>
       updates.map((update) => ({
         ref: update.name,

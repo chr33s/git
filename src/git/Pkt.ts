@@ -24,6 +24,38 @@ export const pkt = (line: string | Uint8Array): Uint8Array => {
 export const FLUSH = encoder.encode("0000");
 
 /**
+ * Side-band channels, as `side-band-64k` defines them: pack bytes on 1,
+ * progress on 2, a fatal error on 3. Multiplexing exists so a fetch can say
+ * something while the pack is still being built — without it a slow walk is
+ * indistinguishable from a hung connection.
+ */
+export const BAND = { pack: 1, progress: 2, error: 3 } as const;
+
+/**
+ * 65520 payload bytes, which with the band byte and the 4-byte length header
+ * is the 65524 maximum the capability's name promises.
+ */
+export const SIDEBAND_MAX = 65_520;
+
+/** One side-band packet. Callers on band 1 must respect `SIDEBAND_MAX`. */
+export const band = (channel: (typeof BAND)[keyof typeof BAND], payload: string | Uint8Array) => {
+  const bytes = typeof payload === "string" ? encoder.encode(payload) : payload;
+  const framed = new Uint8Array(bytes.length + 1);
+  framed[0] = channel;
+  framed.set(bytes, 1);
+  return pkt(framed);
+};
+
+/** A chunk split across as many band-1 packets as its length needs. */
+export const bandChunks = (payload: Uint8Array): ReadonlyArray<Uint8Array> => {
+  const out: Uint8Array[] = [];
+  for (let offset = 0; offset < payload.length; offset += SIDEBAND_MAX) {
+    out.push(band(BAND.pack, payload.subarray(offset, offset + SIDEBAND_MAX)));
+  }
+  return out;
+};
+
+/**
  * Pull-based pkt-line reader; `rest()` hands the remainder to the pack
  * parser. Exported because the client side of the protocol (`artifacts`
  * import) reads the same framing.

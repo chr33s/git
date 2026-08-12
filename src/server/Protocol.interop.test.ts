@@ -118,6 +118,74 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
     await git(work, "fsck", "--strict");
   });
 
+  /** A repository with `count` commits on main, oldest first. */
+  const seedHistory = async (repo: string, count: number): Promise<ReadonlyArray<string>> => {
+    const oids: string[] = [];
+    for (let index = 0; index < count; index++) {
+      oids.push(
+        await inRepo(
+          repo,
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const blob = yield* repository.writeBlob(new TextEncoder().encode(`v${index}\n`));
+            const tree = yield* repository.writeTree([
+              { mode: "100644", name: "file.txt", oid: blob },
+            ]);
+            return yield* repository.commit({
+              branch: "main",
+              tree,
+              message: `commit ${index}`,
+              // Spaced a day apart so `--shallow-since` has something to cut.
+              author: { ...author, at: new Date(1_700_000_000_000 + index * 86_400_000) },
+            });
+          }),
+        ),
+      );
+    }
+    return oids;
+  };
+
+  it("serves a shallow clone, and deepens it on request", async () => {
+    await seedHistory("shallowme", 5);
+
+    const work = path.join(root, "work-shallow");
+    await git(root, "clone", "--quiet", "--depth=1", `${base}/shallowme`, work);
+
+    // One commit, and git agrees the clone is shallow.
+    assert.equal((await git(work, "rev-list", "--count", "HEAD")).trim(), "1");
+    assert.match(await git(work, "log", "--format=%s"), /^commit 4$/m);
+    assert.equal((await git(work, "rev-parse", "--is-shallow-repository")).trim(), "true");
+
+    // The boundary the server reported is the one git recorded.
+    const shallowFile = (await fs.readFile(path.join(work, ".git", "shallow"), "utf8")).trim();
+    assert.equal(shallowFile, (await git(work, "rev-parse", "HEAD")).trim());
+
+    // Deepening asks for more, and the boundary moves rather than resetting.
+    await git(work, "fetch", "--quiet", "--depth=3", "origin", "main");
+    assert.equal((await git(work, "rev-list", "--count", "origin/main")).trim(), "3");
+
+    // And `--unshallow` completes it: no boundary left, whole history present.
+    await git(work, "fetch", "--quiet", "--unshallow", "origin", "main");
+    assert.equal((await git(work, "rev-list", "--count", "origin/main")).trim(), "5");
+    assert.equal((await git(work, "rev-parse", "--is-shallow-repository")).trim(), "false");
+
+    // The objects that arrived across three rounds are consistent.
+    await git(work, "fsck", "--strict");
+  });
+
+  it("honours --shallow-since", async () => {
+    await seedHistory("sincey", 5);
+
+    const work = path.join(root, "work-since");
+    // Commits are a day apart starting at 1_700_000_000; cut before the last two.
+    const cutoff = new Date(1_700_000_000_000 + 3 * 86_400_000).toISOString();
+    await git(root, "clone", "--quiet", `--shallow-since=${cutoff}`, `${base}/sincey`, work);
+
+    assert.equal((await git(work, "rev-list", "--count", "HEAD")).trim(), "2");
+    assert.equal((await git(work, "rev-parse", "--is-shallow-repository")).trim(), "true");
+    await git(work, "fsck", "--strict");
+  });
+
   it("serves the same repository with or without the .git suffix", async () => {
     await seed("suffixed");
 
