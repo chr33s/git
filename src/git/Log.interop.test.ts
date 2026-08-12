@@ -16,28 +16,16 @@ import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
 import { Effect, Layer, Stream } from "effect";
 
+import { gitIn, hasGit } from "../testing/Git.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
 import type { Oid } from "./Store.ts";
 
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
-
 describe.skipIf(!hasGit)("log, against git", () => {
   let root: string;
 
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.com", ...args], {
-      cwd: root,
-      encoding: "utf8",
-    });
+  const git = (...args: string[]) => gitIn(root)(...args);
 
   /**
    * Each commit is a second later than the last.

@@ -15,28 +15,16 @@ import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
 import { Effect, Layer, Stream } from "effect";
 
+import { gitIn, hasGit } from "../testing/Git.ts";
 import { forPath } from "./History.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import type { Oid } from "./Store.ts";
 
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
-
 describe.skipIf(!hasGit)("path history", () => {
   let root: string;
 
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.com", ...args], {
-      cwd: root,
-      encoding: "utf8",
-    });
+  const git = (...args: string[]) => gitIn(root)(...args);
 
   const write = (file: string, content: string) =>
     execFileSync(

@@ -15,6 +15,7 @@ import { describe, it } from "@effect/vitest";
 
 import { Result } from "effect";
 
+import { hasGit } from "../testing/Git.ts";
 import {
   addEntry,
   decodeIndex,
@@ -57,15 +58,6 @@ const entry = (overrides: Partial<IndexEntry> & { readonly path: string }): Inde
   assumeValid: false,
   ...overrides,
 });
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 describe("Index", () => {
   it("round-trips entries through the DIRC format", () => {

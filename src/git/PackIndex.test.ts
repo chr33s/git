@@ -8,6 +8,7 @@ import { describe, it } from "@effect/vitest";
 
 import { Result } from "effect";
 
+import { hasGit } from "../testing/Git.ts";
 import { bytesToHex, hexToBytes } from "./Format.ts";
 import {
   buildPackIndex,
@@ -48,15 +49,6 @@ const packChecksum = Uint8Array.from({ length: 20 }, (_, index) => index * 7);
 
 const readU32 = (bytes: Uint8Array, at: number): number =>
   new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(at);
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 describe("PackIndex", () => {
   it("round-trips entries, sorted by oid", () => {

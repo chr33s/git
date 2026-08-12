@@ -49,11 +49,12 @@ export interface BisectStep {
 /**
  * Every commit reachable from `from`, and each one's parents.
  *
- * Deliberately not `Repository.log`, which follows first parents only. That
- * is the right walk for `git log` and for replaying a branch, but a bisect
- * that used it would never suspect anything merged in from a side branch —
- * it would silently search half the history and confidently name the wrong
- * commit. Reachability here has to mean all parents.
+ * Not `Repository.log`, and not because of the walk it does — `log` follows
+ * every parent now. What it also does is pay for `git log`'s output order: a
+ * date-sorted frontier and a tie-break that re-walks commits sharing a
+ * timestamp. Reachability has no order to get right, so a plain traversal
+ * collecting parents is both sufficient and cheaper on exactly the histories
+ * bisect exists for.
  */
 const reachableFrom = Effect.fn("Bisect.reachableFrom")(function* (roots: ReadonlyArray<Oid>) {
   const repository = yield* Repository;

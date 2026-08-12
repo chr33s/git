@@ -13,7 +13,7 @@
  * Skipped when `git` is not on PATH.
  */
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHmac } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
@@ -24,15 +24,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
 import { serve, type Server } from "../host/Node.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+import { hasGit } from "../testing/Git.ts";
 
 const execFileAsync = promisify(execFile);
 

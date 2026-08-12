@@ -31,16 +31,8 @@ import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { serve, type Server } from "../host/Node.ts";
+import { hasGit } from "../testing/Git.ts";
 import { fetchRepository, type FetchResult } from "./Fetch.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const gitExecPath = hasGit ? execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim() : "";
 const httpBackendPath = path.join(gitExecPath, "git-http-backend");

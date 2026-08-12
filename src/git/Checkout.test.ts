@@ -7,7 +7,6 @@
  * result, stage with git and let ours describe it.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +14,7 @@ import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
+import { gitIn, hasGit } from "../testing/Git.ts";
 import * as Checkout from "./Checkout.ts";
 import { stores as memoryStores } from "./Memory.ts";
 import { stores as nodeStores } from "./Node.ts";
@@ -23,15 +23,6 @@ import { Repository } from "./Repository.ts";
 import { RefStore } from "./Store.ts";
 import { indexMemory, workTreeMemory, WorkTree } from "./Work.ts";
 import { workspace } from "./Work.node.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const author = {
   name: "Alice",
@@ -198,11 +189,7 @@ describe.skipIf(!hasGit)("working tree, against git", () => {
       Layer.provideMerge(workspace(checkout)),
     );
 
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.com", ...args], {
-      cwd,
-      encoding: "utf8",
-    });
+  const git = (cwd: string, ...args: string[]) => gitIn(cwd)(...args);
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "worktree-"));

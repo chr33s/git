@@ -22,6 +22,7 @@ import { Effect, Layer, Stream } from "effect";
 import type { Signature } from "./Format.ts";
 import { stores } from "./Memory.ts";
 import { stores as nodeStores } from "./Node.ts";
+import { hasGit } from "../testing/Git.ts";
 import { cherryPick, rebase } from "./Rebase.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
@@ -29,15 +30,6 @@ import { type Oid, RefStore } from "./Store.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const alice: Signature = {
   name: "Alice",

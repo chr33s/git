@@ -22,21 +22,13 @@ import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
+import { gitIn, hasGit } from "../testing/Git.ts";
 import { next } from "./Bisect.ts";
 import { stores as memoryStores } from "./Memory.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
 import type { Oid } from "./Store.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const author = {
   name: "Alice",
@@ -121,11 +113,7 @@ describe("bisect", () => {
 describe.skipIf(!hasGit)("bisect, against git", () => {
   let root: string;
 
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.com", ...args], {
-      cwd: root,
-      encoding: "utf8",
-    });
+  const git = (...args: string[]) => gitIn(root)(...args);
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "bisect-"));

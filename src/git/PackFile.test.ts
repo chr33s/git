@@ -12,25 +12,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
+import { gitIn, hasGit } from "../testing/Git.ts";
 import { parsePackIndex } from "./PackIndex.ts";
 import { bufferSource, type PackSource, readAt } from "./PackFile.ts";
 import { Result } from "effect";
 import type { Oid } from "./Store.ts";
 
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
-
-const git = (cwd: string, ...args: string[]) =>
-  execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.com", ...args], {
-    cwd,
-    encoding: "utf8",
-  });
+const git = (cwd: string, ...args: string[]) => gitIn(cwd)(...args);
 
 /** Nothing to resolve: a pack git wrote is self-contained. */
 const noBases = () => Promise.resolve(null);

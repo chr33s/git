@@ -18,17 +18,9 @@ import { describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 
 import { encodeCommit, encodeTree } from "./Format.ts";
+import { hasGit } from "../testing/Git.ts";
 import { stores } from "./Node.ts";
 import { ObjectStore, RefStore } from "./Store.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const author = {
   name: "Alice",

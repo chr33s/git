@@ -18,20 +18,12 @@ import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
 import { Effect, Layer, Stream } from "effect";
 
+import { hasGit } from "../testing/Git.ts";
 import { stores as memoryStores } from "./Memory.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
 import { ObjectStore, type Oid, RefStore } from "./Store.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const author = {
   name: "Alice",

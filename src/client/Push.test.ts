@@ -11,7 +11,7 @@
  * and always run.
  */
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,16 +25,8 @@ import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { serve, type Server } from "../host/Node.ts";
+import { hasGit } from "../testing/Git.ts";
 import { push, type PushRef, type PushResult } from "./Push.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const execFileAsync = promisify(execFile);
 

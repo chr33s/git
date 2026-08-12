@@ -18,17 +18,9 @@ import { describe, it } from "@effect/vitest";
 import { Effect, Stream } from "effect";
 
 import { stores } from "./Memory.ts";
+import { hasGit } from "../testing/Git.ts";
 import { pack, unpack } from "./Pack.ts";
 import { ObjectStore, type Oid } from "./Store.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" });

@@ -16,7 +16,7 @@
  * and a divergence reports and leaves it alone.
  */
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -29,17 +29,9 @@ import { Effect } from "effect";
 import { remote } from "../client/Client.ts";
 import type { Sql } from "../git/Sql.ts";
 import { serve, type Server } from "../host/Node.ts";
+import { hasGit } from "../testing/Git.ts";
 import { file as remotesFile } from "./Remotes.node.ts";
 import * as Remotes from "./Remotes.ts";
-
-const hasGit = (() => {
-  try {
-    execFileSync("git", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
 const execFileAsync = promisify(execFile);
 
