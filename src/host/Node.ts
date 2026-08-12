@@ -24,6 +24,8 @@ import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
+import { file as lfsFile } from "../server/Lfs.node.ts";
+import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { routeOf } from "../server/Route.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
@@ -51,9 +53,12 @@ export interface Server {
 
 export const serve = async (options: ServeOptions): Promise<Server> => {
   const hostname = options.hostname ?? "127.0.0.1";
+  /** Only reached by a client that sent no `Host`, which HTTP/1.1 requires. */
+  let fallbackAuthority = `${hostname}:${options.port ?? 0}`;
 
   interface RepoState {
     readonly layer: Layer.Layer<Repository>;
+    readonly lfs: Layer.Layer<Lfs.LfsStore>;
     readonly api: (request: Request) => Promise<Response>;
     /** The input-gate stand-in: requests to one repo run strictly in order. */
     gate: Promise<unknown>;
@@ -78,6 +83,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
     const state: RepoState = {
       layer,
+      lfs: lfsFile(path.join(options.root, repo, "lfs")),
       api: HttpRouter.toWebHandler(
         Api.layer.pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
         { disableLogger: true },
@@ -91,6 +97,14 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const dispatch = async (repo: string, request: Request): Promise<Response> => {
     const state = stateFor(repo);
     const run = async () => {
+      // LFS first: it shares the `info/` prefix with the advertisement, and
+      // its bodies are the large ones, so it must not be behind a handler
+      // that would read them.
+      const lfs = await Effect.runPromise(
+        Lfs.handle(request).pipe(Effect.provide(state.lfs)) as Effect.Effect<Response | null>,
+      );
+      if (lfs !== null) return lfs;
+
       const matched = await Effect.runPromise(
         Protocol.handle(request).pipe(
           Effect.catch((error) =>
@@ -111,7 +125,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
   const server = http.createServer((incoming, outgoing) => {
     void (async () => {
-      const url = new URL(incoming.url ?? "/", `http://${hostname}`);
+      // The `Host` header, not the bind address: a handler that has to hand
+      // a client an absolute URL back — the LFS batch API does — can only
+      // build one that works from the authority the client actually used.
+      const authority = incoming.headers.host ?? fallbackAuthority;
+      const url = new URL(incoming.url ?? "/", `http://${authority}`);
       const matched = routeOf(url.pathname);
       if (matched === null) {
         outgoing.writeHead(400);
@@ -159,8 +177,12 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     server.listen(options.port ?? 0, hostname, resolve);
   });
 
+  // Known only now, because port 0 means "whichever one is free".
+  const bound = (server.address() as AddressInfo).port;
+  fallbackAuthority = `${hostname}:${bound}`;
+
   return {
-    url: `http://${hostname}:${(server.address() as AddressInfo).port}`,
+    url: `http://${hostname}:${bound}`,
     close: () =>
       new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

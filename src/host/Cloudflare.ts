@@ -21,6 +21,8 @@ import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
+import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
+import * as LfsCore from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { normalize, routeOf } from "../server/Route.ts";
 import * as Subscribers from "../server/Subscribers.ts";
@@ -106,6 +108,17 @@ export default Repo.make(
             }
             const { repo, route } = matched;
             request = normalize(request, matched);
+
+            // LFS shares the `info/` prefix with the advertisement, so it is
+            // tried first; its bodies are the large ones.
+            if (route === "info" && matched.rest.includes("/lfs/")) {
+              return LfsCore.handle(request).pipe(
+                Effect.map(
+                  (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+                ),
+                Effect.provide(lfsR2({ bucket: r2, repo })),
+              );
+            }
 
             if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
               return Protocol.handle(request).pipe(

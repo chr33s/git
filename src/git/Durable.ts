@@ -18,6 +18,8 @@ import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
+import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
+import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { normalize, routeOf } from "../server/Route.ts";
 import * as Subscribers from "../server/Subscribers.ts";
@@ -105,6 +107,19 @@ export class GitRepo extends DurableObject<TestEnv> {
 
     if (route === "conformance") return this.#conformance(repo);
     if (route === "registry-conformance") return this.#registryConformance();
+
+    // LFS shares the `info/` prefix with the advertisement, so it is tried
+    // first; its bodies are the large ones.
+    if (route === "info" && matched.rest.includes("/lfs/")) {
+      return Effect.runPromise(
+        Lfs.handle(request).pipe(
+          Effect.map(
+            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+          ),
+          Effect.provide(lfsR2({ bucket: this.env.GIT_OBJECTS, repo })),
+        ),
+      );
+    }
 
     // The smart-HTTP endpoints; everything else is the JSON API.
     if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {

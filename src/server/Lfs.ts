@@ -1,0 +1,266 @@
+/**
+ * Git LFS: the batch API and the basic transfer.
+ *
+ *   POST …/info/lfs/objects/batch      what to upload or download, and where
+ *   PUT  …/info/lfs/objects/:oid       the bytes
+ *   GET  …/info/lfs/objects/:oid       the bytes back
+ *
+ * Large files are exactly what must not be buffered — an LFS object is large
+ * by definition, and a Durable Object has 128 MiB — so the port is a stream in
+ * both directions and every backend has to answer for it.
+ *
+ * LFS names objects by SHA-256, not by git's SHA-1, so this is a separate
+ * keyspace from `ObjectStore` rather than a corner of it. Verifying that the
+ * bytes hash to the name they were given is the backend's job, because the
+ * streaming digest is the one primitive that differs per platform
+ * (`node:crypto` on node, `crypto.DigestStream` on Workers).
+ */
+import { Context, Effect, Stream } from "effect";
+
+import { Invalid, ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+
+/** LFS object ids are SHA-256, so 64 hex characters rather than git's 40. */
+export const isLfsOid = (value: string): boolean => /^[0-9a-f]{64}$/.test(value);
+
+export const MEDIA_TYPE = "application/vnd.git-lfs+json";
+
+export interface LfsObject {
+  readonly oid: string;
+  readonly size: number;
+}
+
+export class LfsStore extends Context.Service<
+  LfsStore,
+  {
+    /** `null` when absent — the batch API's whole job is answering this. */
+    readonly head: (oid: string) => Effect.Effect<LfsObject | null, StorageFailure>;
+    readonly read: (
+      oid: string,
+    ) => Effect.Effect<Stream.Stream<Uint8Array, StorageFailure>, ObjectNotFound | StorageFailure>;
+    /**
+     * Stores the bytes and returns what was actually written. Fails `Invalid`
+     * when the content does not hash to `oid` — a corrupt LFS object that is
+     * accepted silently is worse than a rejected upload.
+     */
+    readonly write: (
+      oid: string,
+      body: Stream.Stream<Uint8Array, StorageFailure>,
+    ) => Effect.Effect<LfsObject, StorageFailure | Invalid>;
+  }
+>()("server/LfsStore") {}
+
+const json = (value: unknown, status = 200): Response =>
+  new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": MEDIA_TYPE, "cache-control": "no-cache" },
+  });
+
+const failure = (status: number, message: string): Response => json({ message }, status);
+
+interface BatchRequest {
+  readonly operation?: string;
+  readonly transfers?: ReadonlyArray<string>;
+  readonly objects?: ReadonlyArray<{ readonly oid?: unknown; readonly size?: unknown }>;
+}
+
+/**
+ * The href a client should use for one object.
+ *
+ * Derived from the request rather than configured: the server may be behind
+ * any hostname, and the one URL known to work is the one that just arrived.
+ */
+const hrefFor = (request: Request, oid: string): string => {
+  const url = new URL(request.url);
+  url.pathname = url.pathname.replace(/\/batch$/, `/${oid}`);
+  url.search = "";
+  return url.toString();
+};
+
+const batch = (request: Request): Effect.Effect<Response, never, LfsStore> =>
+  Effect.gen(function* () {
+    const store = yield* LfsStore;
+
+    const parsed = yield* Effect.tryPromise(() => request.json() as Promise<BatchRequest>).pipe(
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (parsed === null) return failure(400, "malformed batch request");
+
+    const operation = parsed.operation;
+    if (operation !== "download" && operation !== "upload") {
+      return failure(422, `unsupported operation '${String(operation)}'`);
+    }
+
+    // `basic` is the only transfer this server implements, and saying so is
+    // how a client knows not to try for a fancier one.
+    const transfers = parsed.transfers ?? ["basic"];
+    if (!transfers.includes("basic")) {
+      return failure(422, "only the 'basic' transfer is supported");
+    }
+
+    const objects = yield* Effect.forEach(parsed.objects ?? [], (requested) =>
+      Effect.gen(function* () {
+        const oid = typeof requested.oid === "string" ? requested.oid : "";
+        const size = typeof requested.size === "number" ? requested.size : -1;
+
+        if (!isLfsOid(oid) || size < 0) {
+          return {
+            oid,
+            size: Math.max(size, 0),
+            error: { code: 422, message: "invalid oid or size" },
+          };
+        }
+
+        const existing = yield* store.head(oid).pipe(Effect.orElseSucceed(() => null));
+        const href = hrefFor(request, oid);
+
+        if (operation === "download") {
+          if (existing === null) {
+            return { oid, size, error: { code: 404, message: "object not found" } };
+          }
+          return {
+            oid,
+            size: existing.size,
+            actions: { download: { href, expires_in: 3600 } },
+          };
+        }
+
+        // Upload: an object already held needs no action at all, which is
+        // what makes a re-push of an existing file free.
+        if (existing !== null) return { oid, size: existing.size };
+        return { oid, size, actions: { upload: { href, expires_in: 3600 } } };
+      }),
+    );
+
+    return json({ transfer: "basic", objects });
+  });
+
+const download = (oid: string): Effect.Effect<Response, never, LfsStore> =>
+  Effect.gen(function* () {
+    const store = yield* LfsStore;
+    if (!isLfsOid(oid)) return failure(422, "invalid oid");
+
+    const found = yield* store.head(oid).pipe(Effect.orElseSucceed(() => null));
+    if (found === null) return failure(404, "object not found");
+
+    return yield* store.read(oid).pipe(
+      Effect.map(
+        (stream) =>
+          new Response(Stream.toReadableStream(stream), {
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-length": String(found.size),
+            },
+          }),
+      ),
+      Effect.catch(() => Effect.succeed(failure(404, "object not found"))),
+    );
+  });
+
+const upload = (request: Request, oid: string): Effect.Effect<Response, never, LfsStore> =>
+  Effect.gen(function* () {
+    const store = yield* LfsStore;
+    if (!isLfsOid(oid)) return failure(422, "invalid oid");
+
+    const body = request.body;
+    const bytes: Stream.Stream<Uint8Array, StorageFailure> =
+      body === null
+        ? Stream.empty
+        : (Stream.fromReadableStream({
+            evaluate: () => body as ReadableStream<Uint8Array>,
+            onError: (cause) => cause,
+          }) as unknown as Stream.Stream<Uint8Array, StorageFailure>);
+
+    return yield* store.write(oid, bytes).pipe(
+      Effect.map(() => new Response(null, { status: 200 })),
+      Effect.catchTag("Invalid", (error) => Effect.succeed(failure(422, error.reason))),
+      Effect.catchTag("StorageFailure", () =>
+        Effect.succeed(failure(500, "could not store object")),
+      ),
+    );
+  });
+
+/**
+ * Route an LFS request whose repository the caller has already resolved.
+ * `null` means "not an LFS request", so a host can try the next handler.
+ */
+export const handle = (request: Request): Effect.Effect<Response | null, never, LfsStore> =>
+  Effect.suspend(() => {
+    const segments = new URL(request.url).pathname.split("/").filter((part) => part !== "");
+    // …/info/lfs/objects/<batch|oid>
+    const objectsAt = segments.findIndex(
+      (part, index) =>
+        part === "objects" && segments[index - 1] === "lfs" && segments[index - 2] === "info",
+    );
+    if (objectsAt === -1) return Effect.succeed(null);
+
+    const last = segments[objectsAt + 1];
+    if (last === undefined) return Effect.succeed(null);
+
+    if (last === "batch") {
+      return request.method === "POST"
+        ? batch(request)
+        : Effect.succeed(failure(405, "batch requires POST"));
+    }
+    if (request.method === "GET") return download(last);
+    if (request.method === "PUT") return upload(request, last);
+    return Effect.succeed(failure(405, `unsupported method ${request.method}`));
+  });
+
+/** The pointer file git-lfs writes in place of the content. */
+export const parsePointer = (
+  content: string,
+): { readonly oid: string; readonly size: number } | null => {
+  const lines = content.split("\n");
+  if (lines[0] !== "version https://git-lfs.github.com/spec/v1") return null;
+
+  const oid = lines.find((line) => line.startsWith("oid sha256:"))?.slice(11);
+  const size = Number(lines.find((line) => line.startsWith("size "))?.slice(5));
+  if (oid === undefined || !isLfsOid(oid) || !Number.isInteger(size) || size < 0) return null;
+  return { oid, size };
+};
+
+export const formatPointer = (object: LfsObject): string =>
+  `version https://git-lfs.github.com/spec/v1\noid sha256:${object.oid}\nsize ${object.size}\n`;
+
+/** Bytes in memory: what a test wants, and what nothing else should use. */
+export const memory = Effect.sync(() => {
+  const objects = new Map<string, Uint8Array>();
+  return LfsStore.of({
+    head: (oid) =>
+      Effect.sync(() => {
+        const found = objects.get(oid);
+        return found === undefined ? null : { oid, size: found.length };
+      }),
+    read: (oid) =>
+      Effect.suspend(() => {
+        const found = objects.get(oid);
+        return found === undefined
+          ? Effect.fail(new ObjectNotFound({ oid }))
+          : Effect.succeed(Stream.make(found));
+      }),
+    write: (oid, body) =>
+      Effect.gen(function* () {
+        const chunks = yield* Stream.runCollect(body);
+        const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        const digest = yield* Effect.promise(() =>
+          crypto.subtle.digest("SHA-256", bytes.slice().buffer),
+        );
+        const actual = [...new Uint8Array(digest)]
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("");
+        if (actual !== oid) {
+          return yield* new Invalid({ field: "oid", reason: `content hashes to ${actual}` });
+        }
+
+        objects.set(oid, bytes);
+        return { oid, size: bytes.length };
+      }),
+  });
+});
