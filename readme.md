@@ -9,14 +9,14 @@ Universal Git smart-HTTP protocol server, browser client & unix cli — built on
 The repository is a ground-up rewrite in progress: the git core, the
 smart-HTTP server, the JSON API and the node host are real, tested code —
 stock `git` clones from and pushes to it, on Workers or self-hosted — while
-the browser client and the alchemy deployment stack remain typechecked
-design sketches. See [`docs/rewrite.md`](./docs/rewrite.md) for the full plan and
+only the alchemy deployment stack remains a typechecked design sketch. See [`docs/rewrite.md`](./docs/rewrite.md) for the full plan and
 rationale.
 
 ## Prerequisites
 
 - Node.js 24+ and npm 11+
 - `git` on `PATH` (the interop tests drive the real binary)
+- Chromium via Playwright, optional (the real-browser test skips without it)
 
 ## Architecture
 
@@ -70,10 +70,12 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it  |
 | `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable     |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag     |
-| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, browser-compatible    |
+| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone (node/workerd today)   |
 | `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token — `npx chr33s-git`       |
+| `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend  |
+| `src/client/Client.ts`       | browser client: derived JSON client + local `Repository` over OPFS |
 | `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers |
-| `src/git/Store.contract.ts`  | one storage contract suite, run against all three backends         |
+| `src/git/Store.contract.ts`  | one storage contract suite, run against all four backends          |
 
 The Worker (`wrangler.json` → `src/git/Durable.ts`) serves the git smart-HTTP
 protocol — stock `git` clones from and pushes to it — plus a schema-typed JSON
@@ -108,13 +110,11 @@ Everything not yet landed lives beside its future home as a `*.sketch.ts`
 file: illustrative code that typechecks against the real `effect` and
 `alchemy@next` type definitions but is excluded from the build and checks.
 
-| area                           | sketch                                             |
-| ------------------------------ | -------------------------------------------------- |
-| wider JSON API + webhooks      | `src/server/*.sketch.ts`                           |
-| browser client (OPFS)          | `src/client/Client.sketch.ts`                      |
-| alchemy host seam              | `src/host/*.sketch.ts`, `src/adapters/*.sketch.ts` |
-| infrastructure as effects      | `src/alchemy.run.sketch.ts`                        |
-| durable registry / auth wiring | `src/artifacts/Namespace.sketch.ts`                |
+| area                      | sketch                                             |
+| ------------------------- | -------------------------------------------------- |
+| wider JSON API + webhooks | `src/server/*.sketch.ts`                           |
+| alchemy host seam         | `src/host/*.sketch.ts`, `src/adapters/*.sketch.ts` |
+| infrastructure as effects | `src/alchemy.run.sketch.ts`                        |
 
 ## Development
 
@@ -140,8 +140,13 @@ Four kinds of evidence, deliberately:
 - **the repository is really a git repository** — `Node.interop.test.ts`
   writes one through the ports and has the `git` binary read it back
   (`fsck`, `log`, `cat-file`, `ls-tree`, `show`);
-- **the contract holds on the backend that ships** — the storage contract
-  suite runs against DO SQLite and R2 inside workerd, not against a mock;
+- **the contract holds on every backend** — the storage contract suite runs
+  against memory, the filesystem, OPFS, and DO SQLite + R2 inside workerd,
+  not against a mock;
+- **the browser is a real browser** — Playwright loads the bundled client
+  into Chromium, writes commits into actual OPFS, re-reads them through a
+  fresh store, and drives the derived JSON client same-origin (skipped when
+  Chromium is absent);
 - **the protocol is really git's protocol** — stock `git` clones, pushes,
   deletes branches and fetches incrementally against the server, over
   `node:http` in the unit suite and against the Durable Object in workerd in

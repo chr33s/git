@@ -4,8 +4,12 @@
  * Advertisement, then one `want … done` round, then the pack streamed into
  * the target stores with the same `PktReader` and `Pack.unpack` the server
  * uses. Serves the Artifacts provider's `import` and the CLI's `clone` from
- * one implementation; the browser client grows from here too, since nothing
- * in this file is node-specific — `fetch` and web streams only.
+ * one implementation.
+ *
+ * Runs on node and workerd. This file itself is `fetch` + web streams, but
+ * `Pack.unpack`'s inflate leans on `node:zlib`'s consumed-byte accounting —
+ * an in-browser clone waits on a platform-neutral inflate. (`lsRemote` is
+ * browser-clean already.)
  */
 import { Effect, Stream } from "effect";
 

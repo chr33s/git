@@ -4,8 +4,9 @@
 (`src/artifacts/Namespace.ts`), satisfying alchemy's binding tag over this
 server's stores. The one upstream interface change it needed is applied as a
 local patch, and both server surfaces enforce scoped tokens through
-`src/server/Auth.ts`. What remains is durability: the registry and token
-store live in memory.**
+`src/server/Auth.ts`. The self-hosted form is durable (`localNode` persists
+registry, tokens and fork links on disk); a Workers-hosted provider still
+wants those rows in a DO or D1.**
 
 Evaluated against the code, not the docs (`alchemy.run` is unreachable from this
 sandbox): `alchemy@2.0.0-beta.70`'s `src/Cloudflare/Artifacts/*` and the
@@ -60,8 +61,10 @@ over real smart HTTP from the node host. Enforcement landed with it:
 the Basic challenge, 403 on insufficient scope, token accepted as the Basic
 password the way git sends it — with two verifiers, the provider's revocable
 `Tokens.verify` and a stateless HMAC scheme the Durable Object enforces when
-its `GIT_AUTH_SECRET` binding is set. What remains of the gaps below is the
-durable form: registry and token rows in a DO or D1 instead of memory.
+its `GIT_AUTH_SECRET` binding is set. Durability followed: `localNode` keeps
+the registry, token digests and fork links in dot-files under the repository
+root and survives a provider restart in its tests — a Workers-hosted provider
+would put the same rows in a DO or D1.
 
 ### The three gaps, in order of cost
 

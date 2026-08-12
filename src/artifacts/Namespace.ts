@@ -29,8 +29,12 @@ import {
 } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
 import { Context, Effect, Layer, Stream } from "effect";
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
 import { fetchRepository } from "../client/Fetch.ts";
 import { stores as memoryStores } from "../git/Memory.ts";
+import { stores as nodeStores } from "../git/Node.ts";
 import { ObjectStore, RefStore } from "../git/Store.ts";
 
 const failure = (code: string, message: string) =>
@@ -78,12 +82,13 @@ export class Registry extends Context.Service<
   }
 >()("artifacts/Registry") {}
 
-export const registryMemory = Layer.sync(Registry)(() => {
-  const rows = new Map<string, RepoRecord>();
-  return Registry.of({
+const makeRegistry = (rows: Map<string, RepoRecord>, persist: () => Promise<void>) =>
+  Registry.of({
     create: (name, meta) =>
-      Effect.suspend(() => {
-        if (rows.has(name)) return Effect.fail(failure("ALREADY_EXISTS", `repo '${name}' exists`));
+      Effect.gen(function* () {
+        if (rows.has(name)) {
+          return yield* failure("ALREADY_EXISTS", `repo '${name}' exists`);
+        }
         const now = new Date();
         const record: RepoRecord = {
           ...meta,
@@ -94,7 +99,8 @@ export const registryMemory = Layer.sync(Registry)(() => {
           lastPushAt: null,
         };
         rows.set(name, record);
-        return Effect.succeed(record);
+        yield* Effect.promise(persist);
+        return record;
       }),
     get: (name) => Effect.sync(() => rows.get(name) ?? null),
     list: (options) =>
@@ -109,14 +115,67 @@ export const registryMemory = Layer.sync(Registry)(() => {
           ...(start + limit < all.length ? { cursor: String(start + limit) } : {}),
         };
       }),
-    delete: (name) => Effect.sync(() => rows.delete(name)),
+    delete: (name) =>
+      Effect.gen(function* () {
+        const existed = rows.delete(name);
+        if (existed) yield* Effect.promise(persist);
+        return existed;
+      }),
     touch: (name, at) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         const record = rows.get(name);
-        if (record !== undefined) rows.set(name, { ...record, updatedAt: at, lastPushAt: at });
+        if (record === undefined) return;
+        rows.set(name, { ...record, updatedAt: at, lastPushAt: at });
+        yield* Effect.promise(persist);
       }),
   });
-});
+
+export const registryMemory = Layer.sync(Registry)(() =>
+  makeRegistry(new Map(), () => Promise.resolve()),
+);
+
+/** Atomic enough for one process: temp file plus rename, like every backend. */
+const saveJson = async (target: string, value: unknown) => {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(value, null, 1));
+  await fs.rename(temporary, target);
+};
+
+const loadJson = async <A>(target: string): Promise<A | null> => {
+  try {
+    return JSON.parse(await fs.readFile(target, "utf8")) as A;
+  } catch {
+    return null;
+  }
+};
+
+/** The durable form: one JSON file, rows revived with their `Date`s. */
+export const registryNode = (root: string) =>
+  Layer.effect(
+    Registry,
+    Effect.promise(async () => {
+      const file = path.join(root, ".registry.json");
+      interface Stored extends Omit<RepoRecord, "createdAt" | "updatedAt" | "lastPushAt"> {
+        readonly createdAt: string;
+        readonly updatedAt: string;
+        readonly lastPushAt: string | null;
+      }
+      const stored = (await loadJson<Stored[]>(file)) ?? [];
+      const rows = new Map<string, RepoRecord>(
+        stored.map((row) => [
+          row.name,
+          {
+            ...row,
+            createdAt: new Date(row.createdAt),
+            updatedAt: new Date(row.updatedAt),
+            lastPushAt: row.lastPushAt === null ? null : new Date(row.lastPushAt),
+          },
+        ]),
+      );
+      return makeRegistry(rows, () => saveJson(file, [...rows.values()]));
+    }),
+  );
 
 /**
  * Scoped, TTL'd, revocable per-repo tokens, plaintext returned exactly once.
@@ -137,42 +196,46 @@ export class Tokens extends Context.Service<
   }
 >()("artifacts/Tokens") {}
 
-export const tokensMemory = Layer.sync(Tokens)(() => {
-  interface Row {
-    readonly id: string;
-    readonly repo: string;
-    readonly scope: "read" | "write";
-    readonly digest: string;
-    readonly createdAt: Date;
-    readonly expiresAt: Date;
-    revoked: boolean;
-  }
-  const rows: Row[] = [];
+export interface TokenRow {
+  readonly id: string;
+  readonly repo: string;
+  readonly scope: "read" | "write";
+  readonly digest: string;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  revoked: boolean;
+}
 
+const makeTokens = (rows: TokenRow[], persist: () => Promise<void>) => {
   const digestOf = (plaintext: string) =>
     Effect.promise(async () => {
       const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plaintext));
       return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     });
-  const stateOf = (row: Row): "active" | "expired" | "revoked" =>
-    row.revoked ? "revoked" : row.expiresAt.getTime() <= Date.now() ? "expired" : "active";
+  const stateOf = (row: TokenRow): "active" | "expired" | "revoked" =>
+    row.revoked
+      ? "revoked"
+      : new Date(row.expiresAt).getTime() <= Date.now()
+        ? "expired"
+        : "active";
 
   return Tokens.of({
     issue: (repo, scope, ttlSeconds) =>
       Effect.gen(function* () {
         if (!(ttlSeconds > 0)) return yield* failure("INVALID_TTL", `ttl ${ttlSeconds}`);
         const plaintext = `art_${crypto.randomUUID().replaceAll("-", "")}`;
-        const row: Row = {
+        const row: TokenRow = {
           id: crypto.randomUUID(),
           repo,
           scope,
           digest: yield* digestOf(plaintext),
-          createdAt: new Date(),
-          expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
           revoked: false,
         };
         rows.push(row);
-        return { id: row.id, plaintext, scope, expiresAt: row.expiresAt.toISOString() };
+        yield* Effect.promise(persist);
+        return { id: row.id, plaintext, scope, expiresAt: row.expiresAt };
       }),
     list: (repo) =>
       Effect.sync(() => {
@@ -182,8 +245,8 @@ export const tokensMemory = Layer.sync(Tokens)(() => {
             id: row.id,
             scope: row.scope,
             state: stateOf(row),
-            createdAt: row.createdAt.toISOString(),
-            expiresAt: row.expiresAt.toISOString(),
+            createdAt: row.createdAt,
+            expiresAt: row.expiresAt,
           })),
           total: mine.length,
         };
@@ -196,6 +259,7 @@ export const tokensMemory = Layer.sync(Tokens)(() => {
         );
         if (row === undefined || row.revoked) return false;
         row.revoked = true;
+        yield* Effect.promise(persist);
         return true;
       }),
     verify: (repo, presented) =>
@@ -205,7 +269,20 @@ export const tokensMemory = Layer.sync(Tokens)(() => {
         return row !== undefined && stateOf(row) === "active" ? row.scope : null;
       }),
   });
-});
+};
+
+export const tokensMemory = Layer.sync(Tokens)(() => makeTokens([], () => Promise.resolve()));
+
+/** Digests only at rest, in the durable form too. */
+export const tokensNode = (root: string) =>
+  Layer.effect(
+    Tokens,
+    Effect.promise(async () => {
+      const file = path.join(root, ".tokens.json");
+      const rows = (await loadJson<TokenRow[]>(file)) ?? [];
+      return makeTokens(rows, () => saveJson(file, rows));
+    }),
+  );
 
 export interface StoreInstances {
   readonly objects: ObjectStore["Service"];
@@ -287,6 +364,59 @@ export const repoStoresMemory = Layer.sync(RepoStores)(() => {
       }),
   });
 });
+
+/** The durable factory: node stores on disk, fork links in `.forks.json`. */
+export const repoStoresNode = (root: string) =>
+  Layer.effect(
+    RepoStores,
+    Effect.promise(async () => {
+      const forksFile = path.join(root, ".forks.json");
+      const forks = new Map<string, string>(
+        Object.entries((await loadJson<Record<string, string>>(forksFile)) ?? {}),
+      );
+      const instances = new Map<string, StoreInstances>();
+
+      const buildAt = (name: string) =>
+        Effect.gen(function* () {
+          return { objects: yield* ObjectStore, refs: yield* RefStore };
+        }).pipe(Effect.provide(nodeStores(path.join(root, name))));
+
+      const open = (name: string): Effect.Effect<StoreInstances> =>
+        Effect.gen(function* () {
+          const cached = instances.get(name);
+          if (cached !== undefined) return cached;
+          const own = yield* buildAt(name);
+          const parent = forks.get(name);
+          const built: StoreInstances =
+            parent === undefined
+              ? own
+              : { objects: alternates(own.objects, (yield* open(parent)).objects), refs: own.refs };
+          instances.set(name, built);
+          return built;
+        });
+
+      return RepoStores.of({
+        open,
+        fork: (child, parent) =>
+          Effect.gen(function* () {
+            forks.set(child, parent);
+            yield* Effect.promise(() => saveJson(forksFile, Object.fromEntries(forks)));
+            instances.delete(child);
+            return yield* open(child);
+          }),
+        drop: (name) =>
+          Effect.gen(function* () {
+            instances.delete(name);
+            if (forks.delete(name)) {
+              yield* Effect.promise(() => saveJson(forksFile, Object.fromEntries(forks)));
+            }
+            yield* Effect.promise(() =>
+              fs.rm(path.join(root, name), { recursive: true, force: true }),
+            );
+          }),
+      });
+    }),
+  );
 
 /** `import`, through the shared smart-HTTP client, errors mapped to Artifacts codes. */
 const clone = (source: string, branch: string | undefined, target: StoreInstances) =>
@@ -472,4 +602,16 @@ export const localNamespace = (
 export const localMemory = (options?: LocalOptions) =>
   localNamespace(options).pipe(
     Layer.provideMerge(Layer.mergeAll(registryMemory, tokensMemory, repoStoresMemory)),
+  );
+
+/** Everything durable under one directory: the self-hosted provider. */
+export const localNode = (options: { readonly root: string } & LocalOptions) =>
+  localNamespace(options).pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        registryNode(options.root),
+        tokensNode(options.root),
+        repoStoresNode(options.root),
+      ),
+    ),
   );

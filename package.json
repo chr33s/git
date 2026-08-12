@@ -30,10 +30,12 @@
     "@effect/platform-node": "4.0.0-beta.107",
     "@types/node": "25.6.0",
     "alchemy": "2.0.0-beta.70",
+    "esbuild": "0.28.2",
     "oxfmt": "0.47.0",
     "oxlint": "1.62.0",
     "oxlint-tsgolint": "0.22.1",
     "patch-package": "8.0.1",
+    "playwright": "1.62.1",
     "typescript": "6.0.3",
     "wrangler": "4.121.0"
   },

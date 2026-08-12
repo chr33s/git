@@ -1,0 +1,191 @@
+/**
+ * The browser client in a real browser.
+ *
+ * `Opfs.test.ts` proves the adapter against a faked directory handle; this
+ * proves the fake told the truth. esbuild bundles `adapters/Opfs.ts`,
+ * `client/Client.ts` and the domain into an IIFE, Playwright loads it in
+ * Chromium on the node host's own origin (localhost is a secure context, so
+ * OPFS is live and fetches are same-origin), and the scenario runs against
+ * the *actual* Origin Private File System.
+ *
+ * `node:crypto`/`node:zlib` are stubbed to throwing shims: they enter the
+ * bundle through `Repository → Pack`, and the scenario never touches pack
+ * paths — a browser clone waits on a platform-neutral inflate.
+ *
+ * Skipped when Chromium is not available.
+ */
+import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { describe, it } from "node:test";
+
+import { build } from "esbuild";
+import { Effect, Layer } from "effect";
+import { chromium } from "playwright";
+
+import { stores as nodeStores } from "../git/Node.ts";
+import * as GitRepository from "../git/Repository.ts";
+import { Repository } from "../git/Repository.ts";
+import type { Oid } from "../git/Store.ts";
+import { serve } from "../host/Node.ts";
+
+const projectRoot = path.join(import.meta.dirname, "..", "..");
+
+const author = {
+  name: "Alice",
+  email: "alice@example.com",
+  at: new Date(1_700_000_000_000),
+  offset: 0,
+};
+
+/** `node:` builtins load via `Repository → Pack`; the browser never calls them. */
+const nodeStubs = {
+  name: "node-stubs",
+  setup(builder: import("esbuild").PluginBuild) {
+    builder.onResolve({ filter: /^node:(crypto|zlib)$/ }, (args) => ({
+      path: args.path,
+      namespace: "node-stub",
+    }));
+    builder.onLoad({ filter: /.*/, namespace: "node-stub" }, () => ({
+      contents: `
+        const nodeOnly = () => { throw new Error("node-only: pack transport needs node:zlib"); };
+        export const createHash = nodeOnly;
+        export const createInflate = nodeOnly;
+        export const createGunzip = nodeOnly;
+        export const deflateSync = nodeOnly;
+      `,
+      loader: "js",
+    }));
+  },
+};
+
+const scenarioEntry = `
+  import { Effect, Stream } from "effect";
+  import * as Opfs from "./src/adapters/Opfs.ts";
+  import * as Client from "./src/client/Client.ts";
+  import { Repository } from "./src/git/Repository.ts";
+
+  const author = ${JSON.stringify({ ...author, at: author.at.toISOString() })};
+
+  (globalThis /* window */).scenario = async (repoName, head) => {
+    // Real OPFS: the origin's private filesystem, a fresh directory per run.
+    const origin = await navigator.storage.getDirectory();
+    const root = await origin.getDirectoryHandle(
+      "repo-" + Math.random().toString(36).slice(2),
+      { create: true },
+    );
+    const stores = Opfs.stores(root);
+
+    const localMessages = await Effect.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("in the browser\\n"));
+        const tree = yield* repository.writeTree([{ mode: "100644", name: "b.txt", oid: blob }]);
+        yield* repository.commit({
+          branch: "main",
+          tree,
+          message: "first from OPFS",
+          author: { ...author, at: new Date(author.at) },
+        });
+        yield* repository.commit({
+          branch: "main",
+          tree,
+          message: "second from OPFS",
+          author: { ...author, at: new Date(author.at) },
+        });
+        return [];
+      }).pipe(Effect.provide(Client.local(stores))),
+    );
+
+    // A second, independent stores instance over the same handle: what was
+    // written is really in OPFS, not in some layer's memory.
+    const reread = await Effect.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const main = yield* repository.resolve("refs/heads/main");
+        const commits = yield* Stream.runCollect(repository.log(main, { limit: 10 }));
+        return commits.map((commit) => commit.message);
+      }).pipe(Effect.provide(Client.local(Opfs.stores(root)))),
+    );
+
+    // The derived JSON client, same-origin against the node host.
+    const api = await Effect.runPromise(
+      Effect.gen(function* () {
+        const client = yield* Client.remote(location.origin);
+        const refs = yield* client.repo.refs({ params: { repo: repoName } });
+        const log = yield* client.repo.log({ params: { repo: repoName, oid: head } });
+        return { refs: refs.refs, messages: log.commits.map((commit) => commit.message) };
+      }).pipe(Effect.scoped),
+    );
+
+    return { localMessages, reread, api };
+  };
+`;
+
+describe("Client in real Chromium", () => {
+  it("runs OPFS stores and the derived client inside the browser", async (test) => {
+    let browser;
+    try {
+      browser = await chromium.launch();
+    } catch {
+      test.skip("chromium is not available");
+      return;
+    }
+
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "browser-"));
+    const server = await serve({ root });
+    try {
+      const head = await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const blob = yield* repository.writeBlob(new TextEncoder().encode("served\n"));
+          const tree = yield* repository.writeTree([{ mode: "100644", name: "s.txt", oid: blob }]);
+          return yield* repository.commit({ branch: "main", tree, message: "served", author });
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provide(nodeStores(path.join(root, "origin"))),
+            ),
+          ),
+        ) as unknown as Effect.Effect<Oid>,
+      );
+
+      const bundle = await build({
+        stdin: { contents: scenarioEntry, resolveDir: projectRoot, loader: "ts" },
+        bundle: true,
+        format: "iife",
+        platform: "browser",
+        target: "es2022",
+        write: false,
+        plugins: [nodeStubs],
+      });
+
+      const page = await browser.newPage();
+      // Any response will do: the point is the origin — localhost is a secure
+      // context, so OPFS exists and every fetch is same-origin.
+      await page.goto(server.url);
+      await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+
+      const result = (await page.evaluate(
+        ([repo, oid]) =>
+          (
+            globalThis as unknown as { scenario(repo: string, oid: string): Promise<unknown> }
+          ).scenario(repo, oid),
+        ["origin", head] as const,
+      )) as {
+        reread: string[];
+        api: { refs: Array<{ name: string; oid: string }>; messages: string[] };
+      };
+
+      assert.deepEqual(result.reread, ["second from OPFS", "first from OPFS"]);
+      assert.deepEqual(result.api.refs, [{ name: "refs/heads/main", oid: head }]);
+      assert.deepEqual(result.api.messages, ["served"]);
+    } finally {
+      await browser.close();
+      await server.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});

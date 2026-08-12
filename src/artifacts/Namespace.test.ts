@@ -23,7 +23,7 @@ import { Repository } from "../git/Repository.ts";
 import { stores as nodeStores } from "../git/Node.ts";
 import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { serve } from "../host/Node.ts";
-import { localMemory, RepoStores, type StoreInstances } from "./Namespace.ts";
+import { localMemory, localNode, RepoStores, type StoreInstances, Tokens } from "./Namespace.ts";
 
 const namespace = {
   kind: "Cloudflare.Artifacts.Namespace",
@@ -202,6 +202,65 @@ describe("Artifacts local provider", () => {
         assert.equal(yield* childStores.objects.has(childOid), true);
       }),
     );
+  });
+
+  it("survives a provider restart when backed by the node layers", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "artifacts-durable-"));
+    const provider = () => localNode({ root, remoteBase: "http://git.local" });
+    const session = <A, E>(
+      effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | Tokens | RuntimeContext>,
+    ) => Effect.runPromise(effect.pipe(Effect.provide(provider())) as Effect.Effect<A, E>);
+
+    try {
+      // First life: create, seed, fork, mint.
+      const { blob, token } = await session(
+        Effect.gen(function* () {
+          const client = yield* bound;
+          const repoStores = yield* RepoStores;
+          yield* client.create("parent");
+          const stores = yield* repoStores.open("parent");
+          const seeded = yield* Effect.gen(function* () {
+            const repository = yield* Repository;
+            const blob = yield* repository.writeBlob(new TextEncoder().encode("durable\n"));
+            const tree = yield* repository.writeTree([
+              { mode: "100644", name: "d.txt", oid: blob },
+            ]);
+            yield* repository.commit({ branch: "main", tree, message: "durable", author });
+            return blob;
+          }).pipe(Effect.provide(repositoryFor(stores)));
+
+          const parent = yield* client.get("parent");
+          yield* parent.fork("child", { defaultBranchOnly: true });
+          const token = yield* parent.createToken("write", 300);
+          return { blob: seeded, token: token.plaintext };
+        }),
+      );
+
+      // Second life: a fresh provider over the same directory remembers all of it.
+      await session(
+        Effect.gen(function* () {
+          const client = yield* bound;
+          const repoStores = yield* RepoStores;
+          const tokens = yield* Tokens;
+
+          const listed = yield* client.list();
+          assert.deepEqual(
+            listed.repos.map((repo) => repo.name),
+            ["child", "parent"],
+          );
+
+          // The fork link came back from `.forks.json`: reads still fall through.
+          const child = yield* repoStores.open("child");
+          const shared = yield* child.objects.read(blob);
+          assert.equal(new TextDecoder().decode(shared.data), "durable\n");
+
+          // The token digest came back from `.tokens.json`.
+          assert.equal(yield* tokens.verify("parent", token), "write");
+        }),
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("imports a repository over smart HTTP from the node host", async () => {
