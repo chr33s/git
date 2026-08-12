@@ -5,17 +5,17 @@ running inside workerd; the rest is still a sketch.
 
 What is real code today, running under the repo's own test runner:
 
-| module | what it is |
-| --- | --- |
-| `src/git/Error.ts` | the tagged errors, with `httpApiStatus` annotations |
-| `src/git/Store.ts` | `ObjectStore` / `RefStore` ports |
-| `src/git/Format.ts` | the pure/effectful seam — framing, commit and tree codecs, hashing |
-| `src/git/Memory.ts` | in-memory backend |
-| `src/git/Node.ts` | filesystem backend, git's own on-disk layout |
-| `src/git/Repository.ts` | the domain service |
-| `src/git/Cloudflare.ts` | R2 + Durable Object SQLite backend |
-| `src/git/Durable.ts` | the repository as a Durable Object |
-| `src/git/Store.contract.ts` | one contract suite, run against **all three** backends |
+| module                      | what it is                                                         |
+| --------------------------- | ------------------------------------------------------------------ |
+| `src/git/Error.ts`          | the tagged errors, with `httpApiStatus` annotations                |
+| `src/git/Store.ts`          | `ObjectStore` / `RefStore` ports                                   |
+| `src/git/Format.ts`         | the pure/effectful seam — framing, commit and tree codecs, hashing |
+| `src/git/Memory.ts`         | in-memory backend                                                  |
+| `src/git/Node.ts`           | filesystem backend, git's own on-disk layout                       |
+| `src/git/Repository.ts`     | the domain service                                                 |
+| `src/git/Cloudflare.ts`     | R2 + Durable Object SQLite backend                                 |
+| `src/git/Durable.ts`        | the repository as a Durable Object                                 |
+| `src/git/Store.contract.ts` | one contract suite, run against **all three** backends             |
 
 67 tests pass: 58 unit (`npm test`) and 9 integration (`npm run test:integration`),
 the latter driving a real Workers runtime and itself running a 15-case
@@ -53,11 +53,11 @@ a retry that could never fire, because the catch sat inside it.
 
 Pinned against what actually exists today:
 
-| package                  | version           | notes                                                     |
-| ------------------------ | ----------------- | --------------------------------------------------------- |
-| `effect`                 | `4.0.0-beta.107`  | `Schema`, `HttpApi`, `Stream`, CLI all in core now         |
-| `alchemy`                | `2.0.0-beta.70`   | the `next` tag; v2 is "infrastructure as effects"          |
-| `@effect/platform-node`  | `4.0.0-beta.107`  | node `FileSystem`/`Path`/`NodeRuntime` for the CLI         |
+| package                 | version          | notes                                              |
+| ----------------------- | ---------------- | -------------------------------------------------- |
+| `effect`                | `4.0.0-beta.107` | `Schema`, `HttpApi`, `Stream`, CLI all in core now |
+| `alchemy`               | `2.0.0-beta.70`  | the `next` tag; v2 is "infrastructure as effects"  |
+| `@effect/platform-node` | `4.0.0-beta.107` | node `FileSystem`/`Path`/`NodeRuntime` for the CLI |
 
 Both are betas with breaking changes between releases. That is the single
 biggest cost item below.
@@ -160,21 +160,21 @@ three times.
 
 ### Module map
 
-| today                                          | lines | becomes                                   |
-| ---------------------------------------------- | ----: | ----------------------------------------- |
-| `git.error.ts`                                 |    50 | `git/Error.ts` — `Schema.TaggedError` union |
-| `git.storage.ts` + 3 implementations           | 1,192 | `git/Store.ts` + one layer per environment |
-| `git.repository.ts`                            |   874 | `git/Repository.ts` service                |
-| `git.pack.ts`, `git.protocol.ts`               | 1,153 | `git/Pack.ts` — `Stream`/`Channel`         |
-| `git.object|delta|index|merge|utils.ts`        | 2,351 | ported as-is behind `git/Format.ts`        |
-| `git.hooks.ts`                                 |   163 | `Hooks` service                            |
-| `server.ts` (DO + routing)                     | 1,130 | `server/App.ts` + `host/*` (~200)          |
-| `server.api.ts`                                | 2,515 | `server/Api.ts` — one `HttpApi` decl       |
-| `server.webhooks.ts`                           |   257 | `server/Webhooks.ts` — a `Schedule`        |
-| `server.lfs.ts`, `server.storage.ts`           |   981 | folded into the R2 layer                   |
-| `client.ts`                                    | 1,007 | `Repository` + derived client (~250)       |
-| `cli.ts`                                       | 1,991 | `cli/main.ts` — `Command` tree (~350)      |
-| `worker.ts` + `wrangler.json`                  |    32 | `alchemy.run.ts` + `host/Cloudflare.ts`    |
+| today                                | lines | becomes                                     |
+| ------------------------------------ | ----: | ------------------------------------------- | ----- | --------- | ----- | ----------------------------------- |
+| `git.error.ts`                       |    50 | `git/Error.ts` — `Schema.TaggedError` union |
+| `git.storage.ts` + 3 implementations | 1,192 | `git/Store.ts` + one layer per environment  |
+| `git.repository.ts`                  |   874 | `git/Repository.ts` service                 |
+| `git.pack.ts`, `git.protocol.ts`     | 1,153 | `git/Pack.ts` — `Stream`/`Channel`          |
+| `git.object                          | delta | index                                       | merge | utils.ts` | 2,351 | ported as-is behind `git/Format.ts` |
+| `git.hooks.ts`                       |   163 | `Hooks` service                             |
+| `server.ts` (DO + routing)           | 1,130 | `server/App.ts` + `host/*` (~200)           |
+| `server.api.ts`                      | 2,515 | `server/Api.ts` — one `HttpApi` decl        |
+| `server.webhooks.ts`                 |   257 | `server/Webhooks.ts` — a `Schedule`         |
+| `server.lfs.ts`, `server.storage.ts` |   981 | folded into the R2 layer                    |
+| `client.ts`                          | 1,007 | `Repository` + derived client (~250)        |
+| `cli.ts`                             | 1,991 | `cli/main.ts` — `Command` tree (~350)       |
+| `worker.ts` + `wrangler.json`        |    32 | `alchemy.run.ts` + `host/Cloudflare.ts`     |
 
 13,819 non-test lines today. The plausible landing zone is 7–8k: the savings are
 concentrated in `server.api.ts` (schema replaces hand validation and hand
@@ -264,7 +264,7 @@ touches.
 
 One thing the group prefix `/api/:repo` forces: the `repo` path parameter has to
 be declared in each endpoint's `params` schema. Leave it out and the server
-still compiles — it is the *derived client* that fails, because it cannot build
+still compiles — it is the _derived client_ that fails, because it cannot build
 a URL for a segment nobody described. Worth knowing early, since it is the kind
 of thing that gets discovered at the end of a mechanical port of 45 endpoints.
 
@@ -275,7 +275,7 @@ reach for. In alchemy@next both are Cloudflare resources —
 `Alchemy.Worker(...)` and `Alchemy.DurableObject(...)` come from
 `alchemy/Cloudflare`, which is what [`sketch/alchemy.run.ts`](../sketch/alchemy.run.ts)
 and [`sketch/host/Cloudflare.ts`](../sketch/host/Cloudflare.ts) import. What
-alchemy *does* offer across providers is the request shape: a Worker's `serve`
+alchemy _does_ offer across providers is the request shape: a Worker's `serve`
 and `alchemy/Http`'s `NodeHttpServer` / `BunHttpServer` take the same
 `HttpEffect`.
 
@@ -283,18 +283,18 @@ So portability is not a framework feature to switch on — it is one file,
 [`sketch/host/Host.ts`](../sketch/host/Host.ts), naming the three things a git
 server actually needs from a host:
 
-| capability  | why it exists                                   | Cloudflare                  | node / bun            |
-| ----------- | ----------------------------------------------- | --------------------------- | --------------------- |
-| `stores`    | one repository's objects and refs               | R2 + DO SQLite              | a directory           |
-| `serialize` | two pushes to a ref must not interleave the CAS | the DO input gate (nothing) | a `Semaphore` per repo |
-| `background`| webhook delivery outliving the response         | `state.waitUntil`           | `Effect.forkDetach`   |
+| capability   | why it exists                                   | Cloudflare                  | node / bun             |
+| ------------ | ----------------------------------------------- | --------------------------- | ---------------------- |
+| `stores`     | one repository's objects and refs               | R2 + DO SQLite              | a directory            |
+| `serialize`  | two pushes to a ref must not interleave the CAS | the DO input gate (nothing) | a `Semaphore` per repo |
+| `background` | webhook delivery outliving the response         | `state.waitUntil`           | `Effect.forkDetach`    |
 
 Above that line — `server/*`, `git/*` — nothing names a provider; `grep -l
 alchemy sketch/` hits only `host/`, `adapters/Cloudflare.ts` and the stack file.
 
 The unit that moves between hosts is **one app instance bound to one
 repository** ([`App.forRepo`](../sketch/server/App.ts)). That is not an
-arbitrary choice: `Repository` is *constructed* from `ObjectStore` and
+arbitrary choice: `Repository` is _constructed_ from `ObjectStore` and
 `RefStore`, so storage resolves when the layer is built, not when a request
 arrives — which is exactly the Durable Object model. Cloudflare gets an instance
 per repo from the platform; [`host/Node.ts`](../sketch/host/Node.ts) reproduces
@@ -327,7 +327,7 @@ drives it from the outside over HTTP, under plain `node:test`. No second test
 runner, and nothing mocked.
 
 Because the harness is out-of-process, the test file cannot reach
-`state.storage.sql`. So the storage contract runs on the *inside*: the DO
+`state.storage.sql`. So the storage contract runs on the _inside_: the DO
 exposes a `/:repo/conformance` route (gated on a var only the test config sets)
 that runs `Store.contract.ts` against its own R2 and SQLite and returns the
 results as JSON. `Store.contract.ts` was already parameterised over the runner,
@@ -364,17 +364,17 @@ mechanically — the assertions are about git behaviour, not about plumbing.
 Each phase ships on its own and keeps `src/` working. The existing test suite is
 the ratchet: it runs against both implementations until the last phase.
 
-| phase | scope                                                                | risk   |
-| ----- | -------------------------------------------------------------------- | ------ |
-| 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests          | done   |
-| 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite | done   |
-| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness` | done |
-| 2b    | re-point `server.ts`/`worker.ts` at `GitRepo` and retire the old path  | medium |
-| 3     | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed | high  |
-| 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types | medium |
-| 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages | medium |
-| 5b ◑  | node host — the fs backend landed early (it is what proves the ports); the HTTP host is still ahead | low |
-| 6     | CLI on `effect/unstable/cli`; delete the argv parser                   | low    |
+| phase | scope                                                                                                        | risk   |
+| ----- | ------------------------------------------------------------------------------------------------------------ | ------ |
+| 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests                                                | done   |
+| 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite                                      | done   |
+| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness` | done   |
+| 2b    | re-point `server.ts`/`worker.ts` at `GitRepo` and retire the old path                                        | medium |
+| 3     | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                      | high   |
+| 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types                                       | medium |
+| 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages                            | medium |
+| 5b ◑  | node host — the fs backend landed early (it is what proves the ports); the HTTP host is still ahead          | low    |
+| 6     | CLI on `effect/unstable/cli`; delete the argv parser                                                         | low    |
 
 Phase 3 is the one worth doing even if the rest is deferred — it is the only
 phase that fixes a bug users can hit. Phase 5b is the cheapest thing on the
@@ -404,7 +404,7 @@ system, since nothing in `src/` reads an `Authorization` header today.
   (compressed) limit before phase 4, not after.
 - **The edges were reaching past the domain — caught by the types.** The first
   version had `Api.ts` and `Protocol.ts` doing `yield* RefStore` directly.
-  That compiles, but it makes storage a *per-request* requirement of every
+  That compiles, but it makes storage a _per-request_ requirement of every
   route, so `toWebHandler` demanded a `Context<ObjectStore | RefStore>` on every
   call and no host could bind an app instance to a repository. Routing those
   reads through `Repository` (`refs`, `resolve`, `head`, `branch`, `pack`, and

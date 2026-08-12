@@ -30,6 +30,16 @@ import { storeContract } from "./Store.contract.ts";
 import type { Oid } from "./Store.ts";
 
 /**
+ * Bindings from `wrangler.test.json`. `wrangler types` only generates the
+ * global `Env` for the primary config, so this worker declares its own.
+ */
+interface TestEnv {
+  readonly ENABLE_CONFORMANCE?: string;
+  readonly GIT_OBJECTS: R2Bucket;
+  readonly GIT_REPO: DurableObjectNamespace<GitRepo>;
+}
+
+/**
  * The wire shape, which is not the domain shape: JSON has no `Date`, so
  * `author.at` arrives as a string and has to be parsed. Decoding at the
  * boundary is what `HttpApi` schemas do for the JSON API in the sketch; this
@@ -54,7 +64,7 @@ const signatureFrom = (author: CommitBody["author"]): Signature => ({
   offset: author?.offset ?? 0,
 });
 
-export class GitRepo extends DurableObject<Env> {
+export class GitRepo extends DurableObject<TestEnv> {
   #layer: Layer.Layer<Repository> | null = null;
 
   /** Built once per instance: the DO is the unit of isolation, not the request. */
@@ -181,11 +191,11 @@ export class GitRepo extends DurableObject<Env> {
 
 /** Router: resolve `/:repo` to its instance. Mirrors `src/worker.ts`. */
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: TestEnv): Promise<Response> {
     const repo = new URL(request.url).pathname.split("/")[1];
     if (repo === undefined || repo === "") {
       return new Response("No repository in URL", { status: 400 });
     }
     return env.GIT_REPO.get(env.GIT_REPO.idFromName(repo)).fetch(request);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<TestEnv>;

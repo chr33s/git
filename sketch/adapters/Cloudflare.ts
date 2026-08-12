@@ -38,7 +38,8 @@ const fail = (operation: string, path: string) => (cause: unknown) =>
 const captureRuntime = Effect.context<RuntimeContext | Cloudflare.DurableObjectState>();
 
 type Runtime = Context.Context<RuntimeContext | Cloudflare.DurableObjectState>;
-const provided = (runtime: Runtime) =>
+const provided =
+  (runtime: Runtime) =>
   <A, E>(effect: Effect.Effect<A, E, RuntimeContext | Cloudflare.DurableObjectState>) =>
     Effect.provideContext(effect, runtime);
 
@@ -106,7 +107,10 @@ export const objectStoreLayer = (repo: string) =>
             Effect.mapError(fail("has", key(oid))),
           ),
         delete: (oid) =>
-          run(bucket.delete(key(oid))).pipe(Effect.mapError(fail("delete", key(oid))), Effect.asVoid),
+          run(bucket.delete(key(oid))).pipe(
+            Effect.mapError(fail("delete", key(oid))),
+            Effect.asVoid,
+          ),
         list: () =>
           Stream.unwrap(
             run(bucket.list({ prefix: `${repo}/objects/` })).pipe(
@@ -133,14 +137,16 @@ export const refStoreLayer = (repo: string) =>
       const runtime = yield* captureRuntime;
       const run = provided(runtime);
 
-      yield* run(storage.sql.exec(`
+      yield* run(
+        storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS refs (
           repo TEXT NOT NULL,
           name TEXT NOT NULL,
           oid  TEXT NOT NULL,
           PRIMARY KEY (repo, name)
         )
-      `));
+      `),
+      );
 
       const read = (name: string) =>
         run(
@@ -158,7 +164,10 @@ export const refStoreLayer = (repo: string) =>
         list: () =>
           run(
             storage.sql
-              .exec<{ name: string; oid: string }>(`SELECT name, oid FROM refs WHERE repo = ?`, repo)
+              .exec<{ name: string; oid: string }>(
+                `SELECT name, oid FROM refs WHERE repo = ?`,
+                repo,
+              )
               .pipe(
                 Effect.flatMap((cursor) => cursor.toArray()),
                 Effect.map((rows) =>
@@ -171,17 +180,17 @@ export const refStoreLayer = (repo: string) =>
           // mismatch rolls the whole batch back when `atomic` is set.
           run(
             storage.transaction(() =>
-            Effect.forEach(updates, (update) =>
-              Effect.gen(function* () {
-                const actual = yield* read(update.name);
-                const matches = update.expected === undefined || update.expected === actual;
-                if (matches) yield* upsert(repo, update);
-                return {
-                  name: update.name,
-                  applied: matches,
-                  current: matches ? update.value : actual,
-                };
-              }),
+              Effect.forEach(updates, (update) =>
+                Effect.gen(function* () {
+                  const actual = yield* read(update.name);
+                  const matches = update.expected === undefined || update.expected === actual;
+                  if (matches) yield* upsert(repo, update);
+                  return {
+                    name: update.name,
+                    applied: matches,
+                    current: matches ? update.value : actual,
+                  };
+                }),
               ).pipe(
                 Effect.tap((results) =>
                   options?.atomic === true && results.some((result) => !result.applied)

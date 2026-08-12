@@ -30,7 +30,9 @@ import { RepoHost } from "./Host.ts";
  * maintained by hand. A read-heavy deployment would raise the permit count and
  * take two for writers; the port is narrow enough that this stays local.
  */
-export const layer = (root: string): Layer.Layer<RepoHost, never, FileSystem.FileSystem | Path.Path> =>
+export const layer = (
+  root: string,
+): Layer.Layer<RepoHost, never, FileSystem.FileSystem | Path.Path> =>
   Layer.effect(
     RepoHost,
     Effect.gen(function* () {

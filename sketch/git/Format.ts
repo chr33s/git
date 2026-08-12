@@ -20,10 +20,15 @@ import type { ObjectType, Oid, RawObject } from "./Store.ts";
 
 /** Pure — same body as today's `parseCommit`, returning a Result. */
 export declare const parseCommit: (data: Uint8Array) => Result.Result<CommitInfo, Invalid>;
-export declare const parseTree: (data: Uint8Array) => Result.Result<ReadonlyArray<TreeEntry>, Invalid>;
+export declare const parseTree: (
+  data: Uint8Array,
+) => Result.Result<ReadonlyArray<TreeEntry>, Invalid>;
 export declare const encodeCommit: (commit: CommitInfo) => Uint8Array;
 export declare const encodeTree: (entries: ReadonlyArray<TreeEntry>) => Uint8Array;
-export declare const applyDelta: (base: Uint8Array, delta: Uint8Array) => Result.Result<Uint8Array, PackCorrupt>;
+export declare const applyDelta: (
+  base: Uint8Array,
+  delta: Uint8Array,
+) => Result.Result<Uint8Array, PackCorrupt>;
 
 export interface CommitInfo {
   readonly tree: Oid;

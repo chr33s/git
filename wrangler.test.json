@@ -3,9 +3,7 @@
   "name": "git-test",
   "main": "src/git/Durable.ts",
   "compatibility_date": "2025-12-10",
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
+  "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {
@@ -23,9 +21,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": [
-        "GitRepo"
-      ]
+      "new_sqlite_classes": ["GitRepo"]
     }
   ],
   "vars": {

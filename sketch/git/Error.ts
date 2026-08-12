@@ -26,38 +26,38 @@ export class ObjectNotFound extends Schema.TaggedError<ObjectNotFound>()(
 export class RefConflict extends Schema.TaggedError<RefConflict>()(
   "RefConflict",
   {
-  ref: Schema.String,
-  expected: Schema.NullOr(Schema.String),
-  actual: Schema.NullOr(Schema.String),
-},
+    ref: Schema.String,
+    expected: Schema.NullOr(Schema.String),
+    actual: Schema.NullOr(Schema.String),
+  },
   { httpApiStatus: 409 },
 ) {}
 
 export class PackCorrupt extends Schema.TaggedError<PackCorrupt>()(
   "PackCorrupt",
   {
-  reason: Schema.String,
-  offset: Schema.optional(Schema.Number),
-},
+    reason: Schema.String,
+    offset: Schema.optional(Schema.Number),
+  },
   { httpApiStatus: 422 },
 ) {}
 
 export class StorageFailure extends Schema.TaggedError<StorageFailure>()(
   "StorageFailure",
   {
-  operation: Schema.String,
-  path: Schema.String,
-  cause: Schema.optional(Schema.Unknown),
-},
+    operation: Schema.String,
+    path: Schema.String,
+    cause: Schema.optional(Schema.Unknown),
+  },
   { httpApiStatus: 500 },
 ) {}
 
 export class Invalid extends Schema.TaggedError<Invalid>()(
   "Invalid",
   {
-  field: Schema.String,
-  reason: Schema.String,
-},
+    field: Schema.String,
+    reason: Schema.String,
+  },
   { httpApiStatus: 400 },
 ) {}
 

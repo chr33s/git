@@ -94,11 +94,9 @@ declare const runtime: Context.Context<RuntimeContext | Alchemy.DurableObjectSta
  * serves a file off disk, and the type system is the thing that made that
  * assumption explicit instead of implicit.
  */
-const platform = Layer.mergeAll(
-  HttpPlatform.layer,
-  Etag.layer,
-  Path.layer,
-).pipe(Layer.provideMerge(FileSystem.layerNoop({})));
+const platform = Layer.mergeAll(HttpPlatform.layer, Etag.layer, Path.layer).pipe(
+  Layer.provideMerge(FileSystem.layerNoop({})),
+);
 declare const bindings: Layer.Layer<Alchemy.R2.ReadWriteBucket>;
 /** Webhook subscriptions, read from the same DO SQLite database as the refs. */
 declare const subscribers: Layer.Layer<Webhooks.Subscribers>;

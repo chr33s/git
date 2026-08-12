@@ -122,7 +122,10 @@ export declare const errorMiddleware: HttpMiddleware.HttpMiddleware;
 declare const splitCommands: (
   body: Stream.Stream<Uint8Array, PackCorrupt>,
 ) => Effect.Effect<
-  readonly [ReadonlyArray<import("../git/Store.ts").RefUpdate>, Stream.Stream<Uint8Array, PackCorrupt>],
+  readonly [
+    ReadonlyArray<import("../git/Store.ts").RefUpdate>,
+    Stream.Stream<Uint8Array, PackCorrupt>,
+  ],
   PackCorrupt
 >;
 declare const parseWants: (

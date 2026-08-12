@@ -44,14 +44,12 @@ const log = Command.make(
     Effect.gen(function* () {
       const repository = yield* Repository;
       const head = yield* resolveHead;
-      yield* repository
-        .log(head, { limit })
-        .pipe(
-          // Streamed to stdout: `git log` on a large repo prints the first
-          // commit immediately instead of collecting the walk first
-          // (`cli.ts` buffers today).
-          Stream.runForEach((entry) => Effect.log(`${entry.oid} ${entry.message.split("\n")[0]}`)),
-        );
+      yield* repository.log(head, { limit }).pipe(
+        // Streamed to stdout: `git log` on a large repo prints the first
+        // commit immediately instead of collecting the walk first
+        // (`cli.ts` buffers today).
+        Stream.runForEach((entry) => Effect.log(`${entry.oid} ${entry.message.split("\n")[0]}`)),
+      );
     }),
 );
 

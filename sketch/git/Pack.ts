@@ -106,9 +106,8 @@ export const pktLine = {
   },
   flush: new TextEncoder().encode("0000"),
   /** Framing is a `Channel`, so a truncated frame is a typed failure, not a hang. */
-  decode: (
-    self: Stream.Stream<Uint8Array, PackCorrupt>,
-  ): Stream.Stream<Uint8Array, PackCorrupt> => decodeFrames(self),
+  decode: (self: Stream.Stream<Uint8Array, PackCorrupt>): Stream.Stream<Uint8Array, PackCorrupt> =>
+    decodeFrames(self),
 };
 
 declare const decodeFrames: (

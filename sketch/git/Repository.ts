@@ -104,13 +104,9 @@ export interface ReceiveResult {
 export class Hooks extends Context.Service<
   Hooks,
   {
-    readonly preReceive: (
-      updates: ReadonlyArray<RefUpdate>,
-    ) => Effect.Effect<void, HookRejected>;
+    readonly preReceive: (updates: ReadonlyArray<RefUpdate>) => Effect.Effect<void, HookRejected>;
     readonly update: (update: RefUpdate) => Effect.Effect<void, HookRejected>;
-    readonly postReceive: (
-      results: ReadonlyArray<ReceiveResult>,
-    ) => Effect.Effect<void, never>;
+    readonly postReceive: (results: ReadonlyArray<ReceiveResult>) => Effect.Effect<void, never>;
   }
 >()("git/Hooks") {}
 
@@ -149,20 +145,19 @@ export const layer = Layer.effect(
             .apply([{ name: `refs/heads/${name}`, value: from, expected: null }])
             .pipe(Effect.catchTag("Invalid", Effect.die));
           if (!result?.applied) {
-            return yield* new RefConflict({ ref: name, expected: null, actual: result?.current ?? null });
+            return yield* new RefConflict({
+              ref: name,
+              expected: null,
+              actual: result?.current ?? null,
+            });
           }
           return from;
         }),
 
       pack: (wants) => Pack.write(wants).pipe(Stream.provideService(ObjectStore, objects)),
 
-      commit: Effect.fn("Repository.commit")(function* ({
-        author,
-        branch,
-        expected,
-        message,
-        tree,
-      }) {
+      commit: Effect.fn("Repository.commit")(
+        function* ({ author, branch, expected, message, tree }) {
           const ref = `refs/heads/${branch}`;
           const parent = yield* refs.read(ref);
           const data = encodeCommitBytes({
@@ -186,8 +181,8 @@ export const layer = Layer.effect(
               actual: result?.current ?? null,
             });
           }
-        return oid;
-      }, 
+          return oid;
+        },
         // Optimistic concurrency: re-read the parent and retry a few times
         // before surfacing the conflict. Today this is a caller problem.
         Effect.retry({
@@ -201,35 +196,36 @@ export const layer = Layer.effect(
         Stream.paginate(from, (oid) =>
           readCommit(oid).pipe(
             Effect.map(
-              (commit) =>
-                [[{ ...commit, oid }], Option.fromNullishOr(commit.parents[0])] as const,
+              (commit) => [[{ ...commit, oid }], Option.fromNullishOr(commit.parents[0])] as const,
             ),
           ),
         ).pipe(options?.limit === undefined ? (self) => self : Stream.take(options.limit)),
 
       receive: Effect.fn("Repository.receive")(function* (updates, options) {
-          // Objects land before any ref moves, so a rejected push leaves
-          // unreachable objects for gc rather than a ref pointing at nothing.
-          if (options?.pack !== undefined) {
-            yield* Pack.parse(options.pack).pipe(Effect.provideService(ObjectStore, objects));
-          }
+        // Objects land before any ref moves, so a rejected push leaves
+        // unreachable objects for gc rather than a ref pointing at nothing.
+        if (options?.pack !== undefined) {
+          yield* Pack.parse(options.pack).pipe(Effect.provideService(ObjectStore, objects));
+        }
 
-          yield* hooks.preReceive(updates);
-          // Per-ref `update` hooks run concurrently — they are pure policy
-          // checks — but a rejection cancels its siblings.
-          yield* Effect.forEach(updates, hooks.update, { concurrency: "unbounded" });
+        yield* hooks.preReceive(updates);
+        // Per-ref `update` hooks run concurrently — they are pure policy
+        // checks — but a rejection cancels its siblings.
+        yield* Effect.forEach(updates, hooks.update, { concurrency: "unbounded" });
 
-          const applied = yield* refs.apply(updates, options);
-          const results = applied.map((result, index): ReceiveResult => ({
+        const applied = yield* refs.apply(updates, options);
+        const results = applied.map(
+          (result, index): ReceiveResult => ({
             ref: result.name,
             from: updates[index]?.expected ?? null,
             to: result.current,
             ok: result.applied,
-          }));
+          }),
+        );
 
-          // post-receive (webhooks, notifications) must not hold the
-          // response. Forking into the request scope keeps the work alive
-          // past the reply without blocking the client.
+        // post-receive (webhooks, notifications) must not hold the
+        // response. Forking into the request scope keeps the work alive
+        // past the reply without blocking the client.
         yield* Effect.forkScoped(hooks.postReceive(results));
         return results;
       }, Effect.scoped),

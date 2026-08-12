@@ -81,16 +81,17 @@ export class Tokens extends Context.Service<
       repo: string,
       scope: "read" | "write",
       ttlSeconds: number,
-    ) => Effect.Effect<{ readonly id: string; readonly plaintext: string; readonly expiresAt: Date }>;
+    ) => Effect.Effect<{
+      readonly id: string;
+      readonly plaintext: string;
+      readonly expiresAt: Date;
+    }>;
     readonly list: (
       repo: string,
     ) => Effect.Effect<ReadonlyArray<{ readonly id: string; readonly scope: "read" | "write" }>>;
     readonly revoke: (repo: string, tokenOrId: string) => Effect.Effect<boolean>;
     /** Used by the middleware on both the JSON API and the smart-HTTP routes. */
-    readonly verify: (
-      repo: string,
-      presented: string,
-    ) => Effect.Effect<"read" | "write" | null>;
+    readonly verify: (repo: string, presented: string) => Effect.Effect<"read" | "write" | null>;
   }
 >()("artifacts/Tokens") {}
 

@@ -23,31 +23,31 @@ runtime client.
 
 The surface a provider has to implement:
 
-| namespace         | repo handle          |
-| ----------------- | -------------------- |
-| `create(name, { readOnly, description, setDefaultBranch })` | `createToken(scope?, ttl?)` |
-| `get(name)`       | `listTokens()`       |
-| `list({ limit, cursor })` | `revokeToken(tokenOrId)` |
-| `delete(name)`    | `fork(name, { description, readOnly, defaultBranchOnly })` |
-| `import({ source: { url, branch, depth }, target })` | |
+| namespace                                                   | repo handle                                                |
+| ----------------------------------------------------------- | ---------------------------------------------------------- |
+| `create(name, { readOnly, description, setDefaultBranch })` | `createToken(scope?, ttl?)`                                |
+| `get(name)`                                                 | `listTokens()`                                             |
+| `list({ limit, cursor })`                                   | `revokeToken(tokenOrId)`                                   |
+| `delete(name)`                                              | `fork(name, { description, readOnly, defaultBranchOnly })` |
+| `import({ source: { url, branch, depth }, target })`        |                                                            |
 
 Repo metadata is fixed: `id`, `name`, `description`, `defaultBranch`,
 `createdAt`, `updatedAt`, `lastPushAt`, `source`, `readOnly`, `remote`.
 
 ## Fit against what exists today
 
-| capability | status | notes |
-| --- | --- | --- |
-| git smart-HTTP (`upload-pack`, `receive-pack`) | **have** | the hard part, already done — `server.ts` + `git.pack.ts` |
-| repo `create` / `delete` | **have** | `POST` / `DELETE /api/:repo` |
-| `setDefaultBranch` | **have** | `initStorage(repo, branch)` |
-| HTTPS `remote` URL | **have** | the worker route *is* the remote |
-| LFS | **bonus** | Artifacts does not offer it; we do |
-| `import` from a remote | **partial** | `clone`/`fetch` + shallow support exist; needs `depth`/`branch` plumbing and an async `IMPORT_IN_PROGRESS` state |
-| repo metadata | **partial** | `description`, `readOnly`, `createdAt`, `lastPushAt`, `source` have nowhere to live |
-| `list` with cursor | **missing** | see below — this is architectural |
-| `fork` | **missing** | feasible cheaply; see below |
-| tokens / any auth | **missing entirely** | `grep -ri 'authorization\|bearer\|token' src/` returns only commit `author` lines |
+| capability                                     | status               | notes                                                                                                            |
+| ---------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| git smart-HTTP (`upload-pack`, `receive-pack`) | **have**             | the hard part, already done — `server.ts` + `git.pack.ts`                                                        |
+| repo `create` / `delete`                       | **have**             | `POST` / `DELETE /api/:repo`                                                                                     |
+| `setDefaultBranch`                             | **have**             | `initStorage(repo, branch)`                                                                                      |
+| HTTPS `remote` URL                             | **have**             | the worker route _is_ the remote                                                                                 |
+| LFS                                            | **bonus**            | Artifacts does not offer it; we do                                                                               |
+| `import` from a remote                         | **partial**          | `clone`/`fetch` + shallow support exist; needs `depth`/`branch` plumbing and an async `IMPORT_IN_PROGRESS` state |
+| repo metadata                                  | **partial**          | `description`, `readOnly`, `createdAt`, `lastPushAt`, `source` have nowhere to live                              |
+| `list` with cursor                             | **missing**          | see below — this is architectural                                                                                |
+| `fork`                                         | **missing**          | feasible cheaply; see below                                                                                      |
+| tokens / any auth                              | **missing entirely** | `grep -ri 'authorization\|bearer\|token' src/` returns only commit `author` lines                                |
 
 ### The three gaps, in order of cost
 
@@ -56,7 +56,7 @@ codebase today: any caller who can reach the worker can push to any repo. The
 Artifacts contract needs scoped (`read`/`write`), TTL'd, revocable per-repo
 tokens, returned in plaintext exactly once at creation. That means an issuance
 scheme (HMAC over `repo|scope|exp` with a stack secret, or random tokens hashed
-at rest), a revocation table, and verification middleware on *both* the JSON API
+at rest), a revocation table, and verification middleware on _both_ the JSON API
 and the smart-HTTP endpoints.
 
 One detail that matters for compatibility: `git` sends credentials as HTTP Basic
@@ -130,13 +130,13 @@ contract almost line for line: `RepoHost.stores(name)` is the namespace, one app
 instance per repo is `ArtifactsRepo`, and the git protocol is already there. The
 work is not in the git internals — it is the three things around them.
 
-| work | rough size |
-| --- | --- |
-| upstream: make `RepoClient.raw` an Effect | a PR, plus review latency |
-| registry + metadata (one index DO or D1) | ~1 week |
-| tokens: issuance, storage, revocation, Basic + Bearer middleware, tests | ~2 weeks |
-| `fork` via alternates, `import` with depth/branch + progress state | ~1 week |
-| the binding layer itself + conformance tests against the interface | ~1 week |
+| work                                                                    | rough size                |
+| ----------------------------------------------------------------------- | ------------------------- |
+| upstream: make `RepoClient.raw` an Effect                               | a PR, plus review latency |
+| registry + metadata (one index DO or D1)                                | ~1 week                   |
+| tokens: issuance, storage, revocation, Basic + Bearer middleware, tests | ~2 weeks                  |
+| `fork` via alternates, `import` with depth/branch + progress state      | ~1 week                   |
+| the binding layer itself + conformance tests against the interface      | ~1 week                   |
 
 Call it 5–6 weeks to a credible local/self-hosted Artifacts provider, of which
 the git-specific part is about a day — everything else is registry, auth and

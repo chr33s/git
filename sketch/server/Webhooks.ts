@@ -64,19 +64,19 @@ export const layer = Layer.effect(
 
       yield* Effect.forEach(
         targets,
-          (target) =>
-            HttpClientRequest.post(target.url).pipe(
-              HttpClientRequest.bodyJson(body),
-              Effect.flatMap((request) => sign(request, target.secret)),
-              Effect.flatMap(client.execute),
-              // Order matters, and it is the kind of thing a hand-rolled retry
-              // loop gets wrong: the timeout bounds each *attempt*, the retry
-              // wraps the timeout, and the catch is outermost — inside it, the
-              // retry would never see a failure to retry.
-              Effect.timeout(Duration.seconds(10)),
-              Effect.retry(policy),
-              Effect.catchCause((cause) => Effect.logWarning("webhook failed", cause)),
-            ),
+        (target) =>
+          HttpClientRequest.post(target.url).pipe(
+            HttpClientRequest.bodyJson(body),
+            Effect.flatMap((request) => sign(request, target.secret)),
+            Effect.flatMap(client.execute),
+            // Order matters, and it is the kind of thing a hand-rolled retry
+            // loop gets wrong: the timeout bounds each *attempt*, the retry
+            // wraps the timeout, and the catch is outermost — inside it, the
+            // retry would never see a failure to retry.
+            Effect.timeout(Duration.seconds(10)),
+            Effect.retry(policy),
+            Effect.catchCause((cause) => Effect.logWarning("webhook failed", cause)),
+          ),
         { concurrency: 8, discard: true },
       );
     });

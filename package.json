@@ -20,11 +20,14 @@
     "./server": "./src/server.ts"
   },
   "scripts": {
-    "check": "oxfmt --check && oxlint --type-aware --type-check",
-    "fix": "oxlint --type-aware --fix && oxfmt --write",
+    "check": "oxfmt --check && oxlint",
+    "fix": "oxlint --fix && oxfmt --write",
     "postinstall": "npx wrangler types && npm run fix",
     "test": "node --test --test-concurrency=1 --test-global-setup=src/test.helpers.ts",
     "test:integration": "node --test src/git/*.integration.ts"
+  },
+  "dependencies": {
+    "effect": "4.0.0-beta.107"
   },
   "devDependencies": {
     "@types/node": "25.6.0",
@@ -39,7 +42,9 @@
   "engines": {
     "node": ">=24.12.0"
   },
-  "dependencies": {
-    "effect": "4.0.0-beta.107"
+  "allowScripts": {
+    "esbuild": true,
+    "fsevents": true,
+    "workerd": true
   }
 }
