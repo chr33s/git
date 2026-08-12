@@ -36,7 +36,7 @@ What is real code today, running under the repo's own test runner:
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag           |
 | `src/git/Store.contract.ts`  | one contract suite, run against **all three** backends                   |
 
-171 tests pass: 160 unit (`npm test`, one of them cloning inside real Chromium) and 11 integration (`npm run test:integration`),
+171 tests pass: 160 unit (`npm test`, one of them cloning inside real Chromium) and 11 integration (the `integration` project, which `npm test` also runs),
 the latter driving a real Workers runtime and itself running a 15-case
 conformance suite inside it. Three kinds of evidence, deliberately:
 
@@ -142,7 +142,6 @@ flowchart TB
 	subgraph ports["ports (src/git/Store.ts)"]
 		OS[ObjectStore]
 		RS[RefStore]
-		IS[IndexStore]
 	end
 
 	subgraph domain["domain"]
@@ -169,7 +168,7 @@ flowchart TB
 	API --> REPO
 	CLI --> REPO
 	CLIENT -.derived from.-> API
-	REPO --> OS & RS & IS
+	REPO --> OS & RS
 	REPO --> FMT
 	PACK --> OS
 	CF & OPFS & NODE & MEM -.provide.-> ports
@@ -188,7 +187,10 @@ three times.
 | `git.storage.ts` + 3 implementations | 1,192 | `git/Store.ts` + one layer per environment |
 | `git.repository.ts` | 874 | `git/Repository.ts` service |
 | `git.pack.ts`, `git.protocol.ts` | 1,153 | `git/Pack.ts` — `Stream`/`Channel` |
-| `git.object                          | delta | index                                       | merge | utils.ts` | 2,351 | ported as-is behind `git/Format.ts` |
+| `git.object.ts`, `git.utils.ts` | 780 | `git/Format.ts` — framing, codecs, hashing |
+| `git.delta.ts` | 300 | apply-delta folded into `git/Pack.ts`; delta _creation_ not carried over, since neither pack writer ever used it |
+| `git.index.ts` | 294 | `git/Index.ts` — the real `DIRC` v2 codec, kept because git reads it, though nothing here has a work tree |
+| `git.merge.ts` | 950 | `git/Diff.ts` + `git/Merge.ts` (pure) and `Repository.merge` (the tree walk) |
 | `git.hooks.ts` | 163 | `Hooks` service |
 | `server.ts` (DO + routing) | 1,130 | `server/App.ts` + `host/*` (~200) |
 | `server.api.ts` | 2,515 | `server/Api.ts` — one `HttpApi` decl |
@@ -546,6 +548,12 @@ repositories: the server, the CLI and the browser client all commit trees
 they have already built. A port with no caller is the dead code this section
 exists to avoid, so it waits for the feature that needs it — a browser work
 tree — rather than shipping ahead of it.
+
+The _codec_ did land, in `git/Index.ts`, and the distinction is the point:
+it is 300 lines of pure byte work that the real `git` binary reads and
+writes, verified both directions, with no service, no layer and no caller in
+the server. When a work tree arrives it will need exactly that file and a
+twenty-line port; until then there is nothing to keep alive.
 
 ---
 

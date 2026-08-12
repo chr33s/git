@@ -8,7 +8,8 @@ import { defineConfig } from "vitest/config";
  * shared global state, and layers removed that reason.
  *
  * `integration` boots workerd through wrangler's `createTestHarness`, so it
- * is opt-in (`npm run test:integration`), single-file, and patient.
+ * is single-file and patient. It runs under `npm test` alongside the unit
+ * project; `--project unit` is there for the fast half during development.
  */
 export default defineConfig({
   test: {
