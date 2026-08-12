@@ -29,10 +29,9 @@ import {
 } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
 import { Context, Effect, Layer, Stream } from "effect";
 
+import { fetchRepository } from "../client/Fetch.ts";
 import { stores as memoryStores } from "../git/Memory.ts";
-import * as Pack from "../git/Pack.ts";
-import { isOid, ObjectStore, type Oid, RefStore, type RefUpdate } from "../git/Store.ts";
-import { PktReader } from "../server/Protocol.ts";
+import { ObjectStore, RefStore } from "../git/Store.ts";
 
 const failure = (code: string, message: string) =>
   new ArtifactsError({ message: `${code}: ${message}`, cause: new Error(code) });
@@ -289,108 +288,20 @@ export const repoStoresMemory = Layer.sync(RepoStores)(() => {
   });
 });
 
-const decoder = new TextDecoder();
-
-/** Parse a `git-upload-pack` advertisement into `[oid, refName]` pairs. */
-const advertisedRefs = async (body: ReadableStream<Uint8Array> | null) => {
-  if (body === null) return [];
-  const reader = new PktReader(body as unknown as AsyncIterable<Uint8Array>);
-  const refs: Array<readonly [Oid, string]> = [];
-  for (;;) {
-    const item = await reader.next();
-    if (item === "eof") break;
-    if (item === "flush") continue;
-    const line = decoder.decode(item).replace(/\n$/, "");
-    if (line.startsWith("# service=")) continue;
-    const oid = line.slice(0, 40);
-    const name = line.slice(41).split("\0")[0] ?? "";
-    if (isOid(oid) && name.length > 0 && name !== "capabilities^{}") refs.push([oid, name]);
-  }
-  return refs;
-};
-
-/**
- * The client half of the smart-HTTP protocol, just enough for `import`:
- * advertisement, then one `want … done` round, then the pack into the target
- * store — streamed, using the same `PktReader` the server parses with.
- */
+/** `import`, through the shared smart-HTTP client, errors mapped to Artifacts codes. */
 const clone = (source: string, branch: string | undefined, target: StoreInstances) =>
-  Effect.gen(function* () {
-    const advertisement = yield* Effect.tryPromise({
-      try: async () => {
-        const response = await fetch(`${source}/info/refs?service=git-upload-pack`);
-        if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
-        return advertisedRefs(response.body);
-      },
-      catch: (cause) => failure("UPSTREAM_UNAVAILABLE", String(cause)),
-    });
-
-    const head = advertisement.find(([, name]) => name === "HEAD")?.[0];
-    const picked = advertisement.filter(
-      ([, name]) =>
-        (branch === undefined
-          ? name.startsWith("refs/heads/") || name.startsWith("refs/tags/")
-          : name === `refs/heads/${branch}`) && name !== "HEAD",
-    );
-    if (picked.length === 0) {
-      if (branch !== undefined) {
-        return yield* failure("NOT_FOUND", `remote has no branch '${branch}'`);
-      }
-      return { refs: [], defaultBranch: undefined };
-    }
-
-    const wants = [...new Set(picked.map(([oid]) => oid))];
-    const encoder = new TextEncoder();
-    const pktLine = (line: string) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
-    const request = encoder.encode(
-      `${wants.map((oid) => pktLine(`want ${oid}\n`)).join("")}0000${pktLine("done\n")}`,
-    );
-
-    const packBody = yield* Effect.tryPromise({
-      try: async () => {
-        const response = await fetch(`${source}/git-upload-pack`, {
-          method: "POST",
-          headers: { "content-type": "application/x-git-upload-pack-request" },
-          body: request,
-        });
-        if (!response.ok || response.body === null) {
-          throw new Error(`upload-pack returned ${response.status}`);
-        }
-        const reader = new PktReader(response.body as unknown as AsyncIterable<Uint8Array>);
-        await reader.next(); // ACK/NAK prelude
-        return reader.rest();
-      },
-      catch: (cause) => failure("UPSTREAM_UNAVAILABLE", String(cause)),
-    });
-
-    yield* Pack.unpack(
-      Stream.fromAsyncIterable(packBody, (cause) => failure("UPSTREAM_UNAVAILABLE", String(cause))),
-    ).pipe(
-      Effect.provideService(ObjectStore, target.objects),
-      Effect.catch((error) =>
-        Effect.fail(
-          failure(
-            "INTERNAL_ERROR",
-            `unpack: ${error._tag}${"reason" in error ? ` — ${error.reason}` : ""}`,
-          ),
-        ),
+  fetchRepository({ url: source, branch, stores: target }).pipe(
+    Effect.catch((error) =>
+      Effect.fail(
+        error._tag === "Invalid"
+          ? failure(error.field === "branch" ? "NOT_FOUND" : "UPSTREAM_UNAVAILABLE", error.reason)
+          : failure(
+              "INTERNAL_ERROR",
+              `${error._tag}${"reason" in error ? ` — ${error.reason}` : ""}`,
+            ),
       ),
-    );
-
-    const updates: RefUpdate[] = picked.map(([oid, name]) => ({
-      name,
-      value: oid,
-      reason: "import",
-    }));
-    yield* target.refs
-      .apply(updates)
-      .pipe(Effect.catch((error) => Effect.fail(failure("INTERNAL_ERROR", error._tag))));
-
-    const defaultBranch = picked
-      .find(([oid, name]) => name.startsWith("refs/heads/") && oid === head)?.[1]
-      ?.slice("refs/heads/".length);
-    return { refs: updates, defaultBranch: branch ?? defaultBranch };
-  });
+    ),
+  );
 
 export interface LocalOptions {
   /** What `remote` fields advertise, e.g. the node host's URL. */

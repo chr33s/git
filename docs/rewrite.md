@@ -5,29 +5,36 @@ smart-HTTP protocol in `src/server/Protocol.ts` (stock `git` clones from and
 pushes to the Durable Object in the integration suite), and the JSON API as an
 `HttpApi` in `src/server/Api.ts` with a derived client driving it in the
 tests. Phase 5b's node host landed dependency-free in `src/host/Node.ts` —
-self-hosting is one command. The alchemy stack and the CLI are still sketches:
-their dependencies (`alchemy`, `@effect/platform-node`) are deliberately not
-installed.
+self-hosting is one command. Phase 6's CLI landed in `src/cli/main.ts` on
+`effect/unstable/cli`, with the smart-HTTP fetch client it needed extracted to
+`src/client/Fetch.ts`. Both former dependency gates are now installed —
+`alchemy` (patched, see `patches/`) and `@effect/platform-node` — leaving only
+the alchemy deployment stack (phase 5) as a sketch: its transitive
+`@distilled.cloud/*` packages target a newer `effect` than this repo pins.
 
 What is real code today, running under the repo's own test runner:
 
-| module                      | what it is                                                               |
-| --------------------------- | ------------------------------------------------------------------------ |
-| `src/git/Error.ts`          | the tagged errors, with `httpApiStatus` annotations                      |
-| `src/git/Store.ts`          | `ObjectStore` / `RefStore` ports                                         |
-| `src/git/Format.ts`         | the pure/effectful seam — framing, commit and tree codecs, hashing       |
-| `src/git/Memory.ts`         | in-memory backend                                                        |
-| `src/git/Node.ts`           | filesystem backend, git's own on-disk layout                             |
-| `src/git/Repository.ts`     | the domain service                                                       |
-| `src/git/Cloudflare.ts`     | R2 + Durable Object SQLite backend                                       |
-| `src/git/Durable.ts`        | the repository as a Durable Object                                       |
-| `src/git/Pack.ts`           | streaming packfile transport — reader (full, ofs- and ref-delta), writer |
-| `src/server/Protocol.ts`    | smart-HTTP v0: advertisement, upload-pack, receive-pack                  |
-| `src/server/Api.ts`         | the JSON API as one `HttpApi` declaration, client derived from it        |
-| `src/host/Node.ts`          | node host: the same handlers behind `node:http`, self-hosting supported  |
-| `src/git/Store.contract.ts` | one contract suite, run against **all three** backends                   |
+| module                       | what it is                                                               |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `src/git/Error.ts`           | the tagged errors, with `httpApiStatus` annotations                      |
+| `src/git/Store.ts`           | `ObjectStore` / `RefStore` ports                                         |
+| `src/git/Format.ts`          | the pure/effectful seam — framing, commit and tree codecs, hashing       |
+| `src/git/Memory.ts`          | in-memory backend                                                        |
+| `src/git/Node.ts`            | filesystem backend, git's own on-disk layout                             |
+| `src/git/Repository.ts`      | the domain service                                                       |
+| `src/git/Cloudflare.ts`      | R2 + Durable Object SQLite backend                                       |
+| `src/git/Durable.ts`         | the repository as a Durable Object                                       |
+| `src/git/Pack.ts`            | streaming packfile transport — reader (full, ofs- and ref-delta), writer |
+| `src/server/Protocol.ts`     | smart-HTTP v0: advertisement, upload-pack, receive-pack                  |
+| `src/server/Api.ts`          | the JSON API as one `HttpApi` declaration, client derived from it        |
+| `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hosting supported  |
+| `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers       |
+| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, shared by import and CLI    |
+| `src/cli/main.ts`            | the CLI on `effect/unstable/cli`: init, refs, log, clone, serve, token   |
+| `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag           |
+| `src/git/Store.contract.ts`  | one contract suite, run against **all three** backends                   |
 
-89 tests pass: 79 unit (`npm test`) and 10 integration (`npm run test:integration`),
+118 tests pass: 108 unit (`npm test`) and 10 integration (`npm run test:integration`),
 the latter driving a real Workers runtime and itself running a 15-case
 conformance suite inside it. Three kinds of evidence, deliberately:
 
@@ -48,7 +55,8 @@ typechecks against the real `effect@4.0.0-beta.107` and `alchemy@2.0.0-beta.70`
 type definitions (`tsc --noEmit`, strict, no `any` escapes). Bodies that would
 just be ported code are `declare const` stubs, so the shapes and the wiring are
 checked while the git internals stay out of the way. The dependencies are not
-added to `package.json` — the check was run against a scratch install.
+added at first — the check ran against a scratch install — but both are
+installed devDependencies now, `alchemy` behind a `patch-package` patch.
 
 Typechecking it rather than eyeballing it was worth doing: it caught four
 design errors that read fine on the page, all noted below — including one in
@@ -399,7 +407,7 @@ the in-workerd conformance run.
 | 4 ✅  | smart-HTTP protocol + `HttpApi` for the JSON API, client derived from the same declaration                    | done   |
 | 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages                             | medium |
 | 5b ✅ | node host (`src/host/Node.ts`, dependency-free): the same handlers behind `node:http`, self-hosting supported | done   |
-| 6     | CLI on `effect/unstable/cli`; delete the argv parser                                                          | low    |
+| 6 ✅  | CLI on `effect/unstable/cli` (`src/cli/main.ts`): init/refs/log/clone/serve/token                             | done   |
 
 What remains — phase 5's alchemy stack and phase 6's CLI — is blocked on
 dependencies this repository deliberately does not install (`alchemy`,

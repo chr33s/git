@@ -4,6 +4,9 @@
   "private": true,
   "description": "Universal Git smart-HTTP protocol server, browser client & nix cli",
   "license": "MIT",
+  "bin": {
+    "chr33s-git": "./src/cli/main.ts"
+  },
   "files": [
     "src",
     "tsconfig.json",
@@ -24,6 +27,7 @@
     "effect": "4.0.0-beta.107"
   },
   "devDependencies": {
+    "@effect/platform-node": "4.0.0-beta.107",
     "@types/node": "25.6.0",
     "alchemy": "2.0.0-beta.70",
     "oxfmt": "0.47.0",
