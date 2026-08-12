@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Miniflare } from "miniflare";
+import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { chromium, type LaunchOptions } from "playwright";
 
 import wrangler from "../wrangler.json" with { type: "json" };
@@ -191,19 +191,23 @@ export async function worker(options?: WorkerOptions) {
   await mkdir(dir, { recursive: true });
 
   const script = await bundleWorker();
-  const mf = new Miniflare({
-    modules: true,
-    script,
-    compatibilityDate: wrangler.compatibility_date,
-    compatibilityFlags: wrangler.compatibility_flags,
-    port: options?.port,
-    durableObjects: {
-      GIT_SERVER: { className: "GitServer", useSQLite: true },
-    },
-    r2Buckets: ["GIT_OBJECTS"],
-    durableObjectsPersist: dir,
-    r2Persist: dir,
-  });
+  // miniflare 5 restructured its constructor options; `convertV4MiniflareOptions`
+  // is the supported bridge from the v4 shape. Per-resource persist paths are
+  // gone — `resourcePersistencePath` roots all resource state instead.
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      modules: true,
+      script,
+      compatibilityDate: wrangler.compatibility_date,
+      compatibilityFlags: wrangler.compatibility_flags,
+      port: options?.port,
+      durableObjects: {
+        GIT_SERVER: { className: "GitServer", useSQLite: true },
+      },
+      r2Buckets: ["GIT_OBJECTS"],
+      resourcePersistencePath: dir,
+    }),
+  );
 
   const url = await mf.ready;
   const env = await mf.getBindings<Env>();
