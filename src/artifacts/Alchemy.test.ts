@@ -1,8 +1,8 @@
 /**
  * The upstream blocker, patched locally.
  *
- * `docs/artifacts-provider.md` identifies one interface change alchemy needs
- * before a third-party provider can satisfy the Artifacts binding:
+ * One interface change is needed upstream before a third-party provider can
+ * satisfy the Artifacts binding:
  * `RepoClient.raw` must be deferred (an `Effect`) rather than an eager
  * `ArtifactsRepo` no off-platform provider can construct.
  * `patches/alchemy+2.0.0-beta.70.patch` applies exactly that change — the one

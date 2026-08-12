@@ -2,7 +2,7 @@
  * `Registry` and `Tokens` on Durable Object SQLite — the durable form for a
  * Workers-hosted Artifacts provider.
  *
- * `docs/artifacts-provider.md` names the shape: DO namespaces cannot be
+ * The shape follows from one constraint: DO namespaces cannot be
  * enumerated, so `list({ limit, cursor })` needs an index. One DO holding
  * these two tables *is* that index, and the same instance serializes every
  * write through the input gate — no locking, for the same reason a

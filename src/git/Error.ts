@@ -6,7 +6,7 @@
  * `httpApiStatus` annotation — the same one `HttpApiError` uses — so response
  * mapping is not a hand-written switch.
  *
- * See `docs/rewrite.md`.
+ * See the readme's "Errors" convention.
  */
 import { Schema } from "effect";
 

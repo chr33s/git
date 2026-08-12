@@ -208,8 +208,8 @@ export const filePacks = (root: string): PackStore["Service"] => {
  *
  * The batch is checked before anything is written, so an atomic batch with one
  * stale entry writes nothing. Serializing concurrent batches is the host's job
- * (`docs/rewrite.md` — `RepoHost.serialize`), exactly as the DO input gate does
- * it on Workers; this layer assumes it is not racing itself.
+ * (the readme's "One Durable Object per repository"), exactly as the DO input
+ * gate does it on Workers; this layer assumes it is not racing itself.
  */
 export const refStore = (root: string) =>
   Layer.effect(

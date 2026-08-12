@@ -7,7 +7,7 @@
  *
  * Storage reads go through this service rather than the stores directly — that
  * is what keeps `ObjectStore`/`RefStore` out of the HTTP handlers' requirements
- * later on. See `docs/rewrite.md`.
+ * later on. See the readme's "Do not reach past the domain".
  */
 import { Context, Effect, Layer, Option, Result, Schedule, Stream } from "effect";
 import {
