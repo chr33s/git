@@ -18,6 +18,7 @@ import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
+import * as Archive from "../server/Archive.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
@@ -117,6 +118,17 @@ export class GitRepo extends DurableObject<TestEnv> {
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
           ),
           Effect.provide(lfsR2({ bucket: this.env.GIT_OBJECTS, repo })),
+        ),
+      );
+    }
+
+    if (route === "archive") {
+      return this.#respond(
+        repo,
+        Archive.handle(request).pipe(
+          Effect.map(
+            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+          ),
         ),
       );
     }

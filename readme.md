@@ -6,11 +6,13 @@
 Universal Git smart-HTTP protocol server, browser client & unix cli — built on
 [Effect](https://effect.website) v4 with modern TypeScript and Web APIs.
 
-The repository is a ground-up rewrite in progress: the git core, the
-smart-HTTP server, the JSON API and the node host are real, tested code —
-stock `git` clones from and pushes to it, on Workers or self-hosted — while
-every phase of it has landed. See [`docs/rewrite.md`](./docs/rewrite.md) for
-the plan, the rationale, and the designs deliberately not built.
+A ground-up rewrite of this repository's previous implementation, and now its
+default: the git core, the smart-HTTP server (v0 and v2, shallow included),
+the JSON API, LFS, webhooks, the node host and the CLI are real, tested code
+— stock `git` clones from and pushes to it, on Workers or self-hosted. See
+[`docs/rewrite.md`](./docs/rewrite.md) for the rationale and the designs
+deliberately not built, and [`docs/plan.md`](./docs/plan.md) for what is still
+a non-goal.
 
 ## Prerequisites
 
@@ -83,11 +85,21 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 
 The Worker (`src/alchemy.run.ts` → `src/worker.ts`, deployed with
 `alchemy deploy`) serves the git smart-HTTP
-protocol — stock `git` clones from and pushes to it — plus a schema-typed JSON
-API per repository (create commit, read commit, log, list refs), whose errors
-cross the wire as tagged values (`{ "_tag": "RefConflict", … }`) with statuses
-from their own annotations. The wider JSON surface, LFS and webhooks arrive
-with the remaining rewrite phases.
+protocol — stock `git` clones from and pushes to it, including
+`clone --depth=1` and protocol v2 — plus Git LFS, and a schema-typed JSON API
+per repository whose errors cross the wire as tagged values
+(`{ "_tag": "RefConflict", … }`) with statuses from their own annotations.
+
+The JSON API covers commits and content (`commit`, `blob`, `tree`, `files`,
+`file`, `object`), history (`log`, `commits`, `diff`), refs (`refs`,
+`branches`, `tags`, `reset`, `reflog`), `merge`, `grep`, and maintenance
+(`fsck`, `gc`) — plus webhook registration, which is what makes a push
+deliver.
+
+What is deliberately absent is the working tree: this serves bare
+repositories, so there is no `status`, `add` or `checkout`. The index codec
+exists (`src/git/Index.ts`, byte-compatible with git's own) for a client that
+grows one.
 
 The same handlers self-host on plain node — no Cloudflare account required:
 
@@ -124,9 +136,11 @@ npx alchemy deploy        # deploy the same stack from src/alchemy.run.ts
 ## Testing
 
 ```sh
-npm test                  # vitest, `unit` project — runs in parallel
-npm run test:integration  # vitest, `integration` project — boots workerd via
-                          # wrangler's createTestHarness
+npm test                  # both projects: `unit` in parallel, then
+                          # `integration`, which boots workerd via wrangler's
+                          # createTestHarness
+npx vitest run --project unit          # just the fast half
+npx vitest run --project integration   # just the workerd half
 ```
 
 Four kinds of evidence, deliberately:

@@ -21,6 +21,7 @@ import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
+import * as Archive from "../server/Archive.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as LfsCore from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
@@ -117,6 +118,18 @@ export default Repo.make(
                   (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
                 ),
                 Effect.provide(lfsR2({ bucket: r2, repo })),
+              );
+            }
+
+            if (route === "archive") {
+              return Archive.handle(request).pipe(
+                Effect.map(
+                  (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+                ),
+                Effect.catch((error: GitError) =>
+                  Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
+                ),
+                Effect.provide(live(repo)),
               );
             }
 
