@@ -30,6 +30,7 @@ import { push } from "../client/Push.ts";
 import * as Checkout from "../git/Checkout.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { isBinary, unified } from "../git/Diff.ts";
+import { forPath as pathHistory } from "../git/History.ts";
 import { Invalid } from "../git/Error.ts";
 import type { Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
@@ -732,6 +733,35 @@ const bisectCommand = Command.make(
     ),
 );
 
+const history = Command.make(
+  "history",
+  {
+    root: rootFlag,
+    repo: repoArgument,
+    ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
+    limit: Flag.integer("max-count").pipe(Flag.withDefault(20), Flag.withAlias("n")),
+    file: Argument.string("path"),
+  },
+  ({ file, limit, ref, repo, root }) =>
+    withRepo(
+      root,
+      repo,
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        // Streamed like `log`: the first commit prints before the walk ends.
+        yield* pathHistory(yield* mustResolve(repository, ref), file, { limit }).pipe(
+          Stream.runForEach((change) =>
+            Console.log(
+              `${change.oid} ${change.blob === null ? "(deleted)" : change.blob.slice(0, 7)} ${
+                change.message.split("\n")[0]
+              }`,
+            ),
+          ),
+        );
+      }),
+    ),
+);
+
 const reset = Command.make(
   "reset",
   {
@@ -994,6 +1024,7 @@ const git = Command.make("chr33s-git").pipe(
     fsck,
     gc,
     grep,
+    history,
     init,
     log,
     merge,
