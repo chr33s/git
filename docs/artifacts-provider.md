@@ -104,6 +104,14 @@ either — the property is read, not called. The options are a throwing `Proxy`
 sibling. That change is backwards-compatible for the native binding and is worth
 proposing before building anything else.
 
+**Patched locally in the meantime.** `alchemy@2.0.0-beta.70` is installed and
+[`patches/alchemy+2.0.0-beta.70.patch`](../patches/alchemy+2.0.0-beta.70.patch)
+applies exactly the change above via `patch-package` on `postinstall` — the
+interface in `lib`/`src` and the native binding's `wrapRepo`, which now wraps
+the handle in `Effect.succeed`. `src/artifacts/Alchemy.test.ts` pins the shape
+at compile time, so a dependency bump that reverts it fails `npm run check`.
+The patch file doubles as the upstream PR's diff.
+
 ## Where this provider would earn its place
 
 Alchemy ships three implementations of the R2 binding — native worker binding,

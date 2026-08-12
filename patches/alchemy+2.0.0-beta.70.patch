@@ -1,0 +1,64 @@
+diff --git a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts b/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
+index a3a59be4..4cfff68b 100644
+--- a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
++++ b/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
+@@ -63,8 +63,12 @@ export type ForkOptions = {
+  * {@link ArtifactsRepo} so each method returns an Effect.
+  */
+ export interface RepoClient {
+-    /** Underlying Cloudflare runtime handle. */
+-    raw: ArtifactsRepo;
++    /**
++     * Underlying Cloudflare runtime handle, deferred like its namespace-level
++     * sibling: a non-Cloudflare provider cannot construct an `ArtifactsRepo`,
++     * so `raw` fails with `ArtifactsError` instead of lying with a `Proxy`.
++     */
++    raw: Effect.Effect<ArtifactsRepo, ArtifactsError, RuntimeContext>;
+     createToken(scope?: Scope, ttl?: number): Effect.Effect<ArtifactsCreateTokenResult, ArtifactsError>;
+     listTokens(): Effect.Effect<ArtifactsTokenListResult, ArtifactsError>;
+     revokeToken(tokenOrId: string): Effect.Effect<boolean, ArtifactsError>;
+diff --git a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespaceBinding.js b/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespaceBinding.js
+index c321e75d..d8cd6f1f 100644
+--- a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespaceBinding.js
++++ b/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespaceBinding.js
+@@ -11,7 +11,7 @@ const tryPromise = (fn) => Effect.tryPromise({
+     }),
+ });
+ const wrapRepo = (raw) => ({
+-    raw,
++    raw: Effect.succeed(raw),
+     createToken: (scope, ttl) => tryPromise(() => raw.createToken(scope, ttl)),
+     listTokens: () => tryPromise(() => raw.listTokens()),
+     revokeToken: (tokenOrId) => tryPromise(() => raw.revokeToken(tokenOrId)),
+diff --git a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts b/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
+index a1210aa4..215238c9 100644
+--- a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
++++ b/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
+@@ -67,8 +67,12 @@ export type ForkOptions = {
+  * {@link ArtifactsRepo} so each method returns an Effect.
+  */
+ export interface RepoClient {
+-  /** Underlying Cloudflare runtime handle. */
+-  raw: ArtifactsRepo;
++  /**
++   * Underlying Cloudflare runtime handle, deferred like its namespace-level
++   * sibling: a non-Cloudflare provider cannot construct an `ArtifactsRepo`,
++   * so `raw` fails with `ArtifactsError` instead of lying with a `Proxy`.
++   */
++  raw: Effect.Effect<ArtifactsRepo, ArtifactsError, RuntimeContext>;
+   createToken(
+     scope?: Scope,
+     ttl?: number,
+diff --git a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespaceBinding.ts b/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespaceBinding.ts
+index 22253736..9852c5fc 100644
+--- a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespaceBinding.ts
++++ b/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespaceBinding.ts
+@@ -24,7 +24,7 @@ const tryPromise = <T>(
+   });
+ 
+ const wrapRepo = (raw: ArtifactsRepo): RepoClient => ({
+-  raw,
++  raw: Effect.succeed(raw),
+   createToken: (scope, ttl) => tryPromise(() => raw.createToken(scope, ttl)),
+   listTokens: () => tryPromise(() => raw.listTokens()),
+   revokeToken: (tokenOrId) => tryPromise(() => raw.revokeToken(tokenOrId)),

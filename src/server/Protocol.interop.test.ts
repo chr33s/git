@@ -1,19 +1,18 @@
 /**
  * Interop: the real `git` binary clones from and pushes to this server.
  *
- * The protocol handlers speak web `Request`/`Response`, so a ~30-line
- * `node:http` adapter is all it takes to put them behind a socket — the same
- * functions the Durable Object serves. Every test here is an end-to-end
- * conversation with stock git over smart HTTP.
+ * The server under test is the node host itself — `host/Node.ts`, the same
+ * `Protocol.handle` and `Api.layer` the Durable Object serves, behind
+ * `node:http`. Every test here is an end-to-end conversation with stock git
+ * over smart HTTP.
  *
  * Skipped when `git` is not on PATH.
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
-import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -24,7 +23,7 @@ import { Effect, Layer } from "effect";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import * as Protocol from "./Protocol.ts";
+import { serve, type Server } from "../host/Node.ts";
 
 const hasGit = (() => {
   try {
@@ -69,7 +68,7 @@ const author = {
 describe("Protocol interop with git", { skip: hasGit ? false : "git not installed" }, () => {
   let root: string;
   let base: string;
-  let close: () => Promise<void>;
+  let server: Server;
 
   const layerFor = (repo: string) =>
     GitRepository.layer.pipe(
@@ -82,52 +81,12 @@ describe("Protocol interop with git", { skip: hasGit ? false : "git not installe
 
   before(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-protocol-interop-"));
-
-    const server = http.createServer((incoming, outgoing) => {
-      void (async () => {
-        const chunks: Buffer[] = [];
-        for await (const chunk of incoming) chunks.push(chunk as Buffer);
-        const repo = (incoming.url ?? "/").split("/")[1] ?? "";
-
-        const headers = new Headers();
-        for (const name of ["content-type", "content-encoding"]) {
-          const value = incoming.headers[name];
-          if (typeof value === "string") headers.set(name, value);
-        }
-        const request = new Request(`http://127.0.0.1${incoming.url ?? "/"}`, {
-          method: incoming.method,
-          headers,
-          ...(chunks.length > 0 ? { body: new Uint8Array(Buffer.concat(chunks)) } : {}),
-        });
-
-        const response = await Effect.runPromise(
-          Protocol.handle(request).pipe(
-            Effect.map((matched) => matched ?? new Response("not found", { status: 404 })),
-            Effect.catch((error) =>
-              Effect.succeed(new Response(JSON.stringify(error), { status: 500 })),
-            ),
-            Effect.provide(layerFor(repo)),
-          ) as Effect.Effect<Response>,
-        );
-
-        outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
-        outgoing.end(Buffer.from(await response.arrayBuffer()));
-      })().catch((error: unknown) => {
-        outgoing.writeHead(500);
-        outgoing.end(String(error));
-      });
-    });
-
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    close = () =>
-      new Promise((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
+    server = await serve({ root });
+    base = server.url;
   });
 
   after(async () => {
-    await close();
+    await server.close();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -251,6 +210,47 @@ describe("Protocol interop with git", { skip: hasGit ? false : "git not installe
       }),
     );
     assert.equal(serverMain, head);
+  });
+
+  it("serializes concurrent commits to one repository", async () => {
+    // Five racing JSON commits: the host's per-repo gate is the DO input
+    // gate's stand-in, so every one of them lands, in some order.
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        fetch(`${base}/gated/commit`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: `racer ${index}`, author }),
+        }),
+      ),
+    );
+    assert.deepEqual(
+      responses.map((response) => response.status),
+      [200, 200, 200, 200, 200],
+    );
+
+    const refs = (await (await fetch(`${base}/gated/refs`)).json()) as {
+      refs: Array<{ oid: string }>;
+    };
+    const head = refs.refs[0]!.oid;
+    const log = (await (await fetch(`${base}/gated/log/${head}`)).json()) as {
+      commits: unknown[];
+    };
+    assert.equal(log.commits.length, 5);
+  });
+
+  it("rejects repository names that could escape the root", async () => {
+    // `fetch` (and the host's own `new URL`) normalize plain dot segments
+    // away, so the raw request is the only way to present an evasive name.
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = http.request(`${base}/..%2fescape/refs`, (response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      });
+      request.on("error", reject);
+      request.end();
+    });
+    assert.equal(status, 400);
   });
 
   it("fetches incrementally after the server moves ahead", async () => {

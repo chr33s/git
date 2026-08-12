@@ -4,8 +4,10 @@ Status: **phases 0–4 have landed** — the git core in `src/git/`, the
 smart-HTTP protocol in `src/server/Protocol.ts` (stock `git` clones from and
 pushes to the Durable Object in the integration suite), and the JSON API as an
 `HttpApi` in `src/server/Api.ts` with a derived client driving it in the
-tests. The hosts and CLI are still sketches: their dependencies (`alchemy`,
-`@effect/platform-node`) are deliberately not installed.
+tests. Phase 5b's node host landed dependency-free in `src/host/Node.ts` —
+self-hosting is one command. The alchemy stack and the CLI are still sketches:
+their dependencies (`alchemy`, `@effect/platform-node`) are deliberately not
+installed.
 
 What is real code today, running under the repo's own test runner:
 
@@ -22,9 +24,10 @@ What is real code today, running under the repo's own test runner:
 | `src/git/Pack.ts`           | streaming packfile transport — reader (full, ofs- and ref-delta), writer |
 | `src/server/Protocol.ts`    | smart-HTTP v0: advertisement, upload-pack, receive-pack                  |
 | `src/server/Api.ts`         | the JSON API as one `HttpApi` declaration, client derived from it        |
+| `src/host/Node.ts`          | node host: the same handlers behind `node:http`, self-hosting supported  |
 | `src/git/Store.contract.ts` | one contract suite, run against **all three** backends                   |
 
-87 tests pass: 77 unit (`npm test`) and 10 integration (`npm run test:integration`),
+89 tests pass: 79 unit (`npm test`) and 10 integration (`npm run test:integration`),
 the latter driving a real Workers runtime and itself running a 15-case
 conformance suite inside it. Three kinds of evidence, deliberately:
 
@@ -386,21 +389,24 @@ Each phase ships on its own and keeps `src/` working. With the legacy suite
 removed, the ratchet is the contract suite, the git-binary interop tests and
 the in-workerd conformance run.
 
-| phase | scope                                                                                                        | risk   |
-| ----- | ------------------------------------------------------------------------------------------------------------ | ------ |
-| 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests                                                | done   |
-| 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite                                      | done   |
-| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness` | done   |
-| 2b ✅ | re-point the Worker at `GitRepo` and retire the old path — resolved by removing the legacy stack outright    | done   |
-| 3 ✅  | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                      | done   |
-| 4 ✅  | smart-HTTP protocol + `HttpApi` for the JSON API, client derived from the same declaration                   | done   |
-| 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages                            | medium |
-| 5b ◑  | node host — the fs backend landed early (it is what proves the ports); the HTTP host is still ahead          | low    |
-| 6     | CLI on `effect/unstable/cli`; delete the argv parser                                                         | low    |
+| phase | scope                                                                                                         | risk   |
+| ----- | ------------------------------------------------------------------------------------------------------------- | ------ |
+| 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests                                                 | done   |
+| 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite                                       | done   |
+| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness`  | done   |
+| 2b ✅ | re-point the Worker at `GitRepo` and retire the old path — resolved by removing the legacy stack outright     | done   |
+| 3 ✅  | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                       | done   |
+| 4 ✅  | smart-HTTP protocol + `HttpApi` for the JSON API, client derived from the same declaration                    | done   |
+| 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages                             | medium |
+| 5b ✅ | node host (`src/host/Node.ts`, dependency-free): the same handlers behind `node:http`, self-hosting supported | done   |
+| 6     | CLI on `effect/unstable/cli`; delete the argv parser                                                          | low    |
 
-Phase 4 is next: `Pack.ts` gives it the transport, so the protocol endpoints
-are wiring, not invention. Phase 5b is the cheapest thing on the list once 5
-lands, and it pays for itself in test runtime.
+What remains — phase 5's alchemy stack and phase 6's CLI — is blocked on
+dependencies this repository deliberately does not install (`alchemy`,
+`@effect/platform-node`); the sketches stay ready for when they land. Phase 5b
+shipped without them: `host/Node.ts` needed nothing beyond `node:http`, and
+the protocol interop suite now runs against it, so every test of the node host
+is also a test of the handlers the Durable Object serves.
 
 ---
 

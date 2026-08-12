@@ -7,10 +7,11 @@ Universal Git smart-HTTP protocol server, browser client & unix cli — built on
 [Effect](https://effect.website) v4 with modern TypeScript and Web APIs.
 
 The repository is a ground-up rewrite in progress: the git core, the
-smart-HTTP server and the JSON API are real, tested code — stock `git` clones
-from and pushes to it — while the clients and hosts around them exist as
-typechecked design sketches. See [`docs/rewrite.md`](./docs/rewrite.md) for
-the full plan and rationale.
+smart-HTTP server, the JSON API and the node host are real, tested code —
+stock `git` clones from and pushes to it, on Workers or self-hosted — while
+the clients, the CLI and the alchemy stack exist as typechecked design
+sketches. See [`docs/rewrite.md`](./docs/rewrite.md) for the full plan and
+rationale.
 
 ## Prerequisites
 
@@ -67,6 +68,7 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/git/Pack.ts`           | streaming packfile transport, interop-tested against real `git`    |
 | `src/server/Protocol.ts`    | git smart-HTTP: advertisement, upload-pack, receive-pack           |
 | `src/server/Api.ts`         | JSON API as one `HttpApi` declaration; the client derives from it  |
+| `src/host/Node.ts`          | node host: the same handlers behind `node:http`, self-hostable     |
 | `src/git/Store.contract.ts` | one storage contract suite, run against all three backends         |
 
 The Worker (`wrangler.json` → `src/git/Durable.ts`) serves the git smart-HTTP
@@ -76,8 +78,11 @@ cross the wire as tagged values (`{ "_tag": "RefConflict", … }`) with statuses
 from their own annotations. The wider JSON surface, LFS and webhooks arrive
 with the remaining rewrite phases.
 
+The same handlers self-host on plain node — no Cloudflare account required:
+
 ```sh
-git clone http://localhost:8080/my-repo   # against `npx wrangler dev`
+GIT_ROOT=repos node src/host/Node.ts      # or: npx wrangler dev
+git clone http://127.0.0.1:8080/my-repo
 ```
 
 ### The design sketches
@@ -91,7 +96,7 @@ file: illustrative code that typechecks against the real `effect` and
 | wider JSON API + webhooks     | `src/server/*.sketch.ts`                           |
 | browser client (OPFS)         | `src/client/Client.sketch.ts`                      |
 | CLI (`effect/unstable/cli`)   | `src/cli/main.sketch.ts`                           |
-| host seam (Cloudflare / node) | `src/host/*.sketch.ts`, `src/adapters/*.sketch.ts` |
+| alchemy host seam             | `src/host/*.sketch.ts`, `src/adapters/*.sketch.ts` |
 | infrastructure as effects     | `src/alchemy.run.sketch.ts`                        |
 | Cloudflare Artifacts provider | `src/artifacts/Namespace.sketch.ts`                |
 
