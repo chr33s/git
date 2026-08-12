@@ -536,18 +536,26 @@ const gc = Command.make(
   {
     root: rootFlag,
     dryRun: Flag.boolean("dry-run").pipe(Flag.withAlias("n")),
+    repack: Flag.boolean("repack").pipe(
+      Flag.withDescription("Write what survives into one pack and drop the loose objects"),
+    ),
     repo: repoArgument,
   },
-  ({ dryRun, repo, root }) =>
+  ({ dryRun, repack, repo, root }) =>
     withRepo(
       root,
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const report = yield* repository.gc({ dryRun });
+        const report = yield* repository.gc({ dryRun, repack });
         yield* Console.log(
           `${dryRun ? "would remove" : "removed"} ${report.removed.length} of ${report.scanned} object(s), ${report.reachable} reachable`,
         );
+        if (report.packed !== undefined) {
+          yield* Console.log(
+            `packed ${report.packed.objects} object(s) into ${report.packed.name}`,
+          );
+        }
       }),
     ),
 );

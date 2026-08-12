@@ -12,6 +12,7 @@ import { Effect, Layer } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { HttpApiClient } from "effect/unstable/httpapi";
 
+import { noPacks, type PackStore } from "../git/Packed.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import type { ObjectStore, RefStore } from "../git/Store.ts";
@@ -44,5 +45,17 @@ export const remote = (baseUrl: string, options?: { readonly token?: string }) =
  * The local repository over the given stores: in a browser,
  * `Opfs.stores(await navigator.storage.getDirectory())`.
  */
-export const local = (stores: Layer.Layer<ObjectStore | RefStore>): Layer.Layer<Repository> =>
-  GitRepository.layer.pipe(Layer.provide(GitRepository.hooksNoop), Layer.provide(stores));
+export const local = (
+  stores: Layer.Layer<ObjectStore | RefStore>,
+  /**
+   * Where packs live, when they do. `Opfs.stores` carries its own (none);
+   * a caller passing bare stores gets none, which makes reads loose-only and
+   * a repack unavailable rather than wrong.
+   */
+  packs: Layer.Layer<PackStore> = noPacks,
+): Layer.Layer<Repository> =>
+  GitRepository.layer.pipe(
+    Layer.provide(GitRepository.hooksNoop),
+    Layer.provide(stores),
+    Layer.provide(packs),
+  );

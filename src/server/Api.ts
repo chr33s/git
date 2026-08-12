@@ -529,11 +529,16 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.post("gc", "/gc", {
       params: RepoParam,
-      payload: Schema.Struct({ dry_run: Schema.optional(Schema.Boolean) }),
+      payload: Schema.Struct({
+        dry_run: Schema.optional(Schema.Boolean),
+        /** Also write what survives into one pack and drop the loose copies. */
+        repack: Schema.optional(Schema.Boolean),
+      }),
       success: Schema.Struct({
         scanned: Schema.Finite,
         reachable: Schema.Finite,
         removed: Schema.Array(OidString),
+        packed: Schema.NullOr(Schema.Struct({ name: Schema.String, objects: Schema.Finite })),
       }),
       error: ObjectNotFound,
     }),
@@ -954,9 +959,17 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const report = yield* repository
-          .gc(payload.dry_run === undefined ? {} : { dryRun: payload.dry_run })
+          .gc({
+            ...(payload.dry_run === undefined ? {} : { dryRun: payload.dry_run }),
+            ...(payload.repack === undefined ? {} : { repack: payload.repack }),
+          })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        return { scanned: report.scanned, reachable: report.reachable, removed: report.removed };
+        return {
+          scanned: report.scanned,
+          reachable: report.reachable,
+          removed: report.removed,
+          packed: report.packed ?? null,
+        };
       }),
     )
     .handle("webhookAdd", ({ payload }) =>

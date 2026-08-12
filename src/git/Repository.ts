@@ -24,6 +24,7 @@ import {
   encodeCommit,
   encodeTag,
   encodeTree,
+  bytesToHex,
   hashObject,
   parseCommit,
   parseTag,
@@ -35,6 +36,8 @@ import {
 import { isBinary } from "./Diff.ts";
 import { mergeText, type Strategy as MergeStrategy } from "./Merge.ts";
 import * as Pack from "./Pack.ts";
+import { PackStore } from "./Packed.ts";
+import { buildPackIndex } from "./PackIndex.ts";
 import {
   isOid,
   ObjectStore,
@@ -125,6 +128,8 @@ export interface GcReport {
   readonly scanned: number;
   readonly reachable: number;
   readonly removed: ReadonlyArray<Oid>;
+  /** The pack a repack wrote, and how many objects went into it. */
+  readonly packed?: { readonly name: string; readonly objects: number };
 }
 
 export interface FetchPlan {
@@ -286,6 +291,13 @@ export class Repository extends Context.Service<
      */
     readonly gc: (options?: {
       readonly dryRun?: boolean;
+      /**
+       * Also write everything reachable into one pack and drop the loose
+       * copies. This is what turns a repository from one stored entry per
+       * object into a handful — the difference between a filesystem (or an
+       * R2 bucket) holding a million keys and holding three.
+       */
+      readonly repack?: boolean;
     }) => Effect.Effect<GcReport, ObjectNotFound | StorageFailure>;
 
     /**
@@ -373,6 +385,7 @@ export const layer = Layer.effect(
     const objects = yield* ObjectStore;
     const refs = yield* RefStore;
     const hooks = yield* Hooks;
+    const packs = yield* PackStore;
 
     const readTyped = <A>(
       oid: Oid,
@@ -662,6 +675,51 @@ export const layer = Layer.effect(
       }
 
       return candidates.values().next().value ?? shared[0] ?? null;
+    });
+
+    /**
+     * Everything reachable into one pack, and the loose copies dropped.
+     *
+     * Order is the whole safety argument: the pack and its index are written
+     * and verified readable *before* anything is deleted, so an interruption
+     * leaves the repository with both copies rather than neither. `packed`
+     * prefers loose objects for the same reason.
+     *
+     * The pack is built in memory. That is the honest cost of writing an
+     * `.idx`, which cannot be finished until every offset is known — and
+     * repacking is a maintenance call a host schedules, not something on the
+     * request path.
+     */
+    const repack = Effect.fn("Repository.repack")(function* (reachable: ReadonlySet<Oid>) {
+      const oids = [...reachable].filter((oid) => oid !== EMPTY_TREE_OID);
+      if (oids.length === 0) return null;
+
+      const entries: Pack.PackedEntry[] = [];
+      const chunks = yield* Stream.runCollect(
+        Pack.pack(oids, { onObject: (entry) => entries.push(entry) }).pipe(
+          Stream.provideService(ObjectStore, objects),
+        ),
+      );
+
+      const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const bytes = new Uint8Array(total);
+      let at = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, at);
+        at += chunk.length;
+      }
+
+      // The trailer is the pack's own name, which is how git names the pair.
+      const checksum = bytes.subarray(total - 20);
+      const name = `pack-${bytesToHex(checksum)}`;
+      const index = buildPackIndex(entries, checksum);
+
+      yield* packs.write({ name, pack: bytes, index });
+
+      // Only now: the objects are in the pack and the pack is stored.
+      yield* Effect.forEach(oids, (oid) => objects.delete(oid), { discard: true });
+
+      return { name, objects: oids.length };
     });
 
     const closure = (
@@ -1307,7 +1365,11 @@ export const layer = Layer.effect(
           }),
         );
 
-        return { scanned, reachable: reachable.size, removed };
+        const report = { scanned, reachable: reachable.size, removed };
+        if (options?.repack !== true || options.dryRun === true) return report;
+
+        const written = yield* repack(reachable);
+        return written === null ? report : { ...report, packed: written };
       }),
     });
   }),

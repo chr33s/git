@@ -34,7 +34,8 @@ to drive it), not a working-tree git reimplementation. That scope was taken:
   `status`, `add`, `checkout`, `restore`, `switch` — and the e2e-vs-`git` porcelain parity
   suite that tested it. Everything here serves bare repositories.
 - **Not a non-goal, and now present**: merge, diff, tags, gc, fsck, LFS, archive, packs at
-  rest, protocol v2 and client push were all in the "full parity" column and were built.
+  rest (`gc --repack` writes a `.pack`/`.idx` pair git verifies), protocol v2 and client push
+  were all in the "full parity" column and were built.
 
 The one piece of the working-tree story that _did_ land is `src/git/Index.ts`: git's own
 `DIRC` v2 codec, byte-verified both directions. It has no port and no caller — deliberately.
@@ -74,8 +75,10 @@ Ordered by value-for-effort; each lands as its own commit on `artifacts`.
    `POST /:repo/fsck`; the conformance suite covers the storage contract, not object health.
 9. **499-on-abort** mapping in the worker (legacy `worker.ts:16-19`).
 
-Deferred, explicitly (post-swap roadmap, not blockers): gc/repack, pack + `.idx` storage at
-rest, protocol v2, thin-pack/`multi_ack_detailed`, client/CLI push, the wider JSON surface.
+Deferred, explicitly (post-swap roadmap, not blockers): thin-pack and
+`multi_ack_detailed`, delta compression in the pack writer, and the working-tree surface
+§0 rules out. Everything else once listed here — gc, packs and `.idx` at rest, protocol v2,
+client/CLI push, the wider JSON surface — has since landed.
 
 ## 3. Documentation renames (same PR as the swap)
 

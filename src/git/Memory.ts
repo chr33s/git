@@ -18,56 +18,86 @@ import {
   type RawObject,
   type ReflogEntry,
   RefStore,
-  tracedObjectStore,
   tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
 } from "./Store.ts";
+import { bufferSource } from "./PackFile.ts";
+import { packed, PackStore } from "./Packed.ts";
+
+export const packStore = Layer.sync(PackStore, () => memoryPacks());
 
 export const objectStore = Layer.effect(
   ObjectStore,
-  Effect.sync(() => {
+  Effect.gen(function* () {
+    // Taken from context rather than constructed here: the reader and a
+    // repack have to be looking at the same packs, and an in-memory store
+    // built twice is two different repositories.
+    const packs = yield* PackStore;
     const objects = new Map<Oid, RawObject>();
 
-    return ObjectStore.of(
-      tracedObjectStore("Memory", {
-        read: (oid) => {
-          const object = objects.get(oid);
-          return object === undefined
-            ? Effect.fail(new ObjectNotFound({ oid }))
-            : Effect.succeed({ type: object.type, data: new Uint8Array(object.data) });
-        },
-        readStream: (oid) => {
-          const object = objects.get(oid);
-          return object === undefined
-            ? Effect.fail(new ObjectNotFound({ oid }))
-            : Effect.succeed(
-                Stream.fromIterable([new Uint8Array(object.data)]) as Stream.Stream<
-                  Uint8Array,
-                  StorageFailure
-                >,
-              );
-        },
-        write: (object) =>
-          hashObject(object).pipe(
-            Effect.tap((oid) =>
-              Effect.sync(() => {
-                objects.set(oid, { type: object.type, data: new Uint8Array(object.data) });
-              }),
-            ),
+    const loose: ObjectStore["Service"] = {
+      read: (oid) => {
+        const object = objects.get(oid);
+        return object === undefined
+          ? Effect.fail(new ObjectNotFound({ oid }))
+          : Effect.succeed({ type: object.type, data: new Uint8Array(object.data) });
+      },
+      readStream: (oid) => {
+        const object = objects.get(oid);
+        return object === undefined
+          ? Effect.fail(new ObjectNotFound({ oid }))
+          : Effect.succeed(
+              Stream.fromIterable([new Uint8Array(object.data)]) as Stream.Stream<
+                Uint8Array,
+                StorageFailure
+              >,
+            );
+      },
+      write: (object) =>
+        hashObject(object).pipe(
+          Effect.tap((oid) =>
+            Effect.sync(() => {
+              objects.set(oid, { type: object.type, data: new Uint8Array(object.data) });
+            }),
           ),
-        has: (oid) => Effect.sync(() => objects.has(oid)),
-        delete: (oid) =>
-          Effect.sync(() => {
-            objects.delete(oid);
-          }),
-        list: Stream.suspend(
-          () => Stream.fromIterable([...objects.keys()]) as Stream.Stream<Oid, StorageFailure>,
         ),
-      }),
-    );
+      has: (oid) => Effect.sync(() => objects.has(oid)),
+      delete: (oid) =>
+        Effect.sync(() => {
+          objects.delete(oid);
+        }),
+      list: Stream.suspend(
+        () => Stream.fromIterable([...objects.keys()]) as Stream.Stream<Oid, StorageFailure>,
+      ),
+    };
+
+    return ObjectStore.of(packed(loose, packs, "Memory"));
   }),
 );
+
+/** Packs held as bytes — what the contract suite exercises the read path with. */
+export const memoryPacks = (): PackStore["Service"] => {
+  const packs = new Map<string, { pack: Uint8Array; index: Uint8Array }>();
+
+  return {
+    list: Effect.sync(() =>
+      [...packs.entries()].map(([name, stored]) => ({
+        name,
+        index: stored.index,
+        source: bufferSource(stored.pack),
+      })),
+    ),
+    write: ({ index, name, pack }) =>
+      Effect.sync(() => {
+        packs.set(name, { pack, index });
+      }),
+    delete: (name) =>
+      Effect.sync(() => {
+        packs.delete(name);
+      }),
+  };
+};
 
 export const refStore = Layer.effect(
   RefStore,
@@ -169,4 +199,4 @@ export const refStore = Layer.effect(
 );
 
 /** Both stores, for tests and for the browser/CLI until their backends land. */
-export const stores = Layer.mergeAll(objectStore, refStore);
+export const stores = Layer.mergeAll(objectStore, refStore).pipe(Layer.provideMerge(packStore));

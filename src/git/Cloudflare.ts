@@ -21,13 +21,13 @@ import { Effect, Layer, Option, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 import { hashObject } from "./Format.ts";
+import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
   ObjectStore,
   type ObjectType,
   type Oid,
   type ReflogEntry,
   RefStore,
-  tracedObjectStore,
   tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
@@ -44,10 +44,14 @@ const failure = (operation: string, target: string) => (cause: unknown) =>
  * `<type> <len>\0` prefix means a blob read can be served straight from the
  * object body without re-parsing a header.
  */
+export const packStore = (bucket: R2Bucket, repo: string) =>
+  Layer.sync(PackStore, () => r2Packs(bucket, repo));
+
 export const objectStore = (bucket: R2Bucket, repo: string) =>
   Layer.effect(
     ObjectStore,
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      const packs = yield* PackStore;
       const key = (oid: Oid) => `${repo}/objects/${oid}`;
 
       const head = (oid: Oid) =>
@@ -73,79 +77,155 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
           : Effect.fail(new ObjectNotFound({ oid }));
       };
 
-      return ObjectStore.of(
-        tracedObjectStore("Cloudflare", {
-          read: (oid) =>
-            get(oid).pipe(
-              Effect.flatMap((object) =>
-                Effect.all([
-                  typeOf(object, oid),
-                  Effect.tryPromise({
-                    try: () => object.arrayBuffer(),
-                    catch: failure("read", key(oid)),
-                  }),
-                ]),
-              ),
-              Effect.map(([type, buffer]) => ({ type, data: new Uint8Array(buffer) })),
-            ),
-          readStream: (oid) =>
-            get(oid).pipe(
-              Effect.map((object) =>
-                Stream.fromReadableStream({
-                  evaluate: () => object.body as ReadableStream<Uint8Array>,
-                  onError: failure("readStream", key(oid)),
+      const loose: ObjectStore["Service"] = {
+        read: (oid) =>
+          get(oid).pipe(
+            Effect.flatMap((object) =>
+              Effect.all([
+                typeOf(object, oid),
+                Effect.tryPromise({
+                  try: () => object.arrayBuffer(),
+                  catch: failure("read", key(oid)),
                 }),
-              ),
+              ]),
             ),
-          write: (object) =>
-            Effect.gen(function* () {
-              const oid = yield* hashObject(object);
-
-              // Content-addressed: if it is already there, the bytes are identical
-              // and the PUT is pure cost.
-              const existing = yield* head(oid);
-              if (existing !== null) return oid;
-
-              yield* Effect.tryPromise({
-                try: () =>
-                  bucket.put(key(oid), object.data as unknown as ArrayBuffer, {
-                    customMetadata: { type: object.type },
-                  }),
-                catch: failure("write", key(oid)),
-              });
-
-              return oid;
-            }),
-          has: (oid) => head(oid).pipe(Effect.map((object) => object !== null)),
-          delete: (oid) =>
-            Effect.tryPromise({
-              try: () => bucket.delete(key(oid)),
-              catch: failure("delete", key(oid)),
-            }),
-          list: Stream.paginate(undefined as string | undefined, (cursor) =>
-            Effect.tryPromise({
-              try: () =>
-                bucket.list({
-                  prefix: `${repo}/objects/`,
-                  ...(cursor === undefined ? {} : { cursor }),
-                }),
-              catch: failure("list", repo),
-            }).pipe(
-              Effect.map(
-                (page) =>
-                  [
-                    page.objects.map(
-                      (object) => object.key.slice(object.key.lastIndexOf("/") + 1) as Oid,
-                    ),
-                    page.truncated ? Option.some(page.cursor) : Option.none<string>(),
-                  ] as const,
-              ),
+            Effect.map(([type, buffer]) => ({ type, data: new Uint8Array(buffer) })),
+          ),
+        readStream: (oid) =>
+          get(oid).pipe(
+            Effect.map((object) =>
+              Stream.fromReadableStream({
+                evaluate: () => object.body as ReadableStream<Uint8Array>,
+                onError: failure("readStream", key(oid)),
+              }),
             ),
           ),
-        }),
-      );
+        write: (object) =>
+          Effect.gen(function* () {
+            const oid = yield* hashObject(object);
+
+            // Content-addressed: if it is already there, the bytes are identical
+            // and the PUT is pure cost.
+            const existing = yield* head(oid);
+            if (existing !== null) return oid;
+
+            yield* Effect.tryPromise({
+              try: () =>
+                bucket.put(key(oid), object.data as unknown as ArrayBuffer, {
+                  customMetadata: { type: object.type },
+                }),
+              catch: failure("write", key(oid)),
+            });
+
+            return oid;
+          }),
+        has: (oid) => head(oid).pipe(Effect.map((object) => object !== null)),
+        delete: (oid) =>
+          Effect.tryPromise({
+            try: () => bucket.delete(key(oid)),
+            catch: failure("delete", key(oid)),
+          }),
+        list: Stream.paginate(undefined as string | undefined, (cursor) =>
+          Effect.tryPromise({
+            try: () =>
+              bucket.list({
+                prefix: `${repo}/objects/`,
+                ...(cursor === undefined ? {} : { cursor }),
+              }),
+            catch: failure("list", repo),
+          }).pipe(
+            Effect.map(
+              (page) =>
+                [
+                  page.objects.map(
+                    (object) => object.key.slice(object.key.lastIndexOf("/") + 1) as Oid,
+                  ),
+                  page.truncated ? Option.some(page.cursor) : Option.none<string>(),
+                ] as const,
+            ),
+          ),
+        ),
+      };
+
+      return ObjectStore.of(packed(loose, packs, "Cloudflare"));
     }),
   );
+
+/**
+ * Packs in R2, read with range GETs.
+ *
+ * This is where random access pays for itself: pulling one small object out
+ * of a pack costs a couple of ranged reads rather than the whole object, so a
+ * repository whose history is a gigabyte still serves a single blob from a
+ * Durable Object with 128 MiB.
+ */
+export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] => {
+  const prefix = `${repo}/pack/`;
+
+  return {
+    list: Effect.tryPromise({
+      try: async () => {
+        const handles: PackHandle[] = [];
+        let cursor: string | undefined;
+
+        do {
+          const page = await bucket.list({ prefix, ...(cursor === undefined ? {} : { cursor }) });
+          for (const entry of page.objects) {
+            if (!entry.key.endsWith(".idx")) continue;
+            const name = entry.key.slice(prefix.length, -4);
+
+            const packKey = `${prefix}${name}.pack`;
+            const packHead = await bucket.head(packKey);
+            // An index whose pack is missing is a half-finished write; a
+            // reader that failed on it would break the whole repository.
+            if (packHead === null) continue;
+
+            const index = await bucket.get(entry.key);
+            if (index === null) continue;
+
+            handles.push({
+              name,
+              index: new Uint8Array(await index.arrayBuffer()),
+              source: {
+                size: packHead.size,
+                read: async (offset, length) => {
+                  const ranged = await bucket.get(packKey, { range: { offset, length } });
+                  if (ranged === null) return new Uint8Array(0);
+                  return new Uint8Array(await ranged.arrayBuffer());
+                },
+              },
+            });
+          }
+          cursor = page.truncated ? page.cursor : undefined;
+        } while (cursor !== undefined);
+
+        return handles;
+      },
+      catch: failure("packs.list", prefix),
+    }),
+
+    write: ({ index, name, pack }) =>
+      Effect.tryPromise({
+        try: async () => {
+          // Pack before index, so a reader never sees an index pointing into
+          // bytes that are not there yet.
+          await bucket.put(`${prefix}${name}.pack`, pack as unknown as ArrayBuffer);
+          await bucket.put(`${prefix}${name}.idx`, index as unknown as ArrayBuffer);
+        },
+        catch: failure("packs.write", prefix),
+      }),
+
+    delete: (name) =>
+      Effect.tryPromise({
+        try: async () => {
+          // Index first: it is what makes the pack visible.
+          await bucket.delete(`${prefix}${name}.idx`);
+          await bucket.delete(`${prefix}${name}.pack`);
+        },
+        catch: failure("packs.delete", prefix),
+      }),
+  };
+};
 
 /**
  * Refs in DO SQLite.
@@ -334,4 +414,4 @@ export const stores = (options: {
   Layer.mergeAll(
     objectStore(options.bucket, options.repo),
     refStore(options.storage, options.repo),
-  );
+  ).pipe(Layer.provideMerge(packStore(options.bucket, options.repo)));

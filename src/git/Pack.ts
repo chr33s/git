@@ -25,6 +25,7 @@ import { Effect, Result, Stream } from "effect";
 import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
 import { bytesToHex } from "./Format.ts";
 import { type ByteSource, inflate as zlibInflate, InflateError } from "./Inflate.ts";
+import { crc32 } from "./PackIndex.ts";
 import { Sha1 } from "./Sha1.ts";
 import { ObjectStore, type ObjectType, type Oid, type RawObject } from "./Store.ts";
 
@@ -374,8 +375,25 @@ const deflate = async (bytes: Uint8Array): Promise<Uint8Array> =>
  * as the consumer pulls, so the first bytes leave before the last object is
  * read — and a consumer that hangs up stops the reads.
  */
+export interface PackedEntry {
+  readonly oid: Oid;
+  /** Byte offset of this object's header within the pack. */
+  readonly offset: number;
+  /** CRC32 of the object's stored bytes, as the `.idx` records it. */
+  readonly crc32: number;
+}
+
+export interface PackOptions {
+  /**
+   * Called as each object is written, in pack order. This is how a repack
+   * collects what it needs for the `.idx` without a second pass.
+   */
+  readonly onObject?: (entry: PackedEntry) => void;
+}
+
 export const pack = (
   oids: ReadonlyArray<Oid>,
+  options?: PackOptions,
 ): Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure, ObjectStore> =>
   Stream.unwrap(
     Effect.gen(function* () {
@@ -394,22 +412,27 @@ export const pack = (
       header[10] = (oids.length >>> 8) & 0xff;
       header[11] = oids.length & 0xff;
 
+      // Where the next object starts, which only the writer knows — and
+      // which is exactly what an `.idx` records. Reporting it as the pack is
+      // produced is what lets a repack build the index without a second pass
+      // over bytes it would otherwise have to keep.
+      let offset = header.length;
+
       const objects = Stream.fromIterable(oids).pipe(
         Stream.mapEffect((oid) =>
-          store
-            .read(oid)
-            .pipe(
-              Effect.flatMap((object) =>
-                Effect.promise(async () =>
-                  emit(
-                    concat([
-                      encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
-                      await deflate(object.data),
-                    ]),
-                  ),
-                ),
-              ),
+          store.read(oid).pipe(
+            Effect.flatMap((object) =>
+              Effect.promise(async () => {
+                const bytes = concat([
+                  encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
+                  await deflate(object.data),
+                ]);
+                options?.onObject?.({ oid, offset, crc32: crc32(bytes) });
+                offset += bytes.length;
+                return emit(bytes);
+              }),
             ),
+          ),
         ),
       );
 

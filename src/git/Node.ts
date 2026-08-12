@@ -27,12 +27,12 @@ import { Effect, Layer, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 import { decodeObject, encodeObject, hashObject } from "./Format.ts";
+import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
   ObjectStore,
   type Oid,
   type ReflogEntry,
   RefStore,
-  tracedObjectStore,
   tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
@@ -42,10 +42,13 @@ const failure = (operation: string, target: string) => (cause: unknown) =>
   new StorageFailure({ operation, path: target, cause });
 
 /** Objects are immutable, so a write is temp-file plus rename, no locking. */
+export const packStore = (root: string) => Layer.sync(PackStore, () => filePacks(root));
+
 export const objectStore = (root: string) =>
   Layer.effect(
     ObjectStore,
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      const packs = yield* PackStore;
       const objectsDir = path.join(root, "objects");
       const pathFor = (oid: Oid) => path.join(objectsDir, oid.slice(0, 2), oid.slice(2));
 
@@ -67,62 +70,138 @@ export const objectStore = (root: string) =>
           ),
         );
 
-      return ObjectStore.of(
-        tracedObjectStore("Node", {
-          read,
-          readStream: (oid) =>
-            read(oid).pipe(
-              Effect.map(
-                (object) =>
-                  Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
-              ),
+      const loose: ObjectStore["Service"] = {
+        read,
+        readStream: (oid) =>
+          read(oid).pipe(
+            Effect.map(
+              (object) =>
+                Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
             ),
-          write: (object) =>
-            Effect.gen(function* () {
-              const oid = yield* hashObject(object);
-              const target = pathFor(oid);
+          ),
+        write: (object) =>
+          Effect.gen(function* () {
+            const oid = yield* hashObject(object);
+            const target = pathFor(oid);
 
-              // Already there: objects are content-addressed, so a rewrite would
-              // be identical bytes and only costs IO.
-              if (existsSync(target)) return oid;
+            // Already there: objects are content-addressed, so a rewrite would
+            // be identical bytes and only costs IO.
+            if (existsSync(target)) return oid;
 
-              yield* Effect.tryPromise({
-                try: async () => {
-                  await fs.mkdir(path.dirname(target), { recursive: true });
-                  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-                  await fs.writeFile(temporary, deflateSync(encodeObject(object)));
-                  await fs.rename(temporary, target);
-                },
-                catch: failure("write", target),
-              });
-
-              return oid;
-            }),
-          has: (oid) => Effect.sync(() => existsSync(pathFor(oid))),
-          delete: (oid) =>
-            Effect.tryPromise({
-              try: () => fs.rm(pathFor(oid), { force: true }),
-              catch: failure("delete", pathFor(oid)),
-            }),
-          list: Stream.unwrap(
-            Effect.tryPromise({
+            yield* Effect.tryPromise({
               try: async () => {
-                if (!existsSync(objectsDir)) return [];
-                const oids: Oid[] = [];
-                for (const prefix of await fs.readdir(objectsDir)) {
-                  for (const rest of await fs.readdir(path.join(objectsDir, prefix))) {
-                    oids.push(`${prefix}${rest}` as Oid);
-                  }
-                }
-                return oids;
+                await fs.mkdir(path.dirname(target), { recursive: true });
+                const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+                await fs.writeFile(temporary, deflateSync(encodeObject(object)));
+                await fs.rename(temporary, target);
               },
-              catch: failure("list", objectsDir),
-            }).pipe(Effect.map(Stream.fromIterable)),
-          ) as Stream.Stream<Oid, StorageFailure>,
-        }),
-      );
+              catch: failure("write", target),
+            });
+
+            return oid;
+          }),
+        has: (oid) => Effect.sync(() => existsSync(pathFor(oid))),
+        delete: (oid) =>
+          Effect.tryPromise({
+            try: () => fs.rm(pathFor(oid), { force: true }),
+            catch: failure("delete", pathFor(oid)),
+          }),
+        list: Stream.unwrap(
+          Effect.tryPromise({
+            try: async () => {
+              if (!existsSync(objectsDir)) return [];
+              const oids: Oid[] = [];
+              for (const prefix of await fs.readdir(objectsDir)) {
+                for (const rest of await fs.readdir(path.join(objectsDir, prefix))) {
+                  oids.push(`${prefix}${rest}` as Oid);
+                }
+              }
+              return oids;
+            },
+            catch: failure("list", objectsDir),
+          }).pipe(Effect.map(Stream.fromIterable)),
+        ) as Stream.Stream<Oid, StorageFailure>,
+      };
+
+      return ObjectStore.of(packed(loose, packs, "Node"));
     }),
   );
+
+/**
+ * Packs on disk, in git's own `objects/pack` layout.
+ *
+ * A `.pack` is read through `read(2)` at an offset rather than loaded, which
+ * is what keeps a repository with a gigabyte pack usable from a process that
+ * does not have a gigabyte.
+ */
+export const filePacks = (root: string): PackStore["Service"] => {
+  const directory = path.join(root, "objects", "pack");
+
+  return {
+    list: Effect.tryPromise({
+      try: async () => {
+        if (!existsSync(directory)) return [];
+        const names = (await fs.readdir(directory))
+          .filter((name) => name.endsWith(".idx"))
+          .map((name) => name.slice(0, -4));
+
+        const handles: PackHandle[] = [];
+        for (const name of names) {
+          const packPath = path.join(directory, `${name}.pack`);
+          // An `.idx` without its `.pack` is a half-finished write, not a
+          // pack; skipping it beats failing every read in the repository.
+          if (!existsSync(packPath)) continue;
+
+          const index = new Uint8Array(await fs.readFile(path.join(directory, `${name}.idx`)));
+          const size = (await fs.stat(packPath)).size;
+          handles.push({
+            name,
+            index,
+            source: {
+              size,
+              read: async (offset, length) => {
+                const handle = await fs.open(packPath, "r");
+                try {
+                  const buffer = Buffer.alloc(Math.max(0, Math.min(length, size - offset)));
+                  await handle.read(buffer, 0, buffer.length, offset);
+                  return new Uint8Array(buffer);
+                } finally {
+                  await handle.close();
+                }
+              },
+            },
+          });
+        }
+        return handles;
+      },
+      catch: failure("packs.list", directory),
+    }),
+
+    write: ({ index, name, pack }) =>
+      Effect.tryPromise({
+        try: async () => {
+          await fs.mkdir(directory, { recursive: true });
+          // The pack lands before the index that points into it: an index
+          // without a pack is skipped above, but a pack without an index is
+          // simply not consulted, and neither state loses an object.
+          await fs.writeFile(path.join(directory, `${name}.pack`), pack);
+          await fs.writeFile(path.join(directory, `${name}.idx`), index);
+        },
+        catch: failure("packs.write", directory),
+      }),
+
+    delete: (name) =>
+      Effect.tryPromise({
+        try: async () => {
+          // Index first: it is what makes the pack visible, so removing it
+          // first means a reader never sees an index whose pack is gone.
+          await fs.rm(path.join(directory, `${name}.idx`), { force: true });
+          await fs.rm(path.join(directory, `${name}.pack`), { force: true });
+        },
+        catch: failure("packs.delete", directory),
+      }),
+  };
+};
 
 /**
  * Refs on disk.
@@ -295,4 +374,5 @@ export const refStore = (root: string) =>
   );
 
 /** Both stores over one directory. */
-export const stores = (root: string) => Layer.mergeAll(objectStore(root), refStore(root));
+export const stores = (root: string) =>
+  Layer.mergeAll(objectStore(root), refStore(root)).pipe(Layer.provideMerge(packStore(root)));

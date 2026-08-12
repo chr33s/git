@@ -18,6 +18,7 @@ import { ReadWriteNamespace } from "alchemy/Cloudflare/Artifacts/ReadWriteNamesp
 import type { RuntimeContext } from "alchemy/RuntimeContext";
 import { Effect, Layer } from "effect";
 
+import { noPacks } from "../git/Packed.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { stores as nodeStores } from "../git/Node.ts";
@@ -66,6 +67,9 @@ const repositoryFor = (instances: StoreInstances) =>
     Layer.provide(GitRepository.hooksNoop),
     Layer.provide(Layer.succeed(ObjectStore)(instances.objects)),
     Layer.provide(Layer.succeed(RefStore)(instances.refs)),
+    // The provider hands out raw store instances, which have no packs of
+    // their own; a fork reads through alternates rather than through a pack.
+    Layer.provide(noPacks),
   );
 
 describe("Artifacts local provider", () => {

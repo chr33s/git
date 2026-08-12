@@ -13,6 +13,7 @@ import { Effect, Layer, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { decodeObject, encodeObject, hashObject } from "../git/Format.ts";
+import { noPacks } from "../git/Packed.ts";
 import {
   ObjectStore,
   type Oid,
@@ -353,4 +354,8 @@ export const refStore = (
 
 /** Both stores over one directory handle — in a browser, an OPFS directory. */
 export const stores = (root: FileSystemDirectoryHandle | Promise<FileSystemDirectoryHandle>) =>
-  Layer.mergeAll(objectStore(root), refStore(root));
+  // `noPacks`: a tab clones and reads, and the pack it receives is exploded
+  // to loose objects on arrival as it always was. Packs at rest would buy a
+  // browser the same key-count saving they buy R2, and the read path is
+  // already shared — it is the write side that has no caller here yet.
+  Layer.mergeAll(objectStore(root), refStore(root)).pipe(Layer.provideMerge(noPacks));
