@@ -99,6 +99,22 @@ renames retarget open PRs and branch-protection rules and leave a redirect notic
 
 Order matters; do it in a quiet window:
 
+0. **Check that the branch you are promoting carries the work.** A rename cannot lose
+   history, but it can promote the wrong history — and as of this writing `artifacts` is
+   still at `b8632b9`, the commit it had before any of the gap-closing work. Renaming it
+   today would make the default a repository with no LFS, no merge and no protocol v2, with
+   nothing in the git history to suggest anything had gone wrong. Land the work first, then
+   confirm the modules are actually there:
+
+   ```sh
+   git fetch origin artifacts
+   git ls-tree --name-only origin/artifacts src/server/Lfs.ts src/git/Merge.ts \
+     src/server/Route.ts src/client/Push.ts
+   ```
+
+   Four paths back means four phases present; anything missing means the branch is not the
+   one to promote.
+
 1. Freeze: merge or close PRs targeting `main`; announce the cutover.
 2. Preserve legacy history under a new name:
    - Rename `main` → `legacy` (GitHub UI/API). Existing clones keep working; GitHub shows the
