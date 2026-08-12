@@ -21,11 +21,7 @@ registryContract(
   "Memory",
   {
     run: (effect) =>
-      Effect.runPromise(
-        effect.pipe(
-          Effect.provide(Layer.mergeAll(registryMemory, tokensMemory)),
-        ) as Effect.Effect<never>,
-      ),
+      Effect.runPromise(effect.pipe(Effect.provide(Layer.mergeAll(registryMemory, tokensMemory)))),
   },
   { describe, it },
 );
@@ -37,9 +33,7 @@ registryContract(
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "registry-node-"));
       try {
         return await Effect.runPromise(
-          effect.pipe(
-            Effect.provide(Layer.mergeAll(registryNode(root), tokensNode(root))),
-          ) as Effect.Effect<never>,
+          effect.pipe(Effect.provide(Layer.mergeAll(registryNode(root), tokensNode(root)))),
         );
       } finally {
         await fs.rm(root, { recursive: true, force: true });
@@ -78,11 +72,11 @@ registryContract(
   {
     run: (effect) => {
       const database = new DatabaseSync(":memory:");
-      return Effect.runPromise(
-        effect.pipe(Effect.provide(sqlite(nodeSql(database)))) as Effect.Effect<never>,
-      ).finally(() => {
-        database.close();
-      });
+      return Effect.runPromise(effect.pipe(Effect.provide(sqlite(nodeSql(database))))).finally(
+        () => {
+          database.close();
+        },
+      );
     },
   },
   { describe, it },

@@ -51,7 +51,7 @@ describe("Client", () => {
             Layer.provide(nodeStores(path.join(root, "origin"))),
           ),
         ),
-      ) as unknown as Effect.Effect<Oid>,
+      ),
     );
   });
 
@@ -97,7 +97,7 @@ describe("Client", () => {
           const commits = yield* Stream.runCollect(repository.log(main!, { limit: 10 }));
           return commits.map((commit) => commit.message);
         }).pipe(Effect.provide(local(opfs)));
-      }).pipe(Effect.provide(opfs)) as unknown as Effect.Effect<ReadonlyArray<string>>,
+      }).pipe(Effect.provide(opfs)),
     );
 
     assert.deepEqual(messages, ["second", "first"]);
@@ -124,7 +124,7 @@ describe("Client", () => {
               Layer.provide(nodeStores(path.join(authRoot, "vault"))),
             ),
           ),
-        ) as unknown as Effect.Effect<Oid>,
+        ),
       );
       const token = await Effect.runPromise(hmacMint(secret, "vault", "read", 300));
 
@@ -132,7 +132,7 @@ describe("Client", () => {
         Effect.gen(function* () {
           const client = yield* remote(authed.url);
           return yield* client.repo.refs({ params: { repo: "vault" } }).pipe(Effect.flip);
-        }).pipe(Effect.scoped) as unknown as Effect.Effect<unknown>,
+        }).pipe(Effect.scoped),
       );
       assert.ok(denied, "an anonymous derived client must be refused");
 
@@ -140,7 +140,7 @@ describe("Client", () => {
         Effect.gen(function* () {
           const client = yield* remote(authed.url, { token });
           return yield* client.repo.refs({ params: { repo: "vault" } });
-        }).pipe(Effect.scoped) as unknown as Effect.Effect<{ refs: ReadonlyArray<unknown> }>,
+        }).pipe(Effect.scoped),
       );
       assert.equal(allowed.refs.length, 1);
     } finally {

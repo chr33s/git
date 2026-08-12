@@ -19,7 +19,7 @@ import { Effect, Stream } from "effect";
 
 import { stores } from "./Memory.ts";
 import { pack, unpack } from "./Pack.ts";
-import { ObjectStore, type Oid, type RawObject } from "./Store.ts";
+import { ObjectStore, type Oid } from "./Store.ts";
 
 const hasGit = (() => {
   try {
@@ -112,10 +112,7 @@ describe.skipIf(!hasGit)("Pack interop with git", () => {
           const oids = yield* unpack(Stream.fromIterable(chunked(packBytes, 1013)));
           const head = git(root, "rev-parse", "HEAD").trim() as Oid;
           return { oids, headCommit: yield* store.read(head) };
-        }).pipe(Effect.provide(stores)) as Effect.Effect<{
-          oids: ReadonlyArray<Oid>;
-          headCommit: RawObject;
-        }>,
+        }).pipe(Effect.provide(stores)),
       );
 
       assert.deepEqual(
@@ -139,7 +136,7 @@ describe.skipIf(!hasGit)("Pack interop with git", () => {
         const oids = yield* unpack(Stream.fromIterable([packBytes]));
         const chunks = yield* Stream.runCollect(pack(oids));
         return concat([...chunks]);
-      }).pipe(Effect.provide(stores)) as Effect.Effect<Uint8Array>,
+      }).pipe(Effect.provide(stores)),
     );
 
     const out = path.join(root, "ours.pack");

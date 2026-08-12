@@ -19,8 +19,7 @@ storeContract(
   "OPFS",
   {
     // A fresh in-memory origin per test, like a fresh browser profile.
-    run: (effect) =>
-      Effect.runPromise(effect.pipe(Effect.provide(stores(fakeRoot()))) as Effect.Effect<never>),
+    run: (effect) => Effect.runPromise(effect.pipe(Effect.provide(stores(fakeRoot())))),
   },
   { describe, it },
 );

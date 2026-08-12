@@ -132,6 +132,6 @@ describe("Api", () => {
         // `HttpApiTest`'s client carries the router's request-scoped
         // requirement, which the handlers layer satisfies at dispatch time but
         // the type cannot see discharged here.
-      }).pipe(Effect.scoped, Effect.provide(live)) as unknown as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
   );
 });

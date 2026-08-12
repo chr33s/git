@@ -19,7 +19,7 @@ import { Effect } from "effect";
 
 import { encodeCommit, encodeTree } from "./Format.ts";
 import { stores } from "./Node.ts";
-import { ObjectStore, type Oid, RefStore } from "./Store.ts";
+import { ObjectStore, RefStore } from "./Store.ts";
 
 const hasGit = (() => {
   try {
@@ -68,7 +68,7 @@ describe.skipIf(!hasGit)("Node backend interop with git", () => {
         yield* refs.setHead("refs/heads/main");
         yield* refs.apply([{ name: "refs/heads/main", value: commit, expected: null }]);
         return commit;
-      }).pipe(Effect.provide(stores(root))) as Effect.Effect<Oid>,
+      }).pipe(Effect.provide(stores(root))),
     );
 
     return { commit, root };

@@ -87,7 +87,7 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
             Layer.provide(stores(path.join(root, "authed"))),
           ),
         ),
-      ) as Effect.Effect<unknown>,
+      ),
     );
   });
 
@@ -137,7 +137,7 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
             Layer.provide(stores(path.join(root, "authed"))),
           ),
         ),
-      ) as Effect.Effect<string | null>,
+      ),
     );
     assert.equal(serverMain, pushed);
   });

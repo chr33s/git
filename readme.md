@@ -112,7 +112,7 @@ npx chr33s-git clone --token <token> http://127.0.0.1:8080/my-repo my-copy
 
 ```sh
 npm install               # postinstall applies patches/ and regenerates worker types
-npm run check             # format + type-aware lint
+npm run check             # format, lint, and typecheck (tsc -b --noEmit)
 npm run fix               # auto-fix both
 npx wrangler dev          # run the Worker locally on port 8080
 npx wrangler deploy       # deploy (the tested path)

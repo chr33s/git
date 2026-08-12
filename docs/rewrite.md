@@ -461,6 +461,13 @@ defaults). What the audit changed:
   errors, timeouts, 408, 429, 5xx — and _not_ other 4xx) is exactly the
   policy the hand-rolled version was reaching for. The transport is now a
   layer a host or test swaps.
+- **Sixteen unsafe type assertions removed.** `as Effect.Effect<never>` and
+  friends were narrowing error and requirement channels to make things
+  compile; deleting them made the compiler name the two that were actually
+  load-bearing (alchemy's `RuntimeContext`, which cannot be constructed
+  off-platform, and the router's request-scoped `Repository`). Those two keep
+  a cast with a line-scoped `@effect-diagnostics-next-line` and a reason; the
+  other fourteen were cargo cult.
 - **Ten language-service suggestions cleared.** `Effect.mapError` for
   catch-then-fail, `yield*` on yieldable errors instead of `Effect.fail`,
   `catchTags` for consecutive `catchTag`s, `Schema.Finite` where a number is

@@ -10,7 +10,7 @@ storeContract(
   {
     // A fresh layer per call: `Layer.effect` builds new maps each time it is
     // provided, so nothing leaks between tests.
-    run: (effect) => Effect.runPromise(effect.pipe(Effect.provide(stores)) as Effect.Effect<never>),
+    run: (effect) => Effect.runPromise(effect.pipe(Effect.provide(stores))),
   },
   { describe, it },
 );

@@ -11,7 +11,7 @@
     "src",
     "tsconfig.json",
     "!src/**/*.test.ts",
-    "!src/**/*.spec.ts",
+    "!src/**/*.integration.ts",
     "!src/**/*.contract.ts"
   ],
   "type": "module",
@@ -20,8 +20,7 @@
     "fix": "oxlint --fix && oxfmt --write",
     "postinstall": "patch-package && npx wrangler types && npm run fix",
     "prepare": "effect-tsgo patch",
-    "test": "vitest run --project unit",
-    "test:integration": "vitest run --project integration"
+    "test": "vitest run"
   },
   "dependencies": {
     "effect": "4.0.0-beta.107"

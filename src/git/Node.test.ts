@@ -19,9 +19,7 @@ storeContract(
     run: async (effect) => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-store-"));
       try {
-        return await Effect.runPromise(
-          effect.pipe(Effect.provide(stores(root))) as Effect.Effect<never>,
-        );
+        return await Effect.runPromise(effect.pipe(Effect.provide(stores(root))));
       } finally {
         await fs.rm(root, { force: true, recursive: true });
       }

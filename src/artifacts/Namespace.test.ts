@@ -21,7 +21,7 @@ import { Effect, Layer } from "effect";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { stores as nodeStores } from "../git/Node.ts";
-import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
+import { ObjectStore, RefStore } from "../git/Store.ts";
 import { serve } from "../host/Node.ts";
 import { localMemory, localNode, RepoStores, type StoreInstances, Tokens } from "./Namespace.ts";
 
@@ -46,6 +46,8 @@ const author = {
 const run = <A, E>(
   effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | RuntimeContext>,
 ): Promise<A> =>
+  // The local provider never reads `RuntimeContext`, but alchemy's client
+  // signatures carry it and no off-platform value can be constructed.
   Effect.runPromise(
     effect.pipe(Effect.provide(localMemory({ remoteBase: "http://git.local" }))) as Effect.Effect<
       A,
@@ -281,7 +283,7 @@ describe("Artifacts local provider", () => {
             Layer.provide(nodeStores(path.join(root, "origin"))),
           ),
         ),
-      ) as Effect.Effect<Oid>,
+      ),
     );
 
     try {

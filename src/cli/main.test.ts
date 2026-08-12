@@ -50,7 +50,7 @@ const seed = (directory: string, message: string) =>
           Layer.provide(stores(directory)),
         ),
       ),
-    ) as unknown as Effect.Effect<string>,
+    ),
   );
 
 describe("cli", () => {

@@ -129,7 +129,7 @@ export class GitRepo extends DurableObject<TestEnv> {
               // A fresh namespace per test, so the suite starts empty without
               // needing a fresh Durable Object each time.
               Effect.provide(stores({ bucket, repo: `${repo}/${crypto.randomUUID()}`, storage })),
-            ) as Effect.Effect<never>,
+            ),
           ),
       },
       runner,
@@ -159,9 +159,7 @@ export class GitRepo extends DurableObject<TestEnv> {
           // it is what creates them. One DO instance runs every case.
           sql.exec(`DROP TABLE IF EXISTS repos`);
           sql.exec(`DROP TABLE IF EXISTS tokens`);
-          return Effect.runPromise(
-            effect.pipe(Effect.provide(sqlite(sql))) as Effect.Effect<never>,
-          );
+          return Effect.runPromise(effect.pipe(Effect.provide(sqlite(sql))));
         },
       },
       runner,
