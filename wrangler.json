@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "git",
-  "main": "src/worker.ts",
+  "main": "src/git/Durable.ts",
   "compatibility_date": "2025-12-10",
   "compatibility_flags": ["nodejs_compat"],
   "dev": {
@@ -10,9 +10,8 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "GitServer",
-        "name": "GIT_SERVER",
-        "script_name": "git"
+        "class_name": "GitRepo",
+        "name": "GIT_REPO"
       }
     ]
   },
@@ -25,7 +24,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["GitServer"]
+      "new_sqlite_classes": ["GitRepo"]
     }
   ]
 }

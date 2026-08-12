@@ -1,10 +1,10 @@
 /**
  * Storage ports.
  *
- * Replaces the single filesystem-shaped `GitStorage` interface in
- * `src/git.storage.ts`, which is addressed by paths (`readFile(".git/refs/heads/main")`)
- * and carries an optional `applyRefChanges?` that only the Cloudflare
- * implementation provides.
+ * Replaces the legacy single filesystem-shaped `GitStorage` interface
+ * (`git.storage.ts`), which was addressed by paths (`readFile(".git/refs/heads/main")`)
+ * and carried an optional `applyRefChanges?` that only the Cloudflare
+ * implementation provided.
  *
  * Here the ports are addressed by git concepts, and atomic ref update is part
  * of `RefStore` rather than an optional extra — so every backend has to answer

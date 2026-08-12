@@ -29,9 +29,11 @@ conformance suite inside it. Three kinds of evidence, deliberately:
 - **the contract holds on the backend that ships** — the same suite runs
   against DO SQLite and R2 inside workerd, not against a mock.
 
-The old implementation is untouched and still the one wired into the Worker.
+The legacy implementation — the flat `git.*.ts`, `server.*`, `client.*` and
+`cli.*` files and their tests — has been removed; the Worker now serves the
+Durable Object path (`src/git/Durable.ts`).
 
-The code in [`sketch/`](../sketch) is illustrative, but it is not hand-waved: it
+The sketch code (the `*.sketch.ts` files under [`src/`](../src)) is illustrative, but it is not hand-waved: it
 typechecks against the real `effect@4.0.0-beta.107` and `alchemy@2.0.0-beta.70`
 type definitions (`tsc --noEmit`, strict, no `any` escapes). Bodies that would
 just be ported code are `declare const` stubs, so the shapes and the wiring are
@@ -71,7 +73,7 @@ argument for the rewrite. Everything else is taste.
 
 **1. A push can take the isolate out.** `GitPackParser.parsePack` reads the
 whole request body into one `Uint8Array` before it validates the header
-(`src/git.pack.ts:547`). A Durable Object gets 128 MiB. Today a push of a repo
+(`git.pack.ts:547`, in the since-removed legacy implementation). A Durable Object gets 128 MiB. Today a push of a repo
 with a few large blobs OOMs, and the failure mode is an isolate reset, not an
 error the client can read. The upload-pack side has the mirror problem: the
 object walk completes into an array before the first byte goes out.
@@ -104,7 +106,7 @@ lookup) for one binding.
 — 2,351 lines of pure, synchronous byte work with no I/O. Effect buys nothing
 there and costs an allocation per call. They port over with two edits: functions
 that `throw` return a `Result`, and anything that reached for storage moves up
-into `Repository`. See [`sketch/git/Format.ts`](../sketch/git/Format.ts) — that
+into `Repository`. See [`src/git/Format.sketch.ts`](../src/git/Format.sketch.ts) — that
 file is the seam, pure below and effectful above.
 
 Being explicit about this is what keeps the rewrite from being a rewrite of
@@ -117,7 +119,7 @@ to be the part with the subtlest bugs.
 
 ```mermaid
 flowchart TB
-	subgraph ports["ports (sketch/git/Store.ts)"]
+	subgraph ports["ports (src/git/Store.sketch.ts)"]
 		OS[ObjectStore]
 		RS[RefStore]
 		IS[IndexStore]
@@ -188,7 +190,7 @@ moves.
 
 ### Errors
 
-[`sketch/git/Error.ts`](../sketch/git/Error.ts). Six `Schema.TaggedError`
+[`src/git/Error.sketch.ts`](../src/git/Error.sketch.ts). Six `Schema.TaggedError`
 classes replace six `Error` subclasses. Being schema-backed is what matters:
 the same class is the server's failure, the wire representation, and the type
 the browser client matches on. `RefConflict` arrives at the client as
@@ -201,20 +203,20 @@ disappear.
 
 ### Ports
 
-[`sketch/git/Store.ts`](../sketch/git/Store.ts). Three narrow services addressed
+[`src/git/Store.sketch.ts`](../src/git/Store.sketch.ts). Three narrow services addressed
 by git concepts (`read(oid)`), not paths (`readFile(".git/refs/heads/main")`).
 `RefStore.apply` is the only writer and is transactional, with `atomic` as a
 parameter — so receive-pack's atomic mode stops being a separate code path, and
 OPFS and node have to answer for atomicity instead of silently omitting it.
 
 `ObjectStore` has both `read` and `readStream`. The Cloudflare layer
-([`sketch/adapters/Cloudflare.ts`](../sketch/adapters/Cloudflare.ts)) maps
+([`src/adapters/Cloudflare.sketch.ts`](../src/adapters/Cloudflare.sketch.ts)) maps
 `readStream` onto R2's body stream and `writeStream` onto `bucket.put(stream)`,
 which alchemy's binding accepts directly — a large blob never materializes.
 
 ### Streaming
 
-[`sketch/git/Pack.ts`](../sketch/git/Pack.ts). Pack parse becomes a `Stream`
+[`src/git/Pack.sketch.ts`](../src/git/Pack.sketch.ts). Pack parse becomes a `Stream`
 transformation that writes each object through to storage as it resolves, so
 only the delta base window is resident. Pack write is a lazy `Stream` handed to
 `HttpServerResponse.stream`, so first-byte latency drops to the first object and
@@ -234,11 +236,11 @@ silent runtime surprises in a hand-written port.
 ### Concurrency and lifetime
 
 - Ref updates: optimistic CAS with a retry `Schedule` on `RefConflict`
-  ([`Repository.commit`](../sketch/git/Repository.ts)), rather than each caller
+  ([`Repository.commit`](../src/git/Repository.sketch.ts)), rather than each caller
   reinventing read-then-write.
 - Per-ref `update` hooks run concurrently; one rejection interrupts the siblings.
 - `post-receive` / webhooks go through `RepoHost.background`
-  ([`sketch/server/Webhooks.ts`](../sketch/server/Webhooks.ts)) — `waitUntil` on
+  ([`src/server/Webhooks.sketch.ts`](../src/server/Webhooks.sketch.ts)) — `waitUntil` on
   Workers, a detached fiber under node — so a slow subscriber no longer adds its
   latency to the push.
 - Webhook backoff is `Schedule.exponential |> jittered`, capped at four
@@ -251,15 +253,15 @@ silent runtime surprises in a hand-written port.
 
 Two edges, deliberately:
 
-- **Smart-HTTP** ([`sketch/server/Protocol.ts`](../sketch/server/Protocol.ts))
+- **Smart-HTTP** ([`src/server/Protocol.sketch.ts`](../src/server/Protocol.sketch.ts))
   stays byte-oriented on `HttpRouter`. A schema buys nothing on a packfile.
-- **JSON API** ([`sketch/server/Api.ts`](../sketch/server/Api.ts)) becomes one
+- **JSON API** ([`src/server/Api.sketch.ts`](../src/server/Api.sketch.ts)) becomes one
   `HttpApi` declaration. From it: typed handlers, a derived client for both
   `client.ts` and the CLI, and `/api/openapi.json`. The 45 endpoint tables in
   `readme.md` become generated output.
 
 Both mount into one `HttpRouter.toWebHandler(...)` in
-[`sketch/server/App.ts`](../sketch/server/App.ts), which no host-specific code
+[`src/server/App.sketch.ts`](../src/server/App.sketch.ts), which no host-specific code
 touches.
 
 One thing the group prefix `/api/:repo` forces: the `repo` path parameter has to
@@ -273,14 +275,14 @@ of thing that gets discovered at the end of a mechanical port of 45 endpoints.
 There is no provider-neutral `Alchemy.Worker` or `Alchemy.DurableObject` to
 reach for. In alchemy@next both are Cloudflare resources —
 `Alchemy.Worker(...)` and `Alchemy.DurableObject(...)` come from
-`alchemy/Cloudflare`, which is what [`sketch/alchemy.run.ts`](../sketch/alchemy.run.ts)
-and [`sketch/host/Cloudflare.ts`](../sketch/host/Cloudflare.ts) import. What
+`alchemy/Cloudflare`, which is what [`src/alchemy.run.sketch.ts`](../src/alchemy.run.sketch.ts)
+and [`src/host/Cloudflare.sketch.ts`](../src/host/Cloudflare.sketch.ts) import. What
 alchemy _does_ offer across providers is the request shape: a Worker's `serve`
 and `alchemy/Http`'s `NodeHttpServer` / `BunHttpServer` take the same
 `HttpEffect`.
 
 So portability is not a framework feature to switch on — it is one file,
-[`sketch/host/Host.ts`](../sketch/host/Host.ts), naming the three things a git
+[`src/host/Host.sketch.ts`](../src/host/Host.sketch.ts), naming the three things a git
 server actually needs from a host:
 
 | capability   | why it exists                                   | Cloudflare                  | node / bun             |
@@ -290,24 +292,24 @@ server actually needs from a host:
 | `background` | webhook delivery outliving the response         | `state.waitUntil`           | `Effect.forkDetach`    |
 
 Above that line — `server/*`, `git/*` — nothing names a provider; `grep -l
-alchemy sketch/` hits only `host/`, `adapters/Cloudflare.ts` and the stack file.
+alchemy` over the `*.sketch.ts` files hits only `host/`, `adapters/Cloudflare.ts` and the stack file.
 
 The unit that moves between hosts is **one app instance bound to one
-repository** ([`App.forRepo`](../sketch/server/App.ts)). That is not an
+repository** ([`App.forRepo`](../src/server/App.sketch.ts)). That is not an
 arbitrary choice: `Repository` is _constructed_ from `ObjectStore` and
 `RefStore`, so storage resolves when the layer is built, not when a request
 arrives — which is exactly the Durable Object model. Cloudflare gets an instance
-per repo from the platform; [`host/Node.ts`](../sketch/host/Node.ts) reproduces
+per repo from the platform; [`host/Node.ts`](../src/host/Node.sketch.ts) reproduces
 it with a `Map` keyed by repo name and a lock around dispatch.
 
 The node host is worth having on its own merits, provider story aside: `npm run
-dev` and the e2e suite stop spawning `wrangler dev` on port 8080
-(`test.helpers.ts` does today), self-hosting becomes a supported shape rather
+dev` and a future e2e suite need not spawn `wrangler dev` on port 8080 (as the
+removed `test.helpers.ts` did), self-hosting becomes a supported shape rather
 than a fork, and the CLI can run the server in-process.
 
 ### Infrastructure
 
-[`sketch/alchemy.run.ts`](../sketch/alchemy.run.ts). `Alchemy.R2.Bucket` and
+[`src/alchemy.run.sketch.ts`](../src/alchemy.run.sketch.ts). `Alchemy.R2.Bucket` and
 `Alchemy.DurableObject` are values in the same program that uses them;
 `Cloudflare.R2.ReadWriteBucket(Objects)` yields the binding, the env var and the
 typed client from one call. That deletes `wrangler.json`, the generated
@@ -315,8 +317,8 @@ typed client from one call. That deletes `wrangler.json`, the generated
 
 What it adds beyond parity: `--stage` previews (a full stack per PR, destroyed
 on close) and a local runtime that runs the same program against emulated R2/DO
-— so `test.helpers.ts` stops spawning `wrangler dev` on port 8080 for the e2e
-suite.
+— the job the removed `test.helpers.ts` once did by spawning `wrangler dev` on
+port 8080 for the e2e suite.
 
 ### Integration tests
 
@@ -351,18 +353,20 @@ belong behind their own script.
 
 ### Tests
 
-[`sketch/testing/Repository.sketch.ts`](../sketch/testing/Repository.sketch.ts). `@effect/vitest`,
+[`src/testing/Repository.sketch.ts`](../src/testing/Repository.sketch.ts). `@effect/vitest`,
 environment as a layer swap, `HttpApiTest` driving the real handler in-process.
-`--test-concurrency=1` and the global setup file both go away. The 9,125 lines
-of existing tests are the main asset in this repo and most of them port
-mechanically — the assertions are about git behaviour, not about plumbing.
+`--test-concurrency=1` goes away (the global setup file already has). The 9,125
+lines of legacy tests were removed with the old implementation; their
+assertions — about git behaviour, not about plumbing — remain the reference in
+git history for what each rewrite phase must cover.
 
 ---
 
 ## Migration
 
-Each phase ships on its own and keeps `src/` working. The existing test suite is
-the ratchet: it runs against both implementations until the last phase.
+Each phase ships on its own and keeps `src/` working. With the legacy suite
+removed, the ratchet is the contract suite, the git-binary interop tests and
+the in-workerd conformance run.
 
 | phase | scope                                                                                                        | risk   |
 | ----- | ------------------------------------------------------------------------------------------------------------ | ------ |
@@ -419,7 +423,7 @@ system, since nothing in `src/` reads an `Authorization` header today.
   through the port signatures; the typechecker then dragged it into the CLI and
   the test suite, neither of which runs on Workers. The fix is that the
   Cloudflare layer captures the context with `Effect.context` and provides it
-  inward ([`adapters/Cloudflare.ts`](../sketch/adapters/Cloudflare.ts)), so the
+  inward ([`adapters/Cloudflare.ts`](../src/adapters/Cloudflare.sketch.ts)), so the
   ports stay `R = never`. The cost is real and should be measured: that layer
   must be built inside the invocation rather than memoized per DO instance,
   because a cached context would pin a stale `ExecutionContext`.

@@ -64,7 +64,7 @@ flowchart LR
 - Upload‑pack (fetch): `POST /:repo/git-upload-pack`
 - Receive‑pack (push): `POST /:repo/git-receive-pack`
 
-See `src/worker.ts` for routing and `src/server.ts` for bindings.
+See `src/git/Durable.ts` for the Worker entry and `wrangler.json` for bindings.
 
 ### JSON API
 

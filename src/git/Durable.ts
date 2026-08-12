@@ -30,8 +30,10 @@ import { storeContract } from "./Store.contract.ts";
 import type { Oid } from "./Store.ts";
 
 /**
- * Bindings from `wrangler.test.json`. `wrangler types` only generates the
- * global `Env` for the primary config, so this worker declares its own.
+ * This worker's bindings, as both `wrangler.json` and `wrangler.test.json`
+ * provide them. Declared by hand rather than using the generated `Env` because
+ * `ENABLE_CONFORMANCE` exists only in the test config, which `wrangler types`
+ * does not see.
  */
 interface TestEnv {
   readonly ENABLE_CONFORMANCE?: string;
@@ -189,7 +191,7 @@ export class GitRepo extends DurableObject<TestEnv> {
   }
 }
 
-/** Router: resolve `/:repo` to its instance. Mirrors `src/worker.ts`. */
+/** Router: resolve `/:repo` to its instance. */
 export default {
   async fetch(request: Request, env: TestEnv): Promise<Response> {
     const repo = new URL(request.url).pathname.split("/")[1];
