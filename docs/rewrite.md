@@ -7,10 +7,12 @@ pushes to the Durable Object in the integration suite), and the JSON API as an
 tests. Phase 5b's node host landed dependency-free in `src/host/Node.ts` —
 self-hosting is one command. Phase 6's CLI landed in `src/cli/main.ts` on
 `effect/unstable/cli`, with the smart-HTTP fetch client it needed extracted to
-`src/client/Fetch.ts`. Both former dependency gates are now installed —
-`alchemy` (patched, see `patches/`) and `@effect/platform-node` — leaving only
-the alchemy deployment stack (phase 5) as a sketch: its transitive
-`@distilled.cloud/*` packages target a newer `effect` than this repo pins.
+`src/client/Fetch.ts`. Phase 5's stack landed too: `src/alchemy.run.ts` and
+`src/host/Cloudflare.ts` are real code against real alchemy types, unblocked
+by a one-symbol patch (`patches/effect+4.0.0-beta.107.patch` aliases
+`Schema.TaggedErrorClass`, the name `@distilled.cloud/*` is built against).
+Every phase has landed; the only sketches left are the wider JSON API surface
+and webhooks.
 
 What is real code today, running under the repo's own test runner:
 
@@ -34,7 +36,7 @@ What is real code today, running under the repo's own test runner:
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag           |
 | `src/git/Store.contract.ts`  | one contract suite, run against **all three** backends                   |
 
-169 tests pass: 158 unit (`npm test`, one of them cloning inside real Chromium) and 11 integration (`npm run test:integration`),
+171 tests pass: 160 unit (`npm test`, one of them cloning inside real Chromium) and 11 integration (`npm run test:integration`),
 the latter driving a real Workers runtime and itself running a 15-case
 conformance suite inside it. Three kinds of evidence, deliberately:
 
@@ -304,8 +306,8 @@ of thing that gets discovered at the end of a mechanical port of 45 endpoints.
 There is no provider-neutral `Alchemy.Worker` or `Alchemy.DurableObject` to
 reach for. In alchemy@next both are Cloudflare resources —
 `Alchemy.Worker(...)` and `Alchemy.DurableObject(...)` come from
-`alchemy/Cloudflare`, which is what [`src/alchemy.run.sketch.ts`](../src/alchemy.run.sketch.ts)
-and [`src/host/Cloudflare.sketch.ts`](../src/host/Cloudflare.sketch.ts) import. What
+`alchemy/Cloudflare`, which is what [`src/alchemy.run.ts`](../src/alchemy.run.ts)
+and [`src/host/Cloudflare.ts`](../src/host/Cloudflare.ts) import. What
 alchemy _does_ offer across providers is the request shape: a Worker's `serve`
 and `alchemy/Http`'s `NodeHttpServer` / `BunHttpServer` take the same
 `HttpEffect`.
@@ -338,7 +340,7 @@ than a fork, and the CLI can run the server in-process.
 
 ### Infrastructure
 
-[`src/alchemy.run.sketch.ts`](../src/alchemy.run.sketch.ts). `Alchemy.R2.Bucket` and
+**Landed** as [`src/alchemy.run.ts`](../src/alchemy.run.ts). `Alchemy.R2.Bucket` and
 `Alchemy.DurableObject` are values in the same program that uses them;
 `Cloudflare.R2.ReadWriteBucket(Objects)` yields the binding, the env var and the
 typed client from one call. That deletes `wrangler.json`, the generated
@@ -409,12 +411,14 @@ the in-workerd conformance run.
 | 5b ✅ | node host (`src/host/Node.ts`, dependency-free): the same handlers behind `node:http`, self-hosting supported | done   |
 | 6 ✅  | CLI on `effect/unstable/cli` (`src/cli/main.ts`): init/refs/log/clone/serve/token                             | done   |
 
-What remains — phase 5's alchemy stack and phase 6's CLI — is blocked on
-dependencies this repository deliberately does not install (`alchemy`,
-`@effect/platform-node`); the sketches stay ready for when they land. Phase 5b
-shipped without them: `host/Node.ts` needed nothing beyond `node:http`, and
-the protocol interop suite now runs against it, so every test of the node host
-is also a test of the handlers the Durable Object serves.
+Every phase has landed. Phase 5 is the one with a caveat worth stating: the
+stack builds and typechecks against real alchemy types, and a test asserts
+the resource graph and that it agrees with `wrangler.json` — but deploying it
+needs Cloudflare credentials, so `wrangler.json` remains the path the
+integration suite drives. Two local patches hold it up (`patches/`): one
+defers `RepoClient.raw` for the Artifacts provider, one aliases
+`Schema.TaggedErrorClass` in `effect`. Both are upstream-shaped; delete them
+when the versions catch up.
 
 ---
 

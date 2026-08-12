@@ -1,0 +1,35 @@
+diff --git a/node_modules/effect/dist/Schema.d.ts b/node_modules/effect/dist/Schema.d.ts
+index 9547bd0..8efa512 100644
+--- a/node_modules/effect/dist/Schema.d.ts
++++ b/node_modules/effect/dist/Schema.d.ts
+@@ -9760,6 +9760,9 @@ export declare const Error: {
+  * @since 3.10.0
+  */
+ export declare const TaggedError: {
++
++/** Alias of `TaggedError`, under the name later betas use (see patches/). */
++export declare const TaggedErrorClass: typeof TaggedError;
+     /**
+      * Defines a schema-backed yieldable error class with an automatically populated
+      * `_tag` field.
+diff --git a/node_modules/effect/dist/Schema.js b/node_modules/effect/dist/Schema.js
+index 44a28b6..bd59beb 100644
+--- a/node_modules/effect/dist/Schema.js
++++ b/node_modules/effect/dist/Schema.js
+@@ -9204,6 +9204,16 @@ export const Error = identifier => (schema, annotations) => {
+  * @category constructors
+  * @since 3.10.0
+  */
++/**
++ * Alias of {@link TaggedError}, under the name later betas use.
++ *
++ * Added by `patches/effect+4.0.0-beta.107.patch`: `@distilled.cloud/*` (a
++ * transitive dependency of `alchemy`) is built against the newer spelling,
++ * and the two are the same constructor. Delete the patch when this repo
++ * moves to a beta that ships the name itself.
++ */
++export const TaggedErrorClass = identifier => TaggedError(identifier);
++
+ export const TaggedError = identifier => {
+   return (tagValue, schema, annotations) => {
+     const struct = isStruct(schema) ? schema.mapFields(fields => ({

@@ -9,7 +9,7 @@ Universal Git smart-HTTP protocol server, browser client & unix cli — built on
 The repository is a ground-up rewrite in progress: the git core, the
 smart-HTTP server, the JSON API and the node host are real, tested code —
 stock `git` clones from and pushes to it, on Workers or self-hosted — while
-only the alchemy deployment stack remains a typechecked design sketch. See [`docs/rewrite.md`](./docs/rewrite.md) for the full plan and
+the wider JSON API surface and webhooks remain typechecked design sketches. See [`docs/rewrite.md`](./docs/rewrite.md) for the full plan and
 rationale.
 
 ## Prerequisites
@@ -71,6 +71,7 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable     |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag     |
 | `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite          |
+| `src/alchemy.run.ts`         | deployment stack: bucket, DO and Worker as values, not config      |
 | `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, runs anywhere         |
 | `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token — `npx chr33s-git`       |
 | `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend  |
@@ -112,21 +113,28 @@ Everything not yet landed lives beside its future home as a `*.sketch.ts`
 file: illustrative code that typechecks against the real `effect` and
 `alchemy@next` type definitions but is excluded from the build and checks.
 
-| area                      | sketch                                             |
-| ------------------------- | -------------------------------------------------- |
-| wider JSON API + webhooks | `src/server/*.sketch.ts`                           |
-| alchemy host seam         | `src/host/*.sketch.ts`, `src/adapters/*.sketch.ts` |
-| infrastructure as effects | `src/alchemy.run.sketch.ts`                        |
+| area                       | sketch                     |
+| -------------------------- | -------------------------- |
+| wider JSON API + webhooks  | `src/server/*.sketch.ts`   |
+| host seam abstraction      | `src/host/Host.sketch.ts`  |
+| OPFS/node adapter sketches | `src/adapters/*.sketch.ts` |
 
 ## Development
 
 ```sh
-npm install
+npm install               # postinstall applies patches/ and regenerates worker types
 npm run check             # format + type-aware lint
 npm run fix               # auto-fix both
 npx wrangler dev          # run the Worker locally on port 8080
-npx wrangler deploy       # deploy
+npx wrangler deploy       # deploy (the tested path)
+npx alchemy deploy        # deploy the same stack from src/alchemy.run.ts
 ```
+
+Two dependency patches ship in [`patches/`](./patches), applied on install:
+one defers `RepoClient.raw` so a third-party Artifacts provider can exist, one
+aliases `Schema.TaggedErrorClass` in `effect` for `alchemy`'s transitive
+dependencies. Both are upstream-shaped and deletable when the versions catch
+up.
 
 ## Testing
 
