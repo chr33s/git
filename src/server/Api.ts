@@ -23,7 +23,7 @@ import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
-import { Repository } from "../git/Repository.ts";
+import { Repository, treeAt } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import {
   NewRemoteWire,
@@ -33,8 +33,13 @@ import {
 } from "./Remotes.ts";
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 
-/** Wire representation of an oid; the domain's `Oid` is the branded form. */
-const OidString = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
+/**
+ * An oid on the wire, decoded to the domain's branded `Oid` outright: the
+ * refinement carries `isOid`'s type predicate, so a validated payload needs
+ * no `as Oid` at the use sites — the schema is the one place the brand is
+ * earned.
+ */
+const OidString = Schema.String.pipe(Schema.refine(isOid));
 
 /** JSON has no `Date`: `at` crosses as an ISO string, `offset` in minutes. */
 const SignatureWire = Schema.Struct({
@@ -165,12 +170,12 @@ const treeFor = (
   repository: Repository["Service"],
   branch: string,
   payload: {
-    readonly tree?: string | undefined;
+    readonly tree?: Oid | undefined;
     readonly files?: ReadonlyArray<(typeof FileWire)["Type"]> | undefined;
   },
 ) =>
   Effect.gen(function* () {
-    if (payload.tree !== undefined) return payload.tree as Oid;
+    if (payload.tree !== undefined) return payload.tree;
     if (payload.files === undefined) return EMPTY_TREE_OID;
 
     const ref = branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
@@ -189,15 +194,7 @@ const treeOfRef = (repository: Repository["Service"], ref: string | undefined) =
     const name = ref === undefined || ref === "" ? "HEAD" : ref;
     const oid = isOid(name) ? name : yield* repository.resolve(name);
     if (oid === null) return yield* new Invalid({ field: "ref", reason: `unknown ref '${name}'` });
-
-    // A ref may name a commit, a tag that peels to one, or a tree outright.
-    const object = yield* repository.readObject(oid);
-    if (object.type === "tree") return oid;
-    if (object.type === "tag") {
-      const tag = yield* repository.readTag(oid);
-      return (yield* repository.readCommit(tag.object)).tree;
-    }
-    return (yield* repository.readCommit(oid)).tree;
+    return yield* treeAt(repository, oid);
   }).pipe(Effect.catchTag("StorageFailure", Effect.die));
 
 const subtreeAt = (repository: Repository["Service"], tree: Oid, path: string) =>
@@ -986,7 +983,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
             branch,
             message: payload.message ?? "",
             tree,
-            ...(payload.expected === undefined ? {} : { expected: payload.expected as Oid | null }),
+            ...(payload.expected === undefined ? {} : { expected: payload.expected }),
           })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { oid, tree };
@@ -1005,7 +1002,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const data = yield* repository
-          .readBlob(params.oid as Oid)
+          .readBlob(params.oid)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { content: toBase64(data), encoding: "base64" as const, size: data.length };
       }),
@@ -1016,12 +1013,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const oid = yield* (
           payload.entries === undefined
             ? repository.writeFiles({
-                ...(payload.base === undefined ? {} : { base: payload.base as Oid }),
+                ...(payload.base === undefined ? {} : { base: payload.base }),
                 changes: changesOf(payload.files ?? []),
               })
-            : repository.writeTree(
-                payload.entries.map((entry) => ({ ...entry, oid: entry.oid as Oid })),
-              )
+            : repository.writeTree(payload.entries.map((entry) => ({ ...entry, oid: entry.oid })))
         ).pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { oid };
       }),
@@ -1030,7 +1025,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const entries = yield* repository
-          .readTree(params.oid as Oid)
+          .readTree(params.oid)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { entries };
       }),
@@ -1039,7 +1034,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const commit = yield* repository
-          .readCommit(params.oid as Oid)
+          .readCommit(params.oid)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { message: commit.message, parents: commit.parents, tree: commit.tree };
       }),
@@ -1047,9 +1042,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("log", ({ params }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const commits = yield* Stream.runCollect(
-          repository.log(params.oid as Oid, { limit: 50 }),
-        ).pipe(Effect.catchTag("StorageFailure", Effect.die));
+        const commits = yield* Stream.runCollect(repository.log(params.oid, { limit: 50 })).pipe(
+          Effect.catchTag("StorageFailure", Effect.die),
+        );
         return {
           commits: commits.map((commit) => ({ message: commit.message, oid: commit.oid })),
         };
@@ -1113,7 +1108,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const tag = yield* repository
-          .readTag(params.oid as Oid)
+          .readTag(params.oid)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { object: tag.object, type: tag.type, tag: tag.tag, message: tag.message };
       }),
@@ -1155,7 +1150,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           .setRef({
             name: payload.ref,
             to: payload.to,
-            ...(payload.expected === undefined ? {} : { expected: payload.expected as Oid | null }),
+            ...(payload.expected === undefined ? {} : { expected: payload.expected }),
           })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return moved;
@@ -1291,7 +1286,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const object = yield* repository
-          .readObject(params.oid as Oid)
+          .readObject(params.oid)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return {
           oid: params.oid,
@@ -1410,7 +1405,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const size = query.limit === undefined ? 50 : Number.parseInt(query.limit, 10);
         // Walk only as far as this page needs, plus one to answer `has_more`.
         const walked = yield* Stream.runCollect(
-          repository.log(params.oid as Oid, { limit: start + size + 1 }),
+          repository.log(params.oid, { limit: start + size + 1 }),
         ).pipe(Effect.catchTag("StorageFailure", Effect.die));
         return page(
           walked.map((commit) => ({ message: commit.message, oid: commit.oid })),
@@ -1426,13 +1421,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // find its next entry, so taking only what the page needs matters
         // more here than it does for a plain log.
         const walked = yield* Stream.runCollect(
-          pathHistory(params.oid as Oid, query.path, { limit: start + size + 1 }),
+          pathHistory(params.oid, query.path, { limit: start + size + 1 }),
         ).pipe(Effect.catchTag("StorageFailure", Effect.die));
         return page([...walked], query);
       }),
     )
     .handle("bisect", ({ payload }) =>
-      bisectNext({ bad: payload.bad as Oid, good: payload.good as ReadonlyArray<Oid> }).pipe(
+      bisectNext({ bad: payload.bad, good: payload.good }).pipe(
         Effect.catchTag("StorageFailure", Effect.die),
       ),
     ),
@@ -1587,4 +1582,3 @@ export const layer = (registry: Layer.Layer<Remotes>) =>
     // in the same way.
     Layer.provideMerge(registry),
   );
-

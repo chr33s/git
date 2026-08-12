@@ -100,18 +100,7 @@ const mustResolve = (repository: Repository["Service"], rev: string) =>
 
 /** The tree a revision names: a ref, an oid, a tag that peels, or a tree. */
 const treeOf = (repository: Repository["Service"], rev: string) =>
-  Effect.gen(function* () {
-    const oid = yield* resolveRev(repository, rev);
-    if (oid === null) {
-      return yield* new Invalid({ field: "ref", reason: `unknown revision '${rev}'` });
-    }
-    const object = yield* repository.readObject(oid);
-    if (object.type === "tree") return oid;
-    if (object.type === "tag") {
-      return (yield* repository.readCommit((yield* repository.readTag(oid)).object)).tree;
-    }
-    return (yield* repository.readCommit(oid)).tree;
-  });
+  Effect.flatMap(mustResolve(repository, rev), (oid) => GitRepository.treeAt(repository, oid));
 
 /**
  * A checkout, rather than one of the bare repositories under `--root`.
@@ -1016,7 +1005,9 @@ const git = Command.make("chr33s-git").pipe(
   Command.withSubcommands([
     addCommand.pipe(Command.withDescription("Stage paths as they are on disk")),
     archiveCommand.pipe(Command.withDescription("Write a tree as a tar, tar.gz or zip archive")),
-    bisectCommand.pipe(Command.withDescription("Name the next commit to test between a good and a bad one")),
+    bisectCommand.pipe(
+      Command.withDescription("Name the next commit to test between a good and a bad one"),
+    ),
     branch.pipe(Command.withDescription("List, create or delete branches")),
     cherryPickCommand.pipe(Command.withDescription("Replay one commit onto another")),
     clone.pipe(Command.withDescription("Clone a repository over smart HTTP")),
@@ -1037,10 +1028,14 @@ const git = Command.make("chr33s-git").pipe(
     reset.pipe(Command.withDescription("Move a ref, optionally compare-and-swap")),
     restore.pipe(Command.withDescription("Restore a path from the index or a commit")),
     rm.pipe(Command.withDescription("Unstage a path, and delete it unless --cached")),
-    serveCommand.pipe(Command.withDescription("Run the node host over a directory of repositories")),
+    serveCommand.pipe(
+      Command.withDescription("Run the node host over a directory of repositories"),
+    ),
     show.pipe(Command.withDescription("Show one object: a commit, tree, tag or blob")),
     statusCommand.pipe(Command.withDescription("Working-tree status in git's porcelain format")),
-    switchCommand.pipe(Command.withDescription("Check out a branch, replacing index and work tree")),
+    switchCommand.pipe(
+      Command.withDescription("Check out a branch, replacing index and work tree"),
+    ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
     token.pipe(Command.withDescription("Mint or verify a scoped access token")),
   ]),

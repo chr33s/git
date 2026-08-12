@@ -136,6 +136,28 @@ export interface FetchPlan {
   readonly oids: ReadonlyArray<Oid>;
 }
 
+/**
+ * The tree an object names: a tree outright, a commit's tree, or a tag peeled
+ * to one.
+ *
+ * A module-level helper rather than a 36th service method: the revision half
+ * stays with the caller — the CLI disambiguates short names, the API resolves
+ * refs — but what an oid *means* as a tree is one question, and both edges
+ * were answering it with their own copy.
+ */
+export const treeAt = (
+  repository: Repository["Service"],
+  oid: Oid,
+): Effect.Effect<Oid, ObjectNotFound | StorageFailure> =>
+  Effect.gen(function* () {
+    const object = yield* repository.readObject(oid);
+    if (object.type === "tree") return oid;
+    if (object.type === "tag") {
+      return (yield* repository.readCommit((yield* repository.readTag(oid)).object)).tree;
+    }
+    return (yield* repository.readCommit(oid)).tree;
+  });
+
 export class Repository extends Context.Service<
   Repository,
   {
