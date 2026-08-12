@@ -106,9 +106,10 @@ not of parity with main.
 
 - **CLI-vs-system-`git` e2e parity suite** (main's `e2e.test.ts`, 617 lines, 26 command
   suites) — gone, consistent with the CLI shrink.
-- **`npm run test:integration` does not exist** but is referenced by `readme.md:128` and
-  `vitest.config.ts:11`; since `vitest run` runs all projects, `npm test` boots workerd —
-  the integration suite is not actually opt-in, contradicting the stated design.
+- **Stale `test:integration` references.** The integration project has merged into plain
+  `npm test` (`vitest run` executes both projects), but `vitest.config.ts:11`, the readme,
+  and `docs/rewrite.md` still describe an opt-in `npm run test:integration` script that no
+  longer exists. Doc cleanup, not a functional gap.
 - `bin` renamed `.git` → `chr33s-git` (an improvement, but breaks the documented
   `npx @chr33s/git <command>`).
 
@@ -163,11 +164,10 @@ Ordered by value-for-effort:
 2. **Fix `.git` suffix stripping** in all three routers (small, user-facing correctness).
 3. **Un-hardcode `EMPTY_TREE_OID`** in `POST /commit` and expose `writeBlob`/`writeTree`/
    `readTree` over HTTP — that unlocks a useful write API with code that already exists.
-4. **Add `test:integration`** and exclude the integration project from `npm test`.
-5. **Port LFS** onto the R2 layer (the design doc already claims this is the plan).
-6. **Shallow clone + side-band-64k** — the two protocol drops most likely to bite real users
+4. **Port LFS** onto the R2 layer (the design doc already claims this is the plan).
+5. **Shallow clone + side-band-64k** — the two protocol drops most likely to bite real users
    (CI does `--depth=1` by default in many systems).
-7. Decide explicitly whether merge/rebase/index/working-tree and the wide JSON + CLI surface
+6. Decide explicitly whether merge/rebase/index/working-tree and the wide JSON + CLI surface
    are *goals* or *non-goals* of the rewrite, and update the readme/rewrite doc to match —
    today the branch note says "rewrite" while four-fifths of the application surface has no
    landing plan.

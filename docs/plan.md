@@ -40,26 +40,23 @@ Ordered by value-for-effort; each lands as its own commit on `artifacts`.
    (`server/Api.ts:148`). Accept a tree oid and/or inline entries, and expose the existing
    `Repository.writeBlob` / `writeTree` / `readTree` over HTTP so the JSON API can create
    real content.
-4. **`test:integration` script.** Add it to `package.json` and exclude the `integration`
-   project from plain `vitest run`, so `npm test` stops booting workerd — matching what
-   `vitest.config.ts:11` and `readme.md:128` already claim.
-5. **Shallow clone (`--depth`).** CI systems default to `--depth=1`; today the server rejects
+4. **Shallow clone (`--depth`).** CI systems default to `--depth=1`; today the server rejects
    it with `Invalid{field:"depth"}` (`server/Protocol.ts:161`). Implement `shallow`/`deepen`
    at minimum; `deepen-since`/`deepen-not` can follow. Legacy reference:
    `server.ts:524-576`, `git.repository.ts:739-767` on the legacy branch.
-6. **`side-band-64k`.** Progress/error channel for fetch; cheap to add to the v0 protocol and
+5. **`side-band-64k`.** Progress/error channel for fetch; cheap to add to the v0 protocol and
    visible to every user.
 
 ## 2. Should-fix before the swap (parity users will notice)
 
-7. **Git LFS.** Port the batch API + R2 upload/download onto the Cloudflare layer —
+6. **Git LFS.** Port the batch API + R2 upload/download onto the Cloudflare layer —
    `docs/rewrite.md:196` already declares this the plan ("folded into the R2 layer").
    Legacy reference: `server.lfs.ts`, `server.storage.ts:613-657`.
-8. **Annotated tags.** Tag object parse/encode in `git/Format.ts`, a `tag` endpoint and CLI
+7. **Annotated tags.** Tag object parse/encode in `git/Format.ts`, a `tag` endpoint and CLI
    verb. Small, and `refs/tags` handling already exists.
-9. **fsck endpoint.** Object-integrity validation (hash + per-type structure) behind
+8. **fsck endpoint.** Object-integrity validation (hash + per-type structure) behind
    `POST /:repo/fsck`; the conformance suite covers the storage contract, not object health.
-10. **499-on-abort** mapping in the worker (legacy `worker.ts:16-19`).
+9. **499-on-abort** mapping in the worker (legacy `worker.ts:16-19`).
 
 Deferred, explicitly (post-swap roadmap, not blockers): gc/repack, pack + `.idx` storage at
 rest, protocol v2, thin-pack/`multi_ack_detailed`, client/CLI push, the wider JSON surface.
@@ -74,6 +71,8 @@ rest, protocol v2, thin-pack/`multi_ack_detailed`, client/CLI push, the wider JS
   were "ported as-is" (index and merge were not ported; delta is apply-only), and drop the
   `IndexStore` port from the architecture diagram, or mark it future.
 - Update any links of the form `github.com/chr33s/git/tree/artifacts` → default-branch links.
+- Clean up stale `npm run test:integration` references (`vitest.config.ts:11` comment,
+  readme, `docs/rewrite.md`) — the integration project has merged into plain `npm test`.
 - Keep the npm `bin` name `chr33s-git` (already renamed from the legacy `.git`); call out the
   breaking change in the release notes.
 
@@ -112,8 +111,8 @@ Force-pushing over `main` without flipping the default first will orphan open PR
 
 ## 5. Acceptance for the swap PR
 
-- `npm run check` and `npm test` green; `npm run test:integration` green (and only it boots
-  workerd).
+- `npm run check` and `npm test` green — `npm test` runs both vitest projects (unit +
+  integration, including the workerd harness).
 - Stock `git`: clone, push, branch delete, incremental fetch, **`clone --depth=1`**, and
   clone of `…/repo.git` (suffix) all pass against both the node host and the workerd
   integration harness.
