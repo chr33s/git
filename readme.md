@@ -96,10 +96,11 @@ GIT_ROOT=repos node src/host/Node.ts      # or: npx wrangler dev
 git clone http://127.0.0.1:8080/my-repo
 ```
 
-Both hosts are open by default and enforce scoped read/write tokens when told
-to: set the `GIT_AUTH_SECRET` binding on the Worker (stateless HMAC tokens via
-`Auth.hmacMint`), or pass `serve({ verify })` on node. `git` presents the
-token as `http://<token>@host/repo`.
+The deployed Worker always enforces scoped read/write tokens: `alchemy
+deploy` reads `GIT_AUTH_SECRET` from the environment, binds it as a secret,
+and fails the deploy if it is missing (stateless HMAC tokens via
+`Auth.hmacMint`). The node host is open by default — pass `serve({ verify })`
+to enforce. `git` presents the token as `http://<token>@host/repo`.
 
 The CLI drives all of it — the same `Repository`, host, client and auth code:
 

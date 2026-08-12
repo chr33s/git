@@ -10,11 +10,12 @@
  * not pull in `.make()` — the bundler tree-shakes it.
  */
 import * as Alchemy from "alchemy/Cloudflare";
-import { Effect } from "effect";
+import { Config, Effect, Redacted } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import Repos from "./host/Cloudflare.ts";
 import { Repo } from "./host/Cloudflare.ts";
+import * as Auth from "./server/Auth.ts";
 
 /** The Worker's public contract: it serves HTTP, nothing more. */
 export type GitShape = {
@@ -43,6 +44,11 @@ export default Git.make(
   Effect.gen(function* () {
     const repos = yield* Repo;
 
+    // Read at init, so the deploy-time interceptor registers it as a
+    // `secret_text` binding: a deploy without `GIT_AUTH_SECRET` in the
+    // environment fails naming the variable, rather than shipping open.
+    const secret = yield* Config.redacted("GIT_AUTH_SECRET");
+
     return {
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
@@ -51,9 +57,19 @@ export default Git.make(
           return HttpServerResponse.text("No repository in URL", { status: 400 });
         }
 
-        const response = yield* repos
-          .getByName(name)
-          .fetch(new Request(request.url, { method: request.method }));
+        // The platform request, headers and body intact — the effect wrapper
+        // was built from it (`HttpServerRequest.fromWeb`), so this is the
+        // same object, not a reconstruction.
+        const raw = request.source as Request;
+
+        // Auth lives at the edge: the DO trusts its callers, because the
+        // only ways in are this guard and another Worker's binding.
+        const denied = yield* Auth.guard(raw, (credential) =>
+          Auth.hmacVerify(Redacted.value(secret), name, credential),
+        );
+        if (denied !== null) return HttpServerResponse.raw(denied);
+
+        const response = yield* repos.getByName(name).fetch(raw);
         return HttpServerResponse.raw(response);
       }),
     };

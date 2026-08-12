@@ -1,4 +1,6 @@
 .alchemy/
+.env
+!.env.example
 .tmp/
 *.tsbuildinfo
 .wrangler/
