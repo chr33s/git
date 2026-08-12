@@ -23,8 +23,8 @@ step left, and it is a repository-settings operation rather than a code change.*
 
 What landed beyond the phase list: protocol v2, gc, the `.idx` codec, the `DIRC` index
 codec, diff, three-way merge, archive (tar/tar.gz/zip), client push, cherry-pick and
-rebase, streamed bulk commits, the working tree, and a CLI that went from 6 commands
-to 26.
+rebase, bisect, path history, incremental fetch with `have` negotiation, streamed bulk
+commits, the working tree, and a CLI that went from 6 commands to 29.
 
 ## 0. Scope decision (revised)
 
@@ -91,10 +91,14 @@ Ordered by value-for-effort; each lands as its own commit on `artifacts`.
    `POST /:repo/fsck`; the conformance suite covers the storage contract, not object health.
 9. **499-on-abort** mapping in the worker (legacy `worker.ts:16-19`).
 
-Deferred, explicitly (post-swap roadmap, not blockers): thin-pack and
-`multi_ack_detailed`, delta compression in the pack writer, and the working-tree surface
-§0 rules out. Everything else once listed here — gc, packs and `.idx` at rest, protocol v2,
-client/CLI push, the wider JSON surface — has since landed.
+Deferred, explicitly (post-swap roadmap, not blockers): `multi_ack_detailed` and delta
+compression in the pack writer. Fetch negotiation is baseline single-ACK on both sides —
+the client offers `have` lines in rounds and the server acknowledges the first commit it
+holds, which is what makes an incremental fetch transfer only what is missing; the
+multi-ack variants would narrow the common base in fewer round trips, not change what
+arrives. Everything else once listed here — gc, packs and `.idx` at rest, protocol v2,
+client/CLI push, the wider JSON surface, and the working tree §0 used to rule out — has
+since landed.
 
 ## 3. Documentation renames (same PR as the swap)
 

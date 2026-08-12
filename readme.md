@@ -68,6 +68,10 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/git/Cloudflare.ts`      | R2 + Durable Object SQLite backend                                   |
 | `src/git/Durable.ts`         | the Worker entry: one Durable Object per repository                  |
 | `src/git/Pack.ts`            | streaming packfile transport, platform-neutral, git-interop-tested   |
+| `src/git/Work.ts`            | `WorkTree` / `IndexStore` ports; `Checkout.ts` is the porcelain      |
+| `src/git/Rebase.ts`          | replay: cherry-pick, and rebase as a sequence of them                |
+| `src/git/Bisect.ts`          | which commit first broke it, as a function of the good/bad marks     |
+| `src/git/History.ts`         | `git log -- <path>`, history simplification included                 |
 | `src/server/Protocol.ts`     | git smart-HTTP: advertisement, upload-pack, receive-pack             |
 | `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it    |
 | `src/server/Webhooks.ts`     | signed push delivery: `Schedule` retry, backgrounded, per-subscriber |
@@ -75,8 +79,8 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag       |
 | `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite            |
 | `src/alchemy.run.ts`         | deployment stack: bucket, DO and Worker as values, not config        |
-| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, runs anywhere           |
-| `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token, working tree, replay — `npx chr33s-git` |
+| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote`, clone, incremental fetch        |
+| `src/cli/main.ts`            | CLI: 29 commands, `npx chr33s-git` — repository, working tree, replay |
 | `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend    |
 | `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`       |
 | `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers   |

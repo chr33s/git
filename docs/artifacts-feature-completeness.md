@@ -29,7 +29,7 @@ track. Against the review below:
 | `side-band-64k` dropped                                | multiplexed on both fetch and push                                                                                                          |
 | `.git` suffix routing regression                       | one repository per name, in every router                                                                                                    |
 | gc, fsck, annotated tags, archive, `.idx`, index codec | all present, the last two verified against git's own files                                                                                  |
-| CLI: 6 commands                                        | 17                                                                                                                                          |
+| CLI: 6 commands                                        | 29                                                                                                                                          |
 | `npm run test:integration` missing                     | the integration project runs under `npm test`                                                                                               |
 
 The working tree, which this review recorded as dropped by design, is now
