@@ -285,12 +285,13 @@ describe("Fetch", () => {
     );
     assert.equal(result.refs[0]?.value, head);
 
-    // 32, then the remaining 8, then `done` repeating all 40: this server
-    // acknowledges only on the round that carries `done`, so the loop here
-    // runs until the haves are exhausted rather than until it is told to stop.
+    // 32, then `done` repeating those 32. The server holds every commit
+    // offered, so it acknowledges on the first round and the client stops
+    // offering — the remaining 8 haves are never sent, which is the point of
+    // negotiating in rounds rather than shipping the whole history at once.
     assert.deepEqual(
       traffic.rounds.map((round) => round.length),
-      [32, 40, 40],
+      [32, 32],
     );
     // The tip goes first. Ordering is the whole reason a round is 32 lines and
     // not the entire history: the base is expected in the first handful.

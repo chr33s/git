@@ -251,6 +251,29 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
       return yield* new Invalid({ field: "upload-pack", reason: "no 'want' lines" });
     }
 
+    const deepening = depth !== undefined || since !== undefined || notRefs.length > 0;
+
+    // Protocol v0 without multi_ack: acknowledge the first `have` this
+    // repository possesses. A client that gets an ACK stops offering and
+    // sends `done`, so answering NAK while holding a common commit is not
+    // merely uninformative — it makes the client walk its whole history in
+    // 32-have rounds before giving up, and every one of those rounds costs a
+    // request.
+    let common: Oid | null = null;
+    for (const have of haves) {
+      if (common === null && (yield* repository.contains(have))) common = have;
+    }
+
+    // A plain negotiation round is answered without a fetch plan at all: it
+    // replies ACK or NAK and waits to be asked again, so computing the
+    // closure here would be a full walk per round, thrown away each time.
+    if (!done && !deepening) {
+      return new Response(
+        asBody(concat([common === null ? pkt("NAK\n") : pkt(`ACK ${common}\n`)])),
+        { headers: headers("application/x-git-upload-pack-result") },
+      );
+    }
+
     const plan = yield* repository.fetch({
       wants,
       haves,
@@ -259,8 +282,6 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
       ...(since === undefined ? {} : { since }),
       ...(notRefs.length === 0 ? {} : { notRefs }),
     });
-
-    const deepening = depth !== undefined || since !== undefined || notRefs.length > 0;
 
     /**
      * The boundary section comes before anything else, and only when the
@@ -275,21 +296,12 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
           FLUSH,
         ];
 
-    // Protocol v0 without multi_ack: acknowledge the first `have` this
-    // repository possesses, or NAK.
-    let common: Oid | null = null;
-    for (const have of haves) {
-      if (common === null && (yield* repository.contains(have))) common = have;
-    }
-
     if (!done) {
-      // Two shapes here, and the difference is not cosmetic. A deepen round
-      // is answered with the boundary section and its flush *alone*:
-      // fetch-pack reads exactly that much before deciding what to ask for
-      // next, and a trailing NAK leaves it reading a pack that is not there.
-      // A plain negotiation round has no boundary, and NAK is what tells a
-      // stateless client to come back with `done`.
-      return new Response(asBody(concat(deepening ? boundary : [pkt("NAK\n")])), {
+      // A deepen round is answered with the boundary section and its flush
+      // *alone*, and the difference is not cosmetic: fetch-pack reads exactly
+      // that much before deciding what to ask for next, and a trailing NAK
+      // leaves it reading a pack that is not there.
+      return new Response(asBody(concat(boundary)), {
         headers: headers("application/x-git-upload-pack-result"),
       });
     }
