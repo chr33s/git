@@ -14,7 +14,7 @@
  *   - the CLI can run the server in-process for offline work.
  */
 import * as Http from "alchemy/Http";
-import { Effect, Layer, Semaphore } from "effect";
+import { Effect, Layer, PartitionedSemaphore, RcMap } from "effect";
 import { FileSystem, Path } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { node as nodeStores } from "../adapters/Local.ts";
@@ -24,11 +24,11 @@ import { RepoHost } from "./Host.ts";
 /**
  * What the Durable Object got for free has to be built here.
  *
- * Isolation is a directory per repo. Serialization is one `Semaphore` per repo,
- * held for the duration of the request — the same guarantee the DO input gate
- * gives, at the cost of remembering to take it. A read-heavy deployment would
- * want a read/write split; the port is narrow enough that this is a local
- * change.
+ * Isolation is a directory per repo. Serialization is a `PartitionedSemaphore`
+ * keyed by repo — one permit per partition is exactly "the DO input gate, in a
+ * process", and it is a core data structure rather than a `Map` of locks
+ * maintained by hand. A read-heavy deployment would raise the permit count and
+ * take two for writers; the port is narrow enough that this stays local.
  */
 export const layer = (root: string): Layer.Layer<RepoHost, never, FileSystem.FileSystem | Path.Path> =>
   Layer.effect(
@@ -36,26 +36,12 @@ export const layer = (root: string): Layer.Layer<RepoHost, never, FileSystem.Fil
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const platform = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
-      const locks = new Map<string, Semaphore.Semaphore>();
-
-      const lockFor = (name: string) =>
-        Effect.gen(function* () {
-          let lock = locks.get(name);
-          if (lock === undefined) {
-            lock = yield* Semaphore.make(1);
-            locks.set(name, lock);
-          }
-          return lock;
-        });
+      const locks = yield* PartitionedSemaphore.make<string>({ permits: 1 });
 
       return RepoHost.of({
         stores: (name) =>
           nodeStores(path.join(root, name)).pipe(Layer.provide(Layer.succeedContext(platform))),
-        serialize: (name, effect) =>
-          Effect.gen(function* () {
-            const lock = yield* lockFor(name);
-            return yield* lock.withPermits(1)(effect);
-          }),
+        serialize: (name, effect) => PartitionedSemaphore.withPermits(locks, name, 1)(effect),
         // No `waitUntil` to hand it to: the process is the lifetime, so the
         // fiber is detached to the global scope rather than the request's.
         background: (effect) => Effect.forkDetach(effect.pipe(Effect.ignore)).pipe(Effect.asVoid),
@@ -75,18 +61,34 @@ export const layer = (root: string): Layer.Layer<RepoHost, never, FileSystem.Fil
 export const main = (root: string) =>
   Effect.gen(function* () {
     const host = yield* RepoHost;
-    const apps = new Map<string, ReturnType<typeof App.forRepo>>();
 
-    const appFor = (name: string) => {
-      let app = apps.get(name);
-      if (app === undefined) {
-        app = App.forRepo(
-          Layer.mergeAll(Layer.succeed(RepoHost, host), host.stores(name), platform, subscribers),
-        );
-        apps.set(name, app);
-      }
-      return app;
-    };
+    /**
+     * App instances, reference counted and keyed by repo.
+     *
+     * `RcMap` is doing real work here rather than being decoration: it builds
+     * an instance on first use, shares it across concurrent requests, and
+     * disposes it — closing the router scope — once nothing has referenced it
+     * for a minute. A hand-rolled `Map` leaks every repository ever touched,
+     * which on a Worker is invisible because the platform evicts idle DOs for
+     * you.
+     */
+    const apps = yield* RcMap.make({
+      lookup: (name: string) =>
+        Effect.acquireRelease(
+          Effect.sync(() =>
+            App.forRepo(
+              Layer.mergeAll(
+                Layer.succeed(RepoHost, host),
+                host.stores(name),
+                platform,
+                subscribers,
+              ),
+            ),
+          ),
+          (app) => Effect.promise(app.dispose),
+        ),
+      idleTimeToLive: "1 minute",
+    });
 
     return yield* Http.serve(
       Effect.gen(function* () {
@@ -96,16 +98,17 @@ export const main = (root: string) =>
           return HttpServerResponse.text("No repository in URL", { status: 400 });
         }
 
-        const { handler } = appFor(name);
+        const app = yield* RcMap.get(apps, name);
         return yield* host.serialize(
           name,
-          Effect.promise(() => handler(toRequest(request))).pipe(
+          Effect.promise(() => app.handler(toRequest(request))).pipe(
             Effect.map(HttpServerResponse.raw),
           ),
         );
       }),
     );
   }).pipe(
+    Effect.scoped,
     Effect.provide(layer(root)),
     Effect.provide(Http.NodeHttpServer()),
     Effect.provide(platform),

@@ -52,31 +52,34 @@ export const layer = Layer.effect(
     const subscribers = yield* Subscribers;
     const host = yield* RepoHost;
 
-    const deliver = (results: ReadonlyArray<ReceiveResult>) =>
-      Effect.gen(function* () {
-        const targets = yield* subscribers.forEvent("push");
-        const body = results.map((result) => ({
-          ref: result.ref,
-          before: result.from,
-          after: result.to,
-        }));
+    const deliver = Effect.fn("Webhooks.deliver")(function* (
+      results: ReadonlyArray<ReceiveResult>,
+    ) {
+      const targets = yield* subscribers.forEvent("push");
+      const body = results.map((result) => ({
+        ref: result.ref,
+        before: result.from,
+        after: result.to,
+      }));
 
-        yield* Effect.forEach(
-          targets,
+      yield* Effect.forEach(
+        targets,
           (target) =>
             HttpClientRequest.post(target.url).pipe(
               HttpClientRequest.bodyJson(body),
               Effect.flatMap((request) => sign(request, target.secret)),
               Effect.flatMap(client.execute),
-              Effect.retry(policy),
-              // A dead subscriber is logged, never fatal — but now that is
-              // one combinator instead of a swallowed catch per call site.
-              Effect.catchCause((cause) => Effect.logWarning("webhook failed", cause)),
+              // Order matters, and it is the kind of thing a hand-rolled retry
+              // loop gets wrong: the timeout bounds each *attempt*, the retry
+              // wraps the timeout, and the catch is outermost — inside it, the
+              // retry would never see a failure to retry.
               Effect.timeout(Duration.seconds(10)),
+              Effect.retry(policy),
+              Effect.catchCause((cause) => Effect.logWarning("webhook failed", cause)),
             ),
-          { concurrency: 8, discard: true },
-        );
-      });
+        { concurrency: 8, discard: true },
+      );
+    });
 
     return {
       preReceive: () => Effect.void,

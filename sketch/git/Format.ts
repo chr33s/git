@@ -61,8 +61,9 @@ export const hashObject = (object: RawObject): Effect.Effect<Oid> =>
     return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("") as Oid;
   });
 
-/** Lift a pure codec into an effect at the call site. */
-export const decode = <A, E>(result: Result.Result<A, E>): Effect.Effect<A, E> =>
-  Result.isSuccess(result) ? Effect.succeed(result.success) : Effect.fail(result.failure);
+/**
+ * Lifting a pure codec into an effect is `Effect.fromResult` — no wrapper
+ * needed. Call sites read `yield* Effect.fromResult(parseCommit(bytes))`.
+ */
 
 export type { ObjectType };

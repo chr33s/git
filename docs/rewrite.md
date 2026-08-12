@@ -13,6 +13,15 @@ Typechecking it rather than eyeballing it was worth doing: it caught four
 design errors that read fine on the page, all noted below — including one in
 this sketch's own layering.
 
+Where the sketch first reached for a hand-rolled version of something Effect
+already has, it now uses the real thing: `httpApiStatus` annotations instead of
+a `status` field, `Effect.fromResult` instead of a bespoke `Result` lift,
+`Effect.fn` for traced operations, `RcMap` for reference-counted per-repo app
+instances, and `PartitionedSemaphore` instead of a `Map` of locks. Two of those
+were not cosmetic: the `RcMap` swap fixed a leak (every repository ever touched
+stayed resident on the node host), and reordering the webhook combinators fixed
+a retry that could never fire, because the catch sat inside it.
+
 Pinned against what actually exists today:
 
 | package                  | version           | notes                                                     |
@@ -199,11 +208,14 @@ silent runtime surprises in a hand-written port.
   ([`Repository.commit`](../sketch/git/Repository.ts)), rather than each caller
   reinventing read-then-write.
 - Per-ref `update` hooks run concurrently; one rejection interrupts the siblings.
-- `post-receive` / webhooks fork and are handed to `state.waitUntil`
-  ([`sketch/server/Webhooks.ts`](../sketch/server/Webhooks.ts)), so a slow
-  subscriber no longer adds its latency to the push.
-- Webhook backoff is `Schedule.exponential |> jittered |> recurs(4)` — the same
-  policy that today is a `for` loop, but now assertable under `TestClock`.
+- `post-receive` / webhooks go through `RepoHost.background`
+  ([`sketch/server/Webhooks.ts`](../sketch/server/Webhooks.ts)) — `waitUntil` on
+  Workers, a detached fiber under node — so a slow subscriber no longer adds its
+  latency to the push.
+- Webhook backoff is `Schedule.exponential |> jittered`, capped at four
+  attempts, with a per-attempt timeout inside the retry and the catch outside it
+  — the same policy that today is a `for` loop, but now assertable under
+  `TestClock`.
 - Every fiber is tied to the request, so abort propagates all the way down.
 
 ### HTTP
@@ -306,6 +318,17 @@ the ratchet: it runs against both implementations until the last phase.
 Phase 3 is the one worth doing even if the rest is deferred — it is the only
 phase that fixes a bug users can hit. Phase 5b is the cheapest thing on the
 list once 5 lands, and it pays for itself in test runtime.
+
+---
+
+## Related
+
+[`docs/artifacts-provider.md`](./artifacts-provider.md) evaluates whether this
+server can implement alchemy's **Cloudflare Artifacts** binding — Artifacts is
+"git for agents", so the protocol half is already done. The short version: yes,
+and the architecture in this sketch maps onto the contract almost line for line,
+but it needs a namespace registry, `fork`, and — the significant one — an auth
+system, since nothing in `src/` reads an `Authorization` header today.
 
 ---
 

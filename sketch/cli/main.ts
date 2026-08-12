@@ -11,7 +11,7 @@
  * `Repository` service the server uses — the CLI stops being a third
  * implementation of anything.
  */
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { memory, node } from "../adapters/Local.ts";
@@ -50,7 +50,7 @@ const log = Command.make(
           // Streamed to stdout: `git log` on a large repo prints the first
           // commit immediately instead of collecting the walk first
           // (`cli.ts` buffers today).
-          Stream_.runForEach((entry) => Effect.log(`${entry.oid} ${entry.message.split("\n")[0]}`)),
+          Stream.runForEach((entry) => Effect.log(`${entry.oid} ${entry.message.split("\n")[0]}`)),
         );
     }),
 );
@@ -86,7 +86,6 @@ NodeRuntime.runMain(main(process.argv).pipe(Effect.provide(CliLive)));
 
 declare const hooks: Layer.Layer<import("../git/Repository.ts").Hooks>;
 
-import * as Stream_ from "effect/Stream";
 declare const stageWorkTree: () => Effect.Effect<import("../git/Store.ts").Oid>;
 declare const signature: Effect.Effect<import("../git/Format.ts").Signature>;
 declare const resolveHead: Effect.Effect<import("../git/Store.ts").Oid>;

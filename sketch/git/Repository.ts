@@ -21,7 +21,7 @@ import {
   RefConflict,
   type StorageFailure,
 } from "./Error.ts";
-import { decode, type CommitInfo, type Signature, parseCommit } from "./Format.ts";
+import { type CommitInfo, parseCommit, type Signature } from "./Format.ts";
 import * as Pack from "./Pack.ts";
 import { ObjectStore, type Oid, RefStore, type RefUpdate } from "./Store.ts";
 
@@ -125,7 +125,7 @@ export const layer = Layer.effect(
       objects.read(oid).pipe(
         Effect.flatMap((object) =>
           object.type === "commit"
-            ? decode(parseCommit(object.data)).pipe(
+            ? Effect.fromResult(parseCommit(object.data)).pipe(
                 // A commit that will not parse is indistinguishable from a
                 // missing one as far as a caller is concerned.
                 Effect.mapError(() => new ObjectNotFound({ oid })),
@@ -156,8 +156,13 @@ export const layer = Layer.effect(
 
       pack: (wants) => Pack.write(wants).pipe(Stream.provideService(ObjectStore, objects)),
 
-      commit: ({ author, branch, expected, message, tree }) =>
-        Effect.gen(function* () {
+      commit: Effect.fn("Repository.commit")(function* ({
+        author,
+        branch,
+        expected,
+        message,
+        tree,
+      }) {
           const ref = `refs/heads/${branch}`;
           const parent = yield* refs.read(ref);
           const data = encodeCommitBytes({
@@ -181,16 +186,16 @@ export const layer = Layer.effect(
               actual: result?.current ?? null,
             });
           }
-          return oid;
-        }).pipe(
-          // Optimistic concurrency: re-read the parent and retry a few times
-          // before surfacing the conflict. Today this is a caller problem.
-          Effect.retry({
-            while: (error) => error._tag === "RefConflict",
-            times: 3,
-            schedule: Schedule.exponential("10 millis"),
-          }),
-        ),
+        return oid;
+      }, 
+        // Optimistic concurrency: re-read the parent and retry a few times
+        // before surfacing the conflict. Today this is a caller problem.
+        Effect.retry({
+          while: (error) => error._tag === "RefConflict",
+          times: 3,
+          schedule: Schedule.exponential("10 millis"),
+        }),
+      ),
 
       log: (from, options) =>
         Stream.paginate(from, (oid) =>
@@ -202,8 +207,7 @@ export const layer = Layer.effect(
           ),
         ).pipe(options?.limit === undefined ? (self) => self : Stream.take(options.limit)),
 
-      receive: (updates, options) =>
-        Effect.gen(function* () {
+      receive: Effect.fn("Repository.receive")(function* (updates, options) {
           // Objects land before any ref moves, so a rejected push leaves
           // unreachable objects for gc rather than a ref pointing at nothing.
           if (options?.pack !== undefined) {
@@ -226,9 +230,9 @@ export const layer = Layer.effect(
           // post-receive (webhooks, notifications) must not hold the
           // response. Forking into the request scope keeps the work alive
           // past the reply without blocking the client.
-          yield* Effect.forkScoped(hooks.postReceive(results));
-          return results;
-        }).pipe(Effect.scoped),
+        yield* Effect.forkScoped(hooks.postReceive(results));
+        return results;
+      }, Effect.scoped),
 
       gc: () => Effect.succeed({ removed: 0 }),
     };

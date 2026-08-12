@@ -98,9 +98,10 @@ export const routes = HttpRouter.use((router) =>
       "GET",
       "/:repo/info/refs",
       Effect.gen(function* () {
-        const request = yield* HttpServerRequest.HttpServerRequest;
-        const service = new URL(request.url, "http://x").searchParams.get("service");
-        return yield* service === "git-receive-pack"
+        // The router already parsed these; re-parsing the URL by hand is the
+        // reflex to unlearn.
+        const params = yield* HttpServerRequest.ParsedSearchParams;
+        return yield* params.service === "git-receive-pack"
           ? advertise("git-receive-pack")
           : advertise("git-upload-pack");
       }),
