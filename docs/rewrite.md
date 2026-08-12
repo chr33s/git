@@ -542,18 +542,22 @@ handled by making the retry policy a parameter: `Webhooks.test.ts` passes a
 1ms base delay and counts attempts against a real receiver, which tests the
 schedule _and_ the HTTP behaviour in one pass.
 
-**An `IndexStore` port** (`adapters/Local.ts`, `git/Store.ts`).
-A staging area is a working-tree concept, and everything here serves bare
-repositories: the server, the CLI and the browser client all commit trees
-they have already built. A port with no caller is the dead code this section
-exists to avoid, so it waits for the feature that needs it — a browser work
-tree — rather than shipping ahead of it.
+**An `IndexStore` port** — deferred here, and since built (`git/Work.ts`).
 
-The _codec_ did land, in `git/Index.ts`, and the distinction is the point:
-it is 300 lines of pure byte work that the real `git` binary reads and
-writes, verified both directions, with no service, no layer and no caller in
-the server. When a work tree arrives it will need exactly that file and a
-twenty-line port; until then there is nothing to keep alive.
+The argument for deferring it was that a port with no caller is dead code, so
+it should wait for the feature that needs it. That reasoning holds. What it
+missed is that the situation was already the mirror image: the _codec_ had
+landed in `git/Index.ts` — 300 lines of byte work the real `git` binary reads
+and writes, verified both directions — with no service, no layer and no
+caller. A format implementation with nothing on either side of it is not a
+port waiting for its feature; it is a feature waiting for its port.
+
+So the working tree was built rather than the codec retired. `git/Work.ts`
+carries two ports, not one: `WorkTree` is what is on disk and `IndexStore` is
+what has been staged, because a server has neither, a CLI has both, and a
+browser could have the second without the first — which is the distinction
+that would have been lost had they been one service. `IndexStore` came to
+about twenty lines over the codec, as predicted.
 
 ---
 

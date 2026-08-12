@@ -19,27 +19,43 @@ step left, and it is a repository-settings operation rather than a code change.*
 | 3 · docs        | ✅ readme/rewrite-doc contradictions and stale script references fixed                                  |
 | 4 · the swap    | ⏸ **needs a human**: renaming the default branch retargets every clone, open PR and CI trigger          |
 | 5 · acceptance  | ✅ `npm run check` and `npm test` green, criteria below all met                                         |
-| 6 · full parity | ✅ except the working tree, which §0 keeps as a non-goal                                                |
+| 6 · full parity | ✅ including the working tree, which §0 no longer excludes                                              |
 
 What landed beyond the phase list: protocol v2, gc, the `.idx` codec, the `DIRC` index
-codec, diff, three-way merge, archive (tar/tar.gz/zip), client push, and a CLI that went
-from 6 commands to 17.
+codec, diff, three-way merge, archive (tar/tar.gz/zip), client push, cherry-pick and
+rebase, streamed bulk commits, the working tree, and a CLI that went from 6 commands
+to 26.
 
-## 0. Scope decision (settled)
+## 0. Scope decision (revised)
 
-The rewrite is a deliberate narrowing: a bare-repository git _server_ (plus client/CLI enough
-to drive it), not a working-tree git reimplementation. That scope was taken:
+This section previously drew the scope as a bare-repository git _server_ and named the
+working tree a non-goal. **That narrowing has been withdrawn and the working tree is
+built.** The argument for excluding it was that everything here serves bare
+repositories — but `src/git/Index.ts` had already been written, git's own `DIRC` v2
+codec byte-verified both directions, with no port and no caller. A format codec with
+nothing on either side of it is not a deliberate non-goal; it is half of a feature.
 
-- **Non-goals** (documented as such rather than silently missing): the working tree —
-  `status`, `add`, `checkout`, `restore`, `switch` — and the e2e-vs-`git` porcelain parity
-  suite that tested it. Everything here serves bare repositories.
-- **Not a non-goal, and now present**: merge, diff, tags, gc, fsck, LFS, archive, packs at
-  rest (`gc --repack` writes a `.pack`/`.idx` pair git verifies), protocol v2 and client push
-  were all in the "full parity" column and were built.
+What exists now:
 
-The one piece of the working-tree story that _did_ land is `src/git/Index.ts`: git's own
-`DIRC` v2 codec, byte-verified both directions. It has no port and no caller — deliberately.
-A client that grows a work tree needs exactly that file plus a twenty-line `IndexStore`.
+- **The working tree** — `src/git/Work.ts` (the `WorkTree` and `IndexStore` ports),
+  `src/git/Checkout.ts` (`status`, `add`, `remove`, `move`, `restore`, `checkout`,
+  `commit`), `src/git/Work.node.ts` (the filesystem backend, with the index at
+  `.git/index`). Two ports rather than one because a server has neither, a CLI has
+  both, and a browser could have the index without the files.
+- **Parity against `git` itself, not against expectations.** The interop tests stage
+  with ours and let `git status` describe the result, stage with git and let ours
+  describe it, and commit from our index into a history `git log` and
+  `git fsck --strict` accept. `chr33s-git status` emits git's porcelain format, so the
+  two are directly comparable rather than merely similar.
+- **Everything else in the "full parity" column**: merge, diff, tags, gc, fsck, LFS,
+  archive, packs at rest (`gc --repack` writes a `.pack`/`.idx` pair git verifies),
+  protocol v2, client push, cherry-pick and rebase.
+
+One boundary is still drawn deliberately, and this one is about shape rather than
+effort: the working-tree verbs are not exposed over HTTP. A bare server has no files
+on disk, so serving `add` or `checkout` would mean inventing a work tree behind the
+API. The server-side spelling of "commit these files" is the `commit-pack` endpoint,
+which streams an NDJSON body straight into the object store.
 
 ## 1. Must-fix before the swap (regressions within the rewrite's own scope)
 

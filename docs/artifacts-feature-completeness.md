@@ -4,10 +4,12 @@ Reviewed: 2026-08-12, `artifacts` @ `b8632b9` against `main` @ `9a08166`.
 
 > [!NOTE]
 > **This is the review as it stood before the gap-closing work.** Everything
-> below describes `artifacts` @ `b8632b9`. The gaps it names have since been
-> worked through — see "What has since closed" for the current position, and
-> [`docs/plan.md`](./plan.md) for what remains a deliberate non-goal. The
-> original text is kept because the reasoning is what justified the plan.
+> below describes `artifacts` @ `b8632b9`. Every gap it names has since been
+> closed, including the working tree, which an earlier revision of this
+> document argued was out of scope — see "What has since closed" for the
+> current position and [`docs/plan.md`](./plan.md) §0 for why that argument
+> was withdrawn. The original text is kept because the reasoning is what
+> justified the plan, including where it turned out to be wrong.
 
 ## What has since closed
 
@@ -30,9 +32,14 @@ track. Against the review below:
 | CLI: 6 commands                                        | 17                                                                                                                                          |
 | `npm run test:integration` missing                     | the integration project runs under `npm test`                                                                                               |
 
-Still deliberately absent, and argued for in the plan: the working tree —
-`status`, `add`, `checkout` — because this serves bare repositories. The
-index codec exists (`git/Index.ts`) for a client that grows one.
+The working tree, which this review recorded as dropped by design, is now
+built: `git/Work.ts` (ports), `git/Checkout.ts` (`status`, `add`, `rm`, `mv`,
+`restore`, `checkout`, `commit`), `git/Work.node.ts` (filesystem, index at
+`.git/index`), and seven CLI commands. The interop tests settle it against
+the `git` binary in both directions rather than against our own expectations.
+
+Also landed since: cherry-pick and rebase (`git/Rebase.ts`) and a streamed
+NDJSON bulk-commit endpoint (`server/CommitPack.ts`).
 
 The `artifacts` branch is the Effect v4 + alchemy@next rewrite described in its own
 `docs/rewrite.md`. This review compares the two branches feature-by-feature to answer one
@@ -105,6 +112,9 @@ not of parity with main.
    bare-repository-only, stated in `git/Store.ts`. Defensible for a server; it is what removes
    add/commit/status/checkout from CLI and client. (`docs/rewrite.md` still draws an
    `IndexStore` port that does not exist.)
+   _Since resolved by building it, not by keeping the narrowing: the `IndexStore` port
+   `docs/rewrite.md` drew now exists, and the parenthesis above is the tell — a design
+   document describing a port that no code provided was a gap being read as a decision._
 
 ### Protocol narrowing
 

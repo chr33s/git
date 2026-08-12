@@ -7,12 +7,12 @@ Universal Git smart-HTTP protocol server, browser client & unix cli — built on
 [Effect](https://effect.website) v4 with modern TypeScript and Web APIs.
 
 A ground-up rewrite of this repository's previous implementation, and now its
-default: the git core, the smart-HTTP server (v0 and v2, shallow included),
-the JSON API, LFS, webhooks, the node host and the CLI are real, tested code
-— stock `git` clones from and pushes to it, on Workers or self-hosted. See
+default: the git core, the working tree, the smart-HTTP server (v0 and v2,
+shallow included), the JSON API, LFS, webhooks, the node host and the CLI are
+real, tested code — stock `git` clones from and pushes to it, on Workers or
+self-hosted, and reads the index and history our own commands write. See
 [`docs/rewrite.md`](./docs/rewrite.md) for the rationale and the designs
-deliberately not built, and [`docs/plan.md`](./docs/plan.md) for what is still
-a non-goal.
+deliberately not built.
 
 ## Prerequisites
 
@@ -76,7 +76,7 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite            |
 | `src/alchemy.run.ts`         | deployment stack: bucket, DO and Worker as values, not config        |
 | `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, runs anywhere           |
-| `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token — `npx chr33s-git`         |
+| `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token, working tree, replay — `npx chr33s-git` |
 | `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend    |
 | `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`       |
 | `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers   |
@@ -90,16 +90,24 @@ protocol — stock `git` clones from and pushes to it, including
 per repository whose errors cross the wire as tagged values
 (`{ "_tag": "RefConflict", … }`) with statuses from their own annotations.
 
-The JSON API covers commits and content (`commit`, `blob`, `tree`, `files`,
-`file`, `object`), history (`log`, `commits`, `diff`), refs (`refs`,
-`branches`, `tags`, `reset`, `reflog`), `merge`, `grep`, and maintenance
-(`fsck`, `gc`) — plus webhook registration, which is what makes a push
-deliver.
+The JSON API covers commits and content (`commit`, `commit-pack`, `blob`,
+`tree`, `files`, `file`, `object`), history (`log`, `commits`, `diff`), refs
+(`refs`, `branches`, `tags`, `reset`, `reflog`), history rewriting (`merge`,
+`cherry-pick`, `rebase`), `grep`, and maintenance (`fsck`, `gc`) — plus
+webhook registration, which is what makes a push deliver.
 
-What is deliberately absent is the working tree: this serves bare
-repositories, so there is no `status`, `add` or `checkout`. The index codec
-exists (`src/git/Index.ts`, byte-compatible with git's own) for a client that
-grows one.
+There is also a working tree, for the CLI and any other host that has files
+on disk: `status`, `add`, `rm`, `mv`, `restore`, `switch` and `commit`, over
+an index at `.git/index` in git's own `DIRC` v2 format. Both implementations
+can be pointed at the same checkout — `chr33s-git status` prints git's
+porcelain, `git status` reads the index we wrote, and `git fsck --strict`
+accepts the history we commit.
+
+The working-tree verbs are not on the HTTP API, and that is the one boundary
+still drawn on purpose: a bare server has no files, so serving `add` would
+mean inventing a work tree behind the API. The server-side spelling is
+`POST /:repo/commit-pack`, which streams an NDJSON body of file frames into a
+commit without holding more than one file in memory.
 
 The same handlers self-host on plain node — no Cloudflare account required:
 
@@ -120,6 +128,15 @@ The CLI drives all of it — the same `Repository`, host, client and auth code:
 npx chr33s-git init my-repo && npx chr33s-git serve --secret s3cret &
 npx chr33s-git token my-repo --secret s3cret --scope write
 npx chr33s-git clone --token <token> http://127.0.0.1:8080/my-repo my-copy
+```
+
+Working-tree commands take `--work`, a checkout whose repository is `.git`
+inside it, rather than the bare repositories under `--root`:
+
+```sh
+npx chr33s-git add --work . . && npx chr33s-git status --work .
+npx chr33s-git commit --work . --message "first"
+npx chr33s-git switch --work . --create topic
 ```
 
 ## Development
