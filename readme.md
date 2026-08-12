@@ -65,15 +65,15 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/git/Repository.ts`      | the domain service                                                 |
 | `src/git/Cloudflare.ts`      | R2 + Durable Object SQLite backend                                 |
 | `src/git/Durable.ts`         | the Worker entry: one Durable Object per repository                |
-| `src/git/Pack.ts`            | streaming packfile transport, interop-tested against real `git`    |
+| `src/git/Pack.ts`            | streaming packfile transport, platform-neutral, git-interop-tested |
 | `src/server/Protocol.ts`     | git smart-HTTP: advertisement, upload-pack, receive-pack           |
 | `src/server/Api.ts`          | JSON API as one `HttpApi` declaration; the client derives from it  |
 | `src/host/Node.ts`           | node host: the same handlers behind `node:http`, self-hostable     |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag     |
-| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone (node/workerd today)   |
+| `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote` + clone, runs anywhere         |
 | `src/cli/main.ts`            | CLI: init, refs, log, clone, serve, token — `npx chr33s-git`       |
 | `src/adapters/Opfs.ts`       | browser (OPFS) backend — same loose-object layout, fourth backend  |
-| `src/client/Client.ts`       | browser client: derived JSON client + local `Repository` over OPFS |
+| `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`     |
 | `src/server/Auth.ts`         | scoped tokens: guard on both surfaces, HMAC or revocable verifiers |
 | `src/git/Store.contract.ts`  | one storage contract suite, run against all four backends          |
 
@@ -145,7 +145,8 @@ Four kinds of evidence, deliberately:
   not against a mock;
 - **the browser is a real browser** — Playwright loads the bundled client
   into Chromium, writes commits into actual OPFS, re-reads them through a
-  fresh store, and drives the derived JSON client same-origin (skipped when
+  fresh store, drives the derived JSON client same-origin, and executes a
+  full smart-HTTP clone in-page over the pure-JS inflate (skipped when
   Chromium is absent);
 - **the protocol is really git's protocol** — stock `git` clones, pushes,
   deletes branches and fetches incrementally against the server, over

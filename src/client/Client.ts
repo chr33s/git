@@ -8,10 +8,10 @@
  * environment provides — OPFS in a browser (`adapters/Opfs.ts`), anything
  * else in a test.
  *
- * Deliberately no re-export of `client/Fetch.ts`: clone rides on `Pack.ts`,
- * whose inflate needs `node:zlib`'s consumed-byte accounting, so smart-HTTP
- * fetching runs on node and workerd today. This module's own import graph is
- * browser-clean — `Browser.test.ts` bundles it into real Chrome to prove it.
+ * Everything here — including the re-exported smart-HTTP `fetchRepository`
+ * — is platform-neutral: `Pack.ts` sits on `git/Inflate.ts` and `git/Sha1.ts`
+ * rather than `node:*`, and `Browser.test.ts` clones inside real Chromium to
+ * prove it.
  */
 import { Effect, Layer } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
@@ -21,6 +21,9 @@ import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import type { ObjectStore, RefStore } from "../git/Store.ts";
 import * as Api from "../server/Api.ts";
+import { fetchRepository, lsRemote } from "./Fetch.ts";
+
+export { fetchRepository, lsRemote };
 
 /**
  * A typed client for the JSON API — methods, payloads and errors all derived

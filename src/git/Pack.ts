@@ -1,29 +1,31 @@
 /**
- * Packfile transport — phase 3.
+ * Packfile transport — phase 3, platform-neutral.
  *
  * The pack is consumed as a stream: chunks are pulled as the parser needs
  * them, each object is written to `ObjectStore` as it resolves, and delta
  * bases are re-read from the store by oid rather than pinned in memory — so
  * only the object currently being decoded is ever resident. A Durable Object
- * gets 128 MiB, and a push must not be bounded by it.
+ * gets 128 MiB, a browser tab less, and a transfer must not be bounded by
+ * either.
  *
  * Object boundaries inside a pack are implicit: each object's data is its own
- * zlib stream, and the next object starts wherever that stream ends. The
- * parser leans on `node:zlib`'s `Inflate` (available under workerd's
- * `nodejs_compat` as well), which ends exactly at the deflate terminator and
- * reports the consumed byte count as `bytesWritten` — no second pass, no
- * hand-rolled inflate.
+ * zlib stream, and the next object starts wherever that stream ends.
+ * `git/Inflate.ts` is pull-based, so it consumes exactly the stream's bytes
+ * and the boundary falls out by construction; `git/Sha1.ts` hashes the
+ * trailer incrementally. Nothing here imports `node:*` — the same module
+ * runs in node, workerd and browsers, which is what lets a browser clone.
  *
  * Writing emits full objects only, no deltas: valid by the format, larger on
  * the wire, and enough for upload-pack until delta compression pays its way.
+ * Per-object deflate is `CompressionStream("deflate")`, available everywhere
+ * this runs.
  */
-import { createHash } from "node:crypto";
-import { createInflate, deflateSync } from "node:zlib";
-
 import { Effect, Result, Stream } from "effect";
 
 import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
 import { bytesToHex } from "./Format.ts";
+import { type ByteSource, inflate as zlibInflate, InflateError } from "./Inflate.ts";
+import { Sha1 } from "./Sha1.ts";
 import { ObjectStore, type ObjectType, type Oid, type RawObject } from "./Store.ts";
 
 const TYPE_CODES: Record<ObjectType, number> = { commit: 1, tree: 2, blob: 3, tag: 4 };
@@ -59,7 +61,7 @@ type ObjectHeader =
 class Source {
   readonly #iterator: AsyncIterator<Uint8Array>;
   #pending: Uint8Array[] = [];
-  readonly #hash = createHash("sha1");
+  readonly #hash = new Sha1();
   /** Absolute offset of the next unconsumed byte; ofs-delta bases point here. */
   offset = 0;
 
@@ -154,108 +156,43 @@ class Source {
   }
 
   /**
-   * One zlib stream from the current position. `Inflate` ends itself at the
-   * deflate terminator; whatever was fed past it is pushed back for the next
-   * object, and exactly the consumed bytes go into the digest.
+   * One zlib stream from the current position. The pull-based inflate
+   * consumes exactly the stream's bytes — the tracking here only exists to
+   * feed the consumed prefix into the pack digest afterwards.
    */
-  inflate(): Promise<Uint8Array> {
-    return new Promise((resolve, reject) => {
-      const inflater = createInflate();
-      const fed: Uint8Array[] = [];
-      const out: Uint8Array[] = [];
-      let ended = false;
-      let failed: unknown = null;
-      let settled = false;
+  async inflate(): Promise<Uint8Array> {
+    const fed: Uint8Array[] = [];
+    let returned = 0;
+    const adapter: ByteSource = {
+      next: async () => {
+        const chunk = await this.#next();
+        if (chunk !== null) fed.push(chunk);
+        return chunk;
+      },
+      pushBack: (bytes) => {
+        returned += bytes.length;
+        this.#pushBack([bytes]);
+      },
+    };
 
-      inflater.on("error", (error) => {
-        failed ??= error;
-      });
-      inflater.on("data", (chunk: Uint8Array) => out.push(chunk));
-      inflater.on("end", () => {
-        ended = true;
-      });
-
-      /**
-       * The single settlement point, reached only after the pump has stopped
-       * pulling — `end` can fire while a pull is in flight, and a chunk that
-       * arrives after it was never fed, so it must be pushed back whole.
-       */
-      const settle = (unfed: Uint8Array | null) => {
-        if (settled) return;
-        settled = true;
-        const consumed = inflater.bytesWritten;
-        inflater.removeAllListeners();
-        inflater.close();
-
-        if (failed !== null) {
-          if (failed instanceof PackCorrupt) reject(failed);
-          else {
-            reject(this.corrupt(failed instanceof Error ? failed.message : JSON.stringify(failed)));
-          }
-          return;
-        }
-        if (!ended) {
-          reject(this.corrupt("truncated: deflate stream did not end"));
-          return;
-        }
-
-        const leftovers: Uint8Array[] = [];
-        let seen = 0;
-        for (const chunk of fed) {
-          if (seen + chunk.length <= consumed) this.#consume(chunk);
-          else if (seen >= consumed) leftovers.push(chunk);
-          else {
-            this.#consume(chunk.subarray(0, consumed - seen));
-            leftovers.push(chunk.subarray(consumed - seen));
-          }
-          seen += chunk.length;
-        }
-        if (unfed !== null) leftovers.push(unfed);
-        this.#pushBack(leftovers);
-        resolve(concat(out));
-      };
-
-      /** Wait for any of the events — `end` can arrive instead of the one hoped for. */
-      const waitFor = (...events: ReadonlyArray<string>) =>
-        new Promise<void>((next) => {
-          const fire = () => {
-            for (const event of events) inflater.off(event, fire);
-            next();
-          };
-          for (const event of events) inflater.once(event, fire);
-        });
-
-      const pump = async () => {
-        while (!ended && failed === null) {
-          const chunk = await this.#next();
-          if (ended || failed !== null) {
-            settle(chunk);
-            return;
-          }
-          if (chunk === null) {
-            // Upstream is exhausted; the flush decides whether the stream was
-            // complete (`end` fires) or cut short (`error` fires).
-            inflater.end();
-            if (!ended && failed === null) await waitFor("end", "error");
-            break;
-          }
-          fed.push(chunk);
-          if (!inflater.write(chunk) && !ended && failed === null) {
-            await waitFor("drain", "end", "error");
-          }
-        }
-        settle(null);
-      };
-      void pump().catch((error: unknown) => {
-        failed ??= error;
-        settle(null);
-      });
-    });
+    try {
+      const out = await zlibInflate(adapter);
+      const consumed = fed.reduce((total, chunk) => total + chunk.length, 0) - returned;
+      let seen = 0;
+      for (const chunk of fed) {
+        if (seen + chunk.length <= consumed) this.#consume(chunk);
+        else if (seen < consumed) this.#consume(chunk.subarray(0, consumed - seen));
+        seen += chunk.length;
+      }
+      return out;
+    } catch (error) {
+      throw error instanceof InflateError ? this.corrupt(error.message) : error;
+    }
   }
 
   /** The 20-byte trailer: SHA-1 of everything before it. */
   async trailer(): Promise<void> {
-    const expected = this.#hash.digest("hex");
+    const expected = this.#hash.digestHex();
     const actual = bytesToHex(await this.#gather(20));
     if (actual !== expected) {
       throw new PackCorrupt({
@@ -422,6 +359,19 @@ const encodeObjectHeader = (code: number, size: number): Uint8Array => {
   return Uint8Array.from(bytes);
 };
 
+/** One-shot per-object deflate; boundary detection is only a reading problem. */
+const deflate = async (bytes: Uint8Array): Promise<Uint8Array> =>
+  new Uint8Array(
+    await new Response(
+      new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(
+        new CompressionStream("deflate") as unknown as {
+          readable: ReadableStream<Uint8Array>;
+          writable: WritableStream<Uint8Array>;
+        },
+      ),
+    ).arrayBuffer(),
+  );
+
 /**
  * Emit a version-2 packfile for the given objects, already-walked and in
  * order. The stream is lazy: each object is read from the store and deflated
@@ -434,7 +384,7 @@ export const pack = (
   Stream.unwrap(
     Effect.gen(function* () {
       const store = yield* ObjectStore;
-      const hash = createHash("sha1");
+      const hash = new Sha1();
       const emit = (bytes: Uint8Array): Uint8Array => {
         hash.update(bytes);
         return bytes;
@@ -453,12 +403,14 @@ export const pack = (
           store
             .read(oid)
             .pipe(
-              Effect.map((object) =>
-                emit(
-                  concat([
-                    encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
-                    new Uint8Array(deflateSync(object.data)),
-                  ]),
+              Effect.flatMap((object) =>
+                Effect.promise(async () =>
+                  emit(
+                    concat([
+                      encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
+                      await deflate(object.data),
+                    ]),
+                  ),
                 ),
               ),
             ),

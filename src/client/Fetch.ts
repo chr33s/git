@@ -6,10 +6,9 @@
  * uses. Serves the Artifacts provider's `import` and the CLI's `clone` from
  * one implementation.
  *
- * Runs on node and workerd. This file itself is `fetch` + web streams, but
- * `Pack.unpack`'s inflate leans on `node:zlib`'s consumed-byte accounting —
- * an in-browser clone waits on a platform-neutral inflate. (`lsRemote` is
- * browser-clean already.)
+ * Platform-neutral end to end: `fetch`, web streams, and `Pack.ts`'s own
+ * pull-based inflate (`git/Inflate.ts`) — `Browser.test.ts` executes a full
+ * clone inside real Chromium to hold the claim.
  */
 import { Effect, Stream } from "effect";
 
@@ -22,7 +21,7 @@ import {
 import * as Pack from "../git/Pack.ts";
 import { isOid, type ObjectStore, type Oid, type RefStore, type RefUpdate } from "../git/Store.ts";
 import { ObjectStore as ObjectStoreTag } from "../git/Store.ts";
-import { PktReader } from "../server/Protocol.ts";
+import { PktReader } from "../git/Pkt.ts";
 
 const decoder = new TextDecoder();
 

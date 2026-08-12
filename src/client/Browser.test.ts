@@ -8,9 +8,9 @@
  * OPFS is live and fetches are same-origin), and the scenario runs against
  * the *actual* Origin Private File System.
  *
- * `node:crypto`/`node:zlib` are stubbed to throwing shims: they enter the
- * bundle through `Repository → Pack`, and the scenario never touches pack
- * paths — a browser clone waits on a platform-neutral inflate.
+ * Since `Pack.ts` moved onto the platform-neutral `Inflate`/`Sha1`, the
+ * bundle carries no `node:` imports at all — and the scenario ends with the
+ * headline: a real smart-HTTP clone executed inside the browser.
  *
  * Skipped when Chromium is not available.
  */
@@ -39,32 +39,13 @@ const author = {
   offset: 0,
 };
 
-/** `node:` builtins load via `Repository → Pack`; the browser never calls them. */
-const nodeStubs = {
-  name: "node-stubs",
-  setup(builder: import("esbuild").PluginBuild) {
-    builder.onResolve({ filter: /^node:(crypto|zlib)$/ }, (args) => ({
-      path: args.path,
-      namespace: "node-stub",
-    }));
-    builder.onLoad({ filter: /.*/, namespace: "node-stub" }, () => ({
-      contents: `
-        const nodeOnly = () => { throw new Error("node-only: pack transport needs node:zlib"); };
-        export const createHash = nodeOnly;
-        export const createInflate = nodeOnly;
-        export const createGunzip = nodeOnly;
-        export const deflateSync = nodeOnly;
-      `,
-      loader: "js",
-    }));
-  },
-};
-
 const scenarioEntry = `
   import { Effect, Stream } from "effect";
   import * as Opfs from "./src/adapters/Opfs.ts";
   import * as Client from "./src/client/Client.ts";
+  import { fetchRepository } from "./src/client/Fetch.ts";
   import { Repository } from "./src/git/Repository.ts";
+  import { ObjectStore, RefStore } from "./src/git/Store.ts";
 
   const author = ${JSON.stringify({ ...author, at: author.at.toISOString() })};
 
@@ -119,7 +100,35 @@ const scenarioEntry = `
       }).pipe(Effect.scoped),
     );
 
-    return { localMessages, reread, api };
+    // The headline: a smart-HTTP clone, entirely inside the browser — the
+    // pull-based inflate decoding the pack into OPFS.
+    const cloneRoot = await origin.getDirectoryHandle(
+      "clone-" + Math.random().toString(36).slice(2),
+      { create: true },
+    );
+    const cloneStores = Opfs.stores(cloneRoot);
+    const clonedMessages = await Effect.runPromise(
+      Effect.gen(function* () {
+        const target = { objects: yield* ObjectStore, refs: yield* RefStore };
+        const cloned = yield* fetchRepository({
+          url: location.origin + "/" + repoName,
+          stores: target,
+        });
+        return cloned.defaultBranch;
+      }).pipe(Effect.provide(cloneStores)),
+    ).then(async (defaultBranch) => {
+      const log = await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const main = yield* repository.resolve("refs/heads/" + defaultBranch);
+          const commits = yield* Stream.runCollect(repository.log(main, { limit: 10 }));
+          return commits.map((commit) => commit.message);
+        }).pipe(Effect.provide(Client.local(Opfs.stores(cloneRoot)))),
+      );
+      return log;
+    });
+
+    return { localMessages, reread, api, clonedMessages };
   };
 `;
 
@@ -159,7 +168,6 @@ describe("Client in real Chromium", () => {
         platform: "browser",
         target: "es2022",
         write: false,
-        plugins: [nodeStubs],
       });
 
       const page = await browser.newPage();
@@ -177,11 +185,13 @@ describe("Client in real Chromium", () => {
       )) as {
         reread: string[];
         api: { refs: Array<{ name: string; oid: string }>; messages: string[] };
+        clonedMessages: string[];
       };
 
       assert.deepEqual(result.reread, ["second from OPFS", "first from OPFS"]);
       assert.deepEqual(result.api.refs, [{ name: "refs/heads/main", oid: head }]);
       assert.deepEqual(result.api.messages, ["served"]);
+      assert.deepEqual(result.clonedMessages, ["served"]);
     } finally {
       await browser.close();
       await server.close();

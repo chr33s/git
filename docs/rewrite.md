@@ -34,7 +34,7 @@ What is real code today, running under the repo's own test runner:
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag           |
 | `src/git/Store.contract.ts`  | one contract suite, run against **all three** backends                   |
 
-138 tests pass: 128 unit (`npm test`, one of them inside real Chromium) and 10 integration (`npm run test:integration`),
+138 tests pass: 128 unit (`npm test`, one of them cloning inside real Chromium) and 10 integration (`npm run test:integration`),
 the latter driving a real Workers runtime and itself running a 15-case
 conformance suite inside it. Three kinds of evidence, deliberately:
 
