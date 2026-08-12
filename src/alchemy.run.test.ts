@@ -8,7 +8,7 @@
  * agree with `wrangler.json`, which is still the path that ships.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 
 import wrangler from "../wrangler.json" with { type: "json" };
 

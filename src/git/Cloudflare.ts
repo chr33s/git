@@ -27,6 +27,8 @@ import {
   type Oid,
   type ReflogEntry,
   RefStore,
+  tracedObjectStore,
+  tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
 } from "./Store.ts";
@@ -71,56 +73,56 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
           : Effect.fail(new ObjectNotFound({ oid }));
       };
 
-      return ObjectStore.of({
-        read: (oid) =>
-          get(oid).pipe(
-            Effect.flatMap((object) =>
-              Effect.all([
-                typeOf(object, oid),
-                Effect.tryPromise({
-                  try: () => object.arrayBuffer(),
-                  catch: failure("read", key(oid)),
-                }),
-              ]),
+      return ObjectStore.of(
+        tracedObjectStore("Cloudflare", {
+          read: (oid) =>
+            get(oid).pipe(
+              Effect.flatMap((object) =>
+                Effect.all([
+                  typeOf(object, oid),
+                  Effect.tryPromise({
+                    try: () => object.arrayBuffer(),
+                    catch: failure("read", key(oid)),
+                  }),
+                ]),
+              ),
+              Effect.map(([type, buffer]) => ({ type, data: new Uint8Array(buffer) })),
             ),
-            Effect.map(([type, buffer]) => ({ type, data: new Uint8Array(buffer) })),
-          ),
-        readStream: (oid) =>
-          get(oid).pipe(
-            Effect.map((object) =>
-              Stream.fromReadableStream({
-                evaluate: () => object.body as ReadableStream<Uint8Array>,
-                onError: failure("readStream", key(oid)),
-              }),
-            ),
-          ),
-        write: (object) =>
-          Effect.gen(function* () {
-            const oid = yield* hashObject(object);
-
-            // Content-addressed: if it is already there, the bytes are identical
-            // and the PUT is pure cost.
-            const existing = yield* head(oid);
-            if (existing !== null) return oid;
-
-            yield* Effect.tryPromise({
-              try: () =>
-                bucket.put(key(oid), object.data as unknown as ArrayBuffer, {
-                  customMetadata: { type: object.type },
+          readStream: (oid) =>
+            get(oid).pipe(
+              Effect.map((object) =>
+                Stream.fromReadableStream({
+                  evaluate: () => object.body as ReadableStream<Uint8Array>,
+                  onError: failure("readStream", key(oid)),
                 }),
-              catch: failure("write", key(oid)),
-            });
+              ),
+            ),
+          write: (object) =>
+            Effect.gen(function* () {
+              const oid = yield* hashObject(object);
 
-            return oid;
-          }),
-        has: (oid) => head(oid).pipe(Effect.map((object) => object !== null)),
-        delete: (oid) =>
-          Effect.tryPromise({
-            try: () => bucket.delete(key(oid)),
-            catch: failure("delete", key(oid)),
-          }),
-        list: () =>
-          Stream.paginate(undefined as string | undefined, (cursor) =>
+              // Content-addressed: if it is already there, the bytes are identical
+              // and the PUT is pure cost.
+              const existing = yield* head(oid);
+              if (existing !== null) return oid;
+
+              yield* Effect.tryPromise({
+                try: () =>
+                  bucket.put(key(oid), object.data as unknown as ArrayBuffer, {
+                    customMetadata: { type: object.type },
+                  }),
+                catch: failure("write", key(oid)),
+              });
+
+              return oid;
+            }),
+          has: (oid) => head(oid).pipe(Effect.map((object) => object !== null)),
+          delete: (oid) =>
+            Effect.tryPromise({
+              try: () => bucket.delete(key(oid)),
+              catch: failure("delete", key(oid)),
+            }),
+          list: Stream.paginate(undefined as string | undefined, (cursor) =>
             Effect.tryPromise({
               try: () =>
                 bucket.list({
@@ -140,7 +142,8 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
               ),
             ),
           ),
-      });
+        }),
+      );
     }),
   );
 
@@ -192,133 +195,133 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
         catch: failure("read", headKey),
       }).pipe(Effect.map((value) => value ?? "refs/heads/main"));
 
-      return RefStore.of({
-        read,
-        resolve: (name) =>
-          Effect.gen(function* () {
-            let current = name;
-            for (let depth = 0; depth < 8; depth++) {
-              if (current === "HEAD") {
-                current = yield* head;
-                continue;
+      return RefStore.of(
+        tracedRefStore("Cloudflare", {
+          read,
+          resolve: (name) =>
+            Effect.gen(function* () {
+              let current = name;
+              for (let depth = 0; depth < 8; depth++) {
+                if (current === "HEAD") {
+                  current = yield* head;
+                  continue;
+                }
+                return yield* read(current);
               }
-              return yield* read(current);
-            }
-            return null;
-          }),
-        list: (prefix) =>
-          Effect.try({
-            try: () =>
-              sql
-                .exec<{ name: string; oid: string }>(
-                  `SELECT name, oid FROM refs WHERE repo = ? ORDER BY name`,
-                  repo,
-                )
-                .toArray()
-                .filter((row) => prefix === undefined || row.name.startsWith(prefix))
-                .map((row) => [row.name, row.oid as Oid] as const),
-            catch: failure("list", repo),
-          }),
-        apply: (updates, options) =>
-          Effect.gen(function* () {
-            for (const update of updates) {
-              if (update.name.length === 0 || update.name.includes(" ")) {
-                return yield* new Invalid({
-                  field: "ref",
-                  reason: `bad ref name '${update.name}'`,
-                });
-              }
-            }
-
-            return yield* Effect.try({
-              try: () => {
-                const at = new Date().toISOString();
-                const results: RefUpdateResult[] = [];
-                const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
-
-                // Check the whole batch before writing any of it, so an atomic
-                // batch that fails leaves nothing behind.
-                for (const update of updates) {
-                  const actual = readSync(update.name);
-                  const matches = update.expected === undefined || update.expected === actual;
-                  results.push({
-                    name: update.name,
-                    applied: matches,
-                    current: matches ? update.value : actual,
+              return null;
+            }),
+          list: (prefix) =>
+            Effect.try({
+              try: () =>
+                sql
+                  .exec<{ name: string; oid: string }>(
+                    `SELECT name, oid FROM refs WHERE repo = ? ORDER BY name`,
+                    repo,
+                  )
+                  .toArray()
+                  .filter((row) => prefix === undefined || row.name.startsWith(prefix))
+                  .map((row) => [row.name, row.oid as Oid] as const),
+              catch: failure("list", repo),
+            }),
+          apply: (updates, options) =>
+            Effect.gen(function* () {
+              for (const update of updates) {
+                if (update.name.length === 0 || update.name.includes(" ")) {
+                  return yield* new Invalid({
+                    field: "ref",
+                    reason: `bad ref name '${update.name}'`,
                   });
-                  if (matches) pending.push({ from: actual, update });
                 }
+              }
 
-                if (options?.atomic === true && results.some((result) => !result.applied)) {
-                  return results.map((result) => ({
-                    name: result.name,
-                    applied: false,
-                    current: readSync(result.name),
-                  }));
-                }
+              return yield* Effect.try({
+                try: () => {
+                  const at = new Date().toISOString();
+                  const results: RefUpdateResult[] = [];
+                  const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
 
-                for (const { from, update } of pending) {
-                  if (update.value === null) {
-                    sql.exec(`DELETE FROM refs WHERE repo = ? AND name = ?`, repo, update.name);
-                  } else {
-                    sql.exec(
-                      `INSERT INTO refs (repo, name, oid) VALUES (?, ?, ?)
+                  // Check the whole batch before writing any of it, so an atomic
+                  // batch that fails leaves nothing behind.
+                  for (const update of updates) {
+                    const actual = readSync(update.name);
+                    const matches = update.expected === undefined || update.expected === actual;
+                    results.push({
+                      name: update.name,
+                      applied: matches,
+                      current: matches ? update.value : actual,
+                    });
+                    if (matches) pending.push({ from: actual, update });
+                  }
+
+                  if (options?.atomic === true && results.some((result) => !result.applied)) {
+                    return results.map((result) => ({
+                      name: result.name,
+                      applied: false,
+                      current: readSync(result.name),
+                    }));
+                  }
+
+                  for (const { from, update } of pending) {
+                    if (update.value === null) {
+                      sql.exec(`DELETE FROM refs WHERE repo = ? AND name = ?`, repo, update.name);
+                    } else {
+                      sql.exec(
+                        `INSERT INTO refs (repo, name, oid) VALUES (?, ?, ?)
                        ON CONFLICT (repo, name) DO UPDATE SET oid = excluded.oid`,
+                        repo,
+                        update.name,
+                        update.value,
+                      );
+                    }
+                    sql.exec(
+                      `INSERT INTO reflog (repo, name, old_oid, new_oid, at, message)
+                     VALUES (?, ?, ?, ?, ?, ?)`,
                       repo,
                       update.name,
+                      from,
                       update.value,
+                      at,
+                      update.reason ?? "update",
                     );
                   }
-                  sql.exec(
-                    `INSERT INTO reflog (repo, name, old_oid, new_oid, at, message)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                    repo,
-                    update.name,
-                    from,
-                    update.value,
-                    at,
-                    update.reason ?? "update",
-                  );
-                }
 
-                return results;
-              },
-              catch: failure("apply", repo),
-            });
-          }),
-        head,
-        setHead: (target) =>
-          Effect.tryPromise({
-            try: () => storage.put(headKey, target),
-            catch: failure("write", headKey),
-          }),
-        reflog: (name) =>
-          Effect.try({
-            try: () =>
-              sql
-                .exec<{
-                  at: string;
-                  message: string;
-                  new_oid: string | null;
-                  old_oid: string | null;
-                }>(
-                  `SELECT old_oid, new_oid, at, message FROM reflog
+                  return results;
+                },
+                catch: failure("apply", repo),
+              });
+            }),
+          head,
+          setHead: (target) =>
+            Effect.tryPromise({
+              try: () => storage.put(headKey, target),
+              catch: failure("write", headKey),
+            }),
+          reflog: (name) =>
+            Effect.try({
+              try: () =>
+                sql
+                  .exec<{
+                    at: string;
+                    message: string;
+                    new_oid: string | null;
+                    old_oid: string | null;
+                  }>(
+                    `SELECT old_oid, new_oid, at, message FROM reflog
                    WHERE repo = ? AND name = ? ORDER BY rowid`,
-                  repo,
-                  name,
-                )
-                .toArray()
-                .map(
-                  (row): ReflogEntry => ({
+                    repo,
+                    name,
+                  )
+                  .toArray()
+                  .map((row): ReflogEntry => ({
                     from: row.old_oid as Oid | null,
                     to: row.new_oid as Oid | null,
                     at: new Date(row.at),
                     message: row.message,
-                  }),
-                ),
-            catch: failure("reflog", name),
-          }),
-      });
+                  })),
+              catch: failure("reflog", name),
+            }),
+        }),
+      );
     }),
   );
 

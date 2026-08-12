@@ -36,6 +36,10 @@ export default Repo.make(
     const bucket = yield* Alchemy.R2.ReadWriteBucket(Objects);
     const state = yield* Alchemy.DurableObjectState;
 
+    // The nested `Effect<Effect<…>>` is alchemy's DO contract, not a mistake:
+    // the outer generator binds resources once per instance, the inner runs
+    // per request with `RuntimeContext` available.
+    // @effect-diagnostics-next-line returnEffectInGen:off
     return Effect.gen(function* () {
       // `raw` is RuntimeContext-coloured: available here, not at init. The
       // cast crosses one seam only — alchemy types bindings from

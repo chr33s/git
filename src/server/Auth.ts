@@ -1,21 +1,14 @@
 /**
- * Access control for both server surfaces.
+ * Access control for both server surfaces: fetching needs `read`, pushing and
+ * every mutating JSON call need `write`.
  *
- * The guard maps a request to the scope it needs — fetching is `read`,
- * pushing and every mutating JSON call is `write` — extracts the credential,
- * and answers with `null` (authorized), 401 (no or bad credential, with
- * `WWW-Authenticate: Basic` so `git` prompts and retries) or 403 (a real
- * token without the needed scope).
+ * `git` sends credentials as HTTP Basic, so a token is accepted as the
+ * *password* field (and as the username when the password is empty, and as a
+ * Bearer token). Miss that and `git clone` fails while `curl` works.
  *
- * The compatibility detail the evaluation flagged: `git` sends credentials as
- * HTTP Basic, so the token is accepted as the *password* field — and as the
- * username when the password is empty, and as a Bearer token for plain HTTP
- * clients. Miss the first and `git clone` fails while `curl` works.
- *
- * Two verifiers ship. `hmacVerify` is stateless — HMAC-SHA256 over
- * `repo|scope|expiry` with a server secret, nothing stored, which is what a
- * Durable Object can enforce with one secret binding. The Artifacts
- * provider's `Tokens.verify` plugs into the same guard for revocable tokens.
+ * Two verifiers ship: `hmacVerify` is stateless, which is all a Durable
+ * Object needs; the Artifacts provider's `Tokens.verify` plugs into the same
+ * guard for revocable tokens.
  */
 import { Effect } from "effect";
 
@@ -62,16 +55,15 @@ const forbidden = () => new Response("insufficient scope", { status: 403 });
  * `null` means proceed. A `write` scope implies `read`, matching what a repo
  * token means everywhere else git is hosted.
  */
-export const guard = (
+export const guard = Effect.fn("Auth.guard")(function* (
   request: Request,
   verify: (credential: string | null) => Effect.Effect<Scope | null>,
-): Effect.Effect<Response | null> =>
-  Effect.gen(function* () {
-    const credential = credentialOf(request);
-    const scope = yield* verify(credential);
-    if (scope === "write" || scope === requiredScope(request)) return null;
-    return credential === null ? unauthorized() : scope === null ? unauthorized() : forbidden();
-  });
+) {
+  const credential = credentialOf(request);
+  const scope = yield* verify(credential);
+  if (scope === "write" || scope === requiredScope(request)) return null;
+  return credential === null ? unauthorized() : scope === null ? unauthorized() : forbidden();
+});
 
 const encoder = new TextEncoder();
 

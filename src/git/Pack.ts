@@ -1,5 +1,5 @@
 /**
- * Packfile transport — phase 3, platform-neutral.
+ * Packfile transport, platform-neutral.
  *
  * The pack is consumed as a stream: chunks are pulled as the parser needs
  * them, each object is written to `ObjectStore` as it resolves, and delta
@@ -311,12 +311,10 @@ export const unpack = <E>(
       const header = yield* step(() => source.objectHeader());
       const data = yield* step(() => source.inflate());
       if (data.length !== header.size) {
-        return yield* Effect.fail(
-          new PackCorrupt({
-            reason: `object ${index}: header says ${header.size} bytes, inflated to ${data.length}`,
-            offset: start,
-          }),
-        );
+        return yield* new PackCorrupt({
+          reason: `object ${index}: header says ${header.size} bytes, inflated to ${data.length}`,
+          offset: start,
+        });
       }
 
       let object: RawObject;
@@ -325,12 +323,10 @@ export const unpack = <E>(
       } else {
         const baseOid = header.kind === "ref" ? header.base : oidAt.get(start - header.distance);
         if (baseOid === undefined) {
-          return yield* Effect.fail(
-            new PackCorrupt({
-              reason: `object ${index}: ofs-delta base is not an object boundary`,
-              offset: start,
-            }),
-          );
+          return yield* new PackCorrupt({
+            reason: `object ${index}: ofs-delta base is not an object boundary`,
+            offset: start,
+          });
         }
         const base = yield* store.read(baseOid);
         const resolved = yield* Effect.fromResult(applyDelta(base.data, data));

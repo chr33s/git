@@ -1,17 +1,13 @@
 /**
- * Browser stores: the ports over OPFS (Origin Private File System).
+ * The ports over OPFS (Origin Private File System).
  *
- * The fourth backend, and the second filesystem-shaped one — the layout is
- * git's own, byte-for-byte the same loose objects `git/Node.ts` writes, so a
- * repository synced down to a browser is the same repository everywhere else.
- * Compression is `CompressionStream("deflate")`, which browsers, node and
- * workerd all provide; nothing here imports `node:*`.
+ * Byte-for-byte the same loose-object layout `git/Node.ts` writes, so a
+ * repository synced into a browser is the same repository. Compression is
+ * `CompressionStream("deflate")`; nothing here imports `node:*`.
  *
- * Atomicity leans on the platform the way each backend does: OPFS's
- * `createWritable` stages into a swap file and replaces the target on
- * `close()`, the async-API analogue of the `rename(2)` the node backend uses.
- * Cross-tab races remain the host's problem, exactly as cross-process races
- * are on the node host.
+ * Atomicity comes from `createWritable`, which stages and replaces on
+ * `close()` — the async analogue of the node backend's `rename(2)`. Cross-tab
+ * races are the host's problem, as cross-process races are on node.
  */
 import { Effect, Layer, Stream } from "effect";
 
@@ -22,6 +18,8 @@ import {
   type Oid,
   type ReflogEntry,
   RefStore,
+  tracedObjectStore,
+  tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
 } from "../git/Store.ts";
@@ -126,41 +124,41 @@ export const objectStore = (
           ),
         );
 
-      return ObjectStore.of({
-        read,
-        readStream: (oid) =>
-          read(oid).pipe(
-            Effect.map(
-              (object) =>
-                Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
+      return ObjectStore.of(
+        tracedObjectStore("OPFS", {
+          read,
+          readStream: (oid) =>
+            read(oid).pipe(
+              Effect.map(
+                (object) =>
+                  Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
+              ),
             ),
-          ),
-        write: (object) =>
-          Effect.gen(function* () {
-            const oid = yield* hashObject(object);
-            const target = pathFor(oid);
-            yield* Effect.tryPromise({
-              try: async () => {
-                // Content-addressed: a rewrite would be identical bytes.
-                if ((await readBytes(root, target)) !== null) return;
-                await writeBytes(root, target, await deflate(encodeObject(object)));
-              },
-              catch: failure("write", target),
-            });
-            return oid;
-          }),
-        has: (oid) =>
-          Effect.tryPromise({
-            try: async () => (await readBytes(root, pathFor(oid))) !== null,
-            catch: failure("has", pathFor(oid)),
-          }),
-        delete: (oid) =>
-          Effect.tryPromise({
-            try: () => removePath(root, pathFor(oid)),
-            catch: failure("delete", pathFor(oid)),
-          }),
-        list: () =>
-          Stream.unwrap(
+          write: (object) =>
+            Effect.gen(function* () {
+              const oid = yield* hashObject(object);
+              const target = pathFor(oid);
+              yield* Effect.tryPromise({
+                try: async () => {
+                  // Content-addressed: a rewrite would be identical bytes.
+                  if ((await readBytes(root, target)) !== null) return;
+                  await writeBytes(root, target, await deflate(encodeObject(object)));
+                },
+                catch: failure("write", target),
+              });
+              return oid;
+            }),
+          has: (oid) =>
+            Effect.tryPromise({
+              try: async () => (await readBytes(root, pathFor(oid))) !== null,
+              catch: failure("has", pathFor(oid)),
+            }),
+          delete: (oid) =>
+            Effect.tryPromise({
+              try: () => removePath(root, pathFor(oid)),
+              catch: failure("delete", pathFor(oid)),
+            }),
+          list: Stream.unwrap(
             Effect.tryPromise({
               try: async () => {
                 const oids: Oid[] = [];
@@ -182,7 +180,8 @@ export const objectStore = (
               catch: failure("list", "objects"),
             }).pipe(Effect.map(Stream.fromIterable)),
           ) as Stream.Stream<Oid, StorageFailure>,
-      });
+        }),
+      );
     }),
   );
 
@@ -263,90 +262,92 @@ export const refStore = (
           catch: failure("list", "refs"),
         });
 
-      return RefStore.of({
-        read,
-        resolve: (name) =>
-          Effect.gen(function* () {
-            let current = name;
-            for (let depth = 0; depth < 8; depth++) {
-              if (current === "HEAD") {
-                current = yield* head;
-                continue;
+      return RefStore.of(
+        tracedRefStore("OPFS", {
+          read,
+          resolve: (name) =>
+            Effect.gen(function* () {
+              let current = name;
+              for (let depth = 0; depth < 8; depth++) {
+                if (current === "HEAD") {
+                  current = yield* head;
+                  continue;
+                }
+                return yield* read(current);
               }
-              return yield* read(current);
-            }
-            return null;
-          }),
-        list: listRefs,
-        apply: (updates, options) =>
-          Effect.gen(function* () {
-            for (const update of updates) {
-              if (update.name.length === 0 || update.name.includes(" ")) {
-                return yield* new Invalid({
-                  field: "ref",
-                  reason: `bad ref name '${update.name}'`,
+              return null;
+            }),
+          list: listRefs,
+          apply: (updates, options) =>
+            Effect.gen(function* () {
+              for (const update of updates) {
+                if (update.name.length === 0 || update.name.includes(" ")) {
+                  return yield* new Invalid({
+                    field: "ref",
+                    reason: `bad ref name '${update.name}'`,
+                  });
+                }
+              }
+
+              const at = new Date();
+              const results: RefUpdateResult[] = [];
+              const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
+
+              // Check everything before writing anything, like every backend.
+              for (const update of updates) {
+                const actual = yield* read(update.name);
+                const matches = update.expected === undefined || update.expected === actual;
+                results.push({
+                  name: update.name,
+                  applied: matches,
+                  current: matches ? update.value : actual,
                 });
+                if (matches) pending.push({ from: actual, update });
               }
-            }
 
-            const at = new Date();
-            const results: RefUpdateResult[] = [];
-            const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
+              if (options?.atomic === true && results.some((result) => !result.applied)) {
+                return yield* Effect.forEach(results, (result) =>
+                  read(result.name).pipe(
+                    Effect.map((current) => ({ name: result.name, applied: false, current })),
+                  ),
+                );
+              }
 
-            // Check everything before writing anything, like every backend.
-            for (const update of updates) {
-              const actual = yield* read(update.name);
-              const matches = update.expected === undefined || update.expected === actual;
-              results.push({
-                name: update.name,
-                applied: matches,
-                current: matches ? update.value : actual,
-              });
-              if (matches) pending.push({ from: actual, update });
-            }
+              for (const { from, update } of pending) {
+                yield* update.value === null
+                  ? Effect.tryPromise({
+                      try: () => removePath(root, update.name),
+                      catch: failure("delete", update.name),
+                    })
+                  : writeText(update.name, `${update.value}\n`);
+                yield* appendReflog(update, from, at);
+              }
 
-            if (options?.atomic === true && results.some((result) => !result.applied)) {
-              return yield* Effect.forEach(results, (result) =>
-                read(result.name).pipe(
-                  Effect.map((current) => ({ name: result.name, applied: false, current })),
-                ),
-              );
-            }
-
-            for (const { from, update } of pending) {
-              yield* update.value === null
-                ? Effect.tryPromise({
-                    try: () => removePath(root, update.name),
-                    catch: failure("delete", update.name),
-                  })
-                : writeText(update.name, `${update.value}\n`);
-              yield* appendReflog(update, from, at);
-            }
-
-            return results;
-          }),
-        head,
-        setHead: (target) => writeText("HEAD", `ref: ${target}\n`),
-        reflog: (name) =>
-          Effect.gen(function* () {
-            const text = yield* readText(`logs/${name}`);
-            if (text === null) return [] as ReflogEntry[];
-            const zero = "0".repeat(40);
-            return text
-              .split("\n")
-              .filter((line) => line.length > 0)
-              .map((line): ReflogEntry => {
-                const [values = "", message = ""] = line.split("\t");
-                const [from = zero, to = zero, at = ""] = values.split(" ");
-                return {
-                  from: from === zero ? null : (from as Oid),
-                  to: to === zero ? null : (to as Oid),
-                  at: new Date(at),
-                  message,
-                };
-              });
-          }),
-      });
+              return results;
+            }),
+          head,
+          setHead: (target) => writeText("HEAD", `ref: ${target}\n`),
+          reflog: (name) =>
+            Effect.gen(function* () {
+              const text = yield* readText(`logs/${name}`);
+              if (text === null) return [] as ReflogEntry[];
+              const zero = "0".repeat(40);
+              return text
+                .split("\n")
+                .filter((line) => line.length > 0)
+                .map((line): ReflogEntry => {
+                  const [values = "", message = ""] = line.split("\t");
+                  const [from = zero, to = zero, at = ""] = values.split(" ");
+                  return {
+                    from: from === zero ? null : (from as Oid),
+                    to: to === zero ? null : (to as Oid),
+                    at: new Date(at),
+                    message,
+                  };
+                });
+            }),
+        }),
+      );
     }),
   );
 

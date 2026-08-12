@@ -304,18 +304,17 @@ export const alternates = (
   has: (oid) =>
     child.has(oid).pipe(Effect.flatMap((own) => (own ? Effect.succeed(true) : parent.has(oid)))),
   delete: child.delete,
-  list: () =>
-    Stream.unwrap(
-      Stream.runCollect(child.list()).pipe(
-        Effect.map((own) => {
-          const mine = new Set(own);
-          return Stream.concat(
-            Stream.fromIterable(own),
-            parent.list().pipe(Stream.filter((oid) => !mine.has(oid))),
-          );
-        }),
-      ),
+  list: Stream.unwrap(
+    Stream.runCollect(child.list).pipe(
+      Effect.map((own) => {
+        const mine = new Set(own);
+        return Stream.concat(
+          Stream.fromIterable(own),
+          parent.list.pipe(Stream.filter((oid) => !mine.has(oid))),
+        );
+      }),
     ),
+  ),
 });
 
 /** One pair of stores per repository, alive for the provider's lifetime. */
@@ -421,15 +420,13 @@ export const repoStoresNode = (root: string) =>
 /** `import`, through the shared smart-HTTP client, errors mapped to Artifacts codes. */
 const clone = (source: string, branch: string | undefined, target: StoreInstances) =>
   fetchRepository({ url: source, branch, stores: target }).pipe(
-    Effect.catch((error) =>
-      Effect.fail(
-        error._tag === "Invalid"
-          ? failure(error.field === "branch" ? "NOT_FOUND" : "UPSTREAM_UNAVAILABLE", error.reason)
-          : failure(
-              "INTERNAL_ERROR",
-              `${error._tag}${"reason" in error ? ` — ${error.reason}` : ""}`,
-            ),
-      ),
+    Effect.mapError((error) =>
+      error._tag === "Invalid"
+        ? failure(error.field === "branch" ? "NOT_FOUND" : "UPSTREAM_UNAVAILABLE", error.reason)
+        : failure(
+            "INTERNAL_ERROR",
+            `${error._tag}${"reason" in error ? ` — ${error.reason}` : ""}`,
+          ),
     ),
   );
 
@@ -575,7 +572,7 @@ export const localNamespace = (
               yield* Effect.try({
                 try: () => new URL(opts.source.url),
                 catch: () => failure("INVALID_URL", opts.source.url),
-              }).pipe(Effect.catch((error) => Effect.fail(error)));
+              });
 
               const { record, result, stores } = yield* create(
                 opts.target.name,

@@ -9,7 +9,7 @@
  * status code to interpret.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 
 import { Effect, FileSystem, Layer, Path } from "effect";
 import { Etag, HttpPlatform } from "effect/unstable/http";
@@ -39,9 +39,18 @@ const alice = {
   offset: 0,
 };
 
+/**
+ * `it.live`, not `it.effect`: the latter installs a `TestClock` whose
+ * time never advances on its own, and `Repository.commit` retries a
+ * `RefConflict` behind a 10ms schedule — the conflict assertion below
+ * would wait forever. The win is the same either way: the test body *is*
+ * an Effect, so there is no `runPromise` at the edge and a failure is
+ * reported as a `Cause` with its fiber trace.
+ */
 describe("Api", () => {
-  it("drives the derived client end to end, typed errors included", async () => {
-    await Effect.runPromise(
+  it.live(
+    "drives the derived client end to end, typed errors included",
+    () =>
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -120,7 +129,9 @@ describe("Api", () => {
           })
           .pipe(Effect.flip);
         assert.equal(conflict._tag, "RefConflict");
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void>,
-    );
-  });
+        // `HttpApiTest`'s client carries the router's request-scoped
+        // requirement, which the handlers layer satisfies at dispatch time but
+        // the type cannot see discharged here.
+      }).pipe(Effect.scoped, Effect.provide(live)) as unknown as Effect.Effect<void>,
+  );
 });

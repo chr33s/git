@@ -6,7 +6,7 @@
  * backend has to answer for it and callers never branch on whether a method
  * exists.
  */
-import { Context, type Effect, type Layer, type Stream } from "effect";
+import { Context, Effect, type Layer, Stream } from "effect";
 import type { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 
 /** A 40-char lowercase hex object id. Branded so a ref name cannot pass as one. */
@@ -31,7 +31,7 @@ export class ObjectStore extends Context.Service<
     readonly write: (object: RawObject) => Effect.Effect<Oid, StorageFailure>;
     readonly has: (oid: Oid) => Effect.Effect<boolean, StorageFailure>;
     readonly delete: (oid: Oid) => Effect.Effect<void, StorageFailure>;
-    readonly list: () => Stream.Stream<Oid, StorageFailure>;
+    readonly list: Stream.Stream<Oid, StorageFailure>;
   }
 >()("git/ObjectStore") {}
 
@@ -86,3 +86,41 @@ export class RefStore extends Context.Service<
 /** What a server needs. No staging area: a bare repository has no work tree. */
 export type ServerStores = ObjectStore | RefStore;
 export type ServerStoreLayer = Layer.Layer<ServerStores>;
+
+/**
+ * Span wrappers for a port implementation.
+ *
+ * The names live here rather than in each backend for two reasons: a trace
+ * reads `Repository.commit → Cloudflare.RefStore.apply` with the same
+ * vocabulary whichever storage is loaded, and a new backend cannot forget to
+ * name itself — it wraps or it does not, and the contract suite runs the
+ * wrapped form either way.
+ *
+ * `Effect.fn` rather than `Effect.withSpan` for the method forms: it carries
+ * the call-site stack frame as well as the span. `list` is a `Stream` and
+ * `head` is a plain `Effect`, so those take the combinator that fits.
+ */
+export const tracedObjectStore = (
+  backend: string,
+  store: ObjectStore["Service"],
+): ObjectStore["Service"] => ({
+  read: Effect.fn(`${backend}.ObjectStore.read`)(store.read),
+  readStream: Effect.fn(`${backend}.ObjectStore.readStream`)(store.readStream),
+  write: Effect.fn(`${backend}.ObjectStore.write`)(store.write),
+  has: Effect.fn(`${backend}.ObjectStore.has`)(store.has),
+  delete: Effect.fn(`${backend}.ObjectStore.delete`)(store.delete),
+  list: store.list.pipe(Stream.withSpan(`${backend}.ObjectStore.list`)),
+});
+
+export const tracedRefStore = (
+  backend: string,
+  store: RefStore["Service"],
+): RefStore["Service"] => ({
+  read: Effect.fn(`${backend}.RefStore.read`)(store.read),
+  resolve: Effect.fn(`${backend}.RefStore.resolve`)(store.resolve),
+  list: Effect.fn(`${backend}.RefStore.list`)(store.list),
+  apply: Effect.fn(`${backend}.RefStore.apply`)(store.apply),
+  head: store.head.pipe(Effect.withSpan(`${backend}.RefStore.head`)),
+  setHead: Effect.fn(`${backend}.RefStore.setHead`)(store.setHead),
+  reflog: Effect.fn(`${backend}.RefStore.reflog`)(store.reflog),
+});

@@ -16,26 +16,30 @@
   ],
   "type": "module",
   "scripts": {
-    "check": "oxfmt --check && oxlint",
+    "check": "oxfmt --check && oxlint && tsc -b --noEmit",
     "fix": "oxlint --fix && oxfmt --write",
     "postinstall": "patch-package && npx wrangler types && npm run fix",
-    "test": "node --test --test-concurrency=1",
-    "test:integration": "node --test src/git/*.integration.ts"
+    "prepare": "effect-tsgo patch",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
   },
   "dependencies": {
     "effect": "4.0.0-beta.107"
   },
   "devDependencies": {
     "@effect/platform-node": "4.0.0-beta.107",
-    "@types/node": "25.6.0",
+    "@effect/tsgo": "0.36.4",
+    "@effect/vitest": "4.0.0-beta.107",
+    "@types/node": "26.2.0",
     "alchemy": "2.0.0-beta.70",
     "esbuild": "0.28.2",
-    "oxfmt": "0.47.0",
-    "oxlint": "1.62.0",
-    "oxlint-tsgolint": "0.22.1",
+    "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
+    "oxlint-tsgolint": "7.0.2001",
     "patch-package": "8.0.1",
     "playwright": "1.62.1",
-    "typescript": "6.0.3",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
     "wrangler": "4.121.0"
   },
   "engines": {

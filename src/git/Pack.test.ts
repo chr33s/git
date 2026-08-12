@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 import { deflateSync } from "node:zlib";
 
 import { Effect, Result, Stream } from "effect";

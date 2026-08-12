@@ -1,5 +1,5 @@
 /**
- * JSON API — phase 4's schema half.
+ * JSON API.
  *
  * One `HttpApi` definition: the server handlers decode payloads through the
  * same schemas a derived client would use, and the errors on the wire are the
@@ -28,7 +28,7 @@ const SignatureWire = Schema.Struct({
   name: Schema.optional(Schema.String),
   email: Schema.optional(Schema.String),
   at: Schema.optional(Schema.String),
-  offset: Schema.optional(Schema.Number),
+  offset: Schema.optional(Schema.Finite),
 });
 
 const signatureFrom = (author: (typeof SignatureWire)["Type"] | undefined): Signature => ({

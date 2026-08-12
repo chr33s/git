@@ -1,20 +1,11 @@
 /**
- * The repository as a Durable Object — phase 2.
+ * The repository as a Durable Object, and the Worker entry point.
  *
- * One instance per repository, which is not an arbitrary mapping: `Repository`
- * is constructed from `ObjectStore` and `RefStore`, so storage has to resolve
- * when the layer is built rather than when a request arrives. A DO is exactly
- * that shape — an object with durable state, addressed by name, that processes
- * one request at a time.
- *
- * This class is the Worker entry point, driven end to end by
- * `Cloudflare.integration.ts` through wrangler's test harness.
- *
- * What the platform gives us here, and what the other backends have to build:
- *
- *   - serialization: the input gate, so `RefStore.apply`'s check-then-write
- *     cannot interleave with another request's;
- *   - isolation: one instance per repo name.
+ * One instance per repository is forced, not chosen: `Repository` is built
+ * from `ObjectStore` and `RefStore`, so storage must resolve when the layer
+ * is built rather than when a request arrives. The platform supplies two
+ * things the other backends build by hand — the input gate serializes
+ * `RefStore.apply`'s check-then-write, and instances are isolated by name.
  */
 import { DurableObject } from "cloudflare:workers";
 import { Effect, Layer } from "effect";

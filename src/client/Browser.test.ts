@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 
 import { build } from "esbuild";
 import { Effect, Layer } from "effect";
@@ -132,15 +132,18 @@ const scenarioEntry = `
   };
 `;
 
-describe("Client in real Chromium", () => {
-  it("runs OPFS stores and the derived client inside the browser", async (test) => {
-    let browser;
-    try {
-      browser = await chromium.launch();
-    } catch {
-      test.skip("chromium is not available");
-      return;
-    }
+/** Resolved once, at collection time, so the skip is a fact not a branch. */
+const hasChromium = await chromium
+  .launch()
+  .then(async (browser) => {
+    await browser.close();
+    return true;
+  })
+  .catch(() => false);
+
+describe.skipIf(!hasChromium)("Client in real Chromium", () => {
+  it("runs OPFS stores and the derived client inside the browser", async () => {
+    const browser = await chromium.launch();
 
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "browser-"));
     const server = await serve({ root });

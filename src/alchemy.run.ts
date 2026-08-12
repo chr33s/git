@@ -1,26 +1,13 @@
 /**
- * Infrastructure — phase 5.
+ * Infrastructure: the bucket and Durable Object are values in the program
+ * that uses them, so each binding has one source of truth and its type is a
+ * return type rather than codegen output. Replaces `wrangler.json`'s
+ * `r2_buckets`, `durable_objects` and `migrations`, plus the generated
+ * `worker-configuration.d.ts`.
  *
- * The bucket and the Durable Object are values in the same program that uses
- * them: `Objects` is bound by `host/Cloudflare.ts` by reference, and `Repo`
- * is bound here the same way. One source of truth per binding, and its type
- * is the return type of the call rather than the output of a codegen step.
- *
- * What this replaces, concretely:
- *
- *   wrangler.json `r2_buckets`       -> `Objects` in `src/objects.ts`
- *   wrangler.json `durable_objects`  -> the `Repo` class, bound by reference
- *   wrangler.json `migrations`       -> derived from the DO's storage kind
- *   worker-configuration.d.ts        -> the return type of the binding call
- *   npm postinstall `wrangler types` -> nothing
- *
- * What it adds: `--stage` previews (a full stack per PR, destroyed on close).
- *
- *   alchemy deploy · alchemy deploy --stage pr-123 · alchemy destroy
- *
- * `wrangler.json` still ships and is what the integration suite drives; this
- * is the second path, not yet the only one. Deploying it needs Cloudflare
- * credentials, so CI checks that the stack *builds* — see `alchemy.run.test.ts`.
+ * `wrangler.json` still ships and is what the integration suite drives.
+ * Deploying this path needs Cloudflare credentials, so CI only checks that
+ * the stack builds — see `alchemy.run.test.ts`.
  */
 import * as Alchemy from "alchemy/Cloudflare";
 import { Effect } from "effect";

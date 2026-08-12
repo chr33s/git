@@ -314,15 +314,13 @@ export const layer = Layer.effect(
         yield* Effect.forEach(updates, hooks.update, { concurrency: "unbounded" });
 
         const applied = yield* refs.apply(updates, options);
-        const results = applied.map(
-          (result, index): ReceiveResult => ({
-            ref: result.name,
-            from: updates[index]?.expected ?? null,
-            to: result.current,
-            ok: result.applied,
-            ...(result.applied ? {} : { reason: "ref moved" }),
-          }),
-        );
+        const results = applied.map((result, index): ReceiveResult => ({
+          ref: result.name,
+          from: updates[index]?.expected ?? null,
+          to: result.current,
+          ok: result.applied,
+          ...(result.applied ? {} : { reason: "ref moved" }),
+        }));
 
         yield* hooks.postReceive(results);
         return results;
@@ -330,11 +328,17 @@ export const layer = Layer.effect(
 
       contains: objects.has,
 
-      unpack: (pack) => Pack.unpack(pack).pipe(Effect.provideService(ObjectStore, objects)),
+      // Traced: ingesting a pack is the expensive half of a push, and the
+      // span is where its cost shows up.
+      unpack: Effect.fn("Repository.unpack")(function* (pack) {
+        return yield* Pack.unpack(pack).pipe(Effect.provideService(ObjectStore, objects));
+      }),
 
       packOf: (wants, haves) =>
         Stream.unwrap(
-          closure(wants, haves).pipe(
+          // The walk is the expensive half of a fetch; the deflate that
+          // follows is per-object and streams.
+          Effect.withSpan("Repository.packOf")(closure(wants, haves)).pipe(
             Effect.map((oids) => Pack.pack(oids).pipe(Stream.provideService(ObjectStore, objects))),
           ),
         ),

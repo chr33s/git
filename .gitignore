@@ -1,6 +1,6 @@
 .tmp/
+*.tsbuildinfo
 .wrangler/
 dist/
 node_modules/
 worker-configuration.d.ts
-worker-configuration.test.d.ts

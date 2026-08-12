@@ -32,6 +32,8 @@ import {
   type Oid,
   type ReflogEntry,
   RefStore,
+  tracedObjectStore,
+  tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
 } from "./Store.ts";
@@ -65,44 +67,44 @@ export const objectStore = (root: string) =>
           ),
         );
 
-      return ObjectStore.of({
-        read,
-        readStream: (oid) =>
-          read(oid).pipe(
-            Effect.map(
-              (object) =>
-                Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
+      return ObjectStore.of(
+        tracedObjectStore("Node", {
+          read,
+          readStream: (oid) =>
+            read(oid).pipe(
+              Effect.map(
+                (object) =>
+                  Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
+              ),
             ),
-          ),
-        write: (object) =>
-          Effect.gen(function* () {
-            const oid = yield* hashObject(object);
-            const target = pathFor(oid);
+          write: (object) =>
+            Effect.gen(function* () {
+              const oid = yield* hashObject(object);
+              const target = pathFor(oid);
 
-            // Already there: objects are content-addressed, so a rewrite would
-            // be identical bytes and only costs IO.
-            if (existsSync(target)) return oid;
+              // Already there: objects are content-addressed, so a rewrite would
+              // be identical bytes and only costs IO.
+              if (existsSync(target)) return oid;
 
-            yield* Effect.tryPromise({
-              try: async () => {
-                await fs.mkdir(path.dirname(target), { recursive: true });
-                const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-                await fs.writeFile(temporary, deflateSync(encodeObject(object)));
-                await fs.rename(temporary, target);
-              },
-              catch: failure("write", target),
-            });
+              yield* Effect.tryPromise({
+                try: async () => {
+                  await fs.mkdir(path.dirname(target), { recursive: true });
+                  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+                  await fs.writeFile(temporary, deflateSync(encodeObject(object)));
+                  await fs.rename(temporary, target);
+                },
+                catch: failure("write", target),
+              });
 
-            return oid;
-          }),
-        has: (oid) => Effect.sync(() => existsSync(pathFor(oid))),
-        delete: (oid) =>
-          Effect.tryPromise({
-            try: () => fs.rm(pathFor(oid), { force: true }),
-            catch: failure("delete", pathFor(oid)),
-          }),
-        list: () =>
-          Stream.unwrap(
+              return oid;
+            }),
+          has: (oid) => Effect.sync(() => existsSync(pathFor(oid))),
+          delete: (oid) =>
+            Effect.tryPromise({
+              try: () => fs.rm(pathFor(oid), { force: true }),
+              catch: failure("delete", pathFor(oid)),
+            }),
+          list: Stream.unwrap(
             Effect.tryPromise({
               try: async () => {
                 if (!existsSync(objectsDir)) return [];
@@ -117,7 +119,8 @@ export const objectStore = (root: string) =>
               catch: failure("list", objectsDir),
             }).pipe(Effect.map(Stream.fromIterable)),
           ) as Stream.Stream<Oid, StorageFailure>,
-      });
+        }),
+      );
     }),
   );
 
@@ -173,119 +176,121 @@ export const refStore = (root: string) =>
           catch: failure("reflog", update.name),
         });
 
-      return RefStore.of({
-        read,
-        resolve: (name) =>
-          Effect.gen(function* () {
-            let current = name;
-            for (let depth = 0; depth < 8; depth++) {
-              if (current === "HEAD") {
-                current = yield* head;
-                continue;
-              }
-              return yield* read(current);
-            }
-            return null;
-          }),
-        list: (prefix) =>
-          Effect.tryPromise({
-            try: async () => {
-              const base = path.join(root, "refs");
-              if (!existsSync(base)) return [] as Array<readonly [string, Oid]>;
-
-              const found: Array<readonly [string, Oid]> = [];
-              const walk = async (dir: string): Promise<void> => {
-                for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-                  const full = path.join(dir, entry.name);
-                  if (entry.isDirectory()) {
-                    await walk(full);
-                    continue;
-                  }
-                  if (full.endsWith(".tmp")) continue;
-                  const name = path.relative(root, full).split(path.sep).join("/");
-                  const value = (await fs.readFile(full, "utf8")).trim() as Oid;
-                  found.push([name, value] as const);
+      return RefStore.of(
+        tracedRefStore("Node", {
+          read,
+          resolve: (name) =>
+            Effect.gen(function* () {
+              let current = name;
+              for (let depth = 0; depth < 8; depth++) {
+                if (current === "HEAD") {
+                  current = yield* head;
+                  continue;
                 }
-              };
-              await walk(base);
-              return found.filter(([name]) => prefix === undefined || name.startsWith(prefix));
-            },
-            catch: failure("list", root),
-          }),
-        apply: (updates, options) =>
-          Effect.gen(function* () {
-            for (const update of updates) {
-              if (update.name.length === 0 || update.name.includes(" ")) {
-                return yield* new Invalid({
-                  field: "ref",
-                  reason: `bad ref name '${update.name}'`,
-                });
+                return yield* read(current);
               }
-            }
+              return null;
+            }),
+          list: (prefix) =>
+            Effect.tryPromise({
+              try: async () => {
+                const base = path.join(root, "refs");
+                if (!existsSync(base)) return [] as Array<readonly [string, Oid]>;
 
-            const at = new Date();
-            const results: RefUpdateResult[] = [];
-            const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
+                const found: Array<readonly [string, Oid]> = [];
+                const walk = async (dir: string): Promise<void> => {
+                  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+                    const full = path.join(dir, entry.name);
+                    if (entry.isDirectory()) {
+                      await walk(full);
+                      continue;
+                    }
+                    if (full.endsWith(".tmp")) continue;
+                    const name = path.relative(root, full).split(path.sep).join("/");
+                    const value = (await fs.readFile(full, "utf8")).trim() as Oid;
+                    found.push([name, value] as const);
+                  }
+                };
+                await walk(base);
+                return found.filter(([name]) => prefix === undefined || name.startsWith(prefix));
+              },
+              catch: failure("list", root),
+            }),
+          apply: (updates, options) =>
+            Effect.gen(function* () {
+              for (const update of updates) {
+                if (update.name.length === 0 || update.name.includes(" ")) {
+                  return yield* new Invalid({
+                    field: "ref",
+                    reason: `bad ref name '${update.name}'`,
+                  });
+                }
+              }
 
-            // Check everything first: an atomic batch that fails must not have
-            // written anything, and rename(2) cannot be undone.
-            for (const update of updates) {
-              const actual = yield* read(update.name);
-              const matches = update.expected === undefined || update.expected === actual;
-              results.push({
-                name: update.name,
-                applied: matches,
-                current: matches ? update.value : actual,
-              });
-              if (matches) pending.push({ from: actual, update });
-            }
+              const at = new Date();
+              const results: RefUpdateResult[] = [];
+              const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
 
-            if (options?.atomic === true && results.some((result) => !result.applied)) {
-              return yield* Effect.forEach(results, (result) =>
-                read(result.name).pipe(
-                  Effect.map((current) => ({ name: result.name, applied: false, current })),
-                ),
-              );
-            }
-
-            for (const { from, update } of pending) {
-              const target = pathFor(update.name);
-              yield* update.value === null
-                ? Effect.tryPromise({
-                    try: () => fs.rm(target, { force: true }),
-                    catch: failure("delete", target),
-                  })
-                : writeAtomic(target, `${update.value}\n`);
-              yield* appendReflog(update, from, at);
-            }
-
-            return results;
-          }),
-        head,
-        setHead: (target) => writeAtomic(headPath, `ref: ${target}\n`),
-        reflog: (name) =>
-          Effect.tryPromise({
-            try: async () => {
-              const target = path.join(root, "logs", name);
-              if (!existsSync(target)) return [] as ReflogEntry[];
-              const zero = "0".repeat(40);
-              const lines: string[] = (await fs.readFile(target, "utf8")).split("\n");
-              return lines
-                .filter((line: string) => line.length > 0)
-                .map((line: string): ReflogEntry => {
-                  const [values = "", message = ""] = line.split("\t");
-                  const [from = zero, to = zero, at = ""] = values.split(" ");
-                  return {
-                    from: from === zero ? null : (from as Oid),
-                    to: to === zero ? null : (to as Oid),
-                    at: new Date(at),
-                    message,
-                  };
+              // Check everything first: an atomic batch that fails must not have
+              // written anything, and rename(2) cannot be undone.
+              for (const update of updates) {
+                const actual = yield* read(update.name);
+                const matches = update.expected === undefined || update.expected === actual;
+                results.push({
+                  name: update.name,
+                  applied: matches,
+                  current: matches ? update.value : actual,
                 });
-            },
-            catch: failure("reflog", name),
-          }),
-      });
+                if (matches) pending.push({ from: actual, update });
+              }
+
+              if (options?.atomic === true && results.some((result) => !result.applied)) {
+                return yield* Effect.forEach(results, (result) =>
+                  read(result.name).pipe(
+                    Effect.map((current) => ({ name: result.name, applied: false, current })),
+                  ),
+                );
+              }
+
+              for (const { from, update } of pending) {
+                const target = pathFor(update.name);
+                yield* update.value === null
+                  ? Effect.tryPromise({
+                      try: () => fs.rm(target, { force: true }),
+                      catch: failure("delete", target),
+                    })
+                  : writeAtomic(target, `${update.value}\n`);
+                yield* appendReflog(update, from, at);
+              }
+
+              return results;
+            }),
+          head,
+          setHead: (target) => writeAtomic(headPath, `ref: ${target}\n`),
+          reflog: (name) =>
+            Effect.tryPromise({
+              try: async () => {
+                const target = path.join(root, "logs", name);
+                if (!existsSync(target)) return [] as ReflogEntry[];
+                const zero = "0".repeat(40);
+                const lines: string[] = (await fs.readFile(target, "utf8")).split("\n");
+                return lines
+                  .filter((line: string) => line.length > 0)
+                  .map((line: string): ReflogEntry => {
+                    const [values = "", message = ""] = line.split("\t");
+                    const [from = zero, to = zero, at = ""] = values.split(" ");
+                    return {
+                      from: from === zero ? null : (from as Oid),
+                      to: to === zero ? null : (to as Oid),
+                      at: new Date(at),
+                      message,
+                    };
+                  });
+              },
+              catch: failure("reflog", name),
+            }),
+        }),
+      );
     }),
   );
 

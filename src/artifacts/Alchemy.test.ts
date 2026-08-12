@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 
 import type { Artifacts } from "alchemy/Cloudflare";
 import type { Effect } from "effect";

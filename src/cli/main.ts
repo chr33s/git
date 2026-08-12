@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * CLI — phase 6.
+ * CLI.
  *
  * `effect/unstable/cli` owns parsing, flags, help and exit codes; each
  * handler calls the same `Repository` service, host, client and auth code
@@ -177,27 +177,27 @@ const serveCommand = Command.make(
       Flag.withDescription("Require hmac tokens signed with this secret; empty serves open"),
     ),
   },
-  ({ hostname, port, root, secret }) =>
-    Effect.gen(function* () {
-      const server = yield* Effect.promise(() =>
-        serve({
-          root,
-          port,
-          hostname,
-          ...(secret === ""
-            ? {}
-            : {
-                verify: (repo: string, credential: string | null) =>
-                  Effect.runPromise(hmacVerify(secret, repo, credential)),
-              }),
-        }),
-      );
+  ({ hostname, port, root, secret }) => {
+    // Built out here, not inside the generator: `serve` wants a promise-
+    // returning callback, and running an Effect inside an Effect would
+    // discard the surrounding services.
+    const verify =
+      secret === ""
+        ? {}
+        : {
+            verify: (repo: string, credential: string | null) =>
+              Effect.runPromise(hmacVerify(secret, repo, credential)),
+          };
+
+    return Effect.gen(function* () {
+      const server = yield* Effect.promise(() => serve({ root, port, hostname, ...verify }));
       yield* Console.log(
         `git smart-HTTP server on ${server.url}, repositories under ${root}/` +
           (secret === "" ? " (open access)" : " (token required)"),
       );
-      yield* Effect.never;
-    }),
+      return yield* Effect.never;
+    });
+  },
 );
 
 const git = Command.make("chr33s-git").pipe(

@@ -6,9 +6,10 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
-import { after, before, describe, it } from "node:test";
+import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
+import { FetchHttpClient } from "effect/unstable/http";
 
 import type { ReceiveResult } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -58,17 +59,22 @@ const results: ReadonlyArray<ReceiveResult> = [
 describe("Webhooks", () => {
   let hook: Awaited<ReturnType<typeof receiver>>;
 
-  before(async () => {
+  beforeAll(async () => {
     hook = await receiver();
   });
-  after(async () => {
+  afterAll(async () => {
     await hook.close();
   });
 
   const run = (options?: Parameters<typeof deliver>[1]) =>
     Effect.runPromise(
       deliver(results, { baseDelay: "1 millis", ...options }).pipe(
-        Effect.provide(subscribersOf([{ id: "1", url: hook.url, secret: "s3cret" }])),
+        Effect.provide(
+          Layer.mergeAll(
+            subscribersOf([{ id: "1", url: hook.url, secret: "s3cret" }]),
+            FetchHttpClient.layer,
+          ),
+        ),
       ) as Effect.Effect<void>,
     );
 
@@ -125,10 +131,13 @@ describe("Webhooks", () => {
       await Effect.runPromise(
         deliver(results, { baseDelay: "1 millis" }).pipe(
           Effect.provide(
-            subscribersOf([
-              { id: "1", url: hook.url, secret: "s3cret" },
-              { id: "2", url: second.url, secret: "other" },
-            ]),
+            Layer.mergeAll(
+              subscribersOf([
+                { id: "1", url: hook.url, secret: "s3cret" },
+                { id: "2", url: second.url, secret: "other" },
+              ]),
+              FetchHttpClient.layer,
+            ),
           ),
         ) as Effect.Effect<void>,
       );
@@ -142,7 +151,9 @@ describe("Webhooks", () => {
 
     hook.calls.length = 0;
     await Effect.runPromise(
-      deliver(results).pipe(Effect.provide(subscribersOf([]))) as Effect.Effect<void>,
+      deliver(results).pipe(
+        Effect.provide(Layer.mergeAll(subscribersOf([]), FetchHttpClient.layer)),
+      ) as Effect.Effect<void>,
     );
     assert.equal(hook.calls.length, 0);
   });
@@ -153,7 +164,12 @@ describe("Webhooks", () => {
     assert.deepEqual(eventOf(rejected), []);
     await Effect.runPromise(
       deliver(rejected).pipe(
-        Effect.provide(subscribersOf([{ id: "1", url: hook.url, secret: "s" }])),
+        Effect.provide(
+          Layer.mergeAll(
+            subscribersOf([{ id: "1", url: hook.url, secret: "s" }]),
+            FetchHttpClient.layer,
+          ),
+        ),
       ) as Effect.Effect<void>,
     );
     assert.equal(hook.calls.length, 0);

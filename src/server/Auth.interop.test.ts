@@ -13,7 +13,7 @@ import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { after, before, describe, it } from "node:test";
+import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 import { promisify } from "node:util";
 
 import { Effect, Layer } from "effect";
@@ -52,7 +52,7 @@ const author = {
 
 const SECRET = "interop-secret";
 
-describe("Auth interop with git", { skip: hasGit ? false : "git not installed" }, () => {
+describe.skipIf(!hasGit)("Auth interop with git", () => {
   let root: string;
   let server: Server;
   let readToken: string;
@@ -65,7 +65,7 @@ describe("Auth interop with git", { skip: hasGit ? false : "git not installed" }
     return `${url.href}${repo}`;
   };
 
-  before(async () => {
+  beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-auth-interop-"));
     server = await serve({
       root,
@@ -91,7 +91,7 @@ describe("Auth interop with git", { skip: hasGit ? false : "git not installed" }
     );
   });
 
-  after(async () => {
+  afterAll(async () => {
     await server.close();
     await fs.rm(root, { recursive: true, force: true });
   });

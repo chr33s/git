@@ -129,7 +129,7 @@ export const storeContract = (label: string, backend: Backend, runner: Runner): 
           });
 
           const chunks = yield* Stream.runCollect(yield* objects.readStream(oid));
-          const listed = yield* Stream.runCollect(objects.list());
+          const listed = yield* Stream.runCollect(objects.list);
 
           yield* objects.delete(oid);
           return {

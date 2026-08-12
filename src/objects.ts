@@ -1,9 +1,7 @@
 /**
- * The object store, as a resource value.
- *
- * Its own module because both the stack (`alchemy.run.ts`) and the Durable
- * Object that binds it (`host/Cloudflare.ts`) need it, and the DO must not
- * import the stack — that would be a cycle.
+ * The object store as a resource value. Its own module because both the
+ * stack and the Durable Object that binds it need it, and the DO importing
+ * the stack would be a cycle.
  */
 import * as Alchemy from "alchemy/Cloudflare";
 

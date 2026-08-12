@@ -1,17 +1,15 @@
 /**
- * Streaming zlib inflate — RFC 1950 wrapper, RFC 1951 blocks — in plain
- * JavaScript, no platform APIs at all.
+ * Streaming zlib inflate (RFC 1950 wrapper, RFC 1951 blocks) in plain
+ * JavaScript.
  *
- * Why it exists: pack object boundaries are implicit — each object's data is
- * its own zlib stream, and the next object starts wherever that stream ends.
- * `DecompressionStream` cannot report where that is, and `node:zlib` is not
- * in browsers. A pull-based inflate knows the boundary by construction: it
- * consumes exactly the stream's bytes from the source and pushes back
- * whatever it over-pulled from the final chunk.
+ * Pack object boundaries are implicit: each object's data is its own zlib
+ * stream and the next starts where it ends. `DecompressionStream` cannot
+ * report that position and `node:zlib` is absent in browsers, so this is
+ * pull-based — it consumes exactly the stream's bytes and pushes back any
+ * over-pull.
  *
- * Decoding is canonical-Huffman bit-by-bit (the `puff` construction) —
- * simple to verify, honest about being unoptimized; a table-based fast path
- * can come when a profile demands it.
+ * Decoding is canonical-Huffman bit-by-bit (the `puff` construction):
+ * verifiable, and unoptimized until a profile says otherwise.
  */
 
 export interface ByteSource {
@@ -297,7 +295,7 @@ const inflateBlocks = async (reader: Reader, output: Output): Promise<void> => {
 const adler32 = (bytes: Uint8Array): number => {
   let a = 1;
   let b = 0;
-  for (let index = 0; index < bytes.length; ) {
+  for (let index = 0; index < bytes.length;) {
     // Defer the modulo: 5552 is the largest run that cannot overflow 2^32.
     const limit = Math.min(index + 5552, bytes.length);
     for (; index < limit; index++) {

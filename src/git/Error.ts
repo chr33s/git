@@ -30,7 +30,7 @@ export class PackCorrupt extends Schema.TaggedError<PackCorrupt>()(
   "PackCorrupt",
   {
     reason: Schema.String,
-    offset: Schema.optional(Schema.Number),
+    offset: Schema.optional(Schema.Finite),
   },
   { httpApiStatus: 422 },
 ) {}

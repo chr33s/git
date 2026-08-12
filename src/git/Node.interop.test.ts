@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 
 import { Effect } from "effect";
 
@@ -37,7 +37,7 @@ const author = {
   offset: 0,
 };
 
-describe("Node backend interop with git", { skip: hasGit ? false : "git not installed" }, () => {
+describe.skipIf(!hasGit)("Node backend interop with git", () => {
   const build = async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-interop-"));
 

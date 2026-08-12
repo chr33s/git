@@ -16,7 +16,7 @@ import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { after, before, describe, it } from "node:test";
+import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 import { promisify } from "node:util";
 
 import { createTestHarness, type TestHarness } from "wrangler";
@@ -70,12 +70,12 @@ const commit = (repo: string, body: Record<string, unknown>) =>
     body: JSON.stringify({ author: alice, branch: "main", ...body }),
   });
 
-before(async () => {
+beforeAll(async () => {
   harness = createTestHarness({ workers: [{ configPath: "./wrangler.test.json" }] });
   base = (await harness.listen()).url;
 });
 
-after(async () => {
+afterAll(async () => {
   await harness.close();
 });
 
@@ -185,7 +185,7 @@ describe("GitRepo over HTTP", () => {
   });
 });
 
-describe("smart HTTP against workerd", { skip: hasGit ? false : "git not installed" }, () => {
+describe.skipIf(!hasGit)("smart HTTP against workerd", () => {
   it("clones from and pushes to the Durable Object with the real git binary", async () => {
     const repo = repoName();
     await commit(repo, { message: "seed" });

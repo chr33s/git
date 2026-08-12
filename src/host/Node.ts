@@ -1,21 +1,13 @@
 /**
- * Node host: the same server the Durable Object runs, behind `node:http`.
- *
- * This is the file that proves the seam is real — `Protocol.handle` and
- * `Api.layer` are served here unchanged, over a directory of repositories in
- * git's own on-disk layout. Self-hosting is a supported shape, not a fork:
+ * Node host: `Protocol.handle` and `Api.layer` unchanged, behind `node:http`,
+ * over a directory of repositories in git's on-disk layout.
  *
  *   GIT_ROOT=repos PORT=8080 node src/host/Node.ts
- *   git clone http://127.0.0.1:8080/my-repo
  *
- * What the Durable Object gets from the platform has to be built here:
- *
- *   - serialization: a per-repository mutex around dispatch stands in for the
- *     DO input gate, so `RefStore.apply`'s check-then-write cannot interleave.
- *     (Not `PartitionedSemaphore` — its permits are a capacity shared across
- *     keys, fair queuing rather than per-key exclusion.)
- *   - isolation: one layer per repository name, cached for the process's
- *     lifetime the way a DO instance lives between requests.
+ * What the Durable Object gets free is built here: a per-repository mutex
+ * stands in for the input gate (not `PartitionedSemaphore` — its permits are
+ * a capacity shared across keys, not per-key exclusion), and one cached layer
+ * per repository name stands in for instance isolation.
  */
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -23,7 +15,7 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-import { Effect, Layer } from "effect";
+import { Config, Effect, Layer } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
@@ -163,12 +155,22 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   };
 };
 
+/**
+ * Startup configuration, read through `Config` rather than `process.env`:
+ * the provider is swappable (a test can supply `ConfigProvider.fromUnknown`),
+ * a malformed `PORT` fails with a config error naming the variable instead of
+ * silently becoming `NaN`, and the defaults live in one place.
+ */
+export const configuration = Effect.gen(function* () {
+  return {
+    root: yield* Config.string("GIT_ROOT").pipe(Config.withDefault("repos")),
+    port: yield* Config.number("PORT").pipe(Config.withDefault(8080)),
+    hostname: yield* Config.string("HOSTNAME").pipe(Config.withDefault("127.0.0.1")),
+  };
+});
+
 if (import.meta.main) {
-  const root = process.env["GIT_ROOT"] ?? "repos";
-  const { url } = await serve({
-    root,
-    port: Number(process.env["PORT"] ?? 8080),
-    hostname: process.env["HOSTNAME"] ?? "127.0.0.1",
-  });
-  console.log(`git smart-HTTP server on ${url}, repositories under ${root}/`);
+  const options = await Effect.runPromise(configuration.pipe(Effect.orDie));
+  const { url } = await serve(options);
+  console.log(`git smart-HTTP server on ${url}, repositories under ${options.root}/`);
 }

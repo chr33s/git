@@ -15,7 +15,7 @@ import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { after, before, describe, it } from "node:test";
+import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 import { promisify } from "node:util";
 
 import { Effect, Layer } from "effect";
@@ -65,7 +65,7 @@ const author = {
   offset: 0,
 };
 
-describe("Protocol interop with git", { skip: hasGit ? false : "git not installed" }, () => {
+describe.skipIf(!hasGit)("Protocol interop with git", () => {
   let root: string;
   let base: string;
   let server: Server;
@@ -79,13 +79,13 @@ describe("Protocol interop with git", { skip: hasGit ? false : "git not installe
   const inRepo = <A, E>(repo: string, effect: Effect.Effect<A, E, Repository>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layerFor(repo))) as Effect.Effect<A, E>);
 
-  before(async () => {
+  beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-protocol-interop-"));
     server = await serve({ root });
     base = server.url;
   });
 
-  after(async () => {
+  afterAll(async () => {
     await server.close();
     await fs.rm(root, { recursive: true, force: true });
   });

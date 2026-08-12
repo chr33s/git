@@ -119,17 +119,12 @@ npx wrangler deploy       # deploy (the tested path)
 npx alchemy deploy        # deploy the same stack from src/alchemy.run.ts
 ```
 
-Two dependency patches ship in [`patches/`](./patches), applied on install:
-one defers `RepoClient.raw` so a third-party Artifacts provider can exist, one
-aliases `Schema.TaggedErrorClass` in `effect` for `alchemy`'s transitive
-dependencies. Both are upstream-shaped and deletable when the versions catch
-up.
-
 ## Testing
 
 ```sh
-npm test                  # unit: codecs, contract suite on Memory/Node, git-binary interop
-npm run test:integration  # workerd: drives the Worker via wrangler's test harness
+npm test                  # vitest, `unit` project — runs in parallel
+npm run test:integration  # vitest, `integration` project — boots workerd via
+                          # wrangler's createTestHarness
 ```
 
 Four kinds of evidence, deliberately:
@@ -152,8 +147,36 @@ Four kinds of evidence, deliberately:
   `node:http` in the unit suite and against the Durable Object in workerd in
   the integration suite.
 
+## Notes
+
+**Both dependencies are betas.** `effect@4.0.0-beta.107` and
+`alchemy@2.0.0-beta.70` break between releases, so versions are pinned exactly
+(`save-exact=true`) and upgrades are expected to cost churn.
+
+**Two patches ship in [`patches/`](./patches)**, applied by `postinstall`.
+One defers alchemy's `RepoClient.raw` so a third-party Artifacts provider can
+exist at all; one aliases `Schema.TaggedErrorClass` in `effect` for alchemy's
+transitive dependencies, which are built against a later spelling. Both are
+upstream-shaped and deletable when the versions catch up.
+
+**Cloudflare Artifacts provider.** `src/artifacts/` implements alchemy's
+Artifacts binding over this server — registry, scoped tokens, fork via git
+alternates, and import over smart HTTP — in memory, on disk, and on Durable
+Object SQLite, held to one contract suite. Artifacts ships only a native
+binding, so this is the local and self-hosted one.
+
+**Open question: bundle size.** Effect core plus `unstable/http` and
+`unstable/httpapi` is not small, and nothing has yet measured it against a
+Worker's 3 MiB compressed limit.
+
+**Deliberate deviations** from the Effect house style, and the designs
+considered and rejected, are recorded in
+[`docs/rewrite.md`](./docs/rewrite.md) under "Idiomatic Effect" and "Paths not
+taken" — including why the storage ports are traced by one decorator rather
+than per method, and why `it.effect` is not the default test variant.
+
 ## Documentation
 
-- [`docs/rewrite.md`](./docs/rewrite.md) — the rewrite: motivation, mechanics, phases
-- [`docs/artifacts-provider.md`](./docs/artifacts-provider.md) — evaluation as a Cloudflare Artifacts provider
+- [`docs/rewrite.md`](./docs/rewrite.md) — the rewrite: motivation, mechanics, decisions
+- [`docs/artifacts-provider.md`](./docs/artifacts-provider.md) — the Artifacts provider evaluation in full
 - [`license.md`](./license.md) · [`security.md`](./security.md)

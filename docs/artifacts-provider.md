@@ -162,13 +162,13 @@ contract almost line for line: `RepoHost.stores(name)` is the namespace, one app
 instance per repo is `ArtifactsRepo`, and the git protocol is already there. The
 work is not in the git internals — it is the three things around them.
 
-| work                                                                    | rough size                |
+| work | rough size |
 | ----------------------------------------------------------------------- | ------------------------- | --------------------------------------------------------------------------------------- |
-| upstream: make `RepoClient.raw` an Effect                               | a PR, plus review latency |
-| registry + metadata (one index DO or D1)                                | ~1 week                   |
-| tokens: issuance, storage, revocation, Basic + Bearer middleware, tests | ~2 weeks                  |
-| `fork`                                                                  | **have (local)**          | alternates — child reads fall through to the parent, `defaultBranchOnly` copies one ref |
-| the binding layer itself + conformance tests against the interface      | ~1 week                   |
+| upstream: make `RepoClient.raw` an Effect | a PR, plus review latency |
+| registry + metadata (one index DO or D1) | ~1 week |
+| tokens: issuance, storage, revocation, Basic + Bearer middleware, tests | ~2 weeks |
+| `fork` | **have (local)** | alternates — child reads fall through to the parent, `defaultBranchOnly` copies one ref |
+| the binding layer itself + conformance tests against the interface | ~1 week |
 
 Call it 5–6 weeks to a credible local/self-hosted Artifacts provider, of which
 the git-specific part is about a day — everything else is registry, auth and

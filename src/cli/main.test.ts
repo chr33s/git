@@ -7,7 +7,7 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 import { promisify } from "node:util";
 
 import { Effect, Layer } from "effect";

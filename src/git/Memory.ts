@@ -18,6 +18,8 @@ import {
   type RawObject,
   type ReflogEntry,
   RefStore,
+  tracedObjectStore,
+  tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
 } from "./Store.ts";
@@ -27,39 +29,43 @@ export const objectStore = Layer.effect(
   Effect.sync(() => {
     const objects = new Map<Oid, RawObject>();
 
-    return ObjectStore.of({
-      read: (oid) => {
-        const object = objects.get(oid);
-        return object === undefined
-          ? Effect.fail(new ObjectNotFound({ oid }))
-          : Effect.succeed({ type: object.type, data: new Uint8Array(object.data) });
-      },
-      readStream: (oid) => {
-        const object = objects.get(oid);
-        return object === undefined
-          ? Effect.fail(new ObjectNotFound({ oid }))
-          : Effect.succeed(
-              Stream.fromIterable([new Uint8Array(object.data)]) as Stream.Stream<
-                Uint8Array,
-                StorageFailure
-              >,
-            );
-      },
-      write: (object) =>
-        hashObject(object).pipe(
-          Effect.tap((oid) =>
-            Effect.sync(() => {
-              objects.set(oid, { type: object.type, data: new Uint8Array(object.data) });
-            }),
+    return ObjectStore.of(
+      tracedObjectStore("Memory", {
+        read: (oid) => {
+          const object = objects.get(oid);
+          return object === undefined
+            ? Effect.fail(new ObjectNotFound({ oid }))
+            : Effect.succeed({ type: object.type, data: new Uint8Array(object.data) });
+        },
+        readStream: (oid) => {
+          const object = objects.get(oid);
+          return object === undefined
+            ? Effect.fail(new ObjectNotFound({ oid }))
+            : Effect.succeed(
+                Stream.fromIterable([new Uint8Array(object.data)]) as Stream.Stream<
+                  Uint8Array,
+                  StorageFailure
+                >,
+              );
+        },
+        write: (object) =>
+          hashObject(object).pipe(
+            Effect.tap((oid) =>
+              Effect.sync(() => {
+                objects.set(oid, { type: object.type, data: new Uint8Array(object.data) });
+              }),
+            ),
           ),
+        has: (oid) => Effect.sync(() => objects.has(oid)),
+        delete: (oid) =>
+          Effect.sync(() => {
+            objects.delete(oid);
+          }),
+        list: Stream.suspend(
+          () => Stream.fromIterable([...objects.keys()]) as Stream.Stream<Oid, StorageFailure>,
         ),
-      has: (oid) => Effect.sync(() => objects.has(oid)),
-      delete: (oid) =>
-        Effect.sync(() => {
-          objects.delete(oid);
-        }),
-      list: () => Stream.fromIterable([...objects.keys()]) as Stream.Stream<Oid, StorageFailure>,
-    });
+      }),
+    );
   }),
 );
 
@@ -96,64 +102,69 @@ export const refStore = Layer.effect(
       reflogs.set(update.name, entries);
     };
 
-    return RefStore.of({
-      read: (name) => Effect.sync(() => read(name)),
-      resolve: (name) => Effect.sync(() => resolve(name)),
-      list: (prefix) =>
-        Effect.sync(() =>
-          [...refs.entries()]
-            .filter(([name]) => prefix === undefined || name.startsWith(prefix))
-            .map(([name, oid]) => [name, oid] as const),
-        ),
-      apply: (updates, options) =>
-        Effect.gen(function* () {
-          for (const update of updates) {
-            if (update.name.length === 0 || update.name.includes(" ")) {
-              return yield* new Invalid({ field: "ref", reason: `bad ref name '${update.name}'` });
+    return RefStore.of(
+      tracedRefStore("Memory", {
+        read: (name) => Effect.sync(() => read(name)),
+        resolve: (name) => Effect.sync(() => resolve(name)),
+        list: (prefix) =>
+          Effect.sync(() =>
+            [...refs.entries()]
+              .filter(([name]) => prefix === undefined || name.startsWith(prefix))
+              .map(([name, oid]) => [name, oid] as const),
+          ),
+        apply: (updates, options) =>
+          Effect.gen(function* () {
+            for (const update of updates) {
+              if (update.name.length === 0 || update.name.includes(" ")) {
+                return yield* new Invalid({
+                  field: "ref",
+                  reason: `bad ref name '${update.name}'`,
+                });
+              }
             }
-          }
 
-          const at = new Date();
-          const results: RefUpdateResult[] = [];
-          const applied: Array<{ update: RefUpdate; from: Oid | null }> = [];
+            const at = new Date();
+            const results: RefUpdateResult[] = [];
+            const applied: Array<{ update: RefUpdate; from: Oid | null }> = [];
 
-          for (const update of updates) {
-            const actual = read(update.name);
-            const matches = update.expected === undefined || update.expected === actual;
-            results.push({
-              name: update.name,
-              applied: matches,
-              current: matches ? update.value : actual,
-            });
-            if (matches) applied.push({ update, from: actual });
-          }
+            for (const update of updates) {
+              const actual = read(update.name);
+              const matches = update.expected === undefined || update.expected === actual;
+              results.push({
+                name: update.name,
+                applied: matches,
+                current: matches ? update.value : actual,
+              });
+              if (matches) applied.push({ update, from: actual });
+            }
 
-          const rejected = results.some((result) => !result.applied);
-          if (options?.atomic === true && rejected) {
-            // Nothing was written yet, so "rolling back" is reporting the
-            // batch as unapplied — the whole point of doing the checks first.
-            return results.map((result) => ({
-              name: result.name,
-              applied: false,
-              current: read(result.name),
-            }));
-          }
+            const rejected = results.some((result) => !result.applied);
+            if (options?.atomic === true && rejected) {
+              // Nothing was written yet, so "rolling back" is reporting the
+              // batch as unapplied — the whole point of doing the checks first.
+              return results.map((result) => ({
+                name: result.name,
+                applied: false,
+                current: read(result.name),
+              }));
+            }
 
-          for (const { from, update } of applied) {
-            if (update.value === null) refs.delete(update.name);
-            else refs.set(update.name, update.value);
-            log(update, from, at);
-          }
+            for (const { from, update } of applied) {
+              if (update.value === null) refs.delete(update.name);
+              else refs.set(update.name, update.value);
+              log(update, from, at);
+            }
 
-          return results;
-        }),
-      head: Effect.sync(() => head),
-      setHead: (target) =>
-        Effect.sync(() => {
-          head = target;
-        }),
-      reflog: (name) => Effect.sync(() => reflogs.get(name) ?? []),
-    });
+            return results;
+          }),
+        head: Effect.sync(() => head),
+        setHead: (target) =>
+          Effect.sync(() => {
+            head = target;
+          }),
+        reflog: (name) => Effect.sync(() => reflogs.get(name) ?? []),
+      }),
+    );
   }),
 );
 

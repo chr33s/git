@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { after, before, describe, it } from "node:test";
+import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
 import { Effect, Layer, Stream } from "effect";
 
@@ -34,7 +34,7 @@ describe("Client", () => {
   let server: Server;
   let head: Oid;
 
-  before(async () => {
+  beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "client-"));
     server = await serve({ root });
     head = await Effect.runPromise(
@@ -55,7 +55,7 @@ describe("Client", () => {
     );
   });
 
-  after(async () => {
+  afterAll(async () => {
     await server.close();
     await fs.rm(root, { recursive: true, force: true });
   });

@@ -182,21 +182,21 @@ three times.
 
 ### Module map
 
-| today                                | lines | becomes                                     |
+| today | lines | becomes |
 | ------------------------------------ | ----: | ------------------------------------------- | ----- | --------- | ----- | ----------------------------------- |
-| `git.error.ts`                       |    50 | `git/Error.ts` — `Schema.TaggedError` union |
-| `git.storage.ts` + 3 implementations | 1,192 | `git/Store.ts` + one layer per environment  |
-| `git.repository.ts`                  |   874 | `git/Repository.ts` service                 |
-| `git.pack.ts`, `git.protocol.ts`     | 1,153 | `git/Pack.ts` — `Stream`/`Channel`          |
+| `git.error.ts` | 50 | `git/Error.ts` — `Schema.TaggedError` union |
+| `git.storage.ts` + 3 implementations | 1,192 | `git/Store.ts` + one layer per environment |
+| `git.repository.ts` | 874 | `git/Repository.ts` service |
+| `git.pack.ts`, `git.protocol.ts` | 1,153 | `git/Pack.ts` — `Stream`/`Channel` |
 | `git.object                          | delta | index                                       | merge | utils.ts` | 2,351 | ported as-is behind `git/Format.ts` |
-| `git.hooks.ts`                       |   163 | `Hooks` service                             |
-| `server.ts` (DO + routing)           | 1,130 | `server/App.ts` + `host/*` (~200)           |
-| `server.api.ts`                      | 2,515 | `server/Api.ts` — one `HttpApi` decl        |
-| `server.webhooks.ts`                 |   257 | `server/Webhooks.ts` — a `Schedule`         |
-| `server.lfs.ts`, `server.storage.ts` |   981 | folded into the R2 layer                    |
-| `client.ts`                          | 1,007 | `Repository` + derived client (~250)        |
-| `cli.ts`                             | 1,991 | `cli/main.ts` — `Command` tree (~350)       |
-| `worker.ts` + `wrangler.json`        |    32 | `alchemy.run.ts` + `host/Cloudflare.ts`     |
+| `git.hooks.ts` | 163 | `Hooks` service |
+| `server.ts` (DO + routing) | 1,130 | `server/App.ts` + `host/*` (~200) |
+| `server.api.ts` | 2,515 | `server/Api.ts` — one `HttpApi` decl |
+| `server.webhooks.ts` | 257 | `server/Webhooks.ts` — a `Schedule` |
+| `server.lfs.ts`, `server.storage.ts` | 981 | folded into the R2 layer |
+| `client.ts` | 1,007 | `Repository` + derived client (~250) |
+| `cli.ts` | 1,991 | `cli/main.ts` — `Command` tree (~350) |
+| `worker.ts` + `wrangler.json` | 32 | `alchemy.run.ts` + `host/Cloudflare.ts` |
 
 13,819 non-test lines today. The plausible landing zone is 7–8k: the savings are
 concentrated in `server.api.ts` (schema replaces hand validation and hand
@@ -326,7 +326,7 @@ Above that line — `server/*`, `git/*` — nothing names a provider; `grep -l
 alchemy` over the `*.ts` files hits only `host/`, `adapters/Cloudflare.ts` and the stack file.
 
 The unit that moves between hosts is **one app instance bound to one
-repository** ([`App.forRepo`](../src/server/App.ts)). That is not an
+repository** (`App.forRepo`). That is not an
 arbitrary choice: `Repository` is _constructed_ from `ObjectStore` and
 `RefStore`, so storage resolves when the layer is built, not when a request
 arrives — which is exactly the Durable Object model. Cloudflare gets an instance
@@ -384,12 +384,33 @@ belong behind their own script.
 
 ### Tests
 
-`src/testing/Repository.ts`. `@effect/vitest`,
-environment as a layer swap, `HttpApiTest` driving the real handler in-process.
-`--test-concurrency=1` goes away (the global setup file already has). The 9,125
-lines of legacy tests were removed with the old implementation; their
-assertions — about git behaviour, not about plumbing — remain the reference in
-git history for what each rewrite phase must cover.
+**Landed.** The suite runs on `@effect/vitest` (`vitest.config.ts`, two
+projects: `unit` and `integration`), with `HttpApiTest` driving the real
+handler in-process and the environment swapped as a layer.
+`--test-concurrency=1` is gone — it existed because the old suites shared
+global state, and layers removed the reason, so the unit project runs in
+parallel: ~21s serial became ~2.5s.
+
+`it.live` is the variant to reach for, and the distinction is a trap worth
+knowing: **`it.effect` installs a `TestClock` whose time never advances on
+its own**, so any code under test that sleeps hangs until vitest's timeout
+fires. `Api.test.ts` found this the hard way — `Repository.commit` retries a
+`RefConflict` behind a 10ms schedule, and the suite's conflict assertion sat
+there for the full 30 seconds. `it.live` keeps the real clock; reach for
+`it.effect` only when the test itself drives time forward. Either way the win
+is the same: the test body _is_ an Effect, so there is no `runPromise` at the
+edge and a failure arrives as a `Cause` with its fiber trace. Most existing suites still call `Effect.runPromise` at
+the edge, deliberately: their backends are stateful, so each test builds its
+own layer rather than sharing one for the file, which is what `it.layer`
+gives you. (`it.layer`'s nested `it` offers `effect` and `scoped` but not
+`live`, which is the other reason `Api.test.ts` provides its layer per test.) The contract suites (`Store.contract.ts`, `Registry.contract.ts`)
+stay framework-free on purpose — they are parameterised over a `Runner`, and
+one of their runners is the collector that executes inside workerd, where no
+test framework exists.
+
+The 9,125 lines of legacy tests were removed with the old implementation;
+their assertions — about git behaviour, not about plumbing — remain the
+reference in git history for what each rewrite phase must cover.
 
 ---
 
@@ -419,6 +440,65 @@ integration suite drives. Two local patches hold it up (`patches/`): one
 defers `RepoClient.raw` for the Artifacts provider, one aliases
 `Schema.TaggedErrorClass` in `effect`. Both are upstream-shaped; delete them
 when the versions catch up.
+
+---
+
+## Idiomatic Effect
+
+Audited against `.claude/skills/effect` (Effect v4 production
+defaults). What the audit changed:
+
+- **Typed errors, not hand-rolled tags.** `Webhooks`'s delivery failure was a
+  class with a literal `_tag` field; it is a `Schema.TaggedError` like every
+  other failure in `git/Error.ts`, with an `httpApiStatus` annotation.
+- **`Config`, not `process.env`.** The node host reads `GIT_ROOT`, `PORT` and
+  `HOSTNAME` through `Config` recipes, so the provider is swappable in tests
+  and a malformed `PORT` fails with a config error naming the variable rather
+  than silently becoming `NaN`. Verified both ways against the real binary.
+- **Effect `HttpClient` for outgoing calls.** Webhook delivery went from raw
+  `fetch` plus a hand-written retry predicate to `HttpClient.filterStatusOk` +
+  `HttpClient.retryTransient`, whose built-in classification (transport
+  errors, timeouts, 408, 429, 5xx — and _not_ other 4xx) is exactly the
+  policy the hand-rolled version was reaching for. The transport is now a
+  layer a host or test swaps.
+- **Ten language-service suggestions cleared.** `Effect.mapError` for
+  catch-then-fail, `yield*` on yieldable errors instead of `Effect.fail`,
+  `catchTags` for consecutive `catchTag`s, `Schema.Finite` where a number is
+  finite by definition, and `ObjectStore.list` as a `Stream` value rather
+  than a thunk — a `Stream` is already lazy. One suggestion is suppressed by
+  comment rather than followed: the nested `Effect<Effect<…>>` in
+  `host/Cloudflare.ts` is alchemy's Durable Object contract, where the outer
+  generator binds per instance and the inner runs per request.
+- **`Effect.fn` spans on the expensive operations.** `Repository.unpack`,
+  `Repository.packOf` and `Auth.guard` are traced; a push or fetch now shows
+  its cost where it is spent.
+
+Three deviations are deliberate:
+
+- **`Schema.TaggedError`, not `TaggedErrorClass`.** The skill names the later
+  spelling; the pinned `effect@4.0.0-beta.107` exports `TaggedError`. (The
+  alias in `patches/effect+...` exists for a _dependency_ built against the
+  newer name, not as a project convention.)
+- **Raw `fetch` in `client/Fetch.ts`.** The skill's stated exception: this is
+  the browser transport, bundled into Chromium by `Browser.test.ts`, and it
+  keeps Effect boundary discipline inside an adapter.
+- **The module-namespace style** (`export * as UserRepo from …`) is not
+  adopted. The skill defers to an existing codebase style, and this one is
+  consistent already.
+
+**The storage ports are traced too**, and the careful version turned out to
+be one decorator rather than fifty-two hand-edits: `tracedObjectStore` and
+`tracedRefStore` in `git/Store.ts` wrap an implementation, and each backend
+returns `ObjectStore.of(tracedObjectStore("Cloudflare", { … }))`. The span
+names live in one place, so a trace reads with the same vocabulary whichever
+storage is loaded — `Repository.commit → Cloudflare.RefStore.apply` — and a
+new backend cannot forget to name itself. `Effect.fn` carries the call-site
+frame as well as the span; `list` is a `Stream` and `head` a plain `Effect`,
+so those take `Stream.withSpan` and `Effect.withSpan`.
+
+The contract suite already runs every backend through the wrapper, and a
+probe confirmed all thirteen operations report their own span rather than
+inheriting the caller's.
 
 ---
 
@@ -474,9 +554,6 @@ system, since nothing in `src/` reads an `Authorization` header today.
   `alchemy@2.0.0-beta.70` both break between releases. Pinning exactly (the repo
   already sets `save-exact=true`) and budgeting for churn per upgrade is the
   honest plan; the alternative is waiting for stable and doing phase 3 by hand.
-- **Bundle size in a Worker.** Effect core plus `unstable/http` plus
-  `unstable/httpapi` is not small. Needs a measurement against the 3 MiB
-  (compressed) limit before phase 4, not after.
 - **The edges were reaching past the domain — caught by the types.** The first
   version had `Api.ts` and `Protocol.ts` doing `yield* RefStore` directly.
   That compiles, but it makes storage a _per-request_ requirement of every
@@ -485,8 +562,7 @@ system, since nothing in `src/` reads an `Authorization` header today.
   reads through `Repository` (`refs`, `resolve`, `head`, `branch`, `pack`, and
   `receive` taking the pack stream) fixed the requirement and tightened the
   layering: the HTTP edges now know about one service, not three. Worth
-  remembering during phase 4, when 45 endpoints get ported and the shortcut is
-  tempting each time.
+  remembering as the JSON surface grows and the shortcut is tempting each time.
 
 - **`RuntimeContext` colouring — resolved, with a cost.** Alchemy's Cloudflare
   bindings return effects requiring `RuntimeContext` (it holds the invocation's
@@ -494,20 +570,20 @@ system, since nothing in `src/` reads an `Authorization` header today.
   through the port signatures; the typechecker then dragged it into the CLI and
   the test suite, neither of which runs on Workers. The fix is that the
   Cloudflare layer captures the context with `Effect.context` and provides it
-  inward ([`adapters/Cloudflare.ts`](../src/adapters/Cloudflare.ts)), so the
+  inward (`git/Cloudflare.ts`), so the
   ports stay `R = never`. The cost is real and should be measured: that layer
   must be built inside the invocation rather than memoized per DO instance,
   because a cached context would pin a stale `ExecutionContext`.
-- **Delta resolution against a stream.** `OFS_DELTA` bases are addressed by
-  offset into the pack. Streaming means keeping a bounded window plus a
-  second pass for misses — this is the one place the sketch is hand-waving
-  (`decodeObjects` is a `declare`), and it deserves a spike before committing to
-  phase 3.
+- **Delta resolution against a stream — resolved.** `OFS_DELTA` bases are
+  addressed by offset into the pack, and the fear was needing a bounded window
+  plus a second pass. Neither was necessary: objects are written to the store
+  as they resolve, so a delta base is re-read by oid from storage and only the
+  object being decoded is resident.
 - **Effect v4 has no `Effect.Service` class helper.** Services are
   `Context.Service<Self, Shape>()("key")` plus `Layer.effect`. Slightly more
   ceremony than v3 examples on the web suggest; the sketch uses the real v4 form
   throughout.
-- **Rough size.** Phases 0–2 are a couple of weeks of focused work; 3 is the
-  spike-plus-a-week; 4–6 are mostly mechanical but touch every test. Call it
-  6–8 weeks end to end at part-time attention, with the repo shippable at every
-  phase boundary.
+- **Bundle size in a Worker — still unmeasured.** Effect core plus
+  `unstable/http` and `unstable/httpapi` is not small, and nothing has checked
+  it against the 3 MiB (compressed) limit. The one open question that could
+  still force a design change.

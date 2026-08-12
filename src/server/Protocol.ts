@@ -1,5 +1,5 @@
 /**
- * Git smart-HTTP endpoints — phase 4's protocol half.
+ * Git smart-HTTP endpoints.
  *
  * Web `Request` in, web `Response` out, `Repository` the only requirement —
  * no store, no platform type reaches a handler, so the same functions serve
@@ -293,8 +293,10 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     }
 
     const results = yield* repository.receive(updates, { atomic }).pipe(
-      Effect.catchTag("HookRejected", (error) => Effect.succeed(allFailed(error.message))),
-      Effect.catchTag("Invalid", (error) => Effect.succeed(allFailed(error.reason))),
+      Effect.catchTags({
+        HookRejected: (error) => Effect.succeed(allFailed(error.message)),
+        Invalid: (error) => Effect.succeed(allFailed(error.reason)),
+      }),
     );
 
     return respond(results, "ok");

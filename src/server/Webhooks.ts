@@ -1,11 +1,11 @@
 /**
  * Webhook delivery.
  *
- * The retry policy is a `Schedule` value rather than a hand-rolled loop, and
- * the combinator order is the part that is easy to get wrong: the timeout
- * bounds each *attempt*, the retry wraps the timeout, and the catch is
- * outermost — put the catch inside and the retry never sees a failure to
- * retry.
+ * Outgoing calls go through Effect's `HttpClient`, so the transport is a
+ * layer a test or a host can swap, and the retry is
+ * `HttpClient.retryTransient` — which already means exactly what a webhook
+ * wants: transport failures, timeouts, 408, 429 and 5xx are retried, and
+ * every other 4xx is the receiver saying "never send this again".
  *
  * Delivery is handed to `background`, so a push returns as soon as its refs
  * are durable and a slow subscriber cannot stall it. What "background" means
@@ -15,7 +15,8 @@
  * `X-Signature-256: sha256=<hex>` form every git host uses, so receivers can
  * verify with the library they already have.
  */
-import { Context, Effect, Layer, Schedule } from "effect";
+import { Context, Effect, Layer, Schedule, Schema } from "effect";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import { Hooks, type ReceiveResult } from "../git/Repository.ts";
 
@@ -81,98 +82,89 @@ export interface DeliveryOptions {
   readonly background?: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<void>;
 }
 
-/**
- * A 4xx is the receiver saying "never send this again" — retrying is wrong.
- * Anything else (5xx, a timeout, a dropped connection) is worth another try.
- */
-const worthRetrying = (error: { readonly status?: number }): boolean =>
-  error.status === undefined || error.status < 400 || error.status >= 500;
+/** Typed like every other failure in the codebase, not a hand-rolled `_tag`. */
+export class DeliveryFailed extends Schema.TaggedError<DeliveryFailed>()(
+  "DeliveryFailed",
+  { url: Schema.String, reason: Schema.String },
+  { httpApiStatus: 502 },
+) {}
 
-class DeliveryFailure {
-  readonly _tag = "DeliveryFailure";
-  readonly status: number | undefined;
-  readonly cause: unknown;
-  constructor(status: number | undefined, cause: unknown) {
-    this.status = status;
-    this.cause = cause;
-  }
-}
-
-/** One POST, signed, bounded — the unit the retry schedule repeats. */
-export const post = (
+/** One POST, signed and bounded — the unit the retry schedule repeats. */
+export const post = Effect.fn("Webhooks.post")(function* (
   subscriber: Subscriber,
   body: string,
   timeout: `${number} millis`,
-): Effect.Effect<void, DeliveryFailure> =>
-  Effect.gen(function* () {
-    const signature = yield* sign(body, subscriber.secret);
-    const response = yield* Effect.tryPromise({
-      try: () =>
-        fetch(subscriber.url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-signature-256": signature,
-            "x-event": "push",
-          },
-          body,
-        }),
-      catch: (cause) => new DeliveryFailure(undefined, cause),
-    });
-    if (!response.ok) return yield* Effect.fail(new DeliveryFailure(response.status, undefined));
-  }).pipe(Effect.timeout(timeout), Effect.mapError(toFailure));
+) {
+  const client = yield* HttpClient.HttpClient;
+  const signature = yield* sign(body, subscriber.secret);
 
-const toFailure = (error: unknown): DeliveryFailure =>
-  error instanceof DeliveryFailure ? error : new DeliveryFailure(undefined, error);
+  yield* client
+    .execute(
+      HttpClientRequest.post(subscriber.url).pipe(
+        HttpClientRequest.setHeaders({
+          "content-type": "application/json",
+          "x-signature-256": signature,
+          "x-event": "push",
+        }),
+        HttpClientRequest.bodyText(body, "application/json"),
+      ),
+    )
+    .pipe(Effect.timeout(timeout));
+});
 
 /**
  * Deliver one push to every subscriber, concurrently, retrying each
  * independently. Failures are logged, never surfaced: a webhook cannot fail
  * a push that already happened.
  */
-export const deliver = (
+export const deliver = Effect.fn("Webhooks.deliver")(function* (
   results: ReadonlyArray<ReceiveResult>,
   options?: DeliveryOptions,
-): Effect.Effect<void, never, Subscribers> =>
-  Effect.gen(function* () {
-    const events = eventOf(results);
-    if (events.length === 0) return;
+) {
+  const events = eventOf(results);
+  if (events.length === 0) return;
 
-    const subscribers = yield* Subscribers;
-    const targets = yield* subscribers.forEvent("push");
-    if (targets.length === 0) return;
+  const subscribers = yield* Subscribers;
+  const targets = yield* subscribers.forEvent("push");
+  if (targets.length === 0) return;
 
-    const body = JSON.stringify({ event: "push", refs: events });
-    const schedule = Schedule.exponential(options?.baseDelay ?? "200 millis", 2).pipe(
-      Schedule.jittered,
-    );
+  const body = JSON.stringify({ event: "push", refs: events });
 
-    yield* Effect.forEach(
-      targets,
-      (target) =>
-        post(target, body, options?.timeout ?? "10000 millis").pipe(
-          Effect.retry({
-            schedule,
-            times: options?.retries ?? 3,
-            while: worthRetrying,
-          }),
-          Effect.catchCause((cause) =>
-            Effect.logWarning(`webhook delivery to ${target.url} failed`, cause),
-          ),
+  // Non-2xx becomes a failure, and only the transient subset is retried —
+  // both are properties of the client, so `post` stays a plain request.
+  const client = (yield* HttpClient.HttpClient).pipe(
+    HttpClient.filterStatusOk,
+    HttpClient.retryTransient({
+      schedule: Schedule.exponential(options?.baseDelay ?? "200 millis", 2).pipe(Schedule.jittered),
+      times: options?.retries ?? 3,
+    }),
+  );
+
+  yield* Effect.forEach(
+    targets,
+    (target) =>
+      post(target, body, options?.timeout ?? "10000 millis").pipe(
+        Effect.provideService(HttpClient.HttpClient, client),
+        Effect.catchCause((cause) =>
+          Effect.logWarning(`webhook delivery to ${target.url} failed`, cause),
         ),
-      { concurrency: options?.concurrency ?? 8, discard: true },
-    );
-  });
+      ),
+    { concurrency: options?.concurrency ?? 8, discard: true },
+  );
+});
 
 /**
  * Hooks that deliver on `post-receive` — the only hook that runs after the
  * refs are durable, which is exactly when a receiver should hear about them.
  */
-export const hooks = (options?: DeliveryOptions): Layer.Layer<Hooks, never, Subscribers> =>
+export const hooks = (
+  options?: DeliveryOptions,
+): Layer.Layer<Hooks, never, Subscribers | HttpClient.HttpClient> =>
   Layer.effect(
     Hooks,
     Effect.gen(function* () {
       const subscribers = yield* Subscribers;
+      const client = yield* HttpClient.HttpClient;
       const background =
         options?.background ??
         (<A, E>(effect: Effect.Effect<A, E>) => Effect.forkDetach(effect).pipe(Effect.asVoid));
@@ -182,8 +174,15 @@ export const hooks = (options?: DeliveryOptions): Layer.Layer<Hooks, never, Subs
         update: () => Effect.void,
         postReceive: (results) =>
           background(
-            deliver(results, options).pipe(Effect.provideService(Subscribers, subscribers)),
+            deliver(results, options).pipe(
+              Effect.provideService(Subscribers, subscribers),
+              Effect.provideService(HttpClient.HttpClient, client),
+            ),
           ),
       });
     }),
   );
+
+/** The same hooks with the default transport already supplied. */
+export const hooksFetch = (options?: DeliveryOptions) =>
+  hooks(options).pipe(Layer.provide(FetchHttpClient.layer));

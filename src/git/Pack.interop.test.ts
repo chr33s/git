@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
 
 import { Effect, Stream } from "effect";
 
@@ -49,7 +49,7 @@ const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
   return out;
 };
 
-describe("Pack interop with git", { skip: hasGit ? false : "git not installed" }, () => {
+describe.skipIf(!hasGit)("Pack interop with git", () => {
   /**
    * A repository with two large, nearly identical blobs — prime delta
    * material, so `repack -f` reliably produces delta objects and the delta
