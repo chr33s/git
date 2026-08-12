@@ -165,4 +165,153 @@ describe("cli", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("inspects a repository: branch, tag, show, files, grep, diff", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-inspect-"));
+    try {
+      const directory = path.join(root, "repo");
+      const first = await seed(directory, "first");
+      const second = await seed(directory, "second");
+
+      // A branch, listed with the checked-out one marked.
+      await cli(["branch", "--root", root, "-c", "feature", "repo"]);
+      const branches = await cli(["branch", "--root", root, "repo"]);
+      assert.match(branches, /^\* [0-9a-f]{40}\tmain$/m);
+      assert.match(branches, /^ {2}[0-9a-f]{40}\tfeature$/m);
+
+      // Annotated tags and lightweight ones, listed together.
+      await cli(["tag", "--root", root, "--name", "v1", "-m", "release", "repo"]);
+      await cli(["tag", "--root", root, "--name", "latest", "repo"]);
+      const tags = await cli(["tag", "--root", root, "repo"]);
+      assert.match(tags, /^[0-9a-f]{40}\tv1$/m);
+      assert.match(tags, /^[0-9a-f]{40}\tlatest$/m);
+
+      const shown = await cli(["show", "--root", root, "repo", second]);
+      assert.match(shown, /commit/);
+      assert.match(shown, /^second$/m);
+
+      const listed = await cli(["files", "--root", root, "repo"]);
+      assert.match(listed, /100644 [0-9a-f]{40}\tf\.txt/);
+
+      const found = await cli(["grep", "--root", root, "repo", "second"]);
+      assert.equal(found.trim(), "f.txt:1:second");
+
+      const patch = await cli(["diff", "--root", root, "repo", first, second]);
+      assert.match(patch, /^--- a\/f\.txt$/m);
+      assert.match(patch, /^-first$/m);
+      assert.match(patch, /^\+second$/m);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("merges, and exits non-zero when the merge conflicts", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-merge-"));
+    try {
+      const directory = path.join(root, "repo");
+      await seed(directory, "base");
+      await cli(["branch", "--root", root, "-c", "side", "repo"]);
+
+      // Both branches change the one file, on the same line.
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const theirs = yield* repository.writeFiles({
+            base: (yield* repository.readCommit((yield* repository.resolve("refs/heads/side"))!))
+              .tree,
+            changes: [{ path: "f.txt", content: new TextEncoder().encode("theirs\n") }],
+          });
+          yield* repository.commit({
+            branch: "side",
+            tree: theirs,
+            message: "theirs",
+            author,
+          });
+          const ours = yield* repository.writeFiles({
+            base: (yield* repository.readCommit((yield* repository.resolve("refs/heads/main"))!))
+              .tree,
+            changes: [{ path: "f.txt", content: new TextEncoder().encode("ours\n") }],
+          });
+          yield* repository.commit({ branch: "main", tree: ours, message: "ours", author });
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provide(stores(directory)),
+            ),
+          ),
+        ),
+      );
+
+      // A conflict is a failed merge to a shell, and the exit code says so.
+      const failed = await cli([
+        "merge",
+        "--root",
+        root,
+        "repo",
+        "refs/heads/main",
+        "refs/heads/side",
+      ]).then(
+        () => null,
+        (error: { code?: number; stdout?: string; stderr?: string }) => error,
+      );
+      assert.notEqual(failed, null);
+      assert.equal(failed!.code, 1);
+      assert.match(
+        `${failed!.stdout ?? ""}${failed!.stderr ?? ""}`,
+        /CONFLICT \(content\): f\.txt/,
+      );
+
+      // Choosing a side resolves it and moves the ref.
+      const resolved = await cli([
+        "merge",
+        "--root",
+        root,
+        "-s",
+        "theirs",
+        "--into",
+        "refs/heads/main",
+        "repo",
+        "refs/heads/main",
+        "refs/heads/side",
+      ]);
+      assert.match(resolved, /^merged [0-9a-f]{40}$/m);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("checks integrity and collects garbage", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-maint-"));
+    try {
+      const directory = path.join(root, "repo");
+      await seed(directory, "kept");
+
+      const clean = await cli(["fsck", "--root", root, "repo"]);
+      assert.match(clean, /checked \d+ object\(s\)/);
+
+      // A blob nothing references is what gc is for.
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* (yield* Repository).writeBlob(new TextEncoder().encode("orphan\n"));
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provide(stores(directory)),
+            ),
+          ),
+        ),
+      );
+
+      const dry = await cli(["gc", "--root", root, "-n", "repo"]);
+      assert.match(dry, /would remove 1 of \d+ object\(s\)/);
+      const swept = await cli(["gc", "--root", root, "repo"]);
+      assert.match(swept, /removed 1 of \d+ object\(s\)/);
+      const again = await cli(["gc", "--root", root, "repo"]);
+      assert.match(again, /removed 0 of \d+ object\(s\)/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

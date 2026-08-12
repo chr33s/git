@@ -244,6 +244,24 @@ export class Repository extends Context.Service<
 
     readonly deleteTag: (name: string) => Effect.Effect<boolean, StorageFailure | Invalid>;
 
+    /** `false` when the ref was not there to begin with. */
+    readonly deleteRef: (name: string) => Effect.Effect<boolean, StorageFailure | Invalid>;
+
+    /**
+     * Point a ref at a commit. `expected` turns it into a compare-and-swap,
+     * which is the difference between moving a branch and losing someone
+     * else's push.
+     */
+    readonly setRef: (input: {
+      readonly name: string;
+      /** A ref or an oid. */
+      readonly to: string;
+      readonly expected?: Oid | null;
+    }) => Effect.Effect<
+      { readonly ref: string; readonly oid: Oid; readonly previous: Oid | null },
+      RefConflict | ObjectNotFound | Invalid | StorageFailure
+    >;
+
     /**
      * Every object read back and checked against its own name.
      *
@@ -979,6 +997,41 @@ export const layer = Layer.effect(
         refs
           .apply([{ name: `refs/tags/${name}`, value: null, reason: "tag: delete" }])
           .pipe(Effect.map(([result]) => result?.applied === true)),
+
+      deleteRef: (name) =>
+        refs
+          .apply([{ name, value: null, reason: "delete" }])
+          .pipe(Effect.map(([result]) => result?.applied === true)),
+
+      setRef: Effect.fn("Repository.setRef")(function* ({ expected, name, to }) {
+        const target = isOid(to) ? to : yield* refs.resolve(to);
+        if (target === null) {
+          return yield* new Invalid({ field: "to", reason: `unknown ref '${to}'` });
+        }
+        // Refuse to point a ref at something that is not there: a dangling
+        // ref is a repository nobody can clone.
+        if (!(yield* objects.has(target))) return yield* new ObjectNotFound({ oid: target });
+
+        const previous = yield* refs.read(name);
+        const [result] = yield* refs.apply([
+          {
+            name,
+            value: target,
+            ...(expected === undefined ? {} : { expected }),
+            reason: `set: ${to}`,
+          },
+        ]);
+
+        if (result === undefined || !result.applied) {
+          return yield* new RefConflict({
+            ref: name,
+            expected: expected ?? null,
+            actual: result?.current ?? null,
+          });
+        }
+
+        return { ref: name, oid: target, previous };
+      }),
 
       fsck: Effect.gen(function* () {
         const problems: FsckProblem[] = [];

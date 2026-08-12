@@ -362,6 +362,36 @@ const repo = HttpApiGroup.make("repo")
     }),
   )
   .add(
+    HttpApiEndpoint.delete("branchRemove", "/branches/:name", {
+      params: { ...RepoParam, name: Schema.String },
+      success: Schema.Struct({ deleted: Schema.Boolean }),
+      error: Invalid,
+    }),
+  )
+  .add(
+    /**
+     * Move a ref to a commit. This is `reset --hard` and "restore this
+     * branch to that commit" both — on a bare repository they are the same
+     * operation, and the only question worth asking is what the ref was
+     * expected to be, so a concurrent push is not silently discarded.
+     */
+    HttpApiEndpoint.post("reset", "/reset", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        ref: Schema.String,
+        to: Schema.String,
+        /** Absent moves whatever it is now; stating it makes this a CAS. */
+        expected: Schema.optional(Schema.NullOr(OidString)),
+      }),
+      success: Schema.Struct({
+        ref: Schema.String,
+        oid: OidString,
+        previous: Schema.NullOr(OidString),
+      }),
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
     HttpApiEndpoint.post("merge", "/merge", {
       params: RepoParam,
       payload: Schema.Struct({
@@ -711,6 +741,28 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           problems: report.problems,
           dangling_refs: report.danglingRefs,
         };
+      }),
+    )
+    .handle("branchRemove", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const deleted = yield* repository
+          .deleteRef(`refs/heads/${params.name}`)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { deleted };
+      }),
+    )
+    .handle("reset", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const moved = yield* repository
+          .setRef({
+            name: payload.ref,
+            to: payload.to,
+            ...(payload.expected === undefined ? {} : { expected: payload.expected as Oid | null }),
+          })
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return moved;
       }),
     )
     .handle("merge", ({ payload }) =>
