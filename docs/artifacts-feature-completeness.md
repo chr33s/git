@@ -2,6 +2,38 @@
 
 Reviewed: 2026-08-12, `artifacts` @ `b8632b9` against `main` @ `9a08166`.
 
+> [!NOTE]
+> **This is the review as it stood before the gap-closing work.** Everything
+> below describes `artifacts` @ `b8632b9`. The gaps it names have since been
+> worked through — see "What has since closed" for the current position, and
+> [`docs/plan.md`](./plan.md) for what remains a deliberate non-goal. The
+> original text is kept because the reasoning is what justified the plan.
+
+## What has since closed
+
+Every phase-1 and phase-2 item in the plan, and most of the full-parity
+track. Against the review below:
+
+| gap named below                                        | now                                                                                                                                         |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Git LFS entirely absent                                | batch API + basic transfer, streaming, content verified per platform (`server/Lfs*.ts`)                                                     |
+| Merge engine entirely absent                           | `git/Diff.ts` + `git/Merge.ts`, byte-identical to `git diff --no-index` and `git merge-file --diff3`; `Repository.merge` does the tree walk |
+| 36 of 44 JSON endpoints missing                        | commit/blob/tree/files/file/object/diff/merge/grep/tags/reflog/reset/fsck/gc/webhooks all present                                           |
+| `POST /commit` could only make empty commits           | takes a tree or files, and `Repository.writeFiles` builds nested trees                                                                      |
+| Webhooks unreachable                                   | wired in every host, persisted (DO SQLite / JSON file), with CRUD; a real `git push` delivers a signed body                                 |
+| Nothing could originate a push                         | `client/Push.ts`, verified by a real `git clone` of what it pushed                                                                          |
+| Protocol v2 gone                                       | `ls-refs` (prefix/peel/symrefs/unborn) and `fetch` (acknowledgments/shallow-info/packfile)                                                  |
+| Shallow clone rejected                                 | `deepen`, `deepen-since`, `deepen-not`, plus `--unshallow`                                                                                  |
+| `side-band-64k` dropped                                | multiplexed on both fetch and push                                                                                                          |
+| `.git` suffix routing regression                       | one repository per name, in every router                                                                                                    |
+| gc, fsck, annotated tags, archive, `.idx`, index codec | all present, the last two verified against git's own files                                                                                  |
+| CLI: 6 commands                                        | 17                                                                                                                                          |
+| `npm run test:integration` missing                     | the integration project runs under `npm test`                                                                                               |
+
+Still deliberately absent, and argued for in the plan: the working tree —
+`status`, `add`, `checkout` — because this serves bare repositories. The
+index codec exists (`git/Index.ts`) for a client that grows one.
+
 The `artifacts` branch is the Effect v4 + alchemy@next rewrite described in its own
 `docs/rewrite.md`. This review compares the two branches feature-by-feature to answer one
 question: **what does main have that artifacts does not (and vice versa)?**

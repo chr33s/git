@@ -7,22 +7,38 @@ regression for anyone using the repo today.
 Grounded in [`docs/artifacts-feature-completeness.md`](./artifacts-feature-completeness.md)
 (review of `artifacts` @ `b8632b9` vs `main` @ `9a08166`).
 
-## 0. Scope decision (do this first)
+## Status
+
+**Phases 1, 2, 3, 5 and 6 are done; phase 4 — the branch rename itself — is the one
+step left, and it is a repository-settings operation rather than a code change.**
+
+| phase           | state                                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------------------------- |
+| 1 · must-fix    | ✅ `.git` routing, webhooks wired + persisted + CRUD, commit takes real content, shallow, side-band-64k |
+| 2 · should-fix  | ✅ LFS, annotated tags, fsck, 499-on-abort                                                              |
+| 3 · docs        | ✅ readme/rewrite-doc contradictions and stale script references fixed                                  |
+| 4 · the swap    | ⏸ **needs a human**: renaming the default branch retargets every clone, open PR and CI trigger          |
+| 5 · acceptance  | ✅ `npm run check` and `npm test` green, criteria below all met                                         |
+| 6 · full parity | ✅ except the working tree, which §0 keeps as a non-goal                                                |
+
+What landed beyond the phase list: protocol v2, gc, the `.idx` codec, the `DIRC` index
+codec, diff, three-way merge, archive (tar/tar.gz/zip), client push, and a CLI that went
+from 6 commands to 17.
+
+## 0. Scope decision (settled)
 
 The rewrite is a deliberate narrowing: a bare-repository git _server_ (plus client/CLI enough
-to drive it), not a working-tree git reimplementation. This plan assumes that scope is
-accepted:
+to drive it), not a working-tree git reimplementation. That scope was taken:
 
-- **Non-goals after the swap** (removed with the legacy code, documented as such): index /
-  staging, working-tree files, merge/rebase/cherry-pick, and the wide porcelain CLI
-  (add/commit/status/checkout/…) and its e2e-vs-`git` parity suite. The legacy branch remains
-  the reference if any of these come back.
-- **Goals before the swap**: everything in phases 1–2 below — the items that are regressions
-  even for the narrowed scope.
+- **Non-goals** (documented as such rather than silently missing): the working tree —
+  `status`, `add`, `checkout`, `restore`, `switch` — and the e2e-vs-`git` porcelain parity
+  suite that tested it. Everything here serves bare repositories.
+- **Not a non-goal, and now present**: merge, diff, tags, gc, fsck, LFS, archive, packs at
+  rest, protocol v2 and client push were all in the "full parity" column and were built.
 
-If instead full parity is required, this plan's phase 1–2 still apply first, but the swap
-moves out until merge/index/CLI land — see [§6, the full-parity track](#6-full-parity-track-only-if-mains-broader-scope-is-a-goal):
-roughly 8–10k lines of porting, a second project comparable in size to the rewrite itself.
+The one piece of the working-tree story that _did_ land is `src/git/Index.ts`: git's own
+`DIRC` v2 codec, byte-verified both directions. It has no port and no caller — deliberately.
+A client that grows a work tree needs exactly that file plus a twenty-line `IndexStore`.
 
 ## 1. Must-fix before the swap (regressions within the rewrite's own scope)
 
