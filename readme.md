@@ -439,7 +439,11 @@ feature; it is a feature waiting for its port. `git/Work.ts` is the result, and
 sliding window live in the pack writer behind `PackOptions.deltify`, and only
 `Maintenance.repack` turns it on: repack is background work whose output is
 storage, so the window's CPU and pinned memory buy smaller packs at rest
-without costing any fetch response its first byte. Live upload-pack responses
+without costing any fetch response its first byte. Repack also feeds the
+writer `deltaOrder` — type-major, `pack_name_hash` over tree-entry names,
+largest first — because a reachability walk emits a commit's blobs together,
+which parks two versions of one file a whole commit apart and outside any
+window. Live upload-pack responses
 stay full-object until measurement says the wire savings justify serve-time
 delta search — the worst case of not deltifying is a larger pack, never a
 wrong one. Thin packs are read today (a `ref-delta` whose base is outside the

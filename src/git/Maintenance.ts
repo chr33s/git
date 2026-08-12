@@ -174,6 +174,87 @@ export const fsck = Effect.fn("Maintenance.fsck")(function* (stores: Stores) {
   return { checked, problems, danglingRefs } satisfies FsckReport;
 });
 
+const encoder = new TextEncoder();
+
+/**
+ * git's `pack_name_hash`, over a tree entry's name: whitespace skipped, and
+ * each byte shifted in so the tail of the name dominates. Same-named files
+ * across commits — the best delta pairs a repository has — land on the same
+ * hash, which is all the sort below needs from it.
+ */
+const nameHash = (name: string): number => {
+  let hash = 0;
+  for (const byte of encoder.encode(name)) {
+    if (byte === 0x20 || (byte >= 0x09 && byte <= 0x0d)) continue;
+    hash = ((hash >>> 2) + ((byte << 24) >>> 0)) >>> 0;
+  }
+  return hash;
+};
+
+/**
+ * The emission order the delta window wants: same-type objects grouped,
+ * trees and blobs sorted by the name their tree entry gives them and then
+ * largest first — so successive versions of one file sit inside the window
+ * with the biggest as the natural base. Commits and tags keep their walk
+ * order, which already puts a commit next to its parent.
+ *
+ * The name is the entry's, not the full path: `pack_name_hash` weights the
+ * tail of a path, so the entry name carries most of the signal, and the
+ * full path would need a root-down walk this classification pass — one
+ * read per object, contents dropped as soon as they are classified — gets
+ * to skip. Repack is the background caller that can afford the second
+ * read the writer then does.
+ */
+export const deltaOrder = Effect.fn("Maintenance.deltaOrder")(function* (
+  objects: ObjectStore["Service"],
+  oids: ReadonlyArray<Oid>,
+) {
+  interface Classified {
+    readonly oid: Oid;
+    readonly type: RawObject["type"];
+    readonly size: number;
+  }
+  const inventory: Classified[] = [];
+  const names = new Map<Oid, number>();
+
+  for (const oid of oids) {
+    const object = yield* objects.read(oid);
+    inventory.push({ oid, type: object.type, size: object.data.length });
+    if (object.type !== "tree") continue;
+    const entries = parseTree(object.data);
+    // A malformed tree is fsck's finding; here it only means its children
+    // sort with the nameless.
+    if (Result.isSuccess(entries)) {
+      for (const entry of entries.success) names.set(entry.oid, nameHash(entry.name));
+    }
+  }
+
+  interface Sortable {
+    readonly oid: Oid;
+    readonly hash: number;
+    readonly size: number;
+  }
+  const commits: Oid[] = [];
+  const tags: Oid[] = [];
+  const trees: Sortable[] = [];
+  const blobs: Sortable[] = [];
+  for (const item of inventory) {
+    if (item.type === "commit") commits.push(item.oid);
+    else if (item.type === "tag") tags.push(item.oid);
+    else {
+      const sortable = { oid: item.oid, hash: names.get(item.oid) ?? 0, size: item.size };
+      (item.type === "tree" ? trees : blobs).push(sortable);
+    }
+  }
+
+  const grouped = (left: Sortable, right: Sortable) =>
+    left.hash - right.hash || right.size - left.size || left.oid.localeCompare(right.oid);
+  trees.sort(grouped);
+  blobs.sort(grouped);
+
+  return [...commits, ...tags, ...trees.map((tree) => tree.oid), ...blobs.map((blob) => blob.oid)];
+});
+
 /**
  * Everything reachable into one `.pack`/`.idx` pair, loose copies deleted.
  *
@@ -196,12 +277,13 @@ const repack = Effect.fn("Maintenance.repack")(function* (
   if (oids.length === 0) return null;
 
   const entries: Pack.PackedEntry[] = [];
+  const ordered = yield* deltaOrder(objects, oids);
   const chunks = yield* Stream.runCollect(
     // Deltified here and nowhere else: repack is background work whose
     // output is storage, so the window's CPU and pinned memory buy smaller
     // packs at rest without costing any request a first byte. `PackFile.ts`
     // resolves the ofs-deltas on read.
-    Pack.pack(oids, { onObject: (entry) => entries.push(entry), deltify: {} }).pipe(
+    Pack.pack(ordered, { onObject: (entry) => entries.push(entry), deltify: {} }).pipe(
       Stream.provideService(ObjectStore, objects),
     ),
   );
