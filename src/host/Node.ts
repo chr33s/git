@@ -29,6 +29,7 @@ import * as CommitPack from "../server/CommitPack.ts";
 import { file as lfsFile } from "../server/Lfs.node.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
+import { file as remotesFile } from "../server/Remotes.node.ts";
 import { routeOf } from "../server/Route.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import * as Webhooks from "../server/Webhooks.ts";
@@ -75,6 +76,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     // survives a restart the same way a ref does.
     const subscribers = subscribersFile(path.join(options.root, repo, "webhooks.json"));
 
+    // And the remotes it fetches from, for the same reason and in the same
+    // place: a remote that does not survive a restart is a URL somebody has
+    // to remember.
+    const remotes = remotesFile(path.join(options.root, repo, "remotes.json"));
+
     const layer = GitRepository.layer.pipe(
       // Real hooks, not `hooksNoop`: this is what makes a push deliver.
       // `forkDetach` is the node stand-in for `waitUntil` — delivery outlives
@@ -87,7 +93,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
       api: HttpRouter.toWebHandler(
-        Api.layer.pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
+        Api.layerWith(remotes).pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
         { disableLogger: true },
       ).handler,
       gate: Promise.resolve(),

@@ -23,6 +23,7 @@ import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
+import * as Remotes from "../server/Remotes.ts";
 import { normalize, routeOf } from "../server/Route.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
@@ -53,11 +54,18 @@ export class GitRepo extends DurableObject<TestEnv> {
   #api: ((request: Request) => Promise<Response>) | null = null;
 
   #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
+  #remotes: Layer.Layer<Remotes.Remotes> | null = null;
 
   /** The registry on this instance's own SQLite, beside the refs. */
   #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
     this.#subscribers ??= Subscribers.sql(this.ctx.storage.sql as unknown as Sql, repo);
     return this.#subscribers;
+  }
+
+  /** The remotes this repository fetches from, on that same SQLite. */
+  #remoteRegistry(repo: string): Layer.Layer<Remotes.Remotes> {
+    this.#remotes ??= Remotes.sql(this.ctx.storage.sql as unknown as Sql, repo);
+    return this.#remotes;
   }
 
   /** Built once per instance: the DO is the unit of isolation, not the request. */
@@ -169,7 +177,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     // rather than `provide` — handler contexts are request-scoped, so the
     // router looks for `Repository` among the app layer's outputs.
     this.#api ??= HttpRouter.toWebHandler(
-      Api.layer.pipe(
+      Api.layerWith(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
         Layer.provideMerge(this.#registry(repo)),
       ),

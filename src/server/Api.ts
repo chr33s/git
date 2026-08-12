@@ -15,12 +15,22 @@ import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
 import { Etag, HttpPlatform } from "effect/unstable/http";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 
+import { lsRemote } from "../client/Fetch.ts";
+import { push as pushToRemote } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
-import { Invalid, ObjectNotFound, RefConflict } from "../git/Error.ts";
+import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
+import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
+import {
+  NewRemoteWire,
+  none as noRemotes,
+  redact as redactRemote,
+  Remotes,
+  validate as validateRemote,
+} from "./Remotes.ts";
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 
 /** Wire representation of an oid; the domain's `Oid` is the branded form. */
@@ -225,6 +235,246 @@ const matcher = (payload: {
       );
     }
   });
+
+/** A registered remote as a client may see it: no credential, ever. */
+const RemoteWire = Schema.Struct({
+  name: Schema.String,
+  url: Schema.String,
+  has_credential: Schema.Boolean,
+  created_at: Schema.String,
+});
+
+/**
+ * Which remote an operation acts on: a stored `name`, or a `url` outright.
+ * Exactly one — a request that gives both has not said which credential it
+ * expects to be used.
+ */
+const RemoteTarget = {
+  name: Schema.optional(Schema.String),
+  url: Schema.optional(Schema.String),
+};
+
+/** A ref after a fetch moved it, and where it was before. */
+const FetchedRef = Schema.Struct({
+  name: Schema.String,
+  oid: OidString,
+  from: Schema.NullOr(OidString),
+});
+
+/**
+ * The remote a request names: one this repository stores, credential
+ * included, or a URL taken as it stands. A URL carries no credential — one in
+ * a request body is one in an access log — so an authenticated remote is one
+ * that has been registered.
+ */
+const remoteFor = Effect.fn("Api.remoteFor")(function* (payload: {
+  readonly name?: string | undefined;
+  readonly url?: string | undefined;
+}) {
+  const { name, url } = payload;
+  if (name !== undefined && url !== undefined) {
+    return yield* new Invalid({
+      field: "remote",
+      reason: "name a stored remote or give a url, not both",
+    });
+  }
+  if (url !== undefined) {
+    // `origin` is what git calls the remote you cloned from, and a URL used
+    // without a stored name still has to track somewhere.
+    const checked = yield* validateRemote({ name: "origin", url });
+    return { name: checked.name, url: checked.url, credential: null };
+  }
+  if (name === undefined) {
+    return yield* new Invalid({
+      field: "remote",
+      reason: "give a stored remote 'name' or a 'url'",
+    });
+  }
+
+  const remotes = yield* Remotes;
+  const stored = yield* remotes.get(name).pipe(Effect.catchTag("StorageFailure", Effect.die));
+  if (stored === null) {
+    return yield* new Invalid({ field: "name", reason: `unknown remote '${name}'` });
+  }
+  return { name: stored.name, url: stored.url, credential: stored.credential };
+});
+
+/**
+ * Which remote refs a request asked for. An entry is a full ref name
+ * (`refs/heads/main`), its short form (`main`, `v1.0`), or a prefix with a
+ * trailing `*`. Absent means every branch and tag the remote advertises.
+ */
+const selects = (filter: ReadonlyArray<string> | undefined, name: string): boolean => {
+  if (filter === undefined) return true;
+  const short = name.replace(/^refs\/(?:heads|tags)\//, "");
+  return filter.some((entry) =>
+    entry.endsWith("*") ? name.startsWith(entry.slice(0, -1)) : entry === name || entry === short,
+  );
+};
+
+/**
+ * Where a fetched ref lands. A branch becomes a remote-tracking ref, so a
+ * fetch never moves a local branch — `pull` is the endpoint that does that,
+ * and only once it can say the move is a fast-forward. A tag keeps its own
+ * name, because a tag is not per-remote.
+ */
+const trackingOf = (remote: string, name: string): string =>
+  name.startsWith("refs/heads/")
+    ? `refs/remotes/${remote}/${name.slice("refs/heads/".length)}`
+    : name;
+
+const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayBuffer> => {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+};
+
+/**
+ * One `want … done` round against upload-pack, its prelude consumed.
+ *
+ * Everything in a single request, so the reply is the boundary section (only
+ * when deepening), one ACK or NAK, and then the pack — no second round to
+ * hold state for. The `have` lines are this repository's own tips, which is
+ * what keeps a second fetch from re-downloading the whole history.
+ */
+const uploadPack = (input: {
+  readonly url: string;
+  readonly token: string | undefined;
+  readonly wants: ReadonlyArray<Oid>;
+  readonly haves: ReadonlyArray<Oid>;
+  readonly depth: number | undefined;
+}) =>
+  Effect.tryPromise({
+    try: async () => {
+      const body = concat([
+        ...input.wants.map((oid) => pkt(`want ${oid}\n`)),
+        ...(input.depth === undefined ? [] : [pkt(`deepen ${input.depth}\n`)]),
+        FLUSH,
+        ...input.haves.map((oid) => pkt(`have ${oid}\n`)),
+        pkt("done\n"),
+      ]);
+
+      const response = await fetch(`${input.url}/git-upload-pack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-git-upload-pack-request",
+          ...(input.token === undefined ? {} : { authorization: `Bearer ${input.token}` }),
+        },
+        body,
+      });
+      if (!response.ok || response.body === null) {
+        throw new Error(`upload-pack returned ${response.status}`);
+      }
+
+      const reader = new PktReader(response.body as unknown as AsyncIterable<Uint8Array>);
+      for (;;) {
+        const item = await reader.next();
+        if (item === "eof") throw new Error("upload-pack answered with no pack");
+        // The flush that closes the boundary section, and the `shallow` lines
+        // before it: nothing to record here, because these stores keep no
+        // shallow list — see `fetchFrom` on what that costs.
+        if (typeof item === "string") continue;
+        const line = decoder.decode(item);
+        if (line.startsWith("ACK") || line.startsWith("NAK")) break;
+      }
+      return reader.rest();
+    },
+    catch: (cause) => new Invalid({ field: "remote", reason: String(cause) }),
+  });
+
+/**
+ * A fetch into this repository: advertisement, one pack, then the tracking
+ * refs.
+ *
+ * `Client.fetchRepository` writes through an `ObjectStore` and `RefStore` it
+ * is handed; this layer carries `Repository` and not the stores underneath
+ * it, so the pack goes in through `Repository.unpack` — receive-pack's own
+ * ingest, and the reason this can report how many objects arrived rather than
+ * only which refs moved.
+ *
+ * `depth` is passed through as `deepen` and nothing more: the boundary
+ * commits' parents stay on the remote and there is no shallow list in these
+ * stores to record that in, so a depth-limited fetch leaves commits whose
+ * parents are absent — which `fsck` will report. It is here so a caller after
+ * the last few commits of a large history need not take all of it; it is not
+ * an equivalent of `git clone --depth`.
+ */
+const fetchFrom = Effect.fn("Api.fetchFrom")(function* (input: {
+  readonly remote: string;
+  readonly url: string;
+  readonly credential: string | null;
+  readonly refs?: ReadonlyArray<string> | undefined;
+  readonly depth?: number | undefined;
+}) {
+  const repository = yield* Repository;
+  const token = input.credential ?? undefined;
+
+  if (input.depth !== undefined && (!Number.isInteger(input.depth) || input.depth < 1)) {
+    return yield* new Invalid({
+      field: "depth",
+      reason: `depth must be a positive integer, not '${input.depth}'`,
+    });
+  }
+
+  const advertised = yield* lsRemote(input.url, { token });
+  const local = new Map(yield* repository.refs);
+
+  const wanted = advertised
+    .filter(
+      (ref) =>
+        // `refs/tags/v1^{}` is the tag's target, not a ref to hold, and
+        // `HEAD` is a symbolic ref this repository has one of already.
+        !ref.name.endsWith("^{}") &&
+        (ref.name.startsWith("refs/heads/") || ref.name.startsWith("refs/tags/")) &&
+        selects(input.refs, ref.name),
+    )
+    .map((ref) => ({ name: trackingOf(input.remote, ref.name), oid: ref.oid }))
+    .filter(
+      (ref) =>
+        local.get(ref.name) !== ref.oid &&
+        // A tag is a name that does not move: re-pointing one on a fetch
+        // would rewrite what this repository has already published under it.
+        !(ref.name.startsWith("refs/tags/") && local.has(ref.name)),
+    );
+
+  if (wanted.length === 0) return { refs: [], objects: 0 };
+
+  const wants: Array<Oid> = [];
+  for (const oid of new Set(wanted.map((ref) => ref.oid))) {
+    if (!(yield* repository.contains(oid))) wants.push(oid);
+  }
+
+  // Every wanted object is already here — a branch that was fetched under
+  // another name, or a ref moved back to where it was. There is nothing to
+  // ask for, and an empty `want` list is a request the server rejects.
+  const arrived =
+    wants.length === 0
+      ? []
+      : yield* repository.unpack(
+          Stream.fromAsyncIterable(
+            yield* uploadPack({
+              url: input.url,
+              token,
+              wants,
+              haves: [...new Set(local.values())],
+              depth: input.depth,
+            }),
+            (cause) => new Invalid({ field: "remote", reason: String(cause) }),
+          ),
+        );
+
+  const refs = yield* Effect.forEach(wanted, (ref) =>
+    repository
+      .setRef({ name: ref.name, to: ref.oid })
+      .pipe(Effect.map((moved) => ({ name: moved.ref, oid: moved.oid, from: moved.previous }))),
+  );
+
+  return { refs, objects: arrived.length };
+});
 
 const repo = HttpApiGroup.make("repo")
   .add(
@@ -627,7 +877,120 @@ const repo = HttpApiGroup.make("repo")
   )
   .prefix("/:repo");
 
-export const api = HttpApi.make("git").add(repo);
+/**
+ * This repository as a client of another one.
+ *
+ * A group of its own because these are the only endpoints that need the
+ * remote registry, and because they are the only ones that leave the
+ * process: everything in `repo` is answered from local storage, while every
+ * one of these makes a request to a server it does not control and reports
+ * what came back.
+ */
+const remotes = HttpApiGroup.make("remotes")
+  .add(
+    // Registration, because a fetch that has to be handed a URL and a token
+    // every time is a fetch nothing can schedule. The credential goes in and
+    // never comes back out.
+    HttpApiEndpoint.post("remoteAdd", "/remotes", {
+      params: RepoParam,
+      payload: NewRemoteWire,
+      success: RemoteWire,
+      error: Invalid,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("remoteList", "/remotes", {
+      params: RepoParam,
+      success: Schema.Struct({ remotes: Schema.Array(RemoteWire) }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.delete("remoteRemove", "/remotes/:name", {
+      params: { ...RepoParam, name: Schema.String },
+      success: Schema.Struct({ deleted: Schema.Boolean }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("fetch", "/fetch", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        ...RemoteTarget,
+        /** Ref names, short names, or `prefix*`; absent takes everything. */
+        refs: Schema.optional(Schema.Array(Schema.String)),
+        depth: Schema.optional(Schema.Finite),
+      }),
+      success: Schema.Struct({
+        /** The namespace the branches landed in: `refs/remotes/<remote>/…`. */
+        remote: Schema.String,
+        refs: Schema.Array(FetchedRef),
+        objects: Schema.Finite,
+      }),
+      error: [RefConflict, PackCorrupt, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("push", "/push", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        ...RemoteTarget,
+        refs: Schema.Array(
+          Schema.Struct({
+            /** A local ref or an oid. */
+            local: Schema.String,
+            /** Where it lands; absent means the same name. */
+            remote: Schema.optional(Schema.String),
+            delete: Schema.optional(Schema.Boolean),
+          }),
+        ),
+        force: Schema.optional(Schema.Boolean),
+        atomic: Schema.optional(Schema.Boolean),
+      }),
+      /**
+       * Every requested ref gets a line, and a rejection is a value: a push
+       * of five branches where one lost a race is four successes.
+       */
+      success: Schema.Struct({
+        refs: Schema.Array(
+          Schema.Struct({
+            ref: Schema.String,
+            ok: Schema.Boolean,
+            reason: Schema.NullOr(Schema.String),
+          }),
+        ),
+      }),
+      error: [PackCorrupt, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("pull", "/pull", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        ...RemoteTarget,
+        /** A branch name or a full `refs/heads/…`. */
+        branch: Schema.String,
+        depth: Schema.optional(Schema.Finite),
+      }),
+      /**
+       * `non-fast-forward` is the outcome this endpoint exists to be able to
+       * report: the tracking ref moved, the branch did not, and which of a
+       * merge or a rebase was wanted is not something a pull can guess.
+       */
+      success: Schema.Struct({
+        kind: Schema.Literals(["up-to-date", "created", "fast-forward", "non-fast-forward"]),
+        branch: Schema.String,
+        tracking: Schema.String,
+        /** Where the branch was; `null` when it did not exist. */
+        from: Schema.NullOr(OidString),
+        /** What the remote had — where the branch is now, unless it diverged. */
+        to: OidString,
+        objects: Schema.Finite,
+      }),
+      error: [RefConflict, PackCorrupt, ObjectNotFound, Invalid],
+    }),
+  )
+  .prefix("/:repo");
+
+export const api = HttpApi.make("git").add(repo).add(remotes);
 
 /** `StorageFailure` is a defect here: a 500 no caller can act on. */
 export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
@@ -1081,15 +1444,154 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     ),
 );
 
+export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
+  group
+    .handle("remoteAdd", ({ payload }) =>
+      Effect.gen(function* () {
+        const registry = yield* Remotes;
+        const added = yield* registry
+          .add(payload)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return redactRemote(added);
+      }),
+    )
+    .handle("remoteList", () =>
+      Effect.gen(function* () {
+        const registry = yield* Remotes;
+        const rows = yield* registry.list.pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { remotes: rows.map(redactRemote) };
+      }),
+    )
+    .handle("remoteRemove", ({ params }) =>
+      Effect.gen(function* () {
+        const registry = yield* Remotes;
+        const deleted = yield* registry
+          .remove(params.name)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { deleted };
+      }),
+    )
+    .handle("fetch", ({ payload }) =>
+      Effect.gen(function* () {
+        const target = yield* remoteFor(payload);
+        const fetched = yield* fetchFrom({
+          remote: target.name,
+          url: target.url,
+          credential: target.credential,
+          ...(payload.refs === undefined ? {} : { refs: payload.refs }),
+          ...(payload.depth === undefined ? {} : { depth: payload.depth }),
+        });
+        return { remote: target.name, refs: fetched.refs, objects: fetched.objects };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("push", ({ payload }) =>
+      Effect.gen(function* () {
+        const target = yield* remoteFor(payload);
+        const results = yield* pushToRemote({
+          url: target.url,
+          refs: payload.refs.map((ref) => ({
+            local: ref.local,
+            remote: ref.remote ?? ref.local,
+            ...(ref.delete === undefined ? {} : { delete: ref.delete }),
+          })),
+          ...(target.credential === null ? {} : { token: target.credential }),
+          ...(payload.force === undefined ? {} : { force: payload.force }),
+          ...(payload.atomic === undefined ? {} : { atomic: payload.atomic }),
+        });
+        return {
+          refs: results.map((result) => ({
+            ref: result.ref,
+            ok: result.ok,
+            reason: result.reason ?? null,
+          })),
+        };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("pull", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const target = yield* remoteFor(payload);
+
+        const short = payload.branch.startsWith("refs/heads/")
+          ? payload.branch.slice("refs/heads/".length)
+          : payload.branch;
+        const branch = `refs/heads/${short}`;
+        const tracking = `refs/remotes/${target.name}/${short}`;
+
+        const fetched = yield* fetchFrom({
+          remote: target.name,
+          url: target.url,
+          credential: target.credential,
+          refs: [`refs/heads/${short}`],
+          ...(payload.depth === undefined ? {} : { depth: payload.depth }),
+        });
+
+        // Absent from the fetch's own report means the tracking ref was
+        // already where the remote is, not that the remote has no such branch.
+        const moved = fetched.refs.find((ref) => ref.name === tracking);
+        const to = moved?.oid ?? (yield* repository.resolve(tracking));
+        if (to === null) {
+          return yield* new Invalid({
+            field: "branch",
+            reason: `remote has no branch '${short}'`,
+          });
+        }
+
+        const from = yield* repository.resolve(branch);
+        const outcome = { branch, tracking, from, to, objects: fetched.objects };
+
+        if (from === null) {
+          yield* repository.setRef({ name: branch, to, expected: null });
+          return { kind: "created" as const, ...outcome };
+        }
+        if (from === to) return { kind: "up-to-date" as const, ...outcome };
+        // The remote is behind this branch: there is nothing to bring in, and
+        // moving the branch back would drop commits only this side has.
+        if (yield* repository.isAncestor(to, from)) {
+          return { kind: "up-to-date" as const, ...outcome };
+        }
+        /**
+         * Diverged. Reported rather than merged: `/merge` and `/rebase` are
+         * where a caller says which one it meant, and both of them can start
+         * from `tracking`, which this pull has already moved. Guessing here
+         * would write a merge commit nobody asked for into a branch.
+         */
+        if (!(yield* repository.isAncestor(from, to))) {
+          return { kind: "non-fast-forward" as const, ...outcome };
+        }
+
+        // A compare-and-swap, because the fetch above was not instantaneous
+        // and this branch is one a push can move.
+        yield* repository.setRef({ name: branch, to, expected: from });
+        return { kind: "fast-forward" as const, ...outcome };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    ),
+);
+
 /**
  * The API as one layer: routes registered, handlers wired, response plumbing
  * (etag, platform) satisfied from core with no filesystem underneath — a
  * Worker has none, and nothing here serves files.
+ *
+ * The remote registry is a parameter rather than a requirement of the layer
+ * because a server without one is still a whole server: `Remotes.none`
+ * refuses to store a remote, and fetch and push against an explicit `url` go
+ * on working. A host that has a registry passes it here — that is the only
+ * way in, since the handlers must be given theirs before the router is built.
  */
-export const layer = HttpApiBuilder.layer(api).pipe(
-  Layer.provide(handlers),
-  Layer.provide(HttpPlatform.layer),
-  Layer.provide(Etag.layerWeak),
-  Layer.provide(FileSystem.layerNoop({})),
-  Layer.provide(Path.layer),
-);
+export const layerWith = (registry: Layer.Layer<Remotes> = noRemotes) =>
+  HttpApiBuilder.layer(api).pipe(
+    Layer.provide(handlers),
+    Layer.provide(remoteHandlers),
+    Layer.provide(HttpPlatform.layer),
+    Layer.provide(Etag.layerWeak),
+    Layer.provide(FileSystem.layerNoop({})),
+    Layer.provide(Path.layer),
+    // Merged rather than provided: a handler's own requirements are
+    // request-scoped, and `HttpRouter.toWebHandler` resolves them from what
+    // the app layer *outputs* — which is why every host merges `Repository`
+    // in the same way.
+    Layer.provideMerge(registry),
+  );
+
+export const layer = layerWith();
