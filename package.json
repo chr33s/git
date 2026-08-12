@@ -12,10 +12,12 @@
     "tsconfig.json",
     "!src/**/*.test.ts",
     "!src/**/*.integration.ts",
-    "!src/**/*.contract.ts"
+    "!src/**/*.contract.ts",
+    "!src/**/*.build.ts"
   ],
   "type": "module",
   "scripts": {
+    "build:sea": "node src/cli/sea.build.ts",
     "check": "oxfmt --check && oxlint && tsc -b --noEmit",
     "fix": "oxlint --fix && oxfmt --write",
     "postinstall": "patch-package && npx wrangler types -c wrangler.test.json && npm run fix",

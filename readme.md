@@ -183,6 +183,7 @@ storage moves up into `Repository`.
 | `src/client/Push.ts`         | smart-HTTP push client                                               |
 | `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`       |
 | `src/cli/main.ts`            | CLI: 29 commands, `npx chr33s-git`                                   |
+| `src/cli/sea.build.ts`       | `npm run build:sea` — the CLI as one node SEA binary (node 26+)      |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag       |
 | `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite            |
 | `src/alchemy.run.ts`         | deployment stack: bucket, DO and Worker as values, not config        |
@@ -479,6 +480,7 @@ and third exist (`artifacts/Sqlite.ts`, `server/Auth.ts`).
 npm run check             # format, lint, and typecheck (tsc -b --noEmit)
 npm run fix               # auto-fix both
 npm test                  # unit + integration (workerd) projects
+npm run build:sea         # dist/sea/chr33s-git — self-contained CLI binary (node 26+)
 npx wrangler dev          # run the Worker locally on port 8080
 npx wrangler deploy       # deploy (the tested path)
 ```

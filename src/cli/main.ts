@@ -720,10 +720,12 @@ const rendered = (error: unknown): unknown => {
   return error;
 };
 
-if (import.meta.main) {
+/** Parse `process.argv` and run: the entry for both `bin` and the SEA build. */
+const run = () =>
   NodeRuntime.runMain(
     main(process.argv.slice(2)).pipe(Effect.mapError(rendered), Effect.provide(NodeServices.layer)),
   );
-}
 
-export { git, main };
+if (import.meta.main) run();
+
+export { git, main, run };
