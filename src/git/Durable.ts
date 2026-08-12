@@ -177,7 +177,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     // rather than `provide` — handler contexts are request-scoped, so the
     // router looks for `Repository` among the app layer's outputs.
     this.#api ??= HttpRouter.toWebHandler(
-      Api.layerWith(this.#remoteRegistry(repo)).pipe(
+      Api.layer(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
         Layer.provideMerge(this.#registry(repo)),
       ),

@@ -27,7 +27,6 @@ import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import {
   NewRemoteWire,
-  none as noRemotes,
   redact as redactRemote,
   Remotes,
   validate as validateRemote,
@@ -1568,13 +1567,13 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
  * (etag, platform) satisfied from core with no filesystem underneath — a
  * Worker has none, and nothing here serves files.
  *
- * The remote registry is a parameter rather than a requirement of the layer
- * because a server without one is still a whole server: `Remotes.none`
- * refuses to store a remote, and fetch and push against an explicit `url` go
- * on working. A host that has a registry passes it here — that is the only
- * way in, since the handlers must be given theirs before the router is built.
+ * The registry parameter has no default, deliberately. An earlier version
+ * defaulted it to `Remotes.none`, and one host was still on the default —
+ * serving `/remotes` as permanently empty with nothing in the types to say
+ * so. A host without persistence says `Remotes.none` where it builds the
+ * layer, so the choice is visible exactly where it is made.
  */
-export const layerWith = (registry: Layer.Layer<Remotes> = noRemotes) =>
+export const layer = (registry: Layer.Layer<Remotes>) =>
   HttpApiBuilder.layer(api).pipe(
     Layer.provide(handlers),
     Layer.provide(remoteHandlers),
@@ -1589,4 +1588,3 @@ export const layerWith = (registry: Layer.Layer<Remotes> = noRemotes) =>
     Layer.provideMerge(registry),
   );
 
-export const layer = layerWith();

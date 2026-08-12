@@ -93,7 +93,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
       api: HttpRouter.toWebHandler(
-        Api.layerWith(remotes).pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
+        Api.layer(remotes).pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
         { disableLogger: true },
       ).handler,
       gate: Promise.resolve(),

@@ -26,6 +26,7 @@ import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as LfsCore from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { normalize, routeOf } from "../server/Route.ts";
+import * as Remotes from "../server/Remotes.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 import { Objects } from "../objects.ts";
@@ -69,6 +70,9 @@ export default Repo.make(
       const subscribers = (repo: string) =>
         Subscribers.sql(state.raw.storage.sql as unknown as Sql, repo);
 
+      /** The remotes this repository fetches from, on that same SQLite. */
+      const remotes = (repo: string) => Remotes.sql(state.raw.storage.sql as unknown as Sql, repo);
+
       const live = (repo: string): Layer.Layer<Repository> => {
         const existing = layers.get(repo);
         if (existing !== undefined) return existing;
@@ -98,7 +102,10 @@ export default Repo.make(
         const existing = handlers.get(repo);
         if (existing !== undefined) return existing;
         const built = HttpRouter.toWebHandler(
-          Api.layer.pipe(Layer.provideMerge(live(repo)), Layer.provideMerge(subscribers(repo))),
+          Api.layer(remotes(repo)).pipe(
+            Layer.provideMerge(live(repo)),
+            Layer.provideMerge(subscribers(repo)),
+          ),
           { disableLogger: true },
         ).handler;
         handlers.set(repo, built);
