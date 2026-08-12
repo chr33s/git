@@ -21,6 +21,8 @@ import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
+import { next as bisectNext } from "../git/Bisect.ts";
+import { forPath as pathHistory } from "../git/History.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
@@ -875,6 +877,42 @@ const repo = HttpApiGroup.make("repo")
       error: ObjectNotFound,
     }),
   )
+  .add(
+    HttpApiEndpoint.get("history", "/history/:oid", {
+      params: { ...RepoParam, oid: OidString },
+      /** `path` is the point of the endpoint, so it is not optional. */
+      query: { ...Cursor, path: Schema.String },
+      success: Page(
+        Schema.Struct({
+          oid: OidString,
+          message: Schema.String,
+          /** The path's blob here; `null` where the commit deleted it. */
+          blob: Schema.NullOr(OidString),
+        }),
+      ),
+      error: ObjectNotFound,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("bisect", "/bisect", {
+      params: RepoParam,
+      /**
+       * The caller keeps the marks and sends them back each time; there is no
+       * session here, which is what lets a stateless server answer at all.
+       */
+      payload: Schema.Struct({
+        bad: OidString,
+        good: Schema.Array(OidString),
+      }),
+      success: Schema.Struct({
+        kind: Schema.Literals(["test", "found"]),
+        commit: OidString,
+        remaining: Schema.Finite,
+        steps: Schema.Finite,
+      }),
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
   .prefix("/:repo");
 
 /**
@@ -1441,6 +1479,24 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           query,
         );
       }),
+    )
+    .handle("history", ({ params, query }) =>
+      Effect.gen(function* () {
+        const start = query.cursor === undefined ? 0 : Number.parseInt(query.cursor, 10);
+        const size = query.limit === undefined ? 50 : Number.parseInt(query.limit, 10);
+        // Same bound as `commits`: a path history walks the whole graph to
+        // find its next entry, so taking only what the page needs matters
+        // more here than it does for a plain log.
+        const walked = yield* Stream.runCollect(
+          pathHistory(params.oid as Oid, query.path, { limit: start + size + 1 }),
+        ).pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return page([...walked], query);
+      }),
+    )
+    .handle("bisect", ({ payload }) =>
+      bisectNext({ bad: payload.bad as Oid, good: payload.good as ReadonlyArray<Oid> }).pipe(
+        Effect.catchTag("StorageFailure", Effect.die),
+      ),
     ),
 );
 

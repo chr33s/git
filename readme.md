@@ -97,8 +97,14 @@ per repository whose errors cross the wire as tagged values
 The JSON API covers commits and content (`commit`, `commit-pack`, `blob`,
 `tree`, `files`, `file`, `object`), history (`log`, `commits`, `diff`), refs
 (`refs`, `branches`, `tags`, `reset`, `reflog`), history rewriting (`merge`,
-`cherry-pick`, `rebase`), `grep`, and maintenance (`fsck`, `gc`) — plus
+`cherry-pick`, `rebase`), search (`grep`, `history`, `bisect`), remotes
+(`remotes`, `fetch`, `push`, `pull`) and maintenance (`fsck`, `gc`) — plus
 webhook registration, which is what makes a push deliver.
+
+A repository can act as a client of another one: remotes are registered per
+repository with an optional credential that is stored rather than sent, and
+`pull` reports a non-fast-forward as its own outcome instead of guessing
+whether a merge or a rebase was wanted.
 
 There is also a working tree, for the CLI and any other host that has files
 on disk: `status`, `add`, `rm`, `mv`, `restore`, `switch` and `commit`, over

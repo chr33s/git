@@ -14,8 +14,14 @@
  * The answer is not "the middle of the list". History is a graph, and the
  * candidate worth testing is the one whose result rules out the most either
  * way — the commit that best halves the remaining set, which for a linear
- * history is the middle and for a merge-heavy one is not. That is the same
- * choice `git rev-list --bisect` makes, and the tests hold this to it.
+ * history is the middle and for a merge-heavy one is not. That is what
+ * `git rev-list --bisect` computes, and the tests hold this to it.
+ *
+ * Where two commits halve the set equally well — seven suspects split three
+ * and four either way — there is no better one, and this may name the other
+ * one git would. The tests say so precisely: they compare against
+ * `--bisect-all`, which reports every candidate's distance, and require the
+ * chosen commit to be of maximal distance rather than to be git's pick.
  */
 import { Effect } from "effect";
 

@@ -1,11 +1,17 @@
 /**
  * Bisect, against `git rev-list --bisect`.
  *
- * "Picks a good commit to test" is not a checkable claim; "picks the same
- * commit git picks" is, and git's choice is the definition of a good one. So
- * the interop tests build a history, ask both, and compare — on a linear
- * history where the answer is obvious, and on a merge-heavy one where it is
- * not and a naive midpoint would diverge.
+ * "Picks a good commit to test" is not a checkable claim on its own, so the
+ * interop tests build a history and ask git — on a linear history where the
+ * answer is obvious, and on a merge-heavy one where it is not and a naive
+ * midpoint would diverge.
+ *
+ * Where the best candidate is unique they compare oid to oid. Where two
+ * commits halve the range equally well they compare against
+ * `--bisect-all`, which annotates every candidate with its distance, and
+ * require a maximal one: pinning git's pick there would be asserting its
+ * tie-break rather than the quality of the answer, and would fail on a
+ * choice that is exactly as good.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -146,6 +152,29 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
   const theirs = (bad: string, good: ReadonlyArray<string>) =>
     git("rev-list", "--bisect", bad, ...good.map((oid) => `^${oid}`)).trim();
 
+  /**
+   * Every candidate and how well it halves the range, which is what makes
+   * "is this a good choice" checkable rather than "is this git's choice".
+   */
+  const distances = (bad: string, good: ReadonlyArray<string>) =>
+    git("rev-list", "--bisect-all", bad, ...good.map((oid) => `^${oid}`))
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => {
+        const [oid] = line.split(" ");
+        const distance = /dist=(\d+)/.exec(line)?.[1];
+        return { oid: oid!, distance: Number(distance ?? 0) };
+      });
+
+  /** The chosen commit halves the range as well as anything could. */
+  const assertOptimal = (chosen: string, bad: string, good: ReadonlyArray<string>) => {
+    const all = distances(bad, good);
+    const best = Math.max(...all.map((entry) => entry.distance));
+    const mine = all.find((entry) => entry.oid === chosen);
+    assert.notEqual(mine, undefined, "the chosen commit is one git considers a candidate");
+    assert.equal(mine?.distance, best, `chose dist=${mine?.distance}, best available is ${best}`);
+  };
+
   /** `file` is a parameter so two branches can move without conflicting. */
   const commit = (message: string, file = "n.txt") => {
     execFileSync("sh", ["-c", `echo ${message} > ${file}`], { cwd: root });
@@ -180,6 +209,28 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
     assert.equal((await ours(narrowed, good)).commit, theirs(narrowed, good));
   });
 
+  it("picks an equally good commit where git has a tie to break", async () => {
+    git("init", "-q", "-b", "main", ".");
+
+    // Seven suspects split three and four either way, so two commits are
+    // exactly as informative and there is no better one to name. Asserting
+    // git's own pick here would be pinning its tie-break, not our answer.
+    const made: string[] = [];
+    for (let index = 0; index < 8; index++) made.push(commit(`c${index}`));
+
+    const bad = made[7]!;
+    const good = [made[0]!];
+    const step = await ours(bad, good);
+
+    assert.equal(step.remaining, 7);
+    assertOptimal(step.commit, bad, good);
+    assert.equal(
+      distances(bad, good).filter((entry) => entry.distance === 3).length,
+      2,
+      "the fixture really does present a tie",
+    );
+  });
+
   it("picks the same commit as git across a merge", async () => {
     git("init", "-q", "-b", "main", ".");
 
@@ -200,7 +251,7 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
     // list would be the wrong answer here and git's choice is not it either.
     const good = [root0];
     const mine = await ours(bad, good);
-    assert.equal(mine.commit, theirs(bad, good));
+    assertOptimal(mine.commit, bad, good);
     assert.equal(
       mine.remaining,
       Number(git("rev-list", "--count", bad, `^${root0}`).trim()),
@@ -224,7 +275,7 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
     const good = [made[0]!];
     for (;;) {
       const step = await ours(bad, good);
-      assert.equal(step.commit, theirs(bad, good), "same choice at every step");
+      assertOptimal(step.commit, bad, good);
       if (step.kind === "found") break;
       if (isBad(step.commit!)) bad = step.commit!;
       else good.push(step.commit!);
