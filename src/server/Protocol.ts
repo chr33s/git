@@ -20,7 +20,7 @@ import { createGunzip } from "node:zlib";
 import { Effect, Stream } from "effect";
 
 import { type GitError, Invalid, PackCorrupt } from "../git/Error.ts";
-import { bandChunks, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
+import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
@@ -88,6 +88,34 @@ const headers = (type: string) => ({
   "content-type": type,
 });
 
+/** `Git-Protocol: version=2`, which is how a client opts in to v2. */
+const isVersionTwo = (request: Request): boolean =>
+  (request.headers.get("git-protocol") ?? "")
+    .split(":")
+    .some((value) => value.trim() === "version=2");
+
+/**
+ * Protocol v2's advertisement: capabilities only, no refs.
+ *
+ * That is the whole point of v2 — a repository with fifty thousand refs no
+ * longer sends all of them before the client can say it only wants one. The
+ * refs come back from `ls-refs`, filtered by prefix.
+ */
+const advertiseV2 = (): Response =>
+  new Response(
+    asBody(
+      concat([
+        pkt("version 2\n"),
+        pkt(`${AGENT}\n`),
+        pkt("ls-refs=unborn\n"),
+        pkt("fetch=shallow\n"),
+        pkt("object-format=sha1\n"),
+        FLUSH,
+      ]),
+    ),
+    { headers: headers("application/x-git-upload-pack-advertisement") },
+  );
+
 /** `GET /info/refs?service=…` — refs, capabilities on the first line. */
 export const advertise = (
   service: "git-upload-pack" | "git-receive-pack",
@@ -139,6 +167,20 @@ const step = <A>(run: () => Promise<A>) =>
 export const uploadPack = (request: Request): Effect.Effect<Response, GitError, Repository> =>
   Effect.gen(function* () {
     const repository = yield* Repository;
+
+    // v2 is a different conversation, and the client announces it in a
+    // header rather than in the body — so the version is known before a
+    // single pkt-line is read.
+    if (isVersionTwo(request)) {
+      const parsed = yield* readV2(new PktReader(body(request)));
+      if (parsed.command === "ls-refs") return yield* lsRefs(parsed);
+      if (parsed.command === "fetch") return yield* fetchV2(parsed);
+      return yield* new Invalid({
+        field: "command",
+        reason: `unknown v2 command '${parsed.command}'`,
+      });
+    }
+
     const reader = new PktReader(body(request));
 
     const wants: Oid[] = [];
@@ -155,7 +197,10 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
       for (;;) {
         const item = await reader.next();
         if (item === "eof") return;
-        if (item === "flush") continue;
+        // v2's separators cannot appear in a v0 body, and treating them as
+        // nothing keeps the reader total rather than throwing on a byte
+        // sequence this branch simply does not expect.
+        if (item === "flush" || item === "delim" || item === "end") continue;
         let line = text(item);
 
         // Capabilities ride on the first `want`, space-separated after the
@@ -269,6 +314,199 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
     });
   });
 
+/** A v2 request: a command, then capabilities, then `0001`, then arguments. */
+interface V2Request {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+}
+
+const readV2 = (reader: PktReader) =>
+  step(async (): Promise<V2Request> => {
+    let command = "";
+    const args: string[] = [];
+    let afterDelim = false;
+
+    for (;;) {
+      const item = await reader.next();
+      if (item === "eof" || item === "flush") break;
+      if (item === "delim") {
+        afterDelim = true;
+        continue;
+      }
+      if (item === "end") break;
+
+      const line = text(item);
+      if (afterDelim) args.push(line);
+      else if (line.startsWith("command=")) command = line.slice(8);
+    }
+
+    return { command, args };
+  });
+
+/**
+ * `ls-refs`: the refs a client asks for, rather than every ref there is.
+ *
+ * `peel` and `symrefs` are opt-in for the same reason — an annotated tag's
+ * target and HEAD's symbolic name both cost a read, and most callers want
+ * neither.
+ */
+const lsRefs = (request: V2Request): Effect.Effect<Response, GitError, Repository> =>
+  Effect.gen(function* () {
+    const repository = yield* Repository;
+    const refs = yield* repository.refs;
+    const head = yield* repository.head;
+
+    const prefixes = request.args
+      .filter((line) => line.startsWith("ref-prefix "))
+      .map((line) => line.slice(11));
+    const peel = request.args.includes("peel");
+    const symrefs = request.args.includes("symrefs");
+    const unborn = request.args.includes("unborn");
+
+    const matches = (name: string) =>
+      prefixes.length === 0 || prefixes.some((prefix) => name.startsWith(prefix));
+
+    const lines: Uint8Array[] = [];
+
+    const headOid = refs.find(([name]) => name === head)?.[1];
+    if (matches("HEAD")) {
+      if (headOid !== undefined) {
+        lines.push(pkt(`${headOid} HEAD${symrefs ? ` symref-target:${head}` : ""}\n`));
+      } else if (unborn) {
+        // A repository with no commits still has a HEAD, and v2 has a way to
+        // say so — which is what lets a clone of an empty repo set up the
+        // right branch name rather than guessing.
+        lines.push(pkt(`unborn HEAD${symrefs ? ` symref-target:${head}` : ""}\n`));
+      }
+    }
+
+    for (const [name, oid] of refs) {
+      if (!matches(name)) continue;
+      let line = `${oid} ${name}`;
+      if (peel && name.startsWith("refs/tags/")) {
+        const peeled = yield* repository.readTag(oid).pipe(
+          Effect.map((tag) => tag.object),
+          // A lightweight tag points straight at its target: nothing to peel.
+          Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+        );
+        if (peeled !== null) line += ` peeled:${peeled}`;
+      }
+      lines.push(pkt(`${line}\n`));
+    }
+
+    lines.push(FLUSH);
+    return new Response(asBody(concat(lines)), {
+      headers: headers("application/x-git-upload-pack-result"),
+    });
+  });
+
+/**
+ * `fetch`: the same negotiation as v0, in named sections.
+ *
+ * The packfile section is always multiplexed in v2 — side-band is not a
+ * capability here, it is the format — so the `sideband` flag v0 carries has
+ * no counterpart.
+ */
+const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Repository> =>
+  Effect.gen(function* () {
+    const repository = yield* Repository;
+
+    const wants: Oid[] = [];
+    const haves: Oid[] = [];
+    const clientShallow: Oid[] = [];
+    const notRefs: string[] = [];
+    let depth: number | undefined;
+    let since: Date | undefined;
+    let done = false;
+
+    for (const line of request.args) {
+      const [keyword] = line.split(" ", 1);
+      const argument = line.slice((keyword?.length ?? 0) + 1);
+      const oid = argument.slice(0, 40);
+
+      if (keyword === "want" && isOid(oid)) wants.push(oid);
+      else if (keyword === "have" && isOid(oid)) haves.push(oid);
+      else if (keyword === "shallow" && isOid(oid)) clientShallow.push(oid);
+      else if (keyword === "deepen") {
+        const value = Number.parseInt(argument, 10);
+        if (Number.isInteger(value) && value > 0) depth = value;
+      } else if (keyword === "deepen-since") {
+        const seconds = Number.parseInt(argument, 10);
+        if (Number.isInteger(seconds)) since = new Date(seconds * 1000);
+      } else if (keyword === "deepen-not") notRefs.push(argument);
+      else if (line === "done") done = true;
+    }
+
+    if (wants.length === 0) {
+      return yield* new Invalid({ field: "fetch", reason: "no 'want' lines" });
+    }
+
+    const deepening = depth !== undefined || since !== undefined || notRefs.length > 0;
+
+    // Without `done` the client is still negotiating: answer the
+    // acknowledgments section and let it come back.
+    if (!done) {
+      const common: Oid[] = [];
+      for (const have of haves) if (yield* repository.contains(have)) common.push(have);
+
+      const lines: Uint8Array[] = [pkt("acknowledgments\n")];
+      if (common.length === 0) lines.push(pkt("NAK\n"));
+      else {
+        for (const oid of common) lines.push(pkt(`ACK ${oid}\n`));
+        // `ready` says the server can build a pack now, which is what ends
+        // the round trip rather than inviting another one.
+        lines.push(pkt("ready\n"));
+      }
+      lines.push(FLUSH);
+
+      if (common.length === 0) {
+        return new Response(asBody(concat(lines)), {
+          headers: headers("application/x-git-upload-pack-result"),
+        });
+      }
+      // With `ready` the pack follows in the same response, so fall through.
+    }
+
+    const plan = yield* repository.fetch({
+      wants,
+      haves,
+      clientShallow,
+      ...(depth === undefined ? {} : { depth }),
+      ...(since === undefined ? {} : { since }),
+      ...(notRefs.length === 0 ? {} : { notRefs }),
+    });
+
+    const prelude: Uint8Array[] = [];
+    if (!done) {
+      prelude.push(pkt("acknowledgments\n"));
+      for (const have of haves) {
+        if (yield* repository.contains(have)) prelude.push(pkt(`ACK ${have}\n`));
+      }
+      prelude.push(pkt("ready\n"), DELIM);
+    }
+    if (deepening) {
+      prelude.push(pkt("shallow-info\n"));
+      for (const oid of plan.shallow) prelude.push(pkt(`shallow ${oid}\n`));
+      for (const oid of plan.unshallow) prelude.push(pkt(`unshallow ${oid}\n`));
+      prelude.push(DELIM);
+    }
+    prelude.push(pkt("packfile\n"));
+
+    const packStream = Stream.concat(
+      Stream.fromIterable([concat(prelude)]),
+      Stream.concat(
+        repository
+          .packOids(plan.oids)
+          .pipe(Stream.flatMap((bytes) => Stream.fromIterable(bandChunks(bytes)))),
+        Stream.fromIterable([FLUSH]),
+      ),
+    );
+
+    return new Response(Stream.toReadableStream(packStream), {
+      headers: headers("application/x-git-upload-pack-result"),
+    });
+  });
+
 const report = (results: ReadonlyArray<ReceiveResult>, unpacked: string): Uint8Array =>
   concat([
     pkt(`unpack ${unpacked}\n`),
@@ -292,7 +530,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     yield* step(async () => {
       for (;;) {
         const item = await reader.next();
-        if (item === "eof" || item === "flush") return;
+        if (item === "eof" || item === "flush" || item === "delim" || item === "end") return;
         const line = text(item);
 
         let command = line;
@@ -394,6 +632,11 @@ export const handle = (request: Request): Effect.Effect<Response | null, GitErro
     if (request.method === "GET" && last === "refs" && segments.at(-2) === "info") {
       const service = url.searchParams.get("service");
       if (service === "git-upload-pack" || service === "git-receive-pack") {
+        // v2 advertises capabilities and no refs; the refs come from
+        // `ls-refs`, which is the saving the version exists for.
+        if (service === "git-upload-pack" && isVersionTwo(request)) {
+          return Effect.succeed(advertiseV2());
+        }
         return advertise(service);
       }
       // The dumb protocol is not served here.

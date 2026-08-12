@@ -22,6 +22,10 @@ export const pkt = (line: string | Uint8Array): Uint8Array => {
   return out;
 };
 export const FLUSH = encoder.encode("0000");
+/** Protocol v2 separates a command's arguments from its header with `0001`. */
+export const DELIM = encoder.encode("0001");
+/** And ends a response with `0002`, so a client knows nothing more follows. */
+export const RESPONSE_END = encoder.encode("0002");
 
 /**
  * Side-band channels, as `side-band-64k` defines them: pack bytes on 1,
@@ -90,13 +94,17 @@ export class PktReader {
     return out;
   }
 
-  /** One pkt-line's payload, `"flush"`, or `"eof"`. */
-  async next(): Promise<Uint8Array | "flush" | "eof"> {
+  /** One pkt-line's payload, or one of the special packets. */
+  async next(): Promise<Uint8Array | "flush" | "delim" | "end" | "eof"> {
     const header = await this.#read(4);
     if (header === null) return "eof";
     const length = Number.parseInt(decoder.decode(header), 16);
     if (Number.isNaN(length)) throw corrupt(`bad pkt-line length '${decoder.decode(header)}'`);
     if (length === 0) return "flush";
+    // 1 and 2 are v2's delimiter and response-end; they are lengths no v0
+    // reader would accept, which is how the formats stay distinguishable.
+    if (length === 1) return "delim";
+    if (length === 2) return "end";
     if (length < 4) throw corrupt(`bad pkt-line length ${length}`);
     if (length === 4) return new Uint8Array(0);
     const payload = await this.#read(length - 4);

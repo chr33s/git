@@ -39,7 +39,9 @@ const advertisedRefs = async (body: ReadableStream<Uint8Array> | null) => {
   for (;;) {
     const item = await reader.next();
     if (item === "eof") break;
-    if (item === "flush") continue;
+    // `delim`/`end` belong to protocol v2; this is a v0 advertisement, so
+    // they are nothing to act on either way.
+    if (item === "flush" || item === "delim" || item === "end") continue;
     const line = decoder.decode(item).replace(/\n$/, "");
     if (line.startsWith("# service=")) continue;
     const oid = line.slice(0, 40);

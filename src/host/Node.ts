@@ -141,9 +141,28 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // the handlers see the second spelling either way.
       url.pathname = `/${repo}${matched.rest === "" ? "" : `/${matched.rest}`}`;
 
+      /**
+       * Everything but the hop-by-hop headers.
+       *
+       * This was an allowlist, and the allowlist was a bug generator: it
+       * silently dropped `Git-Protocol`, so a client asking for protocol v2
+       * got a v0 advertisement and quietly fell back — the failure mode of
+       * an omission here is a feature that looks like it works.
+       */
       const headers = new Headers();
-      for (const name of ["content-type", "content-encoding", "accept", "authorization"]) {
-        const value = incoming.headers[name];
+      const hopByHop = new Set([
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+      ]);
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (hopByHop.has(name)) continue;
         if (typeof value === "string") headers.set(name, value);
       }
       const method = incoming.method ?? "GET";

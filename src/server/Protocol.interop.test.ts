@@ -145,6 +145,73 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
     return oids;
   };
 
+  it("serves protocol v2: ls-refs and fetch", async () => {
+    await seedHistory("v2", 3);
+    await inRepo(
+      "v2",
+      Effect.gen(function* () {
+        return yield* (yield* Repository).tag({
+          name: "v1",
+          target: "refs/heads/main",
+          message: "tagged\n",
+          tagger: author,
+        });
+      }),
+    );
+
+    const work = path.join(root, "work-v2");
+    // v2 is what modern git prefers; forcing it here means the assertion is
+    // about our v2 path rather than about git's default of the day.
+    await git(root, "-c", "protocol.version=2", "clone", "--quiet", `${base}/v2`, work);
+
+    assert.equal((await git(work, "rev-list", "--count", "HEAD")).trim(), "3");
+    await git(work, "fsck", "--strict");
+
+    // ls-refs with a prefix, which is the saving v2 exists for.
+    const remote = await git(
+      root,
+      "-c",
+      "protocol.version=2",
+      "ls-remote",
+      "--heads",
+      `${base}/v2`,
+    );
+    assert.match(remote, /refs\/heads\/main$/m);
+    assert.doesNotMatch(remote, /refs\/tags/);
+
+    // Tag peeling: `ls-remote --tags` asks for it, and an annotated tag has
+    // a target to report.
+    const tags = await git(root, "-c", "protocol.version=2", "ls-remote", "--tags", `${base}/v2`);
+    assert.match(tags, /refs\/tags\/v1$/m);
+    assert.match(tags, /refs\/tags\/v1\^\{\}$/m);
+
+    // An incremental fetch over v2 exercises the negotiation, not just the
+    // first-clone path.
+    await seedHistory("v2", 1);
+    await git(work, "-c", "protocol.version=2", "fetch", "--quiet", "origin", "main");
+    assert.equal((await git(work, "rev-list", "--count", "origin/main")).trim(), "4");
+  });
+
+  it("serves a shallow clone over protocol v2", async () => {
+    await seedHistory("v2shallow", 4);
+
+    const work = path.join(root, "work-v2-shallow");
+    await git(
+      root,
+      "-c",
+      "protocol.version=2",
+      "clone",
+      "--quiet",
+      "--depth=1",
+      `${base}/v2shallow`,
+      work,
+    );
+
+    assert.equal((await git(work, "rev-list", "--count", "HEAD")).trim(), "1");
+    assert.equal((await git(work, "rev-parse", "--is-shallow-repository")).trim(), "true");
+    await git(work, "fsck", "--strict");
+  });
+
   it("writes annotated tags the git binary reads back", async () => {
     const commit = await seed("tagged");
 
