@@ -8,58 +8,27 @@
  * `wrangler.json` still ships and is what the integration suite drives.
  * Deploying this path needs Cloudflare credentials, so CI only checks that
  * the stack builds — see `alchemy.run.test.ts`.
+ *
+ *   alchemy dev · alchemy deploy --stage pr-123 · alchemy destroy
  */
-import * as Alchemy from "alchemy/Cloudflare";
+import * as Alchemy from "alchemy";
+import * as Cloudflare from "alchemy/Cloudflare";
 import { Effect } from "effect";
-import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
-import { Repo } from "./host/Cloudflare.ts";
+import GitLive, { Git } from "./worker.ts";
 
 export { Objects } from "./objects.ts";
+export { Git, type GitShape } from "./worker.ts";
 
-/**
- * The Worker is a router: resolve `/:repo` to a DO stub and forward. Same job
- * as `git/Durable.ts`'s default export, with one difference — `repos` is a
- * typed stub derived from the DO class, so a renamed method is a compile
- * error rather than a 500 at the edge.
- */
-/** The Worker's public contract: it serves HTTP, nothing more. */
-export type GitShape = {
-  readonly fetch: Effect.Effect<
-    HttpServerResponse.HttpServerResponse,
-    never,
-    HttpServerRequest.HttpServerRequest
-  >;
-};
-
-export class Git extends Alchemy.Worker<Git, GitShape>()("git") {}
-
-/**
- * The layer form, because the Worker binds the DO: `Repo.make` in
- * `host/Cloudflare.ts` provides `Repo`, this requires it, and the two compose
- * into the stack. The class-with-implementation form cannot express that.
- */
-export default Git.make(
-  {
-    main: import.meta.url,
-    compatibility: { date: "2025-12-10", flags: ["nodejs_compat"] },
-  },
+export default Alchemy.Stack(
+  "git",
+  // Local state (`.alchemy/`), so planning and `alchemy dev` need no
+  // Cloudflare account; deploys still authenticate through the provider.
+  { providers: Cloudflare.providers(), state: Alchemy.localState() },
   Effect.gen(function* () {
-    const repos = yield* Repo;
-
-    return {
-      fetch: Effect.gen(function* () {
-        const request = yield* HttpServerRequest.HttpServerRequest;
-        const name = new URL(request.url, "http://x").pathname.split("/")[1];
-        if (name === undefined || name === "") {
-          return HttpServerResponse.text("No repository in URL", { status: 400 });
-        }
-
-        const response = yield* repos
-          .getByName(name)
-          .fetch(new Request(request.url, { method: request.method }));
-        return HttpServerResponse.raw(response);
-      }),
-    };
-  }),
+    // Declaring the Worker provisions everything it hosts and binds: the DO
+    // by contract, and the bucket the DO resolves `Objects` through.
+    const worker = yield* Git;
+    return { url: worker.url };
+  }).pipe(Effect.provide(GitLive)),
 );

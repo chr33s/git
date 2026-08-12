@@ -97,5 +97,8 @@ export default Repo.make(
           }),
       };
     });
-  }),
+    // One binding implementation serves both phases: at deploy time it
+    // registers `r2_bucket` on the host Worker, at runtime it builds the
+    // client. Its own requirements are absorbed by `.make()`.
+  }).pipe(Effect.provide(Alchemy.R2.ReadWriteBucketBinding)),
 );

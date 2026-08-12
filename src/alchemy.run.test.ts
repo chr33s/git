@@ -14,8 +14,9 @@ import wrangler from "../wrangler.json" with { type: "json" };
 
 describe("alchemy stack", () => {
   it("builds the resource graph: bucket, durable object, worker", async () => {
-    const [stack, host, objects] = await Promise.all([
+    const [stack, worker, host, objects] = await Promise.all([
       import("./alchemy.run.ts"),
+      import("./worker.ts"),
       import("./host/Cloudflare.ts"),
       import("./objects.ts"),
     ]);
@@ -25,8 +26,11 @@ describe("alchemy stack", () => {
     assert.ok(host.Repo, "the durable object class exists");
     assert.ok(stack.Git, "the worker class exists");
 
-    // Both default exports are layers — the Worker's requires the DO's.
-    assert.equal(typeof stack.default, "object", "the worker layer is the default export");
+    // The CLI contract: `alchemy.run.ts` default-exports the stack, and the
+    // worker module default-exports its layer (the bundler resolves `main`'s
+    // default export), which in turn provides the DO's layer.
+    assert.equal(typeof stack.default, "object", "the stack is the default export");
+    assert.equal(typeof worker.default, "object", "the worker layer is worker.ts's default export");
     assert.equal(typeof host.default, "object", "the durable object layer is the default export");
   });
 
