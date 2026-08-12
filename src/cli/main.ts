@@ -21,7 +21,12 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-import { NodeRuntime, NodeServices } from "@effect/platform-node";
+// Deep imports, not the package barrel: the index re-exports the whole
+// platform (undici, ws, msgpackr, ioredis), which defeats tree-shaking and
+// costs the bundled CLI ~1 MiB and ~20 ms of startup for modules no command
+// reaches.
+import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Config, Console, Effect, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 

@@ -112,22 +112,24 @@ child's `ru_maxrss`. Work-tree and history actions run in a 200-commit,
 
 | action            | `git`  | `chr33s-git` | `git` peak RSS | `chr33s-git` peak RSS |
 | ----------------- | ------ | ------------ | -------------- | --------------------- |
-| `--version`       | 1 ms   | 186 ms       | 12 MiB         | 121 MiB               |
-| `init`            | 3 ms   | 178 ms       | 12 MiB         | 121 MiB               |
-| `status`          | 2 ms   | 274 ms       | 12 MiB         | 136 MiB               |
-| `add` (one file)  | 2 ms   | 198 ms       | 13 MiB         | 124 MiB               |
-| `commit`          | 80 ms  | 198 ms       | 26 MiB         | 131 MiB               |
-| `log -n 20`       | 2 ms   | 196 ms       | 13 MiB         | 126 MiB               |
-| `clone` over HTTP | 573 ms | 1395 ms      | 20 MiB         | 200 MiB               |
+| `--version`       | 1 ms   | 103 ms       | 12 MiB         | 99 MiB                |
+| `init`            | 3 ms   | 103 ms       | 12 MiB         | 99 MiB                |
+| `status`          | 2 ms   | 193 ms       | 12 MiB         | 114 MiB               |
+| `add` (one file)  | 2 ms   | 109 ms       | 13 MiB         | 102 MiB               |
+| `commit`          | 92 ms  | 116 ms       | 26 MiB         | 108 MiB               |
+| `log -n 20`       | 2 ms   | 113 ms       | 13 MiB         | 104 MiB               |
+| `clone` over HTTP | 578 ms | 1244 ms      | 20 MiB         | 191 MiB               |
 
 `git` wins every row, and the shape of the loss is fixed cost, not algorithm:
-~180 ms of every run is V8 startup and module evaluation — the floor visible
-under `--version` — and ~120 MiB of the RSS is the node runtime the binary
-carries. The work on top of that floor is 10–90 ms per action (commit adds
-~12 ms against git's 80 ms total). Clone, the one action that exercises
-negotiation, pack parsing and storage together, comes in at 2.4× git's wall
-clock and 10× its memory. The binary itself is 144 MiB against git's ~4 MiB,
-for the same reason.
+~100 ms of every run is the runtime coming up — ~23 ms of that is node itself
+(a hello-world SEA binary's floor), the rest is effect's module
+initialization, with parse/compile already paid for by the V8 code cache the
+build embeds. ~95 MiB of the RSS is the node runtime the binary carries. The
+work on top of that floor is 6–90 ms per action (commit adds ~13 ms against
+git's 92 ms total). Clone, the one action that exercises negotiation, pack
+parsing and storage together, comes in at 2.2× git's wall clock and ~10× its
+memory. The binary itself is 143 MiB against git's ~4 MiB, for the same
+reason.
 
 What the binary buys instead of speed: one file with zero dependencies, and
 the same TypeScript the Worker, the node host and the browser client run — a
