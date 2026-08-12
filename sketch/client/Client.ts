@@ -14,7 +14,7 @@
 import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { HttpApiClient } from "effect/unstable/httpapi";
-import { opfs } from "../adapters/Browser.ts";
+import { opfs } from "../adapters/Local.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { api } from "../server/Api.ts";
 

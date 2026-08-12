@@ -120,6 +120,13 @@ export interface IndexEntry {
   readonly mtime: Date;
 }
 
-/** The layer set every runtime has to supply. */
-export type Stores = ObjectStore | RefStore | IndexStore;
+/**
+ * The layer set every runtime has to supply.
+ *
+ * `ServerStores` is the subset a server needs — no staging area, because a bare
+ * repository has no work tree. Splitting it keeps the Cloudflare host from
+ * having to invent an `IndexStore` it would never call.
+ */
+export type ServerStores = ObjectStore | RefStore;
+export type Stores = ServerStores | IndexStore;
 export type StoreLayer<E = never> = Layer.Layer<Stores, E>;

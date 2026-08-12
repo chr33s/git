@@ -14,7 +14,7 @@
 import { Effect, Layer } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
-import { memory, node } from "../adapters/Browser.ts";
+import { memory, node } from "../adapters/Local.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 

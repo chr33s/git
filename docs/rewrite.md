@@ -9,8 +9,9 @@ just be ported code are `declare const` stubs, so the shapes and the wiring are
 checked while the git internals stay out of the way. The dependencies are not
 added to `package.json` — the check was run against a scratch install.
 
-Typechecking it rather than eyeballing it was worth doing: it caught three
-design errors that read fine on the page, all noted below.
+Typechecking it rather than eyeballing it was worth doing: it caught four
+design errors that read fine on the page, all noted below — including one in
+this sketch's own layering.
 
 Pinned against what actually exists today:
 
@@ -114,9 +115,10 @@ flowchart TB
 	CF & OPFS & NODE & MEM -.provide.-> ports
 ```
 
-The point of the diagram is the dotted line: `Repository` and both HTTP edges
-name only the three ports, so the same program is what runs in the DO, in the
-tab, in the CLI and in a test. Today that same program is written three times.
+The point of the diagram is the dotted lines. `Repository` and both HTTP edges
+name only the three ports and `RepoHost`, so the same program runs in the DO, on
+node, in the tab, in the CLI and in a test. Today that same program is written
+three times.
 
 ### Module map
 
@@ -128,13 +130,13 @@ tab, in the CLI and in a test. Today that same program is written three times.
 | `git.pack.ts`, `git.protocol.ts`               | 1,153 | `git/Pack.ts` — `Stream`/`Channel`         |
 | `git.object|delta|index|merge|utils.ts`        | 2,351 | ported as-is behind `git/Format.ts`        |
 | `git.hooks.ts`                                 |   163 | `Hooks` service                            |
-| `server.ts` (DO + routing)                     | 1,130 | `server/Repo.ts` (~120)                    |
+| `server.ts` (DO + routing)                     | 1,130 | `server/App.ts` + `host/*` (~200)          |
 | `server.api.ts`                                | 2,515 | `server/Api.ts` — one `HttpApi` decl       |
 | `server.webhooks.ts`                           |   257 | `server/Webhooks.ts` — a `Schedule`        |
 | `server.lfs.ts`, `server.storage.ts`           |   981 | folded into the R2 layer                   |
 | `client.ts`                                    | 1,007 | `Repository` + derived client (~250)       |
 | `cli.ts`                                       | 1,991 | `cli/main.ts` — `Command` tree (~350)      |
-| `worker.ts` + `wrangler.json`                  |    32 | `alchemy.run.ts`                           |
+| `worker.ts` + `wrangler.json`                  |    32 | `alchemy.run.ts` + `host/Cloudflare.ts`    |
 
 13,819 non-test lines today. The plausible landing zone is 7–8k: the savings are
 concentrated in `server.api.ts` (schema replaces hand validation and hand
@@ -185,11 +187,11 @@ pkt-line framing becomes a `Channel`, which means a truncated frame is a typed
 
 Two constraints the typechecker made explicit here, both worth knowing before
 phase 3 starts. A response body outlives the handler effect, so it cannot carry
-requirements — the upload-pack stream has to be pinned with
-`Stream.provideContext` before it is handed to `HttpServerResponse`. And R2's
-`put` only accepts an uncoloured stream, so a request body streamed into storage
-must already be free of platform requirements. Both are one line each, and both
-would have been silent runtime surprises in a hand-written port.
+requirements: `Repository.pack` closes over its own stores and hands back a
+plain `Stream`, which is what lets it go straight to `HttpServerResponse`. And
+R2's `put` only accepts an uncoloured stream, so a request body streamed into
+storage must already be free of platform requirements. Both would have been
+silent runtime surprises in a hand-written port.
 
 ### Concurrency and lifetime
 
@@ -215,8 +217,9 @@ Two edges, deliberately:
   `client.ts` and the CLI, and `/api/openapi.json`. The 45 endpoint tables in
   `readme.md` become generated output.
 
-Both mount into one `HttpRouter.toWebHandler(...)` inside the DO
-([`sketch/server/Repo.ts`](../sketch/server/Repo.ts)).
+Both mount into one `HttpRouter.toWebHandler(...)` in
+[`sketch/server/App.ts`](../sketch/server/App.ts), which no host-specific code
+touches.
 
 One thing the group prefix `/api/:repo` forces: the `repo` path parameter has to
 be declared in each endpoint's `params` schema. Leave it out and the server
@@ -224,10 +227,47 @@ still compiles — it is the *derived client* that fails, because it cannot buil
 a URL for a segment nobody described. Worth knowing early, since it is the kind
 of thing that gets discovered at the end of a mechanical port of 45 endpoints.
 
+### Portability
+
+There is no provider-neutral `Alchemy.Worker` or `Alchemy.DurableObject` to
+reach for. In alchemy@next both are Cloudflare resources —
+`Alchemy.Worker(...)` and `Alchemy.DurableObject(...)` come from
+`alchemy/Cloudflare`, which is what [`sketch/alchemy.run.ts`](../sketch/alchemy.run.ts)
+and [`sketch/host/Cloudflare.ts`](../sketch/host/Cloudflare.ts) import. What
+alchemy *does* offer across providers is the request shape: a Worker's `serve`
+and `alchemy/Http`'s `NodeHttpServer` / `BunHttpServer` take the same
+`HttpEffect`.
+
+So portability is not a framework feature to switch on — it is one file,
+[`sketch/host/Host.ts`](../sketch/host/Host.ts), naming the three things a git
+server actually needs from a host:
+
+| capability  | why it exists                                   | Cloudflare                  | node / bun            |
+| ----------- | ----------------------------------------------- | --------------------------- | --------------------- |
+| `stores`    | one repository's objects and refs               | R2 + DO SQLite              | a directory           |
+| `serialize` | two pushes to a ref must not interleave the CAS | the DO input gate (nothing) | a `Semaphore` per repo |
+| `background`| webhook delivery outliving the response         | `state.waitUntil`           | `Effect.forkDetach`   |
+
+Above that line — `server/*`, `git/*` — nothing names a provider; `grep -l
+alchemy sketch/` hits only `host/`, `adapters/Cloudflare.ts` and the stack file.
+
+The unit that moves between hosts is **one app instance bound to one
+repository** ([`App.forRepo`](../sketch/server/App.ts)). That is not an
+arbitrary choice: `Repository` is *constructed* from `ObjectStore` and
+`RefStore`, so storage resolves when the layer is built, not when a request
+arrives — which is exactly the Durable Object model. Cloudflare gets an instance
+per repo from the platform; [`host/Node.ts`](../sketch/host/Node.ts) reproduces
+it with a `Map` keyed by repo name and a lock around dispatch.
+
+The node host is worth having on its own merits, provider story aside: `npm run
+dev` and the e2e suite stop spawning `wrangler dev` on port 8080
+(`test.helpers.ts` does today), self-hosting becomes a supported shape rather
+than a fork, and the CLI can run the server in-process.
+
 ### Infrastructure
 
-[`sketch/alchemy.run.ts`](../sketch/alchemy.run.ts). The R2 bucket and the DO
-class are values in the same program that uses them;
+[`sketch/alchemy.run.ts`](../sketch/alchemy.run.ts). `Alchemy.R2.Bucket` and
+`Alchemy.DurableObject` are values in the same program that uses them;
 `Cloudflare.R2.ReadWriteBucket(Objects)` yields the binding, the env var and the
 typed client from one call. That deletes `wrangler.json`, the generated
 `worker-configuration.d.ts`, and the `postinstall` codegen step.
@@ -259,11 +299,13 @@ the ratchet: it runs against both implementations until the last phase.
 | 2     | `Repository` service; re-point `server.ts` at it (still a DO class)   | medium |
 | 3     | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed | high  |
 | 4     | `HttpApi` for the JSON API; derive the client; delete duplicated types | medium |
-| 5     | alchemy stack; delete `wrangler.json` + codegen; preview stages        | medium |
+| 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages | medium |
+| 5b    | node host — drops `wrangler dev` from `npm run dev` and the e2e suite  | low    |
 | 6     | CLI on `effect/unstable/cli`; delete the argv parser                   | low    |
 
 Phase 3 is the one worth doing even if the rest is deferred — it is the only
-phase that fixes a bug users can hit.
+phase that fixes a bug users can hit. Phase 5b is the cheapest thing on the
+list once 5 lands, and it pays for itself in test runtime.
 
 ---
 
@@ -276,6 +318,17 @@ phase that fixes a bug users can hit.
 - **Bundle size in a Worker.** Effect core plus `unstable/http` plus
   `unstable/httpapi` is not small. Needs a measurement against the 3 MiB
   (compressed) limit before phase 4, not after.
+- **The edges were reaching past the domain — caught by the types.** The first
+  version had `Api.ts` and `Protocol.ts` doing `yield* RefStore` directly.
+  That compiles, but it makes storage a *per-request* requirement of every
+  route, so `toWebHandler` demanded a `Context<ObjectStore | RefStore>` on every
+  call and no host could bind an app instance to a repository. Routing those
+  reads through `Repository` (`refs`, `resolve`, `head`, `branch`, `pack`, and
+  `receive` taking the pack stream) fixed the requirement and tightened the
+  layering: the HTTP edges now know about one service, not three. Worth
+  remembering during phase 4, when 45 endpoints get ported and the shortcut is
+  tempting each time.
+
 - **`RuntimeContext` colouring — resolved, with a cost.** Alchemy's Cloudflare
   bindings return effects requiring `RuntimeContext` (it holds the invocation's
   `env`/`ExecutionContext`). The first version of this sketch threaded it

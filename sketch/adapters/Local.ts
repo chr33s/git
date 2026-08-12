@@ -1,5 +1,5 @@
 /**
- * Browser (OPFS) and Node (fs) stores.
+ * Local stores: browser (OPFS), node (fs), and in-memory.
  *
  * Today these are `OpfsStorage` (`src/client.storage.ts`) and `NodeStorage`
  * (`src/cli.storage.ts`), two more implementations of the same 16-method
@@ -14,24 +14,40 @@
  */
 import { Effect, Layer } from "effect";
 import { FileSystem, Path } from "effect";
-import { IndexStore, ObjectStore, RefStore } from "../git/Store.ts";
+import { IndexStore, ObjectStore, RefStore, type ServerStores, type Stores } from "../git/Store.ts";
 
 /** Browser: OPFS directories under `<repo>/objects`, refs in one file per ref. */
-export declare const opfs: (repo: string) => Layer.Layer<ObjectStore | RefStore | IndexStore>;
+export declare const opfs: (repo: string) => Layer.Layer<Stores>;
 
 /**
  * Node: built on the platform `FileSystem`/`Path` services rather than direct
  * `node:fs` imports, so CLI tests run against an in-memory filesystem layer and
  * stop needing a temp directory per test (`test.helpers.ts` today).
  */
-export const node = (root: string): Layer.Layer<ObjectStore, never, FileSystem.FileSystem | Path.Path> =>
-  Layer.effect(
-    ObjectStore,
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      return makeNodeObjectStore(fs, path, root);
-    }),
+export const node = (
+  root: string,
+): Layer.Layer<ServerStores, never, FileSystem.FileSystem | Path.Path> =>
+  Layer.mergeAll(
+    Layer.effect(
+      ObjectStore,
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        return makeNodeObjectStore(fs, path, root);
+      }),
+    ),
+    Layer.effect(
+      RefStore,
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        // Atomic ref update is `write temp + rename(2)` per ref, under the
+        // host's per-repo lock for the batch. The port made this mandatory —
+        // today `NodeStorage` simply omits `applyRefChanges` and the caller
+        // races.
+        return makeNodeRefStore(fs, path, root);
+      }),
+    ),
   );
 
 declare const makeNodeObjectStore: (
@@ -39,6 +55,11 @@ declare const makeNodeObjectStore: (
   path: Path.Path,
   root: string,
 ) => ObjectStore["Service"];
+declare const makeNodeRefStore: (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  root: string,
+) => RefStore["Service"];
 
 /**
  * In-memory, for tests. Today the equivalent is `MemoryStorage` in
@@ -46,4 +67,4 @@ declare const makeNodeObjectStore: (
  * here it is a layer swap at the edge of a test, and everything under it —
  * including `Repository` and the HTTP handlers — is unchanged.
  */
-export declare const memory: Layer.Layer<ObjectStore | RefStore | IndexStore>;
+export declare const memory: Layer.Layer<Stores>;

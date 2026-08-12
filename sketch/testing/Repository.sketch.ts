@@ -15,10 +15,11 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Fiber, Layer, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { HttpApiTest } from "effect/unstable/httpapi";
-import { memory } from "../adapters/Browser.ts";
+import { memory } from "../adapters/Local.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Hooks, Repository } from "../git/Repository.ts";
 import { api } from "../server/Api.ts";
+import * as App from "../server/App.ts";
 
 const noHooks = Layer.succeed(Hooks, {
   preReceive: () => Effect.void,
@@ -68,6 +69,21 @@ describe("Repository", () => {
   );
 });
 
+describe("app", () => {
+  // The portability claim, as a test: no Worker, no node:http, no host at all —
+  // just the app bound to in-memory stores and a `Request`.
+  it.effect("serves the ref advertisement over in-memory stores", () =>
+    Effect.gen(function* () {
+      const { dispose, handler } = App.forRepo(Layer.mergeAll(memory, testHost));
+      const response = yield* Effect.promise(() =>
+        handler(new Request("http://x/demo/info/refs?service=git-upload-pack")),
+      );
+      assert.strictEqual(response.status, 200);
+      yield* Effect.promise(dispose);
+    }),
+  );
+});
+
 describe("api", () => {
   // Runs the actual router and codecs in-process: no port, no wrangler, no
   // global setup file — and it exercises the same handler the DO serves.
@@ -92,6 +108,9 @@ describe("api", () => {
 declare const withApi: <A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ) => Effect.Effect<A, E, Scope.Scope>;
+
+/** A `RepoHost` that isolates nothing and serializes nothing — a test is alone. */
+declare const testHost: Layer.Layer<Exclude<App.Env, import("../git/Store.ts").ServerStores>>;
 
 declare const emptyTree: Effect.Effect<import("../git/Store.ts").Oid>;
 declare const alice: import("../git/Format.ts").Signature;

@@ -20,13 +20,13 @@ import {
 import { PackCorrupt } from "../git/Error.ts";
 import * as Pack from "../git/Pack.ts";
 import { Repository } from "../git/Repository.ts";
-import { ObjectStore, RefStore } from "../git/Store.ts";
+import type { ObjectStore, RefStore } from "../git/Store.ts";
 
 const advertise = (service: "git-upload-pack" | "git-receive-pack") =>
   Effect.gen(function* () {
-    const refs = yield* RefStore;
-    const all = yield* refs.list();
-    const head = yield* refs.head;
+    const repository = yield* Repository;
+    const all = yield* repository.refs;
+    const head = yield* repository.head;
 
     const lines = [
       Pack.pktLine.encode(new TextEncoder().encode(`# service=${service}\n`)),
@@ -59,8 +59,7 @@ const receivePack = Effect.gen(function* () {
   );
 
   const [commands, pack] = yield* splitCommands(body);
-  yield* Pack.parse(pack);
-  const results = yield* repository.receive(commands, { atomic: true });
+  const results = yield* repository.receive(commands, { atomic: true, pack });
 
   return HttpServerResponse.uint8Array(
     concat(
@@ -79,16 +78,16 @@ const receivePack = Effect.gen(function* () {
 /** upload-pack: response body is the lazily built pack. */
 const uploadPack = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
+  const repository = yield* Repository;
   const wants = yield* parseWants(
     request.stream.pipe(Stream.mapError((cause) => new PackCorrupt({ reason: String(cause) }))),
   );
 
-  // A response body outlives the handler effect, so it cannot carry
-  // requirements — the services it needs are pinned to it here. This is the
-  // point where "the walk runs while the bytes are flowing" is made explicit.
-  const context = yield* Effect.context<ObjectStore>();
-
-  return HttpServerResponse.stream(Pack.write(wants).pipe(Stream.provideContext(context)), {
+  // A response body outlives the handler effect, so it must not carry
+  // requirements. `repository.pack` closes over its stores and hands back a
+  // plain stream — the walk runs while the bytes are flowing, and a client
+  // hang-up interrupts it.
+  return HttpServerResponse.stream(repository.pack(wants), {
     contentType: "application/x-git-upload-pack-result",
   });
 });

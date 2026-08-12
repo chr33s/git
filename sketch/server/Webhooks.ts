@@ -7,16 +7,16 @@
  * runs inside the receive-pack request, so a subscriber that takes 10s makes
  * the push take 10s.
  *
- * Sketch: the retry policy is a `Schedule` value, delivery is a forked fiber
- * registered with `waitUntil`, and concurrency across subscribers is a
- * parameter. Same behaviour, but the policy is testable with `TestClock`
- * instead of a real 8-second wait.
+ * Sketch: the retry policy is a `Schedule` value, delivery is handed to
+ * `RepoHost.background`, and concurrency across subscribers is a parameter.
+ * Same behaviour, but the policy is testable with `TestClock` instead of a real
+ * 8-second wait — and this file no longer knows whether "background" means
+ * `waitUntil` or a daemon fiber.
  */
 import { Duration, Effect, Layer, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
-import * as Cloudflare from "alchemy/Cloudflare";
-import type { RuntimeContext } from "alchemy/RuntimeContext";
 import { Context } from "effect";
+import { RepoHost } from "../host/Host.ts";
 import type { ReceiveResult } from "../git/Repository.ts";
 import { Hooks } from "../git/Repository.ts";
 
@@ -50,11 +50,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
     const subscribers = yield* Subscribers;
-    const state = yield* Cloudflare.DurableObjectState;
-    // `waitUntil` belongs to the invocation, so its context is captured here
-    // rather than leaking into the `Hooks` port — same trick as the store
-    // adapter, and the reason `Hooks` is platform-agnostic.
-    const runtime = yield* Effect.context<RuntimeContext>();
+    const host = yield* RepoHost;
 
     const deliver = (results: ReadonlyArray<ReceiveResult>) =>
       Effect.gen(function* () {
@@ -85,10 +81,9 @@ export const layer = Layer.effect(
     return {
       preReceive: () => Effect.void,
       update: () => Effect.void,
-      // Delivery outlives the response without holding it: the push returns
-      // as soon as the refs are durable.
-      postReceive: (results) =>
-        state.waitUntil(deliver(results)).pipe(Effect.provideContext(runtime), Effect.ignore),
+      // Delivery outlives the response without holding it: the push returns as
+      // soon as the refs are durable, and the host keeps the work alive.
+      postReceive: (results) => host.background(deliver(results)),
     };
   }),
 ).pipe(Layer.provide(FetchHttpClient.layer));

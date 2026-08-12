@@ -14,7 +14,7 @@ import { Effect, Layer, Schema, Stream } from "effect";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import { Invalid, ObjectNotFound, RefConflict } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
-import { type Oid, RefStore } from "../git/Store.ts";
+import type { Oid } from "../git/Store.ts";
 
 /** Wire representation of an oid; the domain's `Oid` is the branded form. */
 const OidString = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
@@ -101,8 +101,8 @@ export const refsLive = HttpApiBuilder.group(api, "refs", (handlers) =>
   handlers
     .handle("list", () =>
       Effect.gen(function* () {
-        const store = yield* RefStore;
-        const all = yield* store.list().pipe(Effect.orDie);
+        const repository = yield* Repository;
+        const all = yield* repository.refs.pipe(Effect.orDie);
         return {
           items: all.map(([name, oid]) => ({ name, oid })),
           next_cursor: null,
@@ -112,22 +112,11 @@ export const refsLive = HttpApiBuilder.group(api, "refs", (handlers) =>
     )
     .handle("branch", ({ payload }) =>
       Effect.gen(function* () {
-        const store = yield* RefStore;
-        const base = yield* store.resolve(payload.base).pipe(Effect.orDie);
-        if (base === null) {
-          return yield* new Invalid({ field: "base", reason: "unknown ref" });
-        }
-        const [result] = yield* store
-          .apply([{ name: `refs/heads/${payload.name}`, value: base, expected: null }])
+        const repository = yield* Repository;
+        const oid = yield* repository
+          .branch(payload)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        if (!result?.applied) {
-          return yield* new RefConflict({
-            ref: payload.name,
-            expected: null,
-            actual: result?.current ?? null,
-          });
-        }
-        return { name: payload.name, oid: base };
+        return { name: payload.name, oid };
       }),
     ),
 );
@@ -137,8 +126,7 @@ export const commitsLive = HttpApiBuilder.group(api, "commits", (handlers) =>
     .handle("log", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const store = yield* RefStore;
-        const head = yield* store.resolve(payload.ref).pipe(Effect.orDie);
+        const head = yield* repository.resolve(payload.ref).pipe(Effect.orDie);
         if (head === null) return { items: [], next_cursor: null, has_more: false };
         const items = yield* repository
           .log(head, { limit: payload.limit ?? 50 })
@@ -173,8 +161,6 @@ export const commitsLive = HttpApiBuilder.group(api, "commits", (handlers) =>
  * the handlers are checked against, so `readme.md`'s endpoint tables stop being
  * hand-maintained.
  */
-export const layer = Layer.mergeAll(
-  HttpApiBuilder.layer(api, { openapiPath: "/api/openapi.json" }),
-  refsLive,
-  commitsLive,
+export const layer = HttpApiBuilder.layer(api, { openapiPath: "/api/openapi.json" }).pipe(
+  Layer.provide(Layer.mergeAll(refsLive, commitsLive)),
 );

@@ -12,15 +12,20 @@
  * and the typed client come from one call. `wrangler.json` and the generated
  * env types both go away.
  *
+ * `Alchemy` is `alchemy/Cloudflare`: `Worker`, `DurableObject` and `R2` are
+ * Cloudflare resources. This file is allowed to know that. `server/App.ts` —
+ * the actual git server — is not, which is why `host/Node.ts` can serve the
+ * same program from `node:http`.
+ *
  * Deploy: `alchemy deploy` / `alchemy deploy --stage pr-123` / `alchemy destroy`.
  */
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Alchemy from "alchemy/Cloudflare";
 import { Effect } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
-import { Repo } from "./server/Repo.ts";
+import { Repo } from "./host/Cloudflare.ts";
 
 /** Git objects and LFS payloads. One bucket, prefixed per repo. */
-export const Objects = Cloudflare.R2.Bucket("git-objects");
+export const Objects = Alchemy.R2.Bucket("git-objects");
 
 /**
  * The Worker is a router: resolve `/:repo` to a DO stub and forward. That is
@@ -29,7 +34,7 @@ export const Objects = Cloudflare.R2.Bucket("git-objects");
  * than a 500 at the edge. `Repo` in the third type argument is the Worker's
  * public contract: this script hosts the DO, and other scripts may bind it.
  */
-export class Git extends Cloudflare.Worker<Git, {}, Repo>()("git") {}
+export class Git extends Alchemy.Worker<Git, {}, Repo>()("git") {}
 
 export default Git.make(
   {
@@ -57,9 +62,7 @@ export default Git.make(
   }),
 );
 
-declare const toRequest: (
-  request: HttpServerRequest.HttpServerRequest,
-) => Effect.Effect<Request>;
+declare const toRequest: (request: HttpServerRequest.HttpServerRequest) => Effect.Effect<Request>;
 
 /**
  * What this replaces, concretely:
@@ -72,6 +75,6 @@ declare const toRequest: (
  *
  * What it adds that we do not have today: `--stage` previews (a full stack per
  * PR, torn down on close), and a local runtime that runs the same program
- * against local R2/DO emulation, so `npm run dev` and the e2e suite stop
- * needing a spawned `wrangler dev` on port 8080 (`test.helpers.ts`).
+ * against local R2/DO emulation — plus `host/Node.ts`, which runs it with no
+ * emulation at all.
  */
