@@ -332,6 +332,119 @@ describe("Api", () => {
   );
 
   it.live(
+    "reads the tree by path: files, one file, raw objects, reflog and grep",
+    () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const commit = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "seed",
+            author: alice,
+            files: [
+              { path: "readme.md", content: "# Title\nhello world\n" },
+              { path: "src/a.ts", content: "export const a = 1;\nconst hello = 2;\n" },
+              { path: "src/deep/b.ts", content: "export const b = 3;\n" },
+            ],
+          },
+        });
+
+        // Paths, recursively, from a ref rather than a tree oid — which is
+        // how a caller who has a branch name and no oids asks.
+        const all = yield* client.repo.files({ params: { repo: "r" }, query: {} });
+        assert.deepEqual(
+          all.files.map((file) => file.path),
+          ["readme.md", "src/a.ts", "src/deep/b.ts"],
+        );
+
+        const scoped = yield* client.repo.files({
+          params: { repo: "r" },
+          query: { path: "src" },
+        });
+        assert.deepEqual(
+          scoped.files.map((file) => file.path),
+          ["src/a.ts", "src/deep/b.ts"],
+        );
+
+        const file = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { path: "src/a.ts" },
+        });
+        assert.equal(atob(file.content), "export const a = 1;\nconst hello = 2;\n");
+        assert.equal(file.mode, "100644");
+
+        const missing = yield* client.repo
+          .file({ params: { repo: "r" }, query: { path: "nope.txt" } })
+          .pipe(Effect.flip);
+        assert.equal(missing._tag, "ObjectNotFound");
+
+        // The raw object, whatever its type — the escape hatch for a caller
+        // that knows git's model.
+        const raw = yield* client.repo.object({ params: { repo: "r", oid: commit.oid } });
+        assert.equal(raw.type, "commit");
+        assert.match(atob(raw.content), /^tree [0-9a-f]{40}/);
+
+        const log = yield* client.repo.reflog({
+          params: { repo: "r" },
+          query: { ref: "refs/heads/main" },
+        });
+        assert.equal(log.entries.length, 1);
+        assert.equal(log.entries[0]!.to, commit.oid);
+        assert.equal(log.entries[0]!.from, null);
+
+        const found = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "hello" },
+        });
+        assert.deepEqual(
+          found.matches.map((match) => [match.path, match.line]),
+          [
+            ["readme.md", 2],
+            ["src/a.ts", 2],
+          ],
+        );
+        assert.equal(found.truncated, false);
+
+        const cased = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "HELLO", ignore_case: true },
+        });
+        assert.equal(cased.matches.length, 2);
+
+        const scopedGrep = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "hello", path: "src/" },
+        });
+        assert.deepEqual(
+          scopedGrep.matches.map((match) => match.path),
+          ["src/a.ts"],
+        );
+
+        // A cap, and an honest flag when it bites.
+        const capped = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "e", max_matches: 1 },
+        });
+        assert.equal(capped.matches.length, 1);
+        assert.equal(capped.truncated, true);
+
+        // A bad regex is the caller's mistake, not a 500.
+        const bad = yield* client.repo
+          .grep({ params: { repo: "r" }, payload: { pattern: "([unclosed" } })
+          .pipe(Effect.flip);
+        assert.equal(bad._tag, "Invalid");
+
+        // …and the same string as a fixed pattern is fine.
+        const literal = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "([unclosed", fixed: true },
+        });
+        assert.deepEqual(literal.matches, []);
+      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+  );
+
+  it.live(
     "collects what no ref can reach, and nothing else",
     () =>
       Effect.gen(function* () {

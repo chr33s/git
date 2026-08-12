@@ -18,7 +18,7 @@ import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/u
 import { Invalid, ObjectNotFound, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { isOid, type Oid } from "../git/Store.ts";
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 
 /** Wire representation of an oid; the domain's `Oid` is the branded form. */
@@ -143,6 +143,59 @@ const treeFor = (
       ...(base === undefined ? {} : { base }),
       changes: changesOf(payload.files),
     });
+  });
+
+/** The tree a ref names, defaulting to HEAD — what "at this revision" means. */
+const treeOfRef = (repository: Repository["Service"], ref: string | undefined) =>
+  Effect.gen(function* () {
+    const name = ref === undefined || ref === "" ? "HEAD" : ref;
+    const oid = isOid(name) ? name : yield* repository.resolve(name);
+    if (oid === null) return yield* new Invalid({ field: "ref", reason: `unknown ref '${name}'` });
+
+    // A ref may name a commit, a tag that peels to one, or a tree outright.
+    const object = yield* repository.readObject(oid);
+    if (object.type === "tree") return oid;
+    if (object.type === "tag") {
+      const tag = yield* repository.readTag(oid);
+      return (yield* repository.readCommit(tag.object)).tree;
+    }
+    return (yield* repository.readCommit(oid)).tree;
+  }).pipe(Effect.catchTag("StorageFailure", Effect.die));
+
+const subtreeAt = (repository: Repository["Service"], tree: Oid, path: string) =>
+  repository.findPath(tree, path).pipe(
+    Effect.catchTag("StorageFailure", Effect.die),
+    Effect.flatMap((entry) =>
+      entry === null || entry.mode !== "40000"
+        ? Effect.fail(new ObjectNotFound({ oid: path }))
+        : Effect.succeed(entry.oid),
+    ),
+  );
+
+/**
+ * A grep predicate. A bad pattern is the caller's mistake and says so, rather
+ * than arriving as a 500 from deep inside the walk.
+ */
+const matcher = (payload: {
+  readonly pattern: string;
+  readonly fixed?: boolean | undefined;
+  readonly ignore_case?: boolean | undefined;
+}) =>
+  Effect.suspend((): Effect.Effect<(line: string) => boolean, Invalid> => {
+    if (payload.fixed === true) {
+      const needle = payload.ignore_case === true ? payload.pattern.toLowerCase() : payload.pattern;
+      return Effect.succeed((line) =>
+        (payload.ignore_case === true ? line.toLowerCase() : line).includes(needle),
+      );
+    }
+    try {
+      const expression = new RegExp(payload.pattern, payload.ignore_case === true ? "i" : "");
+      return Effect.succeed((line) => expression.test(line));
+    } catch (cause) {
+      return Effect.fail(
+        new Invalid({ field: "pattern", reason: cause instanceof Error ? cause.message : "bad" }),
+      );
+    }
   });
 
 const repo = HttpApiGroup.make("repo")
@@ -304,6 +357,90 @@ const repo = HttpApiGroup.make("repo")
         problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
         dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
       }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("files", "/files", {
+      params: RepoParam,
+      query: { ref: Schema.optional(Schema.String), path: Schema.optional(Schema.String) },
+      success: Schema.Struct({
+        files: Schema.Array(
+          Schema.Struct({ path: Schema.String, mode: Schema.String, oid: OidString }),
+        ),
+      }),
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("file", "/file", {
+      params: RepoParam,
+      query: { ref: Schema.optional(Schema.String), path: Schema.String },
+      success: Schema.Struct({
+        path: Schema.String,
+        mode: Schema.String,
+        oid: OidString,
+        content: Schema.String,
+        encoding: Schema.Literals(["base64"]),
+        size: Schema.Finite,
+      }),
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("object", "/object/:oid", {
+      params: { ...RepoParam, oid: OidString },
+      success: Schema.Struct({
+        oid: OidString,
+        type: Schema.Literals(["blob", "tree", "commit", "tag"]),
+        size: Schema.Finite,
+        content: Schema.String,
+        encoding: Schema.Literals(["base64"]),
+      }),
+      error: ObjectNotFound,
+    }),
+  )
+  .add(
+    // The ref name has slashes, so it is a query parameter rather than a
+    // path segment — `refs/heads/main` in a path would need escaping every
+    // caller would get wrong.
+    HttpApiEndpoint.get("reflog", "/reflog", {
+      params: RepoParam,
+      query: { ref: Schema.String },
+      success: Schema.Struct({
+        entries: Schema.Array(
+          Schema.Struct({
+            from: Schema.NullOr(OidString),
+            to: Schema.NullOr(OidString),
+            at: Schema.String,
+            message: Schema.String,
+          }),
+        ),
+      }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("grep", "/grep", {
+      params: RepoParam,
+      payload: Schema.Struct({
+        pattern: Schema.String,
+        ref: Schema.optional(Schema.String),
+        path: Schema.optional(Schema.String),
+        ignore_case: Schema.optional(Schema.Boolean),
+        fixed: Schema.optional(Schema.Boolean),
+        /** Bounded by default: a grep over a big tree is a lot of lines. */
+        max_matches: Schema.optional(Schema.Finite),
+      }),
+      success: Schema.Struct({
+        matches: Schema.Array(
+          Schema.Struct({
+            path: Schema.String,
+            line: Schema.Finite,
+            text: Schema.String,
+          }),
+        ),
+        truncated: Schema.Boolean,
+      }),
+      error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -521,6 +658,117 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           problems: report.problems,
           dangling_refs: report.danglingRefs,
         };
+      }),
+    )
+    .handle("files", ({ query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const tree = yield* treeOfRef(repository, query.ref);
+        const root =
+          query.path === undefined || query.path === ""
+            ? tree
+            : yield* subtreeAt(repository, tree, query.path);
+        const files = yield* repository
+          .listFiles(root, query.path === undefined ? {} : { prefix: query.path })
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { files };
+      }),
+    )
+    .handle("file", ({ query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const tree = yield* treeOfRef(repository, query.ref);
+        const entry = yield* repository
+          .findPath(tree, query.path)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        if (entry === null || entry.mode === "40000") {
+          return yield* new ObjectNotFound({ oid: query.path });
+        }
+        const data = yield* repository
+          .readBlob(entry.oid)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return {
+          path: query.path,
+          mode: entry.mode,
+          oid: entry.oid,
+          content: toBase64(data),
+          encoding: "base64" as const,
+          size: data.length,
+        };
+      }),
+    )
+    .handle("object", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const object = yield* repository
+          .readObject(params.oid as Oid)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return {
+          oid: params.oid,
+          type: object.type,
+          size: object.data.length,
+          content: toBase64(object.data),
+          encoding: "base64" as const,
+        };
+      }),
+    )
+    .handle("reflog", ({ query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const entries = yield* repository
+          .reflog(query.ref)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return {
+          entries: entries.map((entry) => ({
+            from: entry.from,
+            to: entry.to,
+            at: entry.at.toISOString(),
+            message: entry.message,
+          })),
+        };
+      }),
+    )
+    .handle("grep", ({ payload }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+
+        const test = yield* matcher(payload);
+        const tree = yield* treeOfRef(repository, payload.ref);
+        const files = yield* repository
+          .listFiles(tree)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+
+        const limit = payload.max_matches ?? 200;
+        const matches: Array<{ path: string; line: number; text: string }> = [];
+        let truncated = false;
+
+        for (const file of files) {
+          if (matches.length >= limit) {
+            truncated = true;
+            break;
+          }
+          if (payload.path !== undefined && !file.path.startsWith(payload.path)) continue;
+
+          const data = yield* repository
+            .readBlob(file.oid)
+            .pipe(Effect.catchTag("StorageFailure", Effect.die));
+          // A binary file has no lines worth reporting, and git skips them
+          // for the same reason.
+          if (data.subarray(0, 8000).includes(0)) continue;
+
+          const lines = new TextDecoder().decode(data).split("\n");
+          for (let index = 0; index < lines.length; index++) {
+            const text = lines[index]!;
+            if (!test(text)) continue;
+            matches.push({ path: file.path, line: index + 1, text });
+            if (matches.length >= limit) {
+              truncated = true;
+              break;
+            }
+          }
+        }
+
+        return { matches, truncated };
       }),
     )
     .handle("gc", ({ payload }) =>

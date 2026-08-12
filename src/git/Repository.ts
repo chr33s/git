@@ -33,7 +33,15 @@ import {
   type TreeEntry,
 } from "./Format.ts";
 import * as Pack from "./Pack.ts";
-import { isOid, ObjectStore, type Oid, type RawObject, RefStore, type RefUpdate } from "./Store.ts";
+import {
+  isOid,
+  ObjectStore,
+  type Oid,
+  type RawObject,
+  type ReflogEntry,
+  RefStore,
+  type RefUpdate,
+} from "./Store.ts";
 
 export interface Commit extends CommitInfo {
   readonly oid: Oid;
@@ -87,6 +95,12 @@ export interface FsckReport {
   readonly danglingRefs: ReadonlyArray<{ readonly ref: string; readonly oid: Oid }>;
 }
 
+export interface TreeFile {
+  readonly path: string;
+  readonly mode: string;
+  readonly oid: Oid;
+}
+
 export interface GcReport {
   readonly scanned: number;
   readonly reachable: number;
@@ -113,6 +127,8 @@ export class Repository extends Context.Service<
       oid: Oid,
     ) => Effect.Effect<ReadonlyArray<TreeEntry>, ObjectNotFound | StorageFailure>;
     readonly readBlob: (oid: Oid) => Effect.Effect<Uint8Array, ObjectNotFound | StorageFailure>;
+    /** Any object, type included — what a caller holding only an oid needs. */
+    readonly readObject: (oid: Oid) => Effect.Effect<RawObject, ObjectNotFound | StorageFailure>;
 
     readonly writeTree: (entries: ReadonlyArray<TreeEntry>) => Effect.Effect<Oid, StorageFailure>;
     readonly writeBlob: (data: Uint8Array) => Effect.Effect<Oid, StorageFailure>;
@@ -233,6 +249,36 @@ export class Repository extends Context.Service<
     readonly gc: (options?: {
       readonly dryRun?: boolean;
     }) => Effect.Effect<GcReport, ObjectNotFound | StorageFailure>;
+
+    /**
+     * The best common ancestor of two commits — the base a three-way merge
+     * is "three-way" about. `null` when the histories are unrelated.
+     */
+    readonly mergeBase: (
+      left: Oid,
+      right: Oid,
+    ) => Effect.Effect<Oid | null, ObjectNotFound | StorageFailure>;
+
+    /** Whether `descendant` can reach `ancestor`; a fast-forward is this. */
+    readonly isAncestor: (
+      ancestor: Oid,
+      descendant: Oid,
+    ) => Effect.Effect<boolean, ObjectNotFound | StorageFailure>;
+
+    /** Every path under a tree, depth-first, with the blob each names. */
+    readonly listFiles: (
+      tree: Oid,
+      options?: { readonly prefix?: string },
+    ) => Effect.Effect<ReadonlyArray<TreeFile>, ObjectNotFound | StorageFailure>;
+
+    /** One path's entry, or `null` when the tree has no such path. */
+    readonly findPath: (
+      tree: Oid,
+      path: string,
+    ) => Effect.Effect<TreeEntry | null, ObjectNotFound | StorageFailure>;
+
+    /** The reflog for a ref, newest last, as the stores recorded it. */
+    readonly reflog: (name: string) => Effect.Effect<ReadonlyArray<ReflogEntry>, StorageFailure>;
   }
 >()("git/Repository") {}
 
@@ -466,6 +512,56 @@ export const layer = Layer.effect(
       return root;
     });
 
+    /** Every commit reachable from `roots`, the commit graph only. */
+    const ancestry = (roots: ReadonlyArray<Oid>) =>
+      Effect.gen(function* () {
+        const seen = new Set<Oid>();
+        const stack = [...roots];
+        while (stack.length > 0) {
+          const oid = stack.pop()!;
+          if (seen.has(oid)) continue;
+          seen.add(oid);
+          const commit = yield* readCommit(oid).pipe(
+            Effect.map((value): CommitInfo | null => value),
+            // A history that runs into a missing commit is a shallow clone's
+            // normal shape, not a failure to walk.
+            Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+          );
+          if (commit !== null) stack.push(...commit.parents);
+        }
+        return seen;
+      });
+
+    /**
+     * Candidates are common ancestors that no other common ancestor can
+     * reach — without that filter every shared commit back to the root
+     * qualifies, and the "base" of a three-way merge would be the wrong one.
+     */
+    const mergeBase = Effect.fn("Repository.mergeBase")(function* (left: Oid, right: Oid) {
+      if (left === right) return left;
+
+      const leftSide = yield* ancestry([left]);
+      if (leftSide.has(right)) return right;
+      const rightSide = yield* ancestry([right]);
+      if (rightSide.has(left)) return left;
+
+      const shared = [...rightSide].filter((oid) => leftSide.has(oid));
+      if (shared.length === 0) return null;
+
+      const candidates = new Set(shared);
+      for (const oid of shared) {
+        const commit = yield* readCommit(oid).pipe(
+          Effect.map((value): CommitInfo | null => value),
+          Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+        );
+        if (commit === null) continue;
+        // Anything strictly behind another candidate is not the best one.
+        for (const older of yield* ancestry(commit.parents)) candidates.delete(older);
+      }
+
+      return candidates.values().next().value ?? shared[0] ?? null;
+    });
+
     const closure = (
       wants: ReadonlyArray<Oid>,
       haves: ReadonlyArray<Oid>,
@@ -613,6 +709,7 @@ export const layer = Layer.effect(
 
       readCommit,
       readTree: readTreeEntries,
+      readObject: objects.read,
       readBlob: (oid) =>
         objects
           .read(oid)
@@ -851,6 +948,50 @@ export const layer = Layer.effect(
 
         return { checked, problems, danglingRefs };
       }).pipe(Effect.withSpan("Repository.fsck")),
+
+      listFiles: Effect.fn("Repository.listFiles")(function* (tree, options) {
+        const files: TreeFile[] = [];
+        // Depth-first with an explicit stack rather than recursion: a deep
+        // tree is data, and data should not size the call stack.
+        const stack: Array<{ oid: Oid; prefix: string }> = [
+          { oid: tree, prefix: options?.prefix ?? "" },
+        ];
+
+        while (stack.length > 0) {
+          const { oid, prefix } = stack.pop()!;
+          for (const entry of yield* readTreeEntries(oid)) {
+            const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+            if (entry.mode === TREE_MODE) stack.push({ oid: entry.oid, prefix: path });
+            else files.push({ path, mode: entry.mode, oid: entry.oid });
+          }
+        }
+
+        return files.sort((left, right) => left.path.localeCompare(right.path));
+      }),
+
+      findPath: Effect.fn("Repository.findPath")(function* (tree, path) {
+        const segments = path.split("/").filter((segment) => segment !== "");
+        let current = tree;
+
+        for (let index = 0; index < segments.length; index++) {
+          const entries = yield* readTreeEntries(current);
+          const entry = entries.find((candidate) => candidate.name === segments[index]);
+          if (entry === undefined) return null;
+          if (index === segments.length - 1) return entry;
+          if (entry.mode !== TREE_MODE) return null;
+          current = entry.oid;
+        }
+
+        return null;
+      }),
+
+      reflog: refs.reflog,
+
+      mergeBase,
+      isAncestor: (ancestor, descendant) =>
+        ancestor === descendant
+          ? Effect.succeed(true)
+          : ancestry([descendant]).pipe(Effect.map((seen) => seen.has(ancestor))),
 
       gc: Effect.fn("Repository.gc")(function* (options) {
         const roots = (yield* refs.list("refs/")).map(([, oid]) => oid);
