@@ -22,34 +22,32 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
-import { Config, Console, Effect, Layer, Stream } from "effect";
+import { Config, Console, Effect, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { fetchRepository } from "../client/Fetch.ts";
 import { push } from "../client/Push.ts";
-import * as Checkout from "../git/Checkout.ts";
-import { next as bisectNext } from "../git/Bisect.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { Invalid } from "../git/Error.ts";
-import type { Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
-import { cherryPick, rebase } from "../git/Rebase.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
-import { IndexStore, WorkTree } from "../git/Work.ts";
-import { workspace } from "../git/Work.node.ts";
+import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
 import { hmacMint, hmacVerify, type Scope } from "../server/Auth.ts";
-
-const rootFlag = Flag.string("root").pipe(
-  Flag.withDefault("."),
-  Flag.withDescription("Directory holding one bare repository per subdirectory"),
-);
-
-const repoArgument = Argument.string("repo");
+import * as replay from "./replay.ts";
+import {
+  cliSignature,
+  mustResolve,
+  refNameOf,
+  repoArgument,
+  resolveRev,
+  rootFlag,
+  withRepo,
+} from "./shared.ts";
+import * as work from "./work.ts";
 
 /** One repository's stores as raw instances, for code that needs them directly. */
 const openStores = (directory: string) =>
@@ -57,87 +55,9 @@ const openStores = (directory: string) =>
     return { objects: yield* ObjectStore, refs: yield* RefStore };
   }).pipe(Effect.provide(stores(directory)));
 
-/**
- * Who a CLI commit is by. `git` reads `user.name`/`user.email` from its own
- * config; there is no such file here, so the environment is the one place a
- * caller can say, and the fallback is honest rather than a fake identity.
- */
-const cliSignature = (): Signature => ({
-  name: process.env["GIT_AUTHOR_NAME"] ?? process.env["USER"] ?? "chr33s-git",
-  email: process.env["GIT_AUTHOR_EMAIL"] ?? "chr33s-git@localhost",
-  at: new Date(),
-  offset: -new Date().getTimezoneOffset(),
-});
-
-/**
- * A revision as a user types it. `git` accepts `main` for
- * `refs/heads/main`, and a CLI that demanded the full name for every
- * argument would be the only thing here that did — so the disambiguation
- * lives at this layer, in git's own order, rather than in the ref store.
- */
-const resolveRev = (repository: Repository["Service"], rev: string) =>
-  Effect.gen(function* () {
-    if (isOid(rev)) return rev;
-    for (const candidate of [rev, `refs/heads/${rev}`, `refs/tags/${rev}`]) {
-      const found = yield* repository.resolve(candidate);
-      if (found !== null) return found;
-    }
-    return null;
-  });
-
-/** The full ref name a branch argument means, for commands that write one. */
-const refNameOf = (rev: string) => (rev.startsWith("refs/") ? rev : `refs/heads/${rev}`);
-
-/** `resolveRev` where not finding it is the end of the command. */
-const mustResolve = (repository: Repository["Service"], rev: string) =>
-  Effect.gen(function* () {
-    const oid = yield* resolveRev(repository, rev);
-    if (oid === null) {
-      return yield* new Invalid({ field: "ref", reason: `unknown revision '${rev}'` });
-    }
-    return oid;
-  });
-
 /** The tree a revision names: a ref, an oid, a tag that peels, or a tree. */
 const treeOf = (repository: Repository["Service"], rev: string) =>
   Effect.flatMap(mustResolve(repository, rev), (oid) => GitRepository.treeAt(repository, oid));
-
-/**
- * A checkout, rather than one of the bare repositories under `--root`.
- *
- * The working-tree commands are the only ones that need files on disk, so
- * they take `--work` — a directory whose repository is `.git` inside it,
- * which is the layout `git` itself uses and the reason the two can be
- * pointed at the same directory.
- */
-const workFlag = Flag.string("work").pipe(
-  Flag.withDefault("."),
-  Flag.withDescription("A checkout: a work tree whose repository is .git inside it"),
-);
-
-const withWork = <A, E>(
-  work: string,
-  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore>,
-) =>
-  effect.pipe(
-    Effect.provide(
-      GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provide(stores(path.join(work, ".git"))),
-        Layer.provideMerge(workspace(work)),
-      ),
-    ),
-  );
-
-const withRepo = <A, E>(root: string, repo: string, effect: Effect.Effect<A, E, Repository>) =>
-  effect.pipe(
-    Effect.provide(
-      GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provide(stores(path.join(root, repo))),
-      ),
-    ),
-  );
 
 const init = Command.make(
   "init",
@@ -681,47 +601,6 @@ const archiveCommand = Command.make(
     ),
 );
 
-/**
- * One bisect step, stateless.
- *
- * `git bisect` keeps a session in `.git`; this takes the known state as
- * arguments and prints the next commit to test. A shell loop is then the
- * whole session, and the same call works over HTTP where there is nothing to
- * keep a session in.
- */
-const bisectCommand = Command.make(
-  "bisect",
-  {
-    root: rootFlag,
-    repo: repoArgument,
-    bad: Flag.string("bad").pipe(Flag.withDescription("A revision known to have the problem")),
-    good: Flag.string("good").pipe(
-      Flag.atLeast(1),
-      Flag.withDescription("A revision known not to; repeat for more than one"),
-    ),
-  },
-  ({ bad, good, repo, root }) =>
-    withRepo(
-      root,
-      repo,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const step = yield* bisectNext({
-          bad: yield* mustResolve(repository, bad),
-          good: yield* Effect.forEach(good, (rev) => mustResolve(repository, rev)),
-        });
-
-        if (step.kind === "found") {
-          yield* Console.log(`${step.commit} is the first bad commit`);
-          return;
-        }
-        yield* Console.log(
-          `${step.commit}\t${step.remaining} revision(s) left, roughly ${step.steps} step(s)`,
-        );
-      }),
-    ),
-);
-
 const history = Command.make(
   "history",
   {
@@ -781,237 +660,19 @@ const reset = Command.make(
     ),
 );
 
-/** Both replay commands print the same ledger, so they share the printer. */
-const reportReplay = (outcome: {
-  readonly kind: string;
-  readonly head: Oid | null;
-  readonly commits: ReadonlyArray<{
-    readonly original: Oid;
-    readonly replayed: Oid | null;
-    readonly conflicts: ReadonlyArray<{ readonly path: string; readonly reason: string }>;
-  }>;
-}) =>
-  Effect.gen(function* () {
-    for (const entry of outcome.commits) {
-      for (const conflict of entry.conflicts) {
-        yield* Console.log(`CONFLICT (${conflict.reason}): ${conflict.path}`);
-      }
-      // A replay of `null` is a commit that produced nothing: already present
-      // on the target, or one whose change was empty once applied.
-      yield* Console.log(
-        entry.replayed === null
-          ? `skipped ${entry.original}`
-          : `${entry.original} -> ${entry.replayed}`,
-      );
-    }
-    yield* Console.log(`${outcome.kind}${outcome.head === null ? "" : ` at ${outcome.head}`}`);
-  });
-
-const cherryPickCommand = Command.make(
-  "cherry-pick",
-  {
-    root: rootFlag,
-    repo: repoArgument,
-    commit: Argument.string("commit"),
-    onto: Flag.string("onto").pipe(Flag.withDescription("The commit or branch to replay onto")),
-    into: Flag.string("into").pipe(
-      Flag.optional,
-      Flag.withDescription("Ref to move on success; absent computes the replay and stops"),
-    ),
-  },
-  ({ commit, into, onto, repo, root }) =>
-    withRepo(
-      root,
-      repo,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const outcome = yield* cherryPick({
-          commit: yield* mustResolve(repository, commit),
-          onto: yield* mustResolve(repository, onto),
-          author: cliSignature(),
-          ...(into._tag === "Some" ? { into: refNameOf(into.value) } : {}),
-        });
-        yield* reportReplay(outcome);
-      }),
-    ),
-);
-
-const rebaseCommand = Command.make(
-  "rebase",
-  {
-    root: rootFlag,
-    repo: repoArgument,
-    branch: Argument.string("branch"),
-    onto: Flag.string("onto").pipe(Flag.withDescription("The commit or branch to replay onto")),
-    into: Flag.string("into").pipe(
-      Flag.optional,
-      Flag.withDescription("Ref to move on success; absent computes the replay and stops"),
-    ),
-  },
-  ({ branch, into, onto, repo, root }) =>
-    withRepo(
-      root,
-      repo,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const outcome = yield* rebase({
-          branch: yield* mustResolve(repository, branch),
-          onto: yield* mustResolve(repository, onto),
-          // Defaulting `--into` to the branch is what makes `rebase main`
-          // move `main`, which is the only thing a caller ever means by it.
-          into: refNameOf(into._tag === "Some" ? into.value : branch),
-        });
-        yield* reportReplay(outcome);
-      }),
-    ),
-);
-
-/**
- * `git status --porcelain`, deliberately.
- *
- * Two columns — index against HEAD, then disk against the index — is the
- * format every script that reads git's status already parses, so it is the
- * one worth emitting rather than a prettier private one.
- */
-const statusCommand = Command.make("status", { work: workFlag }, ({ work }) =>
-  withWork(
-    work,
-    Effect.gen(function* () {
-      const current = yield* Checkout.status();
-      const letter = { added: "A", modified: "M", deleted: "D" } as const;
-
-      const staged = new Map(current.staged.map((entry) => [entry.path, letter[entry.change]]));
-      const unstaged = new Map(current.unstaged.map((entry) => [entry.path, letter[entry.change]]));
-
-      yield* Console.log(`## ${current.branch.replace(/^refs\/heads\//, "")}`);
-      for (const path of [...new Set([...staged.keys(), ...unstaged.keys()])].sort()) {
-        yield* Console.log(`${staged.get(path) ?? " "}${unstaged.get(path) ?? " "} ${path}`);
-      }
-      for (const path of current.untracked) yield* Console.log(`?? ${path}`);
-    }),
-  ),
-);
-
-const addCommand = Command.make(
-  "add",
-  { work: workFlag, paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })) },
-  ({ paths, work }) =>
-    withWork(
-      work,
-      Effect.gen(function* () {
-        for (const staged of yield* Checkout.add(paths)) yield* Console.log(staged);
-      }),
-    ),
-);
-
-const rm = Command.make(
-  "rm",
-  {
-    work: workFlag,
-    cached: Flag.boolean("cached").pipe(
-      Flag.withDescription("Unstage only, and leave the file on disk"),
-    ),
-    paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })),
-  },
-  ({ cached, paths, work }) =>
-    withWork(
-      work,
-      Effect.gen(function* () {
-        for (const removed of yield* Checkout.remove(paths, { cached }))
-          yield* Console.log(removed);
-      }),
-    ),
-);
-
-const mv = Command.make(
-  "mv",
-  { work: workFlag, from: Argument.string("from"), to: Argument.string("to") },
-  ({ from, to, work }) =>
-    withWork(
-      work,
-      Effect.gen(function* () {
-        const moved = yield* Checkout.move(from, to);
-        yield* Console.log(`${moved.from} -> ${moved.to}`);
-      }),
-    ),
-);
-
-const restore = Command.make(
-  "restore",
-  {
-    work: workFlag,
-    staged: Flag.boolean("staged").pipe(
-      Flag.withDescription("Restore the index rather than the work tree"),
-    ),
-    source: Flag.string("source").pipe(
-      Flag.optional,
-      Flag.withDescription("Take content from this revision instead of the index"),
-    ),
-    paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })),
-  },
-  ({ paths, source, staged, work }) =>
-    withWork(
-      work,
-      Effect.gen(function* () {
-        const restored = yield* Checkout.restore(paths, {
-          staged,
-          worktree: !staged,
-          ...(source._tag === "Some" ? { source: source.value } : {}),
-        });
-        for (const path of restored) yield* Console.log(path);
-      }),
-    ),
-);
-
-const switchCommand = Command.make(
-  "switch",
-  {
-    work: workFlag,
-    create: Flag.boolean("create").pipe(Flag.withDescription("Branch from HEAD first")),
-    force: Flag.boolean("force").pipe(
-      Flag.withDescription("Overwrite unstaged changes instead of refusing"),
-    ),
-    branch: Argument.string("branch"),
-  },
-  ({ branch, create, force, work }) =>
-    withWork(
-      work,
-      Effect.gen(function* () {
-        const result = yield* Checkout.checkout(branch, { create, force });
-        yield* Console.log(`${result.ref} ${result.oid} (${result.files} file(s))`);
-      }),
-    ),
-);
-
-const commitCommand = Command.make(
-  "commit",
-  {
-    work: workFlag,
-    message: Flag.string("message").pipe(Flag.withDescription("Commit message")),
-  },
-  ({ message, work }) =>
-    withWork(
-      work,
-      Effect.gen(function* () {
-        const made = yield* Checkout.commit({ message, author: cliSignature() });
-        yield* Console.log(`${made.oid} ${made.files} file(s)`);
-      }),
-    ),
-);
-
 const git = Command.make("chr33s-git").pipe(
   // Descriptions live here rather than beside each definition so `--help`
   // can be read as one list and checked for gaps in one place.
   Command.withSubcommands([
-    addCommand.pipe(Command.withDescription("Stage paths as they are on disk")),
+    work.addCommand.pipe(Command.withDescription("Stage paths as they are on disk")),
     archiveCommand.pipe(Command.withDescription("Write a tree as a tar, tar.gz or zip archive")),
-    bisectCommand.pipe(
+    replay.bisectCommand.pipe(
       Command.withDescription("Name the next commit to test between a good and a bad one"),
     ),
     branch.pipe(Command.withDescription("List, create or delete branches")),
-    cherryPickCommand.pipe(Command.withDescription("Replay one commit onto another")),
+    replay.cherryPickCommand.pipe(Command.withDescription("Replay one commit onto another")),
     clone.pipe(Command.withDescription("Clone a repository over smart HTTP")),
-    commitCommand.pipe(Command.withDescription("Commit what is staged")),
+    work.commitCommand.pipe(Command.withDescription("Commit what is staged")),
     diff.pipe(Command.withDescription("Unified diff between two revisions")),
     files.pipe(Command.withDescription("List the files a revision's tree holds")),
     fsck.pipe(Command.withDescription("Check every object and ref for damage")),
@@ -1021,19 +682,21 @@ const git = Command.make("chr33s-git").pipe(
     init.pipe(Command.withDescription("Create an empty bare repository")),
     log.pipe(Command.withDescription("Commit history, newest first")),
     merge.pipe(Command.withDescription("Three-way merge two revisions")),
-    mv.pipe(Command.withDescription("Move a tracked path, staging both halves")),
+    work.mv.pipe(Command.withDescription("Move a tracked path, staging both halves")),
     pushCommand.pipe(Command.withDescription("Push refs to a remote over smart HTTP")),
-    rebaseCommand.pipe(Command.withDescription("Replay a branch's commits onto another")),
+    replay.rebaseCommand.pipe(Command.withDescription("Replay a branch's commits onto another")),
     refs.pipe(Command.withDescription("Every ref and the object it points at")),
     reset.pipe(Command.withDescription("Move a ref, optionally compare-and-swap")),
-    restore.pipe(Command.withDescription("Restore a path from the index or a commit")),
-    rm.pipe(Command.withDescription("Unstage a path, and delete it unless --cached")),
+    work.restore.pipe(Command.withDescription("Restore a path from the index or a commit")),
+    work.rm.pipe(Command.withDescription("Unstage a path, and delete it unless --cached")),
     serveCommand.pipe(
       Command.withDescription("Run the node host over a directory of repositories"),
     ),
     show.pipe(Command.withDescription("Show one object: a commit, tree, tag or blob")),
-    statusCommand.pipe(Command.withDescription("Working-tree status in git's porcelain format")),
-    switchCommand.pipe(
+    work.statusCommand.pipe(
+      Command.withDescription("Working-tree status in git's porcelain format"),
+    ),
+    work.switchCommand.pipe(
       Command.withDescription("Check out a branch, replacing index and work tree"),
     ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
