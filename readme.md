@@ -81,7 +81,8 @@ demands, and the filesystem backend buys the same guarantee with `rename(2)`.
 | `src/git/Store.contract.ts`  | one storage contract suite, run against all four backends            |
 | `src/git/Inflate.ts`         | pull-based zlib inflate — exact stream boundaries, no `node:*`       |
 
-The Worker (`wrangler.json` → `src/git/Durable.ts`) serves the git smart-HTTP
+The Worker (`src/alchemy.run.ts` → `src/worker.ts`, deployed with
+`alchemy deploy`) serves the git smart-HTTP
 protocol — stock `git` clones from and pushes to it — plus a schema-typed JSON
 API per repository (create commit, read commit, log, list refs), whose errors
 cross the wire as tagged values (`{ "_tag": "RefConflict", … }`) with statuses

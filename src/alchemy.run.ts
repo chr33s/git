@@ -1,13 +1,11 @@
 /**
  * Infrastructure: the bucket and Durable Object are values in the program
  * that uses them, so each binding has one source of truth and its type is a
- * return type rather than codegen output. Replaces `wrangler.json`'s
- * `r2_buckets`, `durable_objects` and `migrations`, plus the generated
- * `worker-configuration.d.ts`.
+ * return type rather than codegen output. This is the only deploy path;
+ * `wrangler.test.json` remains solely as the integration harness config.
  *
- * `wrangler.json` still ships and is what the integration suite drives.
- * Deploying this path needs Cloudflare credentials, so CI only checks that
- * the stack builds — see `alchemy.run.test.ts`.
+ * Deploying needs Cloudflare credentials (`alchemy login`), so CI checks
+ * everything before the API call — see `alchemy.run.test.ts`.
  *
  *   alchemy dev · alchemy deploy --stage pr-123 · alchemy destroy
  */

@@ -343,8 +343,10 @@ than a fork, and the CLI can run the server in-process.
 **Landed** as [`src/alchemy.run.ts`](../src/alchemy.run.ts). `Alchemy.R2.Bucket` and
 `Alchemy.DurableObject` are values in the same program that uses them;
 `Cloudflare.R2.ReadWriteBucket(Objects)` yields the binding, the env var and the
-typed client from one call. That deletes `wrangler.json`, the generated
-`worker-configuration.d.ts`, and the `postinstall` codegen step.
+typed client from one call. `wrangler.json` is deleted — alchemy is the only
+deploy path. `wrangler.test.json` stays as the integration harness config, and
+still feeds `wrangler types` for the ambient workerd types the Cloudflare
+backend compiles against.
 
 What it adds beyond parity: `--stage` previews (a full stack per PR, destroyed
 on close) and a local runtime that runs the same program against emulated R2/DO
@@ -420,26 +422,29 @@ Each phase ships on its own and keeps `src/` working. With the legacy suite
 removed, the ratchet is the contract suite, the git-binary interop tests and
 the in-workerd conformance run.
 
-| phase | scope                                                                                                         | risk   |
-| ----- | ------------------------------------------------------------------------------------------------------------- | ------ |
-| 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests                                                 | done   |
-| 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite                                       | done   |
-| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness`  | done   |
-| 2b ✅ | re-point the Worker at `GitRepo` and retire the old path — resolved by removing the legacy stack outright     | done   |
-| 3 ✅  | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                       | done   |
-| 4 ✅  | smart-HTTP protocol + `HttpApi` for the JSON API, client derived from the same declaration                    | done   |
-| 5     | `RepoHost` seam + alchemy stack; delete `wrangler.json` + codegen; preview stages                             | medium |
-| 5b ✅ | node host (`src/host/Node.ts`, dependency-free): the same handlers behind `node:http`, self-hosting supported | done   |
-| 6 ✅  | CLI on `effect/unstable/cli` (`src/cli/main.ts`): init/refs/log/clone/serve/token                             | done   |
+| phase | scope                                                                                                         | risk |
+| ----- | ------------------------------------------------------------------------------------------------------------- | ---- |
+| 0 ✅  | add `effect`, `Format.ts` seam, codecs ported with real tests                                                 | done |
+| 1 ✅  | `Error.ts` + `Store.ts` ports, in-memory backend, shared contract suite                                       | done |
+| 2 ✅  | `Repository` service, Cloudflare backend, `GitRepo` Durable Object, integration tests on `createTestHarness`  | done |
+| 2b ✅ | re-point the Worker at `GitRepo` and retire the old path — resolved by removing the legacy stack outright     | done |
+| 3 ✅  | `Pack.ts` streaming; this is where the OOM and the abort bugs get fixed                                       | done |
+| 4 ✅  | smart-HTTP protocol + `HttpApi` for the JSON API, client derived from the same declaration                    | done |
+| 5 ✅  | alchemy stack is the only deploy path; `wrangler.json` deleted; preview stages                                | done |
+| 5b ✅ | node host (`src/host/Node.ts`, dependency-free): the same handlers behind `node:http`, self-hosting supported | done |
+| 6 ✅  | CLI on `effect/unstable/cli` (`src/cli/main.ts`): init/refs/log/clone/serve/token                             | done |
 
-Every phase has landed. Phase 5 is the one with a caveat worth stating: the
-stack builds and typechecks against real alchemy types, and a test asserts
-the resource graph and that it agrees with `wrangler.json` — but deploying it
-needs Cloudflare credentials, so `wrangler.json` remains the path the
-integration suite drives. Two local patches hold it up (`patches/`): one
+Every phase has landed. The alchemy stack is the only deploy path:
+`alchemy.run.ts` default-exports the `Stack`, `worker.ts` default-exports the
+Worker layer (which provides the DO's), and a test asserts the resource graph
+and that the deployed runtime matches the one `wrangler.test.json` pins for
+the integration suite. Deploying needs Cloudflare credentials
+(`alchemy login`); everything before the API call runs in CI. Three local
+patches hold it up (`patches/`): one
 defers `RepoClient.raw` for the Artifacts provider, one aliases
-`Schema.TaggedErrorClass` in `effect`. Both are upstream-shaped; delete them
-when the versions catch up.
+`Schema.TaggedErrorClass` in `effect`, one adds `Command.withHidden` for
+alchemy's CLI. All are upstream-shaped; delete them when the versions catch
+up.
 
 ---
 

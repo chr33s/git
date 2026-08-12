@@ -1,11 +1,11 @@
 /**
  * Cloudflare host: the repository as an alchemy-native Durable Object.
  *
- * `git/Durable.ts` is the same server on the wrangler path — one DO per
- * repository, `Protocol.handle` and `Api.layer` inside it. The difference is
- * where the bindings come from: there, `wrangler.json` plus a generated `Env`
- * interface; here, the R2 bucket is a value (`alchemy.run.ts`'s `Objects`)
- * and the binding, its type and the migration all follow from that.
+ * `git/Durable.ts` is the same server under wrangler's test harness — one DO
+ * per repository, `Protocol.handle` and `Api.layer` inside it. The difference
+ * is where the bindings come from: there, `wrangler.test.json` plus a
+ * generated `Env` interface; here, the R2 bucket is a value (`objects.ts`'s
+ * `Objects`) and the binding, its type and the migration all follow from it.
  *
  * `DurableObjectState.storage` is the raw `DurableObjectStorage`, so the
  * backend in `git/Cloudflare.ts` plugs straight in, unchanged — the whole

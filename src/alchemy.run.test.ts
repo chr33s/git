@@ -3,14 +3,15 @@
  *
  * `alchemy deploy` needs Cloudflare credentials, so what CI can hold onto is
  * everything before the API call: the modules load, the resources carry the
- * identities the stack claims, the Worker layer requires the Durable Object
- * layer that provides it, and — the part that actually rots — the bindings
- * agree with `wrangler.json`, which is still the path that ships.
+ * identities the stack claims, the Worker layer provides the Durable Object
+ * layer it hosts, and — the part that actually rots — the runtime the
+ * integration suite proves (`wrangler.test.json`) is the runtime the stack
+ * deploys.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import wrangler from "../wrangler.json" with { type: "json" };
+import harness from "../wrangler.test.json" with { type: "json" };
 
 describe("alchemy stack", () => {
   it("builds the resource graph: bucket, durable object, worker", async () => {
@@ -34,13 +35,12 @@ describe("alchemy stack", () => {
     assert.equal(typeof host.default, "object", "the durable object layer is the default export");
   });
 
-  it("agrees with wrangler.json, which is still the path that ships", () => {
-    // One bucket, one durable object, one nodejs_compat worker — the two
-    // declarations describe the same deployment or one of them is stale.
-    assert.equal(wrangler.r2_buckets.length, 1, "one bucket in wrangler.json");
-    assert.equal(wrangler.r2_buckets[0]?.bucket_name, "git-objects", "same bucket name");
-    assert.equal(wrangler.durable_objects.bindings.length, 1, "one durable object");
-    assert.deepEqual(wrangler.compatibility_flags, ["nodejs_compat"], "same compatibility flags");
-    assert.equal(wrangler.compatibility_date, "2025-12-10", "same compatibility date");
+  it("deploys the runtime the integration suite proves", async () => {
+    // `wrangler.test.json` pins the workerd the contract suite runs in;
+    // `worker.ts` pins what alchemy deploys. If they drift, the tests pass
+    // against one runtime and production runs another.
+    const { compatibility } = await import("./worker.ts");
+    assert.equal(harness.compatibility_date, compatibility.date, "same compatibility date");
+    assert.deepEqual(harness.compatibility_flags, compatibility.flags, "same compatibility flags");
   });
 });

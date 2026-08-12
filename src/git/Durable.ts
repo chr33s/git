@@ -1,5 +1,8 @@
 /**
- * The repository as a Durable Object, and the Worker entry point.
+ * The repository as a Durable Object — the integration harness entry point.
+ * The deployable Worker is `worker.ts` via the alchemy stack; this one exists
+ * so the same server can be driven end to end inside real workerd by
+ * `Cloudflare.integration.ts`.
  *
  * One instance per repository is forced, not chosen: `Repository` is built
  * from `ObjectStore` and `RefStore`, so storage must resolve when the layer
@@ -24,10 +27,10 @@ import { Repository } from "./Repository.ts";
 import { storeContract } from "./Store.contract.ts";
 
 /**
- * This worker's bindings, as both `wrangler.json` and `wrangler.test.json`
- * provide them. Declared by hand rather than using the generated `Env` because
- * `ENABLE_CONFORMANCE` exists only in the test config, which `wrangler types`
- * does not see.
+ * This worker's bindings, as `wrangler.test.json` provides them. Declared by
+ * hand rather than using the generated `Env` so the dependency points the
+ * right way: the types follow the config this entry point actually runs
+ * under.
  */
 interface TestEnv {
   readonly ENABLE_CONFORMANCE?: string;

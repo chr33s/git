@@ -28,10 +28,17 @@ export type GitShape = {
 /** `Repo` in the third slot: this Worker hosts the DO, so it is contract. */
 export class Git extends Alchemy.Worker<Git, GitShape, Repo>()("git") {}
 
+/**
+ * Pinned here and asserted against `wrangler.test.json` in
+ * `alchemy.run.test.ts`: the runtime the integration suite proves must be
+ * the runtime this Worker deploys.
+ */
+export const compatibility = { date: "2025-12-10", flags: ["nodejs_compat"] };
+
 export default Git.make(
   {
     main: import.meta.url,
-    compatibility: { date: "2025-12-10", flags: ["nodejs_compat"] },
+    compatibility,
   },
   Effect.gen(function* () {
     const repos = yield* Repo;
