@@ -281,6 +281,36 @@ describe("cli", () => {
     }
   });
 
+  it("pushes to a server and exports an archive", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-push-"));
+    const serverRoot = path.join(root, "server");
+    const server = await serve({ root: serverRoot });
+    try {
+      await seed(path.join(root, "local"), "pushed");
+
+      const pushed = await cli(["push", "--root", root, "local", `${server.url}/remote`, "main"]);
+      assert.match(pushed, /^ok refs\/heads\/main/m);
+
+      // The server really has it: its own API says so.
+      const refs = (await (await fetch(`${server.url}/remote/refs`)).json()) as {
+        refs: Array<{ name: string }>;
+      };
+      assert.deepEqual(
+        refs.refs.map((ref) => ref.name),
+        ["refs/heads/main"],
+      );
+
+      // And the archive of what we pushed is a real tar.
+      const tarball = path.join(root, "out.tar");
+      await cli(["archive", "--root", root, "-o", tarball, "local"]);
+      const listed = await execFileAsync("tar", ["-tf", tarball], { encoding: "utf8" });
+      assert.match(listed.stdout, /f\.txt/);
+    } finally {
+      await server.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("checks integrity and collects garbage", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-maint-"));
     try {

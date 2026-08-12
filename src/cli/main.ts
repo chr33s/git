@@ -16,13 +16,17 @@
  * type: a bad ref is a diagnostic and exit 1, an interrupt is 130, an
  * unexpected defect prints a `Cause` with the fiber trace.
  */
+import { createWriteStream } from "node:fs";
 import * as path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { Config, Console, Effect, Layer, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { fetchRepository } from "../client/Fetch.ts";
+import { push } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid } from "../git/Error.ts";
 import type { Signature } from "../git/Format.ts";
@@ -31,6 +35,7 @@ import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { serve } from "../host/Node.ts";
+import * as Archive from "../server/Archive.ts";
 import { hmacMint, hmacVerify, type Scope } from "../server/Auth.ts";
 
 const rootFlag = Flag.string("root").pipe(
@@ -58,10 +63,29 @@ const cliSignature = (): Signature => ({
   offset: -new Date().getTimezoneOffset(),
 });
 
+/**
+ * A revision as a user types it. `git` accepts `main` for
+ * `refs/heads/main`, and a CLI that demanded the full name for every
+ * argument would be the only thing here that did — so the disambiguation
+ * lives at this layer, in git's own order, rather than in the ref store.
+ */
+const resolveRev = (repository: Repository["Service"], rev: string) =>
+  Effect.gen(function* () {
+    if (isOid(rev)) return rev;
+    for (const candidate of [rev, `refs/heads/${rev}`, `refs/tags/${rev}`]) {
+      const found = yield* repository.resolve(candidate);
+      if (found !== null) return found;
+    }
+    return null;
+  });
+
+/** The full ref name a branch argument means, for commands that write one. */
+const refNameOf = (rev: string) => (rev.startsWith("refs/") ? rev : `refs/heads/${rev}`);
+
 /** The tree a revision names: a ref, an oid, a tag that peels, or a tree. */
 const treeOf = (repository: Repository["Service"], rev: string) =>
   Effect.gen(function* () {
-    const oid = isOid(rev) ? rev : yield* repository.resolve(rev);
+    const oid = yield* resolveRev(repository, rev);
     if (oid === null) {
       return yield* new Invalid({ field: "ref", reason: `unknown revision '${rev}'` });
     }
@@ -126,7 +150,7 @@ const log = Command.make(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const head = yield* repository.resolve(ref);
+        const head = yield* resolveRev(repository, ref);
         if (head === null) {
           return yield* new Invalid({ field: "ref", reason: `unknown ref '${ref}'` });
         }
@@ -317,7 +341,7 @@ const show = Command.make(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const oid = isOid(rev) ? rev : yield* repository.resolve(rev);
+        const oid = yield* resolveRev(repository, rev);
         if (oid === null) {
           return yield* new Invalid({ field: "rev", reason: `unknown revision '${rev}'` });
         }
@@ -528,8 +552,98 @@ const gc = Command.make(
     ),
 );
 
+const pushCommand = Command.make(
+  "push",
+  {
+    root: rootFlag,
+    token: Flag.string("token").pipe(Flag.withDefault("")),
+    force: Flag.boolean("force").pipe(Flag.withAlias("f")),
+    atomic: Flag.boolean("atomic"),
+    delete: Flag.boolean("delete").pipe(
+      Flag.withAlias("d"),
+      Flag.withDescription("Remove the ref on the server instead of updating it"),
+    ),
+    repo: repoArgument,
+    url: Argument.string("url"),
+    ref: Argument.string("ref"),
+  },
+  ({ atomic, delete: remove, force, ref, repo, root, token: accessToken, url }) =>
+    withRepo(
+      root,
+      repo,
+      Effect.gen(function* () {
+        // Local and remote name the same branch: pushing `main` somewhere
+        // else is what an explicit `refs/…:refs/…` spelling would be for,
+        // and this CLI does not pretend to offer one.
+        const remote = refNameOf(ref);
+        const results = yield* push({
+          url,
+          refs: [{ local: remote, remote, delete: remove }],
+          force,
+          atomic,
+          ...(accessToken === "" ? {} : { token: accessToken }),
+        });
+
+        for (const result of results) {
+          yield* Console.log(
+            `${result.ok ? "ok" : "ng"} ${result.ref}${result.reason === undefined ? "" : ` (${result.reason})`}`,
+          );
+        }
+        // The exit code is what a script reads, so a rejected ref is a
+        // failure even though the request itself succeeded.
+        if (results.some((result) => !result.ok)) {
+          return yield* new Invalid({ field: "push", reason: "some refs were rejected" });
+        }
+      }),
+    ),
+);
+
+const archiveCommand = Command.make(
+  "archive",
+  {
+    root: rootFlag,
+    ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
+    prefix: Flag.string("prefix").pipe(Flag.withDefault("")),
+    output: Flag.string("output").pipe(
+      Flag.withAlias("o"),
+      Flag.withDescription("Where to write it; the extension picks the format"),
+    ),
+    repo: repoArgument,
+  },
+  ({ output, prefix, ref, repo, root }) =>
+    withRepo(
+      root,
+      repo,
+      Effect.gen(function* () {
+        const format = Archive.formatOf(output);
+        if (format === null) {
+          return yield* new Invalid({
+            field: "output",
+            reason: `cannot tell the format from '${output}' (want .tar, .tar.gz, .tgz or .zip)`,
+          });
+        }
+
+        const repository = yield* Repository;
+        const stream = yield* Archive.archive({
+          tree: yield* treeOf(repository, ref),
+          format,
+          ...(prefix === "" ? {} : { prefix }),
+        });
+
+        // Streamed to disk rather than collected: the whole point of the
+        // archive being a Stream is that a big repository never lands in
+        // memory, and buffering it here would throw that away.
+        yield* Effect.promise(() =>
+          pipeline(Readable.from(Stream.toAsyncIterable(stream)), createWriteStream(output)),
+        );
+        yield* Console.log(`Wrote ${output}`);
+      }),
+    ),
+);
+
 const git = Command.make("chr33s-git").pipe(
   Command.withSubcommands([
+    archiveCommand,
     branch,
     clone,
     diff,
@@ -540,6 +654,7 @@ const git = Command.make("chr33s-git").pipe(
     init,
     log,
     merge,
+    pushCommand,
     refs,
     serveCommand,
     show,
