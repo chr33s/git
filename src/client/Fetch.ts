@@ -42,10 +42,17 @@ export interface FetchStores {
 
 const unreachable = (reason: string) => new Invalid({ field: "remote", reason });
 
-const advertisedRefs = async (body: ReadableStream<Uint8Array> | null) => {
-  if (body === null) return [];
-  const reader = new PktReader(body as unknown as AsyncIterable<Uint8Array>);
+interface Advertisement {
+  readonly refs: ReadonlyArray<RemoteRef>;
+  /** What the first ref line carried after its NUL — the server's offer. */
+  readonly capabilities: ReadonlySet<string>;
+}
+
+const advertisedRefs = async (body: ReadableStream<Uint8Array> | null): Promise<Advertisement> => {
+  const capabilities = new Set<string>();
   const refs: RemoteRef[] = [];
+  if (body === null) return { refs, capabilities };
+  const reader = new PktReader(body as unknown as AsyncIterable<Uint8Array>);
   for (;;) {
     const item = await reader.next();
     if (item === "eof") break;
@@ -55,21 +62,23 @@ const advertisedRefs = async (body: ReadableStream<Uint8Array> | null) => {
     const line = decoder.decode(item).replace(/\n$/, "");
     if (line.startsWith("# service=")) continue;
     const oid = line.slice(0, 40);
-    const name = line.slice(41).split("\0")[0] ?? "";
+    const [name = "", caps] = line.slice(41).split("\0");
+    // Capabilities ride the first ref line — or the `capabilities^{}`
+    // placeholder an empty repository advertises them on instead.
+    if (caps !== undefined) for (const cap of caps.split(" ")) capabilities.add(cap);
     if (isOid(oid) && name.length > 0 && name !== "capabilities^{}") refs.push({ oid, name });
   }
-  return refs;
+  return { refs, capabilities };
 };
 
 /** `fetch` rejects credentials in URLs, so a token travels as a header. */
 const authorization = (token: string | undefined): Record<string, string> =>
   token === undefined ? {} : { authorization: `Bearer ${token}` };
 
-/** The refs a remote advertises for fetching, `HEAD` included. */
-export const lsRemote = (
+const advertisement = (
   url: string,
   options?: { readonly token?: string | undefined },
-): Effect.Effect<ReadonlyArray<RemoteRef>, Invalid> =>
+): Effect.Effect<Advertisement, Invalid> =>
   Effect.tryPromise({
     try: async () => {
       const response = await fetch(`${url}/info/refs?service=git-upload-pack`, {
@@ -80,6 +89,13 @@ export const lsRemote = (
     },
     catch: (cause) => unreachable(String(cause)),
   });
+
+/** The refs a remote advertises for fetching, `HEAD` included. */
+export const lsRemote = (
+  url: string,
+  options?: { readonly token?: string | undefined },
+): Effect.Effect<ReadonlyArray<RemoteRef>, Invalid> =>
+  advertisement(url, options).pipe(Effect.map((advertised) => advertised.refs));
 
 export interface FetchResult {
   readonly refs: ReadonlyArray<RefUpdate>;
@@ -102,18 +118,20 @@ const MAX_HAVES = 256;
 const HAVES_PER_ROUND = 32;
 
 /**
- * Capabilities ride on the first `want`, space-separated after the oid.
+ * Which capabilities to request — and only from what the advertisement
+ * offered: asking for a capability the remote did not agree to is how a
+ * client ends up parsing a format the server never sent.
  *
- * Empty, and deliberately: `server/Protocol.ts` advertises neither `multi_ack`
- * nor `multi_ack_detailed` (its own comment says why — a stateless round trip
- * concludes with `done` or restarts), so the negotiation below is the baseline
- * single-ACK one every upload-pack speaks. `side-band-64k` is advertised but
- * not asked for either: the pack is read straight off the response body, and
- * requesting the capability would only add a demultiplexing layer. Asking for
- * a capability the remote did not agree to is how a client ends up parsing a
- * format the server never sent.
+ * `multi_ack_detailed` is the one worth asking for. Under it the server tags
+ * every common have (`ACK <oid> common`) instead of closing the conversation
+ * on the first hit, and says `ready` the moment a pack can be cut — so a
+ * client with several branches gets all of its bases counted, and usually in
+ * fewer rounds. `side-band-64k` is advertised but never requested: the pack
+ * is read straight off the response body, and the capability would only add
+ * a demultiplexing layer.
  */
-const CAPABILITIES: ReadonlyArray<string> = [];
+const requestedCapabilities = (offered: ReadonlySet<string>): ReadonlyArray<string> =>
+  offered.has("multi_ack_detailed") ? ["multi_ack_detailed"] : [];
 
 const pktLine = (line: string) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
 
@@ -128,12 +146,16 @@ const negotiation = (input: {
   readonly haves: ReadonlyArray<Oid>;
   readonly done: boolean;
   readonly depth?: number | undefined;
+  /** Requested on the first `want`, space-separated after the oid. */
+  readonly capabilities?: ReadonlyArray<string> | undefined;
 }): Uint8Array<ArrayBuffer> =>
   encoder.encode(
     [
       ...input.wants.map((oid, index) =>
         pktLine(
-          `want ${oid}${index === 0 ? CAPABILITIES.map((name) => ` ${name}`).join("") : ""}\n`,
+          `want ${oid}${
+            index === 0 ? (input.capabilities ?? []).map((name) => ` ${name}`).join("") : ""
+          }\n`,
         ),
       ),
       ...(input.depth === undefined ? [] : [pktLine(`deepen ${input.depth}\n`)]),
@@ -280,10 +302,12 @@ const prelude = async (
  * Whether a round's acknowledgments end the negotiation.
  *
  * Single-ACK has two answers: a bare `ACK <oid>` means the server found a base
- * and wants `done` next, `NAK` means keep offering. `ACK <oid> continue` is
- * `multi_ack`'s "noted, carry on" and `ready` is `multi_ack_detailed`'s "stop,
- * I can build the pack" — neither capability is requested, but reading them
- * correctly is cheaper than the failure mode of not doing so.
+ * and wants `done` next, `NAK` means keep offering. Under `multi_ack_detailed`
+ * — requested whenever the server offers it — `ACK <oid> common` means "noted,
+ * carry on" and `ACK <oid> ready` means "stop, I can build the pack". Plain
+ * `multi_ack`'s `continue` is read the same way even though the capability is
+ * never requested: reading it correctly is cheaper than the failure mode of
+ * not doing so.
  */
 const acknowledged = (lines: ReadonlyArray<string>): boolean =>
   lines.some((line) => {
@@ -296,19 +320,20 @@ const acknowledged = (lines: ReadonlyArray<string>): boolean =>
  * The rounds before `done`, and how many haves they got through — the prefix
  * the final request repeats.
  *
- * Against `server/Protocol.ts` this always runs to exhaustion: that server
- * acknowledges only on the round that carries `done`, so every round here
- * comes back NAK and the loop ends when the haves do. The rounds exist for
- * the servers that do answer early, and the cap is what bounds the cost of
- * the ones that do not.
+ * A round ends the loop when the server signals a base was found: a bare
+ * `ACK` from a single-ACK server, `ready` from a `multi_ack_detailed` one.
+ * Under `multi_ack_detailed` the per-have `ACK <oid> common` lines keep the
+ * loop offering — that is the point of requesting it — and the cap is what
+ * bounds the cost against a server that never answers either way.
  */
 const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
   readonly url: string;
   readonly token: string | undefined;
   readonly wants: ReadonlyArray<Oid>;
   readonly haves: ReadonlyArray<Oid>;
+  readonly capabilities: ReadonlyArray<string>;
 }) {
-  const { haves, token, url, wants } = input;
+  const { capabilities, haves, token, url, wants } = input;
   let offered = 0;
   while (offered < haves.length) {
     const next = Math.min(offered + HAVES_PER_ROUND, haves.length);
@@ -317,7 +342,7 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
         const response = await uploadPack(
           url,
           token,
-          negotiation({ wants, haves: haves.slice(0, next), done: false }),
+          negotiation({ wants, haves: haves.slice(0, next), done: false, capabilities }),
         );
         const { lines } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);
         return acknowledged(lines);
@@ -351,13 +376,20 @@ export const requestPack = (input: {
   readonly wants: ReadonlyArray<Oid>;
   readonly haves: ReadonlyArray<Oid>;
   readonly depth?: number | undefined;
+  readonly capabilities?: ReadonlyArray<string> | undefined;
 }): Effect.Effect<AsyncIterable<Uint8Array>, Invalid> =>
   Effect.tryPromise({
     try: async () => {
       const response = await uploadPack(
         input.url,
         input.token,
-        negotiation({ wants: input.wants, haves: input.haves, done: true, depth: input.depth }),
+        negotiation({
+          wants: input.wants,
+          haves: input.haves,
+          done: true,
+          depth: input.depth,
+          capabilities: input.capabilities,
+        }),
       );
       const { rest } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);
       return rest;
@@ -378,10 +410,11 @@ export const fetchRepository = (options: {
 }): Effect.Effect<FetchResult, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> =>
   Effect.gen(function* () {
     const { branch, stores, token, url } = options;
-    const advertisement = yield* lsRemote(url, { token });
+    const advertised = yield* advertisement(url, { token });
+    const capabilities = requestedCapabilities(advertised.capabilities);
 
-    const head = advertisement.find((ref) => ref.name === "HEAD")?.oid;
-    const picked = advertisement.filter(
+    const head = advertised.refs.find((ref) => ref.name === "HEAD")?.oid;
+    const picked = advertised.refs.filter(
       (ref) =>
         (branch === undefined
           ? ref.name.startsWith("refs/heads/") || ref.name.startsWith("refs/tags/")
@@ -399,9 +432,15 @@ export const fetchRepository = (options: {
     // Empty target, empty offer: the clone case sends `done` straight away
     // rather than a round that could only say "I have nothing".
     const haves = yield* localHaves(stores);
-    const offered = yield* negotiate({ url, token, wants, haves });
+    const offered = yield* negotiate({ url, token, wants, haves, capabilities });
 
-    const packBody = yield* requestPack({ url, token, wants, haves: haves.slice(0, offered) });
+    const packBody = yield* requestPack({
+      url,
+      token,
+      wants,
+      haves: haves.slice(0, offered),
+      capabilities,
+    });
 
     yield* Pack.unpack(
       Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),

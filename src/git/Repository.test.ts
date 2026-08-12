@@ -375,3 +375,69 @@ describe("Repository.receive", () => {
     assert.deepEqual(seen, ["refs/heads/a"]);
   });
 });
+
+describe("Repository.canServe", () => {
+  /** main: a <- b <- c, and an unrelated root on `side`. */
+  const history = Effect.gen(function* () {
+    const repository = yield* Repository;
+    const commitOn = (branch: string, message: string) =>
+      repository.commit({ branch, tree: EMPTY_TREE_OID, message, author: alice });
+    const a = yield* commitOn("main", "a");
+    const b = yield* commitOn("main", "b");
+    const c = yield* commitOn("main", "c");
+    const side = yield* commitOn("side", "elsewhere");
+    return { repository, a, b, c, side };
+  });
+
+  it("is true when every want reaches a common commit", async () => {
+    const served = await scenario(
+      Effect.gen(function* () {
+        const { repository, a, c } = yield* history;
+        return yield* repository.canServe([c], [a]);
+      }),
+    );
+    assert.equal(served, true);
+  });
+
+  it("is false with nothing common, and false past an unreachable want", async () => {
+    const [none, unreachable] = await scenario(
+      Effect.gen(function* () {
+        const { repository, a, b, c, side } = yield* history;
+        return [
+          yield* repository.canServe([c], []),
+          // `side` shares no history with main: no common set built from
+          // main's commits can cover it.
+          yield* repository.canServe([c, side], [a, b]),
+        ];
+      }),
+    );
+    assert.equal(none, false);
+    assert.equal(unreachable, false);
+  });
+
+  it("treats a want that is itself common as reached", async () => {
+    const served = await scenario(
+      Effect.gen(function* () {
+        const { repository, c } = yield* history;
+        return yield* repository.canServe([c], [c]);
+      }),
+    );
+    assert.equal(served, true);
+  });
+
+  it("peels an annotated tag want to the commit it names", async () => {
+    const served = await scenario(
+      Effect.gen(function* () {
+        const { repository, b, c } = yield* history;
+        const tag = yield* repository.tag({
+          name: "v1",
+          target: c,
+          message: "release",
+          tagger: alice,
+        });
+        return yield* repository.canServe([tag.oid], [b]);
+      }),
+    );
+    assert.equal(served, true);
+  });
+});

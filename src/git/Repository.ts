@@ -237,6 +237,18 @@ export class Repository extends Context.Service<
 
     readonly contains: (oid: Oid) => Effect.Effect<boolean, StorageFailure>;
 
+    /**
+     * git's `ok_to_give_up`: can every want already reach a commit the client
+     * has confirmed common? True is what lets negotiation say `ready` — a
+     * pack cut at `common` misses nothing the client needs. False only ever
+     * costs another round or a larger pack, so the walk is budgeted rather
+     * than exhaustive: history deeper than the budget answers false.
+     */
+    readonly canServe: (
+      wants: ReadonlyArray<Oid>,
+      common: ReadonlyArray<Oid>,
+    ) => Effect.Effect<boolean, StorageFailure>;
+
     /** receive-pack's object phase: ingest a packfile into the store. */
     readonly unpack: <E>(
       pack: Stream.Stream<Uint8Array, E>,
@@ -639,6 +651,56 @@ export const layer = Layer.effect(
       }
 
       return candidates.values().next().value ?? shared[0] ?? null;
+    });
+
+    /**
+     * One walk per want, each stopping the moment it reaches a common
+     * commit. Wants share the budget but not the visited set: a shared set
+     * would let one want's early exit hide the path another want needed, and
+     * a wrong `false` here is only slower, never wrong — so the sets are
+     * kept independent and the budget is what bounds the cost.
+     */
+    const canServe = Effect.fn("Repository.canServe")(function* (
+      wants: ReadonlyArray<Oid>,
+      common: ReadonlyArray<Oid>,
+    ) {
+      if (common.length === 0) return false;
+      const commonSet = new Set(common);
+      let budget = 4096;
+
+      for (const want of wants) {
+        let found = false;
+        const seen = new Set<Oid>();
+        const stack = [want];
+        while (stack.length > 0) {
+          const oid = stack.pop()!;
+          if (seen.has(oid)) continue;
+          seen.add(oid);
+          if (commonSet.has(oid)) {
+            found = true;
+            break;
+          }
+          if (budget-- <= 0) return false;
+          const commit = yield* readCommit(oid).pipe(
+            Effect.map((value): CommitInfo | null => value),
+            Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+          );
+          if (commit !== null) {
+            stack.push(...commit.parents);
+            continue;
+          }
+          // Not a commit: an annotated tag peels to its target. Anything
+          // else has no history to reach common through, and leaving `found`
+          // false only delays `ready`, which is the safe direction.
+          const tag = yield* readTyped(oid, "tag", parseTag).pipe(
+            Effect.map((value): TagInfo | null => value),
+            Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+          );
+          if (tag !== null) stack.push(tag.object);
+        }
+        if (!found) return false;
+      }
+      return true;
     });
 
     const writePaths = Effect.fn("Repository.writePaths")(function* (
@@ -1044,6 +1106,7 @@ export const layer = Layer.effect(
       }),
 
       contains: objects.has,
+      canServe,
 
       // Traced: ingesting a pack is the expensive half of a push, and the
       // span is where its cost shows up.

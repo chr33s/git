@@ -137,4 +137,32 @@ describe.skipIf(!hasGit)("Pack interop with git", () => {
 
     await fs.rm(root, { recursive: true, force: true });
   });
+
+  it("produces a deltified pack git accepts, with real deltas, smaller than the full one", async () => {
+    const { root, packBytes } = await build(true);
+
+    const { deltified, full } = await Effect.runPromise(
+      Effect.gen(function* () {
+        const oids = yield* unpack(Stream.fromIterable([packBytes]));
+        const collect = (options?: Parameters<typeof pack>[1]) =>
+          Stream.runCollect(pack(oids, options)).pipe(Effect.map((chunks) => concat([...chunks])));
+        return { deltified: yield* collect({ deltify: {} }), full: yield* collect() };
+      }).pipe(Effect.provide(stores)),
+    );
+
+    assert.ok(
+      deltified.length < full.length,
+      `deltified pack (${deltified.length}) should undercut the full one (${full.length})`,
+    );
+
+    const out = path.join(root, "ours-deltified.pack");
+    await fs.writeFile(out, deltified);
+    execFileSync("git", ["index-pack", "--strict", out], { cwd: root, stdio: "ignore" });
+
+    // The pack must contain deltas git resolves, or deltify proved nothing.
+    const verify = git(root, "verify-pack", "-v", path.join(root, "ours-deltified.idx"));
+    assert.match(verify, /chain length = 1: \d+ object/);
+
+    await fs.rm(root, { recursive: true, force: true });
+  });
 });

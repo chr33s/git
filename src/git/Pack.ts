@@ -15,10 +15,12 @@
  * trailer incrementally. Nothing here imports `node:*` — the same module
  * runs in node, workerd and browsers, which is what lets a browser clone.
  *
- * Writing emits full objects only, no deltas: valid by the format, larger on
- * the wire, and enough for upload-pack until delta compression pays its way.
- * Per-object deflate is `CompressionStream("deflate")`, available everywhere
- * this runs.
+ * Writing emits full objects by default: valid by the format, larger on the
+ * wire, and the right trade on the request path, where delta search would
+ * spend CPU and latency ahead of the first byte. `PackOptions.deltify` turns
+ * on an ofs-delta sliding window for the caller that can afford it — repack,
+ * where the work is background and the bytes are storage. Per-object deflate
+ * is `CompressionStream("deflate")`, available everywhere this runs.
  */
 import { Effect, Result, Stream } from "effect";
 
@@ -281,6 +283,148 @@ export const applyDelta = (
   return Result.succeed(target);
 };
 
+/** Blocks this long index the base for `createDelta`'s copy search. */
+const DELTA_BLOCK = 16;
+/** A copy instruction names at most this many bytes; size 0 encodes it. */
+const MAX_COPY = 0x10000;
+/** An insert instruction carries at most 127 literal bytes. */
+const MAX_INSERT = 127;
+
+/** The little-endian 7-bit varint `applyDelta` reads sizes with. */
+const sizeVarint = (value: number): number[] => {
+  const bytes: number[] = [];
+  let rest = value;
+  for (;;) {
+    const low = rest % 128;
+    rest = Math.floor(rest / 128);
+    if (rest === 0) {
+      bytes.push(low);
+      return bytes;
+    }
+    bytes.push(low | 0x80);
+  }
+};
+
+/** FNV-1a over one block: cheap, and a collision only costs a byte compare. */
+const blockHash = (bytes: Uint8Array, at: number): number => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < DELTA_BLOCK; index++) {
+    hash ^= bytes[at + index]!;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+};
+
+/**
+ * Produce a delta whose application to `base` yields `target` — the inverse
+ * of `applyDelta`, in the same copy/insert vocabulary — or `null` when the
+ * result is not worth a chain link: a delta that saves less than a tenth of
+ * the target costs a base read at every future access of the object and
+ * buys almost nothing back.
+ *
+ * The search is greedy: the base is indexed in 16-byte blocks, the target
+ * scanned front to back, and the longest block-anchored match at each point
+ * becomes a copy. Bytes no block matches accumulate into inserts. This is
+ * the shape of git's own delta search, without its heuristics for sliding
+ * the anchor — simplicity over the last few percent.
+ */
+export const createDelta = (base: Uint8Array, target: Uint8Array): Uint8Array | null => {
+  if (base.length === 0 || target.length < DELTA_BLOCK) return null;
+
+  const budget = Math.floor(target.length * 0.9);
+
+  const index = new Map<number, number[]>();
+  for (let at = 0; at + DELTA_BLOCK <= base.length; at += DELTA_BLOCK) {
+    const key = blockHash(base, at);
+    const slot = index.get(key);
+    if (slot === undefined) index.set(key, [at]);
+    // A base full of one repeated block would otherwise collect every
+    // offset here and turn the scan quadratic; any handful of them is as
+    // good as all of them.
+    else if (slot.length < 64) slot.push(at);
+  }
+
+  const out: number[] = [...sizeVarint(base.length), ...sizeVarint(target.length)];
+  let pendingStart = 0;
+  let position = 0;
+
+  const flushInsert = (upTo: number): boolean => {
+    let from = pendingStart;
+    while (from < upTo) {
+      const length = Math.min(MAX_INSERT, upTo - from);
+      out.push(length);
+      for (let index = 0; index < length; index++) out.push(target[from + index]!);
+      from += length;
+      if (out.length > budget) return false;
+    }
+    pendingStart = upTo;
+    return true;
+  };
+
+  const emitCopy = (offset: number, size: number): void => {
+    let command = 0x80;
+    const operands: number[] = [];
+    for (let bit = 0; bit < 4; bit++) {
+      const byte = Math.floor(offset / 2 ** (8 * bit)) % 256;
+      if (byte !== 0) {
+        command |= 1 << bit;
+        operands.push(byte);
+      }
+    }
+    // `MAX_COPY` travels as size zero — the one value the three size bytes
+    // cannot spell, which is why `applyDelta` reads zero as 0x10000.
+    const encoded = size === MAX_COPY ? 0 : size;
+    for (let bit = 0; bit < 3; bit++) {
+      const byte = Math.floor(encoded / 2 ** (8 * bit)) % 256;
+      if (byte !== 0) {
+        command |= 0x10 << bit;
+        operands.push(byte);
+      }
+    }
+    out.push(command, ...operands);
+  };
+
+  while (position < target.length) {
+    let bestAt = -1;
+    let bestLength = 0;
+    if (position + DELTA_BLOCK <= target.length) {
+      for (const candidate of index.get(blockHash(target, position)) ?? []) {
+        const limit = Math.min(base.length - candidate, target.length - position);
+        let length = 0;
+        while (length < limit && base[candidate + length] === target[position + length]) length++;
+        if (length >= DELTA_BLOCK && length > bestLength) {
+          bestLength = length;
+          bestAt = candidate;
+        }
+      }
+    }
+
+    if (bestAt === -1) {
+      position++;
+      // A literal run that alone exceeds the budget cannot be saved by
+      // anything that follows it.
+      if (position - pendingStart > budget) return null;
+      continue;
+    }
+
+    if (!flushInsert(position)) return null;
+    let offset = bestAt;
+    let remaining = bestLength;
+    while (remaining > 0) {
+      const size = Math.min(MAX_COPY, remaining);
+      emitCopy(offset, size);
+      offset += size;
+      remaining -= size;
+    }
+    position += bestLength;
+    pendingStart = position;
+    if (out.length > budget) return null;
+  }
+
+  if (!flushInsert(target.length)) return null;
+  return out.length > budget ? null : Uint8Array.from(out);
+};
+
 /**
  * Ingest a version-2 packfile: every object — full, ofs-delta, ref-delta —
  * lands in `ObjectStore` as it is decoded, and the trailing checksum is
@@ -383,13 +527,44 @@ export interface PackedEntry {
   readonly crc32: number;
 }
 
+export interface DeltaOptions {
+  /** How many recent same-type objects to try as bases. Default 10. */
+  readonly window?: number;
+  /** Objects larger than this are stored whole and never window. Default 1 MiB. */
+  readonly maxSize?: number;
+  /** Longest allowed base chain; readers cap at 64. Default 50. */
+  readonly maxDepth?: number;
+}
+
 export interface PackOptions {
   /**
    * Called as each object is written, in pack order. This is how a repack
    * collects what it needs for the `.idx` without a second pass.
    */
   readonly onObject?: (entry: PackedEntry) => void;
+  /**
+   * Store objects as ofs-deltas against a sliding window of recent
+   * same-type objects when the delta wins by at least half. Off by default:
+   * the window pins `window × maxSize` bytes and the search costs CPU per
+   * object, both of which belong in a background repack rather than ahead
+   * of a fetch response's first byte.
+   */
+  readonly deltify?: DeltaOptions;
 }
+
+/** The reverse of `objectHeader`'s ofs-delta distance read. */
+const encodeOfsDistance = (distance: number): Uint8Array => {
+  const bytes = [distance % 128];
+  let rest = Math.floor(distance / 128) - 1;
+  while (rest >= 0) {
+    bytes.unshift(0x80 | (rest % 128));
+    rest = Math.floor(rest / 128) - 1;
+  }
+  return Uint8Array.from(bytes);
+};
+
+/** Below this a delta cannot beat its own header overhead. */
+const MIN_DELTA_TARGET = 64;
 
 export const pack = (
   oids: ReadonlyArray<Oid>,
@@ -418,16 +593,73 @@ export const pack = (
       // over bytes it would otherwise have to keep.
       let offset = header.length;
 
+      const deltify = options?.deltify;
+      const windowSize = deltify?.window ?? 10;
+      const maxSize = deltify?.maxSize ?? 1024 * 1024;
+      const maxDepth = deltify?.maxDepth ?? 50;
+
+      /**
+       * The window: recent objects kept raw, with the offset a delta
+       * against them will name and the chain depth one would inherit.
+       * Bases must already be in the pack — an ofs-delta points backwards —
+       * so candidacy and emission order agree by construction.
+       */
+      interface Candidate {
+        readonly type: ObjectType;
+        readonly data: Uint8Array;
+        readonly offset: number;
+        readonly depth: number;
+      }
+      const window: Candidate[] = [];
+
+      const spell = async (
+        object: RawObject,
+      ): Promise<{ readonly bytes: Uint8Array; readonly depth: number }> => {
+        if (
+          deltify !== undefined &&
+          object.data.length >= MIN_DELTA_TARGET &&
+          object.data.length <= maxSize
+        ) {
+          let best: { readonly delta: Uint8Array; readonly base: Candidate } | null = null;
+          for (const base of window) {
+            if (base.type !== object.type || base.depth >= maxDepth) continue;
+            const delta = createDelta(base.data, object.data);
+            // Wins by at least half, else the full spelling keeps reads
+            // free of a base resolution for very little saved.
+            if (delta === null || delta.length * 2 > object.data.length) continue;
+            if (best === null || delta.length < best.delta.length) best = { delta, base };
+          }
+          if (best !== null) {
+            return {
+              bytes: concat([
+                encodeObjectHeader(OFS_DELTA, best.delta.length),
+                encodeOfsDistance(offset - best.base.offset),
+                await deflate(best.delta),
+              ]),
+              depth: best.base.depth + 1,
+            };
+          }
+        }
+        return {
+          bytes: concat([
+            encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
+            await deflate(object.data),
+          ]),
+          depth: 0,
+        };
+      };
+
       const objects = Stream.fromIterable(oids).pipe(
         Stream.mapEffect((oid) =>
           store.read(oid).pipe(
             Effect.flatMap((object) =>
               Effect.promise(async () => {
-                const bytes = concat([
-                  encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
-                  await deflate(object.data),
-                ]);
+                const { bytes, depth } = await spell(object);
                 options?.onObject?.({ oid, offset, crc32: crc32(bytes) });
+                if (deltify !== undefined && object.data.length <= maxSize) {
+                  window.push({ type: object.type, data: object.data, offset, depth });
+                  if (window.length > windowSize) window.shift();
+                }
                 offset += bytes.length;
                 return emit(bytes);
               }),

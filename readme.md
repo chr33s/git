@@ -361,10 +361,15 @@ Protocol v0 and v2, shallow (`deepen`, `deepen-since`, `deepen-not`,
 with `have` negotiation. Stock `git` clones, pushes, and fetches; `…/repo.git`
 and `…/repo` are the same repository.
 
-Negotiation is baseline single-ACK on both sides: the client offers haves in
-rounds of 32 up to a cap of 256, and the server acknowledges the first commit
-it holds. `multi_ack_detailed` would narrow the common base in fewer round
-trips, not change which objects arrive.
+Negotiation speaks `multi_ack_detailed` on both sides: the client offers
+haves in rounds of 32 up to a cap of 256, the server tags every common
+commit (`ACK <oid> common`), and `ACK <oid> ready` ends the conversation the
+moment `Repository.canServe` — git's `ok_to_give_up`, a budgeted walk from
+each want down to the common set — proves a pack can be cut. The same
+predicate is what makes protocol v2's `ready` honest rather than eager. A
+client that never requests the capability gets baseline single-ACK, and
+either way negotiation only narrows the pack: it never changes which objects
+arrive.
 
 ### JSON API
 
@@ -430,10 +435,17 @@ implementation with nothing on either side of it is not a port waiting for its
 feature; it is a feature waiting for its port. `git/Work.ts` is the result, and
 `IndexStore` came to about twenty lines over the codec, as predicted.
 
-**Delta creation in the pack writer.** Delta _application_ is carried; creation
-was never used by either legacy pack writer. Thin packs are read today — a
-`ref-delta` whose base is outside the pack resolves from the store — so writing
-them is the same item as delta compression.
+**Delta creation on the request path.** `createDelta` and an ofs-delta
+sliding window live in the pack writer behind `PackOptions.deltify`, and only
+`Maintenance.repack` turns it on: repack is background work whose output is
+storage, so the window's CPU and pinned memory buy smaller packs at rest
+without costing any fetch response its first byte. Live upload-pack responses
+stay full-object until measurement says the wire savings justify serve-time
+delta search — the worst case of not deltifying is a larger pack, never a
+wrong one. Thin packs are read today (a `ref-delta` whose base is outside the
+pack resolves from the store) but never written; writing them is the wire
+half of this same trade, and additionally leans on the negotiated common set
+for its bases.
 
 ## Open questions
 
@@ -443,8 +455,11 @@ them is the same item as delta compression.
   change.
 - **Both dependencies are betas** and break between releases. Budget for churn
   per upgrade.
-- **`multi_ack_detailed` and delta compression** are the two protocol items
-  still on the roadmap.
+- **Delta compression on the wire** is the remaining protocol item:
+  `multi_ack_detailed` landed on both sides, deltas are written at repack, and
+  the open question is whether fetch responses should spend serve-time CPU on
+  delta search (and thin packs) for the bandwidth back. Measure before
+  building — `docs/multi-ack-delta-compression.md` holds the sketch.
 
 ### Cloudflare Artifacts provider
 

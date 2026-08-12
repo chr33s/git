@@ -10,10 +10,12 @@
  *   POST …/git-upload-pack                               wants/haves -> pack
  *   POST …/git-receive-pack                              commands + pack -> report
  *
- * Deliberately not advertised: `multi_ack` (a stateless round-trip either
- * concludes with `done` or restarts, so the client sends everything it has
- * and the worst case is a larger pack, never a wrong one) and `thin-pack`
- * (the writer emits full objects).
+ * Negotiation speaks `multi_ack_detailed`: every common `have` is tagged
+ * `ACK <oid> common` so the client keeps offering past the first hit, and
+ * `ACK <oid> ready` goes out once `Repository.canServe` proves a pack cut at
+ * the common set is complete. Deliberately not advertised: `thin-pack` (the
+ * writer emits full objects) and plain `multi_ack`, which `_detailed`
+ * supersedes.
  */
 import { createGunzip } from "node:zlib";
 
@@ -127,7 +129,7 @@ export const advertise = (
 
     const caps =
       service === "git-upload-pack"
-        ? `shallow deepen-since deepen-not side-band-64k symref=HEAD:${head} ${AGENT}`
+        ? `multi_ack_detailed shallow deepen-since deepen-not side-band-64k symref=HEAD:${head} ${AGENT}`
         : `report-status delete-refs atomic side-band-64k ${AGENT}`;
 
     const lines: string[] = [];
@@ -190,6 +192,7 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
     let depth: number | undefined;
     let since: Date | undefined;
     let sideband = false;
+    let multiAck = false;
     let done = false;
     let first = true;
 
@@ -210,7 +213,9 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
         if (first && line.startsWith("want ")) {
           const capabilities = line.slice(45).trim();
           if (capabilities !== "") {
-            sideband = capabilities.split(" ").includes("side-band-64k");
+            const requested = capabilities.split(" ");
+            sideband = requested.includes("side-band-64k");
+            multiAck = requested.includes("multi_ack_detailed");
             line = line.slice(0, 45).trimEnd();
           }
           first = false;
@@ -253,25 +258,42 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
 
     const deepening = depth !== undefined || since !== undefined || notRefs.length > 0;
 
-    // Protocol v0 without multi_ack: acknowledge the first `have` this
-    // repository possesses. A client that gets an ACK stops offering and
-    // sends `done`, so answering NAK while holding a common commit is not
-    // merely uninformative — it makes the client walk its whole history in
-    // 32-have rounds before giving up, and every one of those rounds costs a
-    // request.
-    let common: Oid | null = null;
+    // Which of the offered haves this repository possesses. Without
+    // multi_ack the first hit is the whole answer — a single-ACK client
+    // stops offering the moment it gets one, so checking further haves would
+    // be work nothing reads. With `multi_ack_detailed` every hit matters:
+    // each one is a base the pack can be cut at, and answering NAK while
+    // holding a common commit would make the client walk its whole history
+    // in 32-have rounds, every one of them a request.
+    const common: Oid[] = [];
     for (const have of haves) {
-      if (common === null && (yield* repository.contains(have))) common = have;
+      if (!multiAck && common.length > 0) break;
+      if (yield* repository.contains(have)) common.push(have);
     }
+    const last = common.at(-1);
 
     // A plain negotiation round is answered without a fetch plan at all: it
-    // replies ACK or NAK and waits to be asked again, so computing the
+    // replies acknowledgments and waits to be asked again, so computing the
     // closure here would be a full walk per round, thrown away each time.
+    // `canServe` is the exception, and a deliberate one — its bounded walk
+    // is what earns the `ready` that ends the conversation early.
     if (!done && !deepening) {
-      return new Response(
-        asBody(concat([common === null ? pkt("NAK\n") : pkt(`ACK ${common}\n`)])),
-        { headers: headers("application/x-git-upload-pack-result") },
-      );
+      if (!multiAck) {
+        return new Response(
+          asBody(concat([last === undefined ? pkt("NAK\n") : pkt(`ACK ${last}\n`)])),
+          { headers: headers("application/x-git-upload-pack-result") },
+        );
+      }
+      const acks = common.map((oid) => pkt(`ACK ${oid} common\n`));
+      if (last !== undefined && (yield* repository.canServe(wants, common))) {
+        acks.push(pkt(`ACK ${last} ready\n`));
+      }
+      // Every non-done round ends with NAK — it is the round's terminator in
+      // the multi_ack dialects, not a contradiction of the ACKs before it.
+      acks.push(pkt("NAK\n"));
+      return new Response(asBody(concat(acks)), {
+        headers: headers("application/x-git-upload-pack-result"),
+      });
     }
 
     const plan = yield* repository.fetch({
@@ -306,7 +328,16 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
       });
     }
 
-    const prelude = concat([...boundary, common === null ? pkt("NAK\n") : pkt(`ACK ${common}\n`)]);
+    // The done round restates the acknowledgments a stateless server never
+    // saw itself send: `common` lines first under multi_ack_detailed —
+    // fetch-pack reads them again before the final line — then the bare
+    // `ACK`/`NAK` that says the pack follows.
+    const acks = multiAck ? common.map((oid) => pkt(`ACK ${oid} common\n`)) : [];
+    const prelude = concat([
+      ...boundary,
+      ...acks,
+      last === undefined ? pkt("NAK\n") : pkt(`ACK ${last}\n`),
+    ]);
     const pack = repository.packOids(plan.oids);
 
     const packStream = Stream.concat(
@@ -455,23 +486,21 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
 
     const deepening = depth !== undefined || since !== undefined || notRefs.length > 0;
 
-    // Without `done` the client is still negotiating: answer the
-    // acknowledgments section and let it come back.
+    // Without `done` the client is still negotiating: acknowledge what is
+    // common, and only continue into a pack when `canServe` proves one can
+    // be cut at the common set. `ready` on the first shared commit — the
+    // eager version — would end negotiation with whatever base happened to
+    // come first, which is single-ACK's fat-pack mistake in v2 syntax.
+    const common: Oid[] = [];
     if (!done) {
-      const common: Oid[] = [];
       for (const have of haves) if (yield* repository.contains(have)) common.push(have);
+      const ready = common.length > 0 && (yield* repository.canServe(wants, common));
 
-      const lines: Uint8Array[] = [pkt("acknowledgments\n")];
-      if (common.length === 0) lines.push(pkt("NAK\n"));
-      else {
-        for (const oid of common) lines.push(pkt(`ACK ${oid}\n`));
-        // `ready` says the server can build a pack now, which is what ends
-        // the round trip rather than inviting another one.
-        lines.push(pkt("ready\n"));
-      }
-      lines.push(FLUSH);
-
-      if (common.length === 0) {
+      if (!ready) {
+        const lines: Uint8Array[] = [pkt("acknowledgments\n")];
+        if (common.length === 0) lines.push(pkt("NAK\n"));
+        else for (const oid of common) lines.push(pkt(`ACK ${oid}\n`));
+        lines.push(FLUSH);
         return new Response(asBody(concat(lines)), {
           headers: headers("application/x-git-upload-pack-result"),
         });
@@ -491,9 +520,7 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
     const prelude: Uint8Array[] = [];
     if (!done) {
       prelude.push(pkt("acknowledgments\n"));
-      for (const have of haves) {
-        if (yield* repository.contains(have)) prelude.push(pkt(`ACK ${have}\n`));
-      }
+      for (const oid of common) prelude.push(pkt(`ACK ${oid}\n`));
       prelude.push(pkt("ready\n"), DELIM);
     }
     if (deepening) {

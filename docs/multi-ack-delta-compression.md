@@ -1,5 +1,13 @@
 # Multi-ack & delta compression — design sketch
 
+> **Status:** implemented on this branch, with one deliberate narrowing.
+> `multi_ack_detailed` landed on both sides plus the honest v2 `ready`
+> (`Repository.canServe`). Delta creation landed as `createDelta` and an
+> ofs-delta window behind `PackOptions.deltify`, enabled in
+> `Maintenance.repack` only — live fetch responses stay full-object, and
+> thin packs remain unbuilt, until measurement shows the wire savings pay
+> for serve-time delta search.
+
 The two protocol items still on the [artifacts branch](https://github.com/chr33s/git/tree/artifacts)
 roadmap, explained against the code as it stands and sketched against its
 seams. File references below are to the artifacts branch. Neither item changes
@@ -21,7 +29,7 @@ receipts:
   format, larger on the wire, and enough for upload-pack until delta
   compression pays its way."
 
-Delta *application* is complete (ofs-delta, ref-delta, thin packs, verified
+Delta _application_ is complete (ofs-delta, ref-delta, thin packs, verified
 against real `git repack` output). Missing is the other direction of each
 item: acknowledging more than one common commit, and producing deltas.
 
@@ -38,7 +46,7 @@ ACK ends the offering: the client sends `done` and takes the pack.
 The failure mode is a client with several branches. The first common commit
 closes the conversation, bases on the other branches are never offered, and
 everything reachable only from an unoffered base is re-sent.
-`multi_ack_detailed` fixes both dimensions: the server tags *every* common
+`multi_ack_detailed` fixes both dimensions: the server tags _every_ common
 have (`ACK <oid> common`) so the client keeps offering, and says
 `ACK <oid> ready` once it can prove a pack is cuttable — usually fewer rounds
 than walking the cap down.
@@ -63,7 +71,7 @@ Two things make this smaller than it looks. The client already parses the
 richer dialect defensively (`client/Fetch.ts:284` reads `continue` and
 `ready`) — it just never requests the capability. And the v2 handler already
 answers per-have ACKs plus `ready` (`server/Protocol.ts:464`); its gap is
-declaring `ready` as soon as *any* common commit exists, which ends
+declaring `ready` as soon as _any_ common commit exists, which ends
 negotiation with the same possibly-too-small base set. The genuinely new
 piece is one honest predicate shared by both paths.
 
@@ -100,11 +108,11 @@ only.
 
 One writer, three call sites, so the item pays three times:
 
-| call site | what gets smaller |
-| --- | --- |
-| `git/Repository.ts:1064` `packOids` | every fetch and clone response |
-| `git/Maintenance.ts:200` repack | packs at rest in R2 / DO storage |
-| `client/Push.ts` (same writer) | every push, including from a browser |
+| call site                           | what gets smaller                    |
+| ----------------------------------- | ------------------------------------ |
+| `git/Repository.ts:1064` `packOids` | every fetch and clone response       |
+| `git/Maintenance.ts:200` repack     | packs at rest in R2 / DO storage     |
+| `client/Push.ts` (same writer)      | every push, including from a browser |
 
 ### Sketch
 

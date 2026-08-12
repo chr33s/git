@@ -197,7 +197,11 @@ const repack = Effect.fn("Maintenance.repack")(function* (
 
   const entries: Pack.PackedEntry[] = [];
   const chunks = yield* Stream.runCollect(
-    Pack.pack(oids, { onObject: (entry) => entries.push(entry) }).pipe(
+    // Deltified here and nowhere else: repack is background work whose
+    // output is storage, so the window's CPU and pinned memory buy smaller
+    // packs at rest without costing any request a first byte. `PackFile.ts`
+    // resolves the ofs-deltas on read.
+    Pack.pack(oids, { onObject: (entry) => entries.push(entry), deltify: {} }).pipe(
       Stream.provideService(ObjectStore, objects),
     ),
   );

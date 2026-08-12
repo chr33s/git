@@ -451,4 +451,39 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
     assert.equal(await fs.readFile(path.join(work, "new.txt"), "utf8"), "new content\n");
     await git(work, "fsck", "--strict");
   });
+
+  it("negotiates multi_ack_detailed with stock git over protocol v0", async () => {
+    // More history than one 32-have round: with fewer haves fetch-pack sends
+    // them all plus `done` in its first request, and `ready` — the round
+    // terminator this test exists to observe — never has a round to end.
+    await seedHistory("multiack", 40);
+    const work = path.join(root, "work-multiack");
+    await git(root, "clone", "--quiet", `${base}/multiack`, work);
+
+    const publisher = path.join(root, "work-multiack-publisher");
+    await git(root, "clone", "--quiet", `${base}/multiack`, publisher);
+    await fs.writeFile(path.join(publisher, "ahead.txt"), "ahead\n");
+    await git(publisher, "add", ".");
+    await git(publisher, "commit", "--quiet", "-m", "ahead");
+    await git(publisher, "push", "--quiet", "origin", "main");
+
+    // The packet trace is the observable: the client must request the
+    // capability, hear its haves tagged common, and be told ready — the
+    // whole point of advertising multi_ack_detailed.
+    const { stderr } = await execFileAsync(
+      "git",
+      ["-c", "protocol.version=0", "fetch", "--quiet", "origin", "main"],
+      {
+        cwd: work,
+        encoding: "utf8",
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_TRACE_PACKET: "2" },
+      },
+    );
+    assert.match(stderr, /want [0-9a-f]{40}.* multi_ack_detailed/);
+    assert.match(stderr, /ACK [0-9a-f]{40} common/);
+    assert.match(stderr, /ACK [0-9a-f]{40} ready/);
+
+    assert.equal((await git(work, "rev-list", "--count", "origin/main")).trim(), "41");
+    await git(work, "fsck", "--strict");
+  });
 });

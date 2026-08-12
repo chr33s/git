@@ -7,7 +7,7 @@ import { Effect, Result, Stream } from "effect";
 
 import { encodeCommit, encodeTree } from "./Format.ts";
 import { stores } from "./Memory.ts";
-import { applyDelta, pack, unpack } from "./Pack.ts";
+import { applyDelta, createDelta, pack, unpack } from "./Pack.ts";
 import { ObjectStore, type Oid, type RawObject } from "./Store.ts";
 
 const encoder = new TextEncoder();
@@ -270,5 +270,118 @@ describe("Pack", () => {
       ]);
       await expectCorrupt(buildPack([entry]));
     });
+  });
+});
+
+describe("createDelta", () => {
+  const baseText = Array.from(
+    { length: 120 },
+    (_, index) => `line ${index}: the quick brown fox jumps over the lazy dog\n`,
+  ).join("");
+  const base = encoder.encode(baseText);
+  const target = encoder.encode(baseText.replace("line 60:", "line sixty:"));
+
+  it("round-trips through applyDelta and actually wins", () => {
+    const delta = createDelta(base, target);
+    assert.ok(delta !== null);
+    assert.ok(delta.length * 2 < target.length, "delta should be far smaller than the target");
+    const applied = applyDelta(base, delta);
+    assert.ok(Result.isSuccess(applied));
+    assert.deepEqual(applied.success, target);
+  });
+
+  it("handles a target that only appends", () => {
+    const grown = encoder.encode(`${baseText}line 120: appended\n`);
+    const delta = createDelta(base, grown);
+    assert.ok(delta !== null);
+    const applied = applyDelta(base, delta);
+    assert.ok(Result.isSuccess(applied));
+    assert.deepEqual(applied.success, grown);
+  });
+
+  it("returns null when copying saves nothing", () => {
+    // Deterministic noise: no 16-byte block of it appears in the base.
+    let seed = 1;
+    const noise = new Uint8Array(2048);
+    for (let index = 0; index < noise.length; index++) {
+      seed = (seed * 48271) % 0x7fffffff;
+      noise[index] = seed & 0xff;
+    }
+    assert.equal(createDelta(base, noise), null);
+  });
+
+  it("refuses targets smaller than one block", () => {
+    assert.equal(createDelta(base, encoder.encode("tiny")), null);
+  });
+});
+
+describe("deltified writer", () => {
+  const baseText = Array.from(
+    { length: 200 },
+    (_, index) => `line ${index}: file content that repeats\n`,
+  ).join("");
+
+  it("emits a smaller pack whose objects unpack byte-identically", async () => {
+    const one: RawObject = { type: "blob", data: encoder.encode(baseText) };
+    const two: RawObject = {
+      type: "blob",
+      data: encoder.encode(baseText.replace("line 100:", "line one hundred:")),
+    };
+
+    const { deltified, full, oids } = await run(
+      Effect.gen(function* () {
+        const store = yield* ObjectStore;
+        const oids = [yield* store.write(one), yield* store.write(two)];
+        const collect = (options?: Parameters<typeof pack>[1]) =>
+          Stream.runCollect(pack(oids, options)).pipe(Effect.map((chunks) => concat([...chunks])));
+        return {
+          oids,
+          deltified: yield* collect({ deltify: {} }),
+          full: yield* collect(),
+        };
+      }),
+    );
+
+    assert.ok(
+      deltified.length < full.length,
+      `deltified pack (${deltified.length}) should undercut the full one (${full.length})`,
+    );
+
+    // A fresh store: everything read back must come from the pack alone.
+    const contents = await run(
+      Effect.gen(function* () {
+        const store = yield* ObjectStore;
+        const unpacked = yield* unpack(Stream.fromIterable(chunked(deltified, 997)));
+        const objects: RawObject[] = [];
+        for (const oid of unpacked) objects.push(yield* store.read(oid));
+        return { unpacked, objects };
+      }),
+    );
+
+    assert.deepEqual(contents.unpacked, oids);
+    assert.deepEqual(contents.objects[0], one);
+    assert.deepEqual(contents.objects[1], two);
+  });
+
+  it("never deltas across types", async () => {
+    // A tree whose payload happens to resemble the blob would still be a
+    // type confusion if used as a base; sameness of type gates the window.
+    const blob: RawObject = { type: "blob", data: encoder.encode(baseText) };
+    const bytes = await run(
+      Effect.gen(function* () {
+        const store = yield* ObjectStore;
+        const blobOid = yield* store.write(blob);
+        const treeOid = yield* store.write({
+          type: "tree",
+          data: encodeTree([{ mode: "100644", name: "a.txt", oid: blobOid }]),
+        });
+        return concat([...(yield* Stream.runCollect(pack([blobOid, treeOid], { deltify: {} })))]);
+      }),
+    );
+
+    // Re-ingest into a fresh store; a cross-type delta would fail to apply
+    // or change an oid, and either would surface here.
+    const oids = await run(unpack(Stream.fromIterable([bytes])));
+    assert.equal(oids.length, 2);
   });
 });
