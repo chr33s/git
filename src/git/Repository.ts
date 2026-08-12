@@ -33,8 +33,7 @@ import {
   type TagInfo,
   type TreeEntry,
 } from "./Format.ts";
-import { isBinary } from "./Diff.ts";
-import { mergeText, type Strategy as MergeStrategy } from "./Merge.ts";
+import { mergeTrees, type Strategy as MergeStrategy } from "./Merge.ts";
 import * as Pack from "./Pack.ts";
 import { PackStore } from "./Packed.ts";
 import { buildPackIndex } from "./PackIndex.ts";
@@ -47,9 +46,6 @@ import {
   RefStore,
   type RefUpdate,
 } from "./Store.ts";
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 export interface Commit extends CommitInfo {
   readonly oid: Oid;
@@ -1415,81 +1411,15 @@ export const layer = Layer.effect(
         const ourFiles = yield* flatten((yield* readCommit(ours)).tree);
         const theirFiles = yield* flatten((yield* readCommit(theirs)).tree);
 
-        const conflicts: MergeConflict[] = [];
-        const changes: FileChange[] = [];
-
-        for (const path of new Set([
-          ...ourFiles.keys(),
-          ...theirFiles.keys(),
-          ...baseFiles.keys(),
-        ])) {
-          const inBase = baseFiles.get(path);
-          const mine = ourFiles.get(path);
-          const yours = theirFiles.get(path);
-
-          // Same on both sides, or only one side moved: no decision to make.
-          if (mine?.oid === yours?.oid && mine?.mode === yours?.mode) continue;
-          if (inBase?.oid === mine?.oid && inBase?.mode === mine?.mode) {
-            changes.push(
-              yours === undefined
-                ? { path, content: null }
-                : { path, content: yield* readBlobAt(yours.oid), mode: yours.mode },
-            );
-            continue;
-          }
-          if (inBase?.oid === yours?.oid && inBase?.mode === yours?.mode) continue;
-
-          // Both sides moved. A deletion on one side against an edit on the
-          // other has no content to merge, so it is reported rather than
-          // silently resolved either way.
-          if (mine === undefined || yours === undefined) {
-            if (strategy === "ours") {
-              if (mine === undefined) changes.push({ path, content: null });
-              continue;
-            }
-            if (strategy === "theirs") {
-              changes.push(
-                yours === undefined
-                  ? { path, content: null }
-                  : { path, content: yield* readBlobAt(yours.oid), mode: yours.mode },
-              );
-              continue;
-            }
-            conflicts.push({ path, reason: inBase === undefined ? "add/add" : "modify/delete" });
-            continue;
-          }
-
-          const ourBytes = yield* readBlobAt(mine.oid);
-          const theirBytes = yield* readBlobAt(yours.oid);
-
-          if (strategy === "ours") continue;
-          if (strategy === "theirs") {
-            changes.push({ path, content: theirBytes, mode: yours.mode });
-            continue;
-          }
-
-          // Conflict markers only make sense in text; a binary file has to be
-          // chosen by a human, so it is reported and ours is left in place.
-          if (isBinary(ourBytes) || isBinary(theirBytes)) {
-            conflicts.push({ path, reason: "binary" });
-            continue;
-          }
-
-          const baseBytes =
-            inBase === undefined ? new Uint8Array(0) : yield* readBlobAt(inBase.oid);
-          const merged = mergeText({
-            base: decoder.decode(baseBytes),
-            ours: decoder.decode(ourBytes),
-            theirs: decoder.decode(theirBytes),
-          });
-
-          if (merged.conflicted) {
-            conflicts.push({ path, reason: inBase === undefined ? "add/add" : "content" });
-            // The markers still go into the tree: a conflicted merge that
-            // wrote nothing would leave the caller with no way to resolve it.
-          }
-          changes.push({ path, content: encoder.encode(merged.content), mode: mine.mode });
-        }
+        // The walk itself is `Merge.mergeTrees`, shared with `Rebase` — the
+        // treesame rules and the conflict taxonomy exist exactly once.
+        const { changes, conflicts } = yield* mergeTrees({
+          base: baseFiles,
+          ours: ourFiles,
+          theirs: theirFiles,
+          strategy,
+          read: readBlobAt,
+        });
 
         const tree = yield* writeFiles({
           base: (yield* readCommit(ours)).tree,

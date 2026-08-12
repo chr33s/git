@@ -18,15 +18,11 @@
  */
 import { Effect, Stream } from "effect";
 
-import { isBinary } from "./Diff.ts";
 import { Invalid, type ObjectNotFound, type RefConflict, type StorageFailure } from "./Error.ts";
 import type { CommitInfo, Signature } from "./Format.ts";
-import { mergeText } from "./Merge.ts";
-import { type FileChange, type MergeConflict, Repository, type TreeFile } from "./Repository.ts";
+import { mergeTrees } from "./Merge.ts";
+import { type MergeConflict, Repository, type TreeFile } from "./Repository.ts";
 import { isOid, type Oid } from "./Store.ts";
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 /** Everything replaying a commit can go wrong with, ref move included. */
 export type RebaseError = Invalid | ObjectNotFound | RefConflict | StorageFailure;
@@ -85,64 +81,16 @@ const replayTree = Effect.fn("Rebase.replayTree")(function* (input: {
   const ourFiles = yield* filesOf(input.onto.tree);
   const theirFiles = yield* filesOf(input.commit.tree);
 
-  const conflicts: MergeConflict[] = [];
-  const changes: FileChange[] = [];
-
-  for (const path of new Set([...ourFiles.keys(), ...theirFiles.keys(), ...baseFiles.keys()])) {
-    const inBase = baseFiles.get(path);
-    const mine = ourFiles.get(path);
-    const yours = theirFiles.get(path);
-
-    // Both sides agree; there is no decision to make.
-    if (mine?.oid === yours?.oid && mine?.mode === yours?.mode) continue;
-
-    // The commit did not touch this path, so `onto`'s version stands. This is
-    // the case a base of `onto` instead of the parent would get wrong, and it
-    // is the common one: most of a tree is untouched by any one commit.
-    if (inBase?.oid === yours?.oid && inBase?.mode === yours?.mode) continue;
-
-    // `onto` still holds the version the commit was written against, so the
-    // commit's version applies as it stands.
-    if (inBase?.oid === mine?.oid && inBase?.mode === mine?.mode) {
-      changes.push(
-        yours === undefined
-          ? { path, content: null }
-          : { path, content: yield* repository.readBlob(yours.oid), mode: yours.mode },
-      );
-      continue;
-    }
-
-    // Both moved. One of them to nothing: a path missing from the base and
-    // from one side is unchanged on that side and was handled above, so the
-    // base has it and this is an edit against a delete — no content to merge.
-    if (mine === undefined || yours === undefined) {
-      conflicts.push({ path, reason: "modify/delete" });
-      continue;
-    }
-
-    const ourBytes = yield* repository.readBlob(mine.oid);
-    const theirBytes = yield* repository.readBlob(yours.oid);
-
-    // Markers only mean something in text; a binary file needs a human.
-    if (isBinary(ourBytes) || isBinary(theirBytes)) {
-      conflicts.push({ path, reason: "binary" });
-      continue;
-    }
-
-    const baseBytes =
-      inBase === undefined ? new Uint8Array(0) : yield* repository.readBlob(inBase.oid);
-    const merged = mergeText({
-      base: decoder.decode(baseBytes),
-      ours: decoder.decode(ourBytes),
-      theirs: decoder.decode(theirBytes),
-    });
-
-    if (merged.conflicted) {
-      conflicts.push({ path, reason: inBase === undefined ? "add/add" : "content" });
-      continue;
-    }
-    changes.push({ path, content: encoder.encode(merged.content), mode: mine.mode });
-  }
+  // The walk is `Merge.mergeTrees` with the roles cast for a replay: `ours`
+  // is `onto`, `theirs` is the commit, and the base above is what makes the
+  // common case — a path the commit never touched — resolve to `onto`'s
+  // version instead of being dragged back to the fork point.
+  const { changes, conflicts } = yield* mergeTrees({
+    base: baseFiles,
+    ours: ourFiles,
+    theirs: theirFiles,
+    read: repository.readBlob,
+  });
 
   // Nothing is written when a replay conflicts. A merge hands the caller a
   // tree with markers to resolve; a replay hands back the commit that failed,

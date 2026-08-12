@@ -1,5 +1,5 @@
 /**
- * Three-way merge.
+ * Three-way merge — text, and the tree walk over it.
  *
  * diff3: match each side against the base, and the lines *both* sides matched
  * are the only places a region can safely begin or end. Between two of those
@@ -9,8 +9,19 @@
  * A conflict is a value, not a failure: an unmergeable region is a normal
  * outcome that the caller writes to a file with markers in it, and the caller
  * still wants the regions that did merge.
+ *
+ * `mergeTrees` at the bottom is the same decision lifted to whole trees, and
+ * it lives here — once — because both of its callers depend on its subtlest
+ * part being identical: `Repository.merge` and `Rebase.replayTree` differ
+ * only in which commit supplies the base, and two copies of the treesame
+ * rules and the conflict taxonomy would drift apart precisely where a drift
+ * is hardest to notice.
  */
-import { lcs, splitLines } from "./Diff.ts";
+import { Effect } from "effect";
+
+import { isBinary, lcs, splitLines } from "./Diff.ts";
+import type { ObjectNotFound, StorageFailure } from "./Error.ts";
+import type { Oid } from "./Store.ts";
 
 export type MergeRegion =
   | { readonly ok: true; readonly lines: ReadonlyArray<string> }
@@ -168,3 +179,128 @@ export const mergeText = (input: MergeInput): TextMerge => {
 
   return { content: out.length === 0 ? "" : `${out.join("\n")}\n`, conflicted };
 };
+
+/** One side's version of a path: the blob and the mode it carries. */
+export interface TreeSideFile {
+  readonly oid: Oid;
+  readonly mode: string;
+}
+
+export interface TreeConflict {
+  readonly path: string;
+  /** Why it could not be resolved, in the vocabulary git uses for it. */
+  readonly reason: "content" | "add/add" | "modify/delete" | "binary";
+}
+
+export interface TreeChange {
+  readonly path: string;
+  /** `null` removes the path. */
+  readonly content: Uint8Array | null;
+  readonly mode?: string;
+}
+
+const treeEncoder = new TextEncoder();
+const treeDecoder = new TextDecoder();
+
+/**
+ * The three-way decision over whole trees: what changes to apply on top of
+ * `ours`, and which paths a human has to settle.
+ *
+ * Every rule reads off one question — which sides moved since the base?
+ * Neither or both-to-the-same: nothing to decide. One: that side stands,
+ * which is the rule that keeps a merge from reverting the other branch's
+ * work. Both: merge the text, or report why not.
+ *
+ * A `content` conflict still contributes its marker text to `changes`. A
+ * caller recording the merge writes those markers into the tree — a
+ * conflicted merge that wrote nothing would leave nothing to resolve — and a
+ * caller that refuses to write on conflict discards `changes` whole, so the
+ * markers cost it nothing.
+ */
+export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
+  readonly base: ReadonlyMap<string, TreeSideFile>;
+  readonly ours: ReadonlyMap<string, TreeSideFile>;
+  readonly theirs: ReadonlyMap<string, TreeSideFile>;
+  readonly strategy?: Strategy;
+  readonly read: (oid: Oid) => Effect.Effect<Uint8Array, ObjectNotFound | StorageFailure>;
+}) {
+  const strategy = input.strategy ?? "recursive";
+  const conflicts: TreeConflict[] = [];
+  const changes: TreeChange[] = [];
+
+  for (const path of new Set([
+    ...input.ours.keys(),
+    ...input.theirs.keys(),
+    ...input.base.keys(),
+  ])) {
+    const inBase = input.base.get(path);
+    const mine = input.ours.get(path);
+    const yours = input.theirs.get(path);
+
+    // Same on both sides: no decision to make.
+    if (mine?.oid === yours?.oid && mine?.mode === yours?.mode) continue;
+
+    // Only they moved, so their version stands — including standing deleted.
+    if (inBase?.oid === mine?.oid && inBase?.mode === mine?.mode) {
+      changes.push(
+        yours === undefined
+          ? { path, content: null }
+          : { path, content: yield* input.read(yours.oid), mode: yours.mode },
+      );
+      continue;
+    }
+
+    // Only we moved; ours is already the tree the changes apply to.
+    if (inBase?.oid === yours?.oid && inBase?.mode === yours?.mode) continue;
+
+    // Both moved, one of them to nothing. A path absent from the base and
+    // from one side is unchanged on that side and was handled above, so the
+    // base has it and this is an edit against a delete — no content to merge.
+    if (mine === undefined || yours === undefined) {
+      if (strategy === "ours") {
+        if (mine === undefined) changes.push({ path, content: null });
+        continue;
+      }
+      if (strategy === "theirs") {
+        changes.push(
+          yours === undefined
+            ? { path, content: null }
+            : { path, content: yield* input.read(yours.oid), mode: yours.mode },
+        );
+        continue;
+      }
+      conflicts.push({ path, reason: "modify/delete" });
+      continue;
+    }
+
+    const ourBytes = yield* input.read(mine.oid);
+    const theirBytes = yield* input.read(yours.oid);
+
+    if (strategy === "ours") continue;
+    if (strategy === "theirs") {
+      changes.push({ path, content: theirBytes, mode: yours.mode });
+      continue;
+    }
+
+    // Conflict markers only make sense in text; a binary file has to be
+    // chosen by a human, so it is reported and ours is left in place.
+    if (isBinary(ourBytes) || isBinary(theirBytes)) {
+      conflicts.push({ path, reason: "binary" });
+      continue;
+    }
+
+    const baseBytes = inBase === undefined ? new Uint8Array(0) : yield* input.read(inBase.oid);
+    const merged = mergeText({
+      base: treeDecoder.decode(baseBytes),
+      ours: treeDecoder.decode(ourBytes),
+      theirs: treeDecoder.decode(theirBytes),
+    });
+
+    if (merged.conflicted) {
+      conflicts.push({ path, reason: inBase === undefined ? "add/add" : "content" });
+    }
+    changes.push({ path, content: treeEncoder.encode(merged.content), mode: mine.mode });
+  }
+
+  return { changes, conflicts };
+});
