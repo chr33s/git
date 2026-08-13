@@ -425,6 +425,64 @@ describe("receive-pack", () => {
     }
   });
 
+  it("refuses a push whose ref name escapes the repository", async () => {
+    // The delete-only traversal from the security audit: `next` is the zero
+    // oid, so no pack body is needed and the command reaches the ref store on
+    // its own. On a filesystem backend the name is joined onto the repository
+    // root, so `../../victim` would have unlinked a file outside it — and the
+    // reflog append would have written outside it too.
+    const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), "receive-pack-escape-"));
+    const root = path.join(sandbox, "nested", "repo");
+    await fs.mkdir(root, { recursive: true });
+    const victim = path.join(sandbox, "victim");
+    await fs.writeFile(victim, "precious\n");
+
+    try {
+      const onDisk = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provideMerge(nodeStores(root)),
+      );
+
+      const reports = await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "one",
+            author: alice,
+          });
+
+          const said: string[] = [];
+          for (const name of ["../../victim", "refs/heads/../../../victim", "refs/../../victim"]) {
+            // Both directions: the delete that needs no pack, and the create
+            // that would write an oid into the escaped path.
+            for (const command of [`${commit} ${ZERO} ${name}\n`, `${ZERO} ${commit} ${name}\n`]) {
+              const response = yield* Protocol.receivePack(push([command]));
+              said.push(
+                decoder.decode(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()))),
+              );
+            }
+          }
+          return said;
+        }).pipe(Effect.provide(onDisk)) as Effect.Effect<string[]>,
+      );
+
+      // Every one refused per-ref, as a report the client can read — not as a
+      // torn-down connection and not as a 500.
+      for (const report of reports) {
+        assert.ok(report.includes("funny refname"), report);
+      }
+
+      // And nothing outside the repository moved.
+      assert.equal(await fs.readFile(victim, "utf8"), "precious\n");
+      assert.deepEqual((await fs.readdir(sandbox)).sort(), ["nested", "victim"]);
+      assert.deepEqual(await fs.readdir(path.join(sandbox, "nested")), ["repo"]);
+    } finally {
+      await fs.rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
   it("reports a ref the store cannot write as a per-ref failure", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "receive-pack-"));
     try {

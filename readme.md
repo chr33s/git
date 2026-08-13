@@ -58,8 +58,9 @@ Both hosts speak:
 - **webhooks** — signed push events, delivered with retries
 
 The deployed Worker always enforces scoped read/write tokens (it fails to
-deploy without `GIT_AUTH_SECRET`); the node host is open unless started with a
-secret. `git` presents a token as `http://<token>@host/repo`.
+deploy without `GIT_AUTH_SECRET`); the node host wants `--secret` too, and
+refuses to start without it unless you pass `--open` to say you meant an
+unauthenticated server. `git` presents a token as `http://<token>@host/repo`.
 
 ## Use the CLI
 

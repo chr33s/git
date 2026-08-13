@@ -139,7 +139,9 @@ describe("cli", () => {
 
     let child: ChildProcess | null = null;
     try {
-      child = spawn("node", [entry, "serve", "--root", root, "--port", "0"], {
+      // `--open` on purpose: with no secret the command refuses to start, so
+      // an unauthenticated server has to be asked for by name.
+      child = spawn("node", [entry, "serve", "--root", root, "--port", "0", "--open"], {
         stdio: ["ignore", "pipe", "pipe"],
       });
       const url = await new Promise<string>((resolve, reject) => {
@@ -162,6 +164,26 @@ describe("cli", () => {
       );
     } finally {
       child?.kill();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to serve unauthenticated unless asked to", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-serve-closed-"));
+    try {
+      // No `--secret` and no `--open`: an open server is a thing to ask for,
+      // not a thing to arrive at by leaving a flag off. The message has to name
+      // both ways forward, or the refusal is just an obstacle.
+      const refused = await cli(["serve", "--root", root, "--port", "0"]).then(
+        () => null,
+        (error: { stderr?: string; stdout?: string }) => error,
+      );
+      assert.ok(refused !== null, "serve without --secret or --open must fail");
+      const said = `${refused.stderr ?? ""}${refused.stdout ?? ""}`;
+      assert.match(said, /refusing to serve/);
+      assert.match(said, /--secret/);
+      assert.match(said, /--open/);
+    } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
   });

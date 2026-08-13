@@ -9,7 +9,7 @@
  *   chr33s-git init my-repo                      # bare repository under --root
  *   chr33s-git refs my-repo · log my-repo        # inspect it
  *   chr33s-git clone http://host/repo my-copy    # bare clone over smart HTTP
- *   chr33s-git serve --port 8080 --secret s3…    # the node host, optionally authed
+ *   chr33s-git serve --port 8080 --secret s3…    # the node host; --open to skip auth
  *   chr33s-git token my-repo --secret s3… -s write
  *
  * The failure channel reaches `main`, so exit codes come from the error
@@ -190,10 +190,13 @@ const serveCommand = Command.make(
     hostname: Flag.string("hostname").pipe(Flag.withDefault("127.0.0.1")),
     secret: Flag.string("secret").pipe(
       Flag.withDefault(""),
-      Flag.withDescription("Require hmac tokens signed with this secret; empty serves open"),
+      Flag.withDescription("Require hmac tokens signed with this secret"),
+    ),
+    open: Flag.boolean("open").pipe(
+      Flag.withDescription("Serve without authentication — anyone who can reach the port can push"),
     ),
   },
-  ({ hostname, port, root, secret }) => {
+  ({ hostname, open, port, root, secret }) => {
     // Built out here, not inside the generator: `serve` wants a promise-
     // returning callback, and running an Effect inside an Effect would
     // discard the surrounding services.
@@ -206,7 +209,26 @@ const serveCommand = Command.make(
           };
 
     return Effect.gen(function* () {
+      // Unauthenticated is something to ask for, not something to arrive at.
+      // An open server hands read *and* write over every repository under the
+      // root to anyone who can reach the port — which is a fine thing to want
+      // on a laptop and a bad thing to get by leaving a flag off.
+      if (secret === "" && !open) {
+        return yield* new Invalid({
+          field: "serve",
+          reason:
+            `refusing to serve ${root}/ unauthenticated: pass --secret <secret> to require ` +
+            "tokens, or --open to serve it to anyone who can reach the port",
+        });
+      }
+
       const server = yield* Effect.promise(() => serve({ root, port, hostname, ...verify }));
+      if (secret === "") {
+        yield* Console.error(
+          `warning: --open, so anyone who can reach ${server.url} can read and push to ` +
+            `every repository under ${root}/`,
+        );
+      }
       yield* Console.log(
         `git smart-HTTP server on ${server.url}, repositories under ${root}/` +
           (secret === "" ? " (open access)" : " (token required)"),
