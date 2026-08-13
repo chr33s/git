@@ -15,6 +15,7 @@
  * `X-Signature-256: sha256=<hex>` form every git host uses, so receivers can
  * verify with the library they already have.
  */
+import { bytesToHex } from "../git/Format.ts";
 import { Effect, Layer, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
@@ -60,9 +61,7 @@ export const sign = (body: string, secret: string): Effect.Effect<string> =>
       ["sign"],
     );
     const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
-    const hex = [...new Uint8Array(signature)]
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
+    const hex = bytesToHex(new Uint8Array(signature));
     return `sha256=${hex}`;
   });
 

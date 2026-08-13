@@ -30,7 +30,7 @@ import { file as lfsFile } from "../server/Lfs.node.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
-import { routeOf } from "../server/Route.ts";
+import { collects, routeOf, settledWithin } from "../server/Route.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 
@@ -65,12 +65,49 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     readonly api: (request: Request) => Promise<Response>;
     /** The input-gate stand-in: requests to one repo run strictly in order. */
     gate: Promise<unknown>;
+    /**
+     * Responses whose bodies are still being written.
+     *
+     * An upload-pack body reads objects as the client consumes it, so it is
+     * still reading the store after its handler has returned. Collection is
+     * the one operation that cannot run alongside that, and it is the only one
+     * that waits — making every request wait would let a client that stops
+     * reading its socket wedge the repository for everyone else.
+     */
+    readonly delivering: Set<Promise<unknown>>;
+    /** Requests inside the gate right now; an evictable entry has none. */
+    active: number;
   }
   const repos = new Map<string, RepoState>();
 
+  /**
+   * How many repositories keep a built layer.
+   *
+   * One entry per name ever asked for is a leak with a name: a scan for
+   * `/aaaa/info/refs`, `/aaab/…` would grow the map without bound, and none of
+   * those repositories need exist. Eviction only ever takes an entry with
+   * nothing in flight, so it cannot break the serialization the gate provides.
+   */
+  const REPO_CACHE = 256;
+
+  const evict = () => {
+    if (repos.size <= REPO_CACHE) return;
+    for (const [name, state] of repos) {
+      if (state.active > 0 || state.delivering.size > 0) continue;
+      repos.delete(name);
+      if (repos.size <= REPO_CACHE) return;
+    }
+  };
+
   const stateFor = (repo: string): RepoState => {
     const cached = repos.get(repo);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      // Re-inserted so iteration order is least-recently-used first.
+      repos.delete(repo);
+      repos.set(repo, cached);
+      return cached;
+    }
+    evict();
 
     // The registry lives beside the repository it reports on, so a webhook
     // survives a restart the same way a ref does.
@@ -97,14 +134,45 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         { disableLogger: true },
       ).handler,
       gate: Promise.resolve(),
+      delivering: new Set(),
+      active: 0,
     };
     repos.set(repo, state);
     return state;
   };
 
-  const dispatch = async (repo: string, request: Request): Promise<Response> => {
+  /**
+   * One repository's requests, strictly in order.
+   *
+   * The gate spans the handler, which is what makes a push's write-objects-
+   * then-move-the-ref window indivisible. It deliberately does not span
+   * writing the response body: that finishes at the client's pace, and a
+   * client that stops reading would otherwise hold the whole repository.
+   *
+   * Collection is the exception, because a pack body reads objects long after
+   * its handler returned — `Repository.gc` relies on this, so `gc` waits for
+   * the bodies still in flight before it starts deleting.
+   */
+  const dispatch = async (
+    repo: string,
+    request: Request,
+    deliver: (response: Response) => Promise<void>,
+  ): Promise<void> => {
     const state = stateFor(repo);
-    const run = async () => {
+    state.active += 1;
+
+    // Outside the gate, deliberately: a collection waits on bodies that finish
+    // at their clients' pace, and waiting for them with the gate held would
+    // stall every other request to this repository for the whole bound.
+    if (collects(request)) await settledWithin(state.delivering);
+
+    const answer = async (): Promise<Response> => {
+      // And once more with the gate held, briefly: the wait above lets go of
+      // the backlog without holding anyone up, but a body that started while
+      // it was waiting would otherwise still be reading objects. Short,
+      // because by here the queue is short.
+      if (collects(request)) await settledWithin(state.delivering, 2_000);
+
       // LFS first: it shares the `info/` prefix with the advertisement, and
       // its bodies are the large ones, so it must not be behind a handler
       // that would read them.
@@ -135,14 +203,30 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           Effect.provide(state.layer),
         ) as Effect.Effect<Response | null>,
       );
-      return matched ?? state.api(request);
+      return matched ?? (await state.api(request));
     };
-    const response = state.gate.then(run, run);
-    state.gate = response.then(
+
+    const answered = state.gate.then(answer, answer);
+    state.gate = answered.then(
       () => undefined,
       () => undefined,
     );
-    return response;
+
+    let response: Response;
+    try {
+      response = await answered;
+    } finally {
+      state.active -= 1;
+    }
+
+    const delivery = deliver(response);
+    // Registered before it is awaited, so a `gc` that arrives mid-body sees it.
+    state.delivering.add(delivery);
+    try {
+      await delivery;
+    } finally {
+      state.delivering.delete(delivery);
+    }
   };
 
   const server = http.createServer((incoming, outgoing) => {
@@ -204,10 +288,13 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           : await Effect.runPromise(
               Auth.guard(request, (credential) => Effect.promise(() => verify(repo, credential))),
             );
-      const response = denied ?? (await dispatch(repo, request));
-      outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
-      if (response.body === null) outgoing.end();
-      else await pipeline(Readable.fromWeb(response.body as never), outgoing);
+      const deliver = async (response: Response) => {
+        outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
+        if (response.body === null) outgoing.end();
+        else await pipeline(Readable.fromWeb(response.body as never), outgoing);
+      };
+      if (denied !== null) await deliver(denied);
+      else await dispatch(repo, request, deliver);
     })().catch((error: unknown) => {
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end(String(error));

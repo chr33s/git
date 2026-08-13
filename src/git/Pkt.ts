@@ -36,10 +36,15 @@ export const RESPONSE_END = encoder.encode("0002");
 export const BAND = { pack: 1, progress: 2, error: 3 } as const;
 
 /**
- * 65520 payload bytes, which with the band byte and the 4-byte length header
- * is the 65524 maximum the capability's name promises.
+ * The most pack bytes one side-band packet may carry.
+ *
+ * git's hard limit is 65520 bytes for the *whole* pkt-line, header included
+ * (`LARGE_PACKET_MAX`), and a side-band packet spends 4 of those on the length
+ * header and 1 on the channel byte. A payload of 65520 would frame as 65525
+ * and real git refuses the stream with "bad line length" — while this
+ * repository's own reader accepts it, so only an actual git client notices.
  */
-export const SIDEBAND_MAX = 65_520;
+export const SIDEBAND_MAX = 65_515;
 
 /** One side-band packet. Callers on band 1 must respect `SIDEBAND_MAX`. */
 export const band = (channel: (typeof BAND)[keyof typeof BAND], payload: string | Uint8Array) => {
@@ -98,8 +103,12 @@ export class PktReader {
   async next(): Promise<Uint8Array | "flush" | "delim" | "end" | "eof"> {
     const header = await this.#read(4);
     if (header === null) return "eof";
-    const length = Number.parseInt(decoder.decode(header), 16);
-    if (Number.isNaN(length)) throw corrupt(`bad pkt-line length '${decoder.decode(header)}'`);
+    const hex = decoder.decode(header);
+    // All four bytes, not a hex prefix: `parseInt("00zz", 16)` is 0, which
+    // would read as a flush packet and leave the rest of the header to be
+    // misframed as the next one — a desynchronised stream instead of an error.
+    if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw corrupt(`bad pkt-line length '${hex}'`);
+    const length = Number.parseInt(hex, 16);
     if (length === 0) return "flush";
     // 1 and 2 are v2's delimiter and response-end; they are lengths no v0
     // reader would accept, which is how the formats stay distinguishable.

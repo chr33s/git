@@ -10,6 +10,7 @@
  * Object needs; the Artifacts provider's `Tokens.verify` plugs into the same
  * guard for revocable tokens.
  */
+import { bytesToHex } from "../git/Format.ts";
 import { Effect } from "effect";
 
 export type Scope = "read" | "write";
@@ -21,6 +22,11 @@ export const requiredScope = (request: Request): Scope => {
   if (last === "git-receive-pack") return "write";
   if (last === "refs" && url.searchParams.get("service") === "git-receive-pack") return "write";
   if (last === "git-upload-pack") return "read";
+  // The LFS batch endpoint is a POST that negotiates downloads as well as
+  // uploads, so method alone would lock a read token out of `git clone` on
+  // any LFS repository. The upload it may hand back is a separate PUT, and
+  // that one is still charged as a write.
+  if (last === "batch" && url.pathname.includes("/info/lfs/")) return "read";
   return request.method === "GET" || request.method === "HEAD" ? "read" : "write";
 };
 
@@ -81,8 +87,7 @@ const key = (secret: string) =>
 const payload = (repo: string, scope: Scope, expiresAtMs: number) =>
   encoder.encode(`${repo}|${scope}|${expiresAtMs}`);
 
-const hex = (bytes: ArrayBuffer) =>
-  [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+const hex = (bytes: ArrayBuffer) => bytesToHex(new Uint8Array(bytes));
 
 /** `git1.<scope>.<expiry-ms>.<hmac>` — everything needed to verify statelessly. */
 export const hmacMint = (

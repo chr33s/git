@@ -9,12 +9,10 @@
  * in git's own layout, and a webhook list is small, read once per push, and
  * written by hand often enough that being able to read it matters.
  */
-import * as fs from "node:fs";
-import * as path from "node:path";
-
 import { Effect, Layer } from "effect";
 
 import { StorageFailure } from "../git/Error.ts";
+import { readRows, writeRows } from "./JsonRows.node.ts";
 import { type Subscriber, Subscribers, validate } from "./Subscribers.ts";
 
 interface Stored {
@@ -24,32 +22,16 @@ interface Stored {
   readonly createdAt: string;
 }
 
-const read = (file: string): ReadonlyArray<Subscriber> => {
-  if (!fs.existsSync(file)) return [];
-  const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (!Array.isArray(parsed)) return [];
-  return (parsed as ReadonlyArray<Stored>).map((row) => ({
+const read = (file: string): ReadonlyArray<Subscriber> =>
+  readRows<Subscriber, Stored>(file, (row) => ({
     id: row.id,
     url: row.url,
     secret: row.secret,
     createdAt: new Date(row.createdAt),
   }));
-};
 
-/** Temp-and-rename, so a reader never sees a half-written list. */
-const write = (file: string, rows: ReadonlyArray<Subscriber>): void => {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(
-    temporary,
-    JSON.stringify(
-      rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })),
-      null,
-      2,
-    ),
-  );
-  fs.renameSync(temporary, file);
-};
+const write = (file: string, rows: ReadonlyArray<Subscriber>): void =>
+  writeRows(file, rows, (row) => ({ ...row, createdAt: row.createdAt.toISOString() }));
 
 export const file = (location: string): Layer.Layer<Subscribers> =>
   Layer.sync(Subscribers, () => {

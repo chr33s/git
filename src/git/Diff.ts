@@ -62,11 +62,22 @@ const backtrack = (
   return pairs.reverse();
 };
 
-/** Matched index pairs, ascending in both coordinates. */
-export const lcs = (
+/**
+ * How far the search will go before giving up.
+ *
+ * The trace costs O(D²) where D is the edit distance, so the bound has to be
+ * on D — not on the file size. Two 5,000-line files differing by one line have
+ * D = 2 and diff exactly; two that share nothing have D ≈ n + m and stop here.
+ * Bounding `n + m` up front, as an earlier version did, called every large
+ * file a rewrite and turned ordinary merges into whole-file conflicts.
+ */
+const MAX_EDITS = 2_000;
+
+/** The Myers trace, or `null` when the edit distance ran past the bound. */
+const myers = (
   a: ReadonlyArray<string>,
   b: ReadonlyArray<string>,
-): ReadonlyArray<readonly [number, number]> => {
+): ReadonlyArray<readonly [number, number]> | null => {
   const n = a.length;
   const m = b.length;
   if (n === 0 || m === 0) return [];
@@ -77,7 +88,9 @@ export const lcs = (
   // the trace O(D²) rather than O(D(N+M)).
   const trace: Array<Int32Array> = [];
 
-  for (let d = 0; d <= max; d++) {
+  // Bounded by the edit distance: past `MAX_EDITS` the two sides share little
+  // enough that "rewritten" is the honest answer, and the trace stops growing.
+  for (let d = 0; d <= Math.min(max, MAX_EDITS); d++) {
     trace.push(frontier.slice(max - d, max + d + 1));
 
     for (let k = -d; k <= d; k += 2) {
@@ -99,7 +112,47 @@ export const lcs = (
     }
   }
 
-  return [];
+  return null;
+};
+
+/**
+ * Matched index pairs, ascending in both coordinates.
+ *
+ * The equal lines at the two ends are matched directly, before the search
+ * runs. That is not only faster — it is what keeps the bound above from
+ * costing correctness. Returning no matches at all when the search ran long,
+ * which is what this used to do, told `diff3` the two files had nothing in
+ * common: a 100-line append to a 4,000-line file came back as a whole-file
+ * rewrite, and a merge of two edits at opposite ends of one became a
+ * whole-file conflict where git merges it cleanly. Now the search giving up
+ * costs the detail in the middle and nothing else.
+ */
+export const lcs = (
+  a: ReadonlyArray<string>,
+  b: ReadonlyArray<string>,
+): ReadonlyArray<readonly [number, number]> => {
+  if (a.length === 0 || b.length === 0) return [];
+
+  const shortest = Math.min(a.length, b.length);
+  let head = 0;
+  while (head < shortest && a[head] === b[head]) head++;
+
+  let tail = 0;
+  while (tail < shortest - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+
+  const pairs: Array<readonly [number, number]> = [];
+  for (let index = 0; index < head; index++) pairs.push([index, index]);
+
+  const middle = myers(a.slice(head, a.length - tail), b.slice(head, b.length - tail));
+  if (middle !== null) {
+    for (const [x, y] of middle) pairs.push([x + head, y + head]);
+  }
+
+  for (let index = 0; index < tail; index++) {
+    pairs.push([a.length - tail + index, b.length - tail + index]);
+  }
+
+  return pairs;
 };
 
 /** The changed regions only — no context, and no entry for equal lines. */

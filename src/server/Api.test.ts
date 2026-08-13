@@ -651,6 +651,25 @@ describe("Api", () => {
           ["src/a.ts"],
         );
 
+        // A prefix stops at a path boundary: `src` is a directory, not the
+        // first three characters of one, so `src-generated/` is not under it.
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "a sibling directory",
+            author: alice,
+            files: [{ path: "src-generated/g.ts", content: "const hello = 9;\n" }],
+          },
+        });
+        const anchored = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "hello", path: "src" },
+        });
+        assert.deepEqual(
+          anchored.matches.map((match) => match.path),
+          ["src/a.ts"],
+        );
+
         // A cap, and an honest flag when it bites.
         const capped = yield* client.repo.grep({
           params: { repo: "r" },
@@ -671,6 +690,27 @@ describe("Api", () => {
           payload: { pattern: "([unclosed", fixed: true },
         });
         assert.deepEqual(literal.matches, []);
+
+        // A file too large to hold three times over — the bytes, the decoded
+        // string and the array of lines — is named as skipped rather than
+        // read, decoded and split inside a worker with 128 MiB.
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "a big one",
+            author: alice,
+            files: [{ path: "big.log", content: "hello padding\n".repeat(400_000) }],
+          },
+        });
+        const big = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "hello" },
+        });
+        assert.deepEqual(big.skipped, ["big.log"]);
+        assert.equal(
+          big.matches.some((match) => match.path === "big.log"),
+          false,
+        );
       }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
   );
 

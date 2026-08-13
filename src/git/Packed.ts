@@ -41,6 +41,17 @@ export class PackStore extends Context.Service<
   PackStore,
   {
     readonly list: Effect.Effect<ReadonlyArray<PackHandle>, StorageFailure>;
+    /**
+     * Packs this repository reads through but does not own — a fork's view of
+     * its parent, via git's `alternates`.
+     *
+     * Separate from `list` because the two answer different questions: reads
+     * consult both, while everything that *enumerates* this repository's
+     * objects — `gc`, `fsck`, a repack — must see only what it owns. Folding
+     * them together makes a fork report its parent's history as its own and
+     * try to collect it.
+     */
+    readonly borrowed?: Effect.Effect<ReadonlyArray<PackHandle>, StorageFailure>;
     readonly write: (input: {
       readonly name: string;
       readonly pack: Uint8Array;
@@ -87,7 +98,15 @@ export const packed = (
    */
   const locate = (oid: Oid) =>
     Effect.gen(function* () {
-      for (const handle of yield* packs.list) {
+      // Owned first, borrowed second: a fork that has its own copy uses it.
+      // Both are listed per lookup on purpose — a repack replaces the packs
+      // through the store directly, so anything remembered here could point
+      // at a pack that has since been deleted. Backends that can tell when
+      // their pack directory changed cache it there instead, where the
+      // invalidation is real.
+      const own = yield* packs.list;
+      const borrowed = packs.borrowed === undefined ? [] : yield* packs.borrowed;
+      for (const handle of [...own, ...borrowed]) {
         const found = findInPackIndex(handle.index, oid);
         if (found._tag === "Failure") {
           return yield* new StorageFailure({
@@ -101,7 +120,7 @@ export const packed = (
       return null;
     });
 
-  const fromPack = (oid: Oid) =>
+  const fromPack = (oid: Oid, depth = 0): Effect.Effect<RawObject | null, StorageFailure> =>
     Effect.gen(function* () {
       const located = yield* locate(oid);
       if (located === null) return null;
@@ -109,19 +128,23 @@ export const packed = (
 
       return yield* Effect.tryPromise({
         try: () =>
-          readAt(located.handle.source, located.entry.offset, (base) =>
-            // A ref-delta whose base is not in this pack: look everywhere
-            // else this store can see, which is what makes a thin pack
-            // readable once it has been stored.
-            Effect.runPromiseWith(context)(
-              read(base).pipe(
-                Effect.map((object): RawObject | null => object),
-                Effect.catchTags({
-                  ObjectNotFound: () => Effect.succeed(null),
-                  StorageFailure: () => Effect.succeed(null),
-                }),
+          readAt(
+            located.handle.source,
+            located.entry.offset,
+            (base, at) =>
+              // A ref-delta whose base is not in this pack: look everywhere
+              // else this store can see, which is what makes a thin pack
+              // readable once it has been stored. `at` carries the chain
+              // depth across that hop, so a cycle is caught rather than
+              // recursed into forever.
+              Effect.runPromiseWith(context)(
+                loose.read(base).pipe(
+                  Effect.map((object): RawObject | null => object),
+                  Effect.catchTag("ObjectNotFound", () => fromPack(base, at)),
+                  Effect.catchTag("StorageFailure", () => Effect.succeed(null)),
+                ),
               ),
-            ),
+            depth,
           ),
         catch: failed("packs.read", located.handle.name),
       });
@@ -168,6 +191,7 @@ export const packed = (
     // Deleting from a pack is a repack; `gc` owns that, and silently doing it
     // here would turn one delete into rewriting a gigabyte.
     delete: loose.delete,
+    ...(loose.shared === undefined ? {} : { shared: loose.shared }),
 
     /**
      * `Stream.suspend`, so the dedupe set below belongs to one run of the

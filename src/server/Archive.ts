@@ -17,7 +17,8 @@
  */
 import { Effect, Stream } from "effect";
 
-import { ObjectNotFound, type StorageFailure, statusOf } from "../git/Error.ts";
+import { Invalid, ObjectNotFound, type StorageFailure, statusOf } from "../git/Error.ts";
+import { isGitlink, isTree } from "../git/Format.ts";
 import { crc32 } from "../git/PackIndex.ts";
 import { Repository, type TreeFile } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -28,7 +29,7 @@ const decoder = new TextDecoder();
 export type Format = "tar" | "tar.gz" | "zip";
 
 /** What reading a tree can go wrong with; the archive inherits it verbatim. */
-export type ArchiveError = ObjectNotFound | StorageFailure;
+export type ArchiveError = ObjectNotFound | StorageFailure | Invalid;
 
 const CONTENT_TYPES: Record<Format, string> = {
   tar: "application/x-tar",
@@ -84,7 +85,7 @@ const planOf = (files: ReadonlyArray<TreeFile>, prefix: string): ReadonlyArray<E
   for (const file of files) {
     // A gitlink names a commit in another repository; there is nothing here to
     // write for it, and git archive skips it too.
-    if (file.mode === "160000") continue;
+    if (isGitlink(file.mode)) continue;
 
     const path = `${prefix}${file.path}`;
     const segments = path.split("/");
@@ -102,6 +103,19 @@ const planOf = (files: ReadonlyArray<TreeFile>, prefix: string): ReadonlyArray<E
 };
 
 const BLOCK = 512;
+
+/**
+ * What the zip writer can describe.
+ *
+ * The end-of-central-directory record holds the entry count in 16 bits and the
+ * directory's size and offset in 32; local headers hold each entry's size the
+ * same way. Past those the fields wrap and the archive is truncated at
+ * extraction time — after a 200 that looked like a complete download. zip64 is
+ * the format's answer and this writer does not implement it, so the limits are
+ * refused rather than exceeded.
+ */
+const ZIP_MAX_ENTRIES = 0xffff;
+const ZIP_MAX_BYTES = 0xffff_ffff;
 
 /** Zero bytes to round `size` up to a whole 512-byte block, or nothing. */
 const padding = (size: number): ReadonlyArray<Uint8Array> => {
@@ -187,34 +201,58 @@ const splitPath = (path: string): { readonly name: string; readonly prefix: stri
  */
 const tarHeaders = (header: Omit<Header, "prefix">): ReadonlyArray<Uint8Array> => {
   const split = splitPath(header.name);
-  if (split !== null) return [ustarHeader({ ...header, ...split })];
+  // A symlink target has no `prefix` field to spill into, so 100 bytes is the
+  // whole of it — and silently shipping half a target is a broken link in the
+  // extracted tree rather than an error anyone sees.
+  const longLink = encoder.encode(header.link).length > 100;
+  if (split !== null && !longLink) return [ustarHeader({ ...header, ...split })];
 
-  // "<len> path=<value>\n", where <len> counts itself — solved by growing the
-  // guess until the printed length agrees with it.
-  const value = `path=${header.name}\n`;
-  let length = encoder.encode(value).length + 2;
-  while (encoder.encode(`${length}`).length + 1 + encoder.encode(value).length !== length) {
-    length = encoder.encode(`${length}`).length + 1 + encoder.encode(value).length;
+  // "<len> <keyword>=<value>\n", where <len> counts itself — solved by growing
+  // the guess until the printed length agrees with it.
+  const pax = (keyword: string, value: string): Uint8Array => {
+    const body = `${keyword}=${value}\n`;
+    let length = encoder.encode(body).length + 2;
+    while (encoder.encode(`${length}`).length + 1 + encoder.encode(body).length !== length) {
+      length = encoder.encode(`${length}`).length + 1 + encoder.encode(body).length;
+    }
+    return encoder.encode(`${length} ${body}`);
+  };
+
+  const parts = [
+    ...(split === null ? [pax("path", header.name)] : []),
+    ...(longLink ? [pax("linkpath", header.link)] : []),
+  ];
+  const records = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let written = 0;
+  for (const part of parts) {
+    records.set(part, written);
+    written += part.length;
   }
-  const record = encoder.encode(`${length} ${value}`);
 
-  // The truncated name is what a tar without pax support would see; readers
-  // that do support it replace the name from the record.
-  const truncated = decoder.decode(encoder.encode(header.name).subarray(0, 100));
+  // The truncated fields are what a tar without pax support would see; readers
+  // that do support it replace them from the records.
+  const fallback = {
+    ...header,
+    ...(split ?? {
+      name: decoder.decode(encoder.encode(header.name).subarray(0, 100)),
+      prefix: "",
+    }),
+    link: longLink ? decoder.decode(encoder.encode(header.link).subarray(0, 100)) : header.link,
+  };
 
   return [
     ustarHeader({
       name: "PaxHeaders/pax",
       mode: 0o644,
-      size: record.length,
+      size: records.length,
       typeflag: "x",
       link: "",
       mtime: header.mtime,
       prefix: "",
     }),
-    record,
-    ...padding(record.length),
-    ustarHeader({ ...header, name: truncated, prefix: "" }),
+    records,
+    ...padding(records.length),
+    ustarHeader(fallback),
   ];
 };
 
@@ -419,6 +457,18 @@ const zipStream = (
           mode,
           offset,
         };
+
+        // Refused rather than wrapped: past these the fields the format has
+        // for them overflow and the archive is truncated at extraction time,
+        // after a 200 that looked like a complete download.
+        if (records.length >= ZIP_MAX_ENTRIES || offset + data.length > ZIP_MAX_BYTES) {
+          return yield* new Invalid({
+            field: "format",
+            reason:
+              `this archive needs zip64 (${records.length + 1} entries, ` +
+              `${offset + data.length} bytes); ask for .tar.gz instead`,
+          });
+        }
         records.push(record);
 
         const header = localHeader(record, stamp);
@@ -531,7 +581,7 @@ export const handle = Effect.fn("Archive.handle")(
       if (path === "") return root;
       const entry = yield* repository.findPath(root, path);
       // Only a directory can become an archive; a blob would have no entries.
-      return entry === null || entry.mode !== "40000" ? null : entry.oid;
+      return entry === null || !isTree(entry.mode) ? null : entry.oid;
     });
     if (tree === null) return failure(404, `no such directory '${path}'`);
 

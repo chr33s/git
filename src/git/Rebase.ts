@@ -148,6 +148,8 @@ const settle = Effect.fn("Rebase.settle")(function* (input: {
   readonly onto: Oid;
   readonly commits: ReadonlyArray<Replayed>;
   readonly into?: string;
+  /** Where `into` stood when the replay began; the swap compares against it. */
+  readonly expected?: Oid | null;
 }) {
   const repository = yield* Repository;
   const head = input.commits.reduce<Oid>((last, entry) => entry.replayed ?? last, input.onto);
@@ -170,11 +172,13 @@ const settle = Effect.fn("Rebase.settle")(function* (input: {
 
   if (input.into !== undefined) {
     // Compare-and-swap, as `Repository.merge` does: a replay that raced
-    // another push loses cleanly instead of overwriting it.
+    // another push loses cleanly instead of overwriting it. `expected` is
+    // where the ref stood when the replay began — reading it here instead
+    // would be comparing the value against itself, which no race can fail.
     yield* repository.setRef({
       name: input.into,
       to: head,
-      expected: yield* repository.resolve(input.into),
+      ...(input.expected === undefined ? {} : { expected: input.expected }),
     });
   }
 
@@ -208,6 +212,24 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   });
 });
 
+/** Every commit `onto` already contains — the walk's stop condition. */
+const ancestryOf = Effect.fn("Rebase.ancestry")(function* (onto: Oid) {
+  const repository = yield* Repository;
+  const seen = new Set<Oid>();
+  const stack = [onto];
+  while (stack.length > 0) {
+    const oid = stack.pop()!;
+    if (seen.has(oid)) continue;
+    seen.add(oid);
+    const commit = yield* repository.readCommit(oid).pipe(
+      Effect.map((value): { readonly parents: ReadonlyArray<Oid> } | null => value),
+      Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+    );
+    if (commit !== null) stack.push(...commit.parents);
+  }
+  return seen;
+});
+
 /** Replay `branch`'s commits that are not in `onto`, in order. */
 export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
   /** A ref or an oid. */
@@ -219,6 +241,9 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
   const repository = yield* Repository;
   const branch = yield* resolveCommit(input.branch);
   const onto = yield* resolveCommit(input.onto);
+  // Read before the replay, which takes as long as the history is deep: this
+  // is what the ref move at the end compares against.
+  const intoWas = input.into === undefined ? null : yield* repository.resolve(input.into);
 
   // `onto..branch`, oldest first — the merge base is where the two histories
   // parted, so everything after it on `branch` is what `onto` lacks. A branch
@@ -229,10 +254,16 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
   // unless asked to preserve merges. `log` walks every parent by default, and
   // that walk would replay the side branch's commits individually here.
   const base = yield* repository.mergeBase(branch, onto);
+  // Everything `onto` already contains, so the walk stops at the merge base
+  // wherever it lies. `takeWhile(oid !== base)` alone would only stop if the
+  // base sat on this first-parent chain — and it does not on any branch that
+  // has merged its upstream, so the walk ran to the root commit and replayed
+  // the entire history.
+  const contained = base === null ? new Set<Oid>() : yield* ancestryOf(onto);
   const history = yield* Stream.runCollect(
     repository
       .log(branch, { firstParent: true })
-      .pipe(Stream.takeWhile((commit) => commit.oid !== base)),
+      .pipe(Stream.takeWhile((commit) => !contained.has(commit.oid))),
   );
 
   const commits: Replayed[] = [];
@@ -249,6 +280,6 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
   return yield* settle({
     onto,
     commits,
-    ...(input.into === undefined ? {} : { into: input.into }),
+    ...(input.into === undefined ? {} : { into: input.into, expected: intoWas }),
   });
 });

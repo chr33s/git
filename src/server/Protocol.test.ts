@@ -1,23 +1,41 @@
 /**
- * Negotiation over `uploadPack`, without a wire: requests are built by hand
- * and answers read back as pkt-lines. The interop suite proves stock git can
- * hold this conversation; this file pins the exact acknowledgments each round
- * shape earns, which a passing clone would hide.
+ * The protocol's two halves without a git binary in sight: what `uploadPack`
+ * acknowledges during negotiation, and what `receivePack` reports back.
+ *
+ * Both take a web `Request` and answer a `Response`, so a test can speak
+ * pkt-lines at them directly. The interop suite proves stock git can hold
+ * these conversations; this file pins the exact acknowledgments each round
+ * shape earns, which a passing clone would hide, and the shape of the push
+ * *report*: a push is not all-or-nothing unless the client asked for that, so
+ * a command this server refuses has to come back as one `ng` line beside the
+ * `ok`s for everything that worked — an HTTP error would tell the client
+ * nothing about which ref was at fault and would silently drop the rest.
  */
 import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { createGzip } from "node:zlib";
 import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { stores } from "../git/Memory.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
+import { stores } from "../git/Memory.ts";
+import { stores as nodeStores } from "../git/Node.ts";
 import { DELIM, FLUSH, pkt } from "../git/Pkt.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
-import { advertise, uploadPack } from "./Protocol.ts";
+import { RefStore, type Oid } from "../git/Store.ts";
+import * as Protocol from "./Protocol.ts";
+
+const live = GitRepository.layer.pipe(
+  Layer.provide(GitRepository.hooksNoop),
+  Layer.provideMerge(stores),
+);
 
 const decoder = new TextDecoder();
+const ZERO = "0".repeat(40);
 
 const alice: Signature = {
   name: "Alice",
@@ -28,16 +46,7 @@ const alice: Signature = {
 
 /** Each test gets its own stores, so there is no shared state to reset. */
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.provide(
-        GitRepository.layer.pipe(
-          Layer.provide(GitRepository.hooksNoop),
-          Layer.provideMerge(stores),
-        ),
-      ),
-    ) as Effect.Effect<A, E>,
-  );
+  Effect.runPromise(effect.pipe(Effect.provide(live)) as Effect.Effect<A, E>);
 
 /** main: a <- b <- c, plus an unrelated root on `side`. */
 const history = Effect.gen(function* () {
@@ -117,9 +126,17 @@ const linesOf = (bytes: Uint8Array): { lines: string[]; sawPack: boolean } => {
 
 const answer = (request: Request) =>
   Effect.gen(function* () {
-    const response = yield* uploadPack(request);
+    const response = yield* Protocol.uploadPack(request);
     const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
     return linesOf(bytes);
+  });
+
+const pktLine = (line: string) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
+
+const push = (commands: ReadonlyArray<string>): Request =>
+  new Request("http://git.test/r/git-receive-pack", {
+    method: "POST",
+    body: `${commands.map(pktLine).join("")}0000`,
   });
 
 describe("Protocol negotiation", () => {
@@ -127,7 +144,7 @@ describe("Protocol negotiation", () => {
     const text = await scenario(
       Effect.gen(function* () {
         yield* history;
-        const response = yield* advertise("git-upload-pack");
+        const response = yield* Protocol.advertise("git-upload-pack");
         return decoder.decode(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())));
       }),
     );
@@ -208,5 +225,245 @@ describe("Protocol negotiation", () => {
       }),
     );
     assert.deepEqual(lines.slice(0, 4), ["acknowledgments", `ACK ${a}`, "ready", "packfile"]);
+  });
+});
+
+describe("receive-pack", () => {
+  it.live(
+    "refuses a ref name per-ref and applies the rest of the push",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const refs = yield* RefStore;
+
+        const commit = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+        yield* repository.setRef({ name: "refs/heads/gone", to: commit });
+
+        // One delete this server accepts, and one command naming a file in the
+        // repository root rather than a ref. `HEAD` passes git's character
+        // rules, which is exactly why the check has to be about *where* the
+        // name points and not only about how it is spelled.
+        const response = yield* Protocol.receivePack(
+          push([`${commit} ${ZERO} refs/heads/gone\n`, `${ZERO} ${commit} HEAD\n`]),
+        );
+        const report = decoder.decode(
+          new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+        );
+
+        assert.equal(response.status, 200);
+        assert.ok(report.includes("unpack ok"), report);
+        assert.ok(report.includes("ok refs/heads/gone"), report);
+        assert.ok(report.includes("ng HEAD funny refname"), report);
+
+        // The good command took effect and the refused one did not: HEAD is
+        // still the symbolic ref it was, not a file holding an oid.
+        assert.equal(yield* refs.read("refs/heads/gone"), null);
+        assert.equal(yield* repository.head, "refs/heads/main");
+      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "reads the pack of a push it refuses, so the client sees the report",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const commit = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+
+        // A create for a refused name: the client has already begun sending
+        // its pack. Answering without reading it abandons the request body,
+        // and the client sees a torn-down connection instead of this report.
+        const body = `${pktLine(`${ZERO} ${commit} HEAD\n`)}0000PACK-and-then-some-bytes`;
+        const response = yield* Protocol.receivePack(
+          new Request("http://git.test/r/git-receive-pack", { method: "POST", body }),
+        );
+        const report = decoder.decode(
+          new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+        );
+
+        assert.equal(response.status, 200);
+        assert.ok(report.includes("ng HEAD"), report);
+      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "fails an atomic push whole when one of its names is refused",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const refs = yield* RefStore;
+
+        const commit = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+        yield* repository.setRef({ name: "refs/heads/gone", to: commit });
+
+        const response = yield* Protocol.receivePack(
+          push([`${commit} ${ZERO} refs/heads/gone\0atomic\n`, `${ZERO} ${commit} HEAD\n`]),
+        );
+        const report = decoder.decode(
+          new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+        );
+
+        assert.ok(report.includes("ng refs/heads/gone"), report);
+        assert.ok(report.includes("ng HEAD"), report);
+        // Atomic means the delete did not happen either.
+        assert.equal(yield* refs.read("refs/heads/gone"), commit);
+      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "inflates a compressed body as it reads it, not into memory first",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const refs = yield* RefStore;
+
+        const commit = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+        yield* repository.setRef({ name: "refs/heads/gone", to: commit });
+
+        // A quarter of a gigabyte of highly compressible padding behind one
+        // valid command — the shape of a zip bomb, and about what deflate's
+        // ~1000:1 gets from a request a client could send in a second. The
+        // server has to read all of it, because the command comes first; what
+        // it must not do is hold it. Buffering every byte a single
+        // `gunzip.write` produced is what this replaced, and on a Durable
+        // Object with 128 MiB that was an isolate reset per request.
+        const padding = new Uint8Array(1024 * 1024);
+        const gzip = createGzip();
+        const compressed: Array<Uint8Array> = [];
+        gzip.on("data", (chunk: Uint8Array) => compressed.push(chunk));
+        gzip.write(`${pktLine(`${commit} ${ZERO} refs/heads/gone\n`)}0000`);
+        for (let written = 0; written < 256; written++) gzip.write(padding);
+        yield* Effect.promise(() => new Promise<void>((resolve) => gzip.end(() => resolve())));
+
+        let peak = 0;
+        const sample = setInterval(() => {
+          peak = Math.max(peak, process.memoryUsage().arrayBuffers);
+        }, 1);
+        const before = process.memoryUsage().arrayBuffers;
+
+        const response = yield* Protocol.receivePack(
+          new Request("http://git.test/r/git-receive-pack", {
+            method: "POST",
+            body: Buffer.concat(compressed),
+            headers: { "content-encoding": "gzip" },
+          }),
+        ).pipe(Effect.ensuring(Effect.sync(() => clearInterval(sample))));
+
+        const report = decoder.decode(
+          new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+        );
+
+        // The command it was carrying was read and applied…
+        assert.ok(report.includes("ok refs/heads/gone"), report);
+        assert.equal(yield* refs.read("refs/heads/gone"), null);
+        // …without the 256 MiB behind it ever being held at once.
+        assert.ok(peak - before < 64 * 1024 * 1024, `peak grew by ${peak - before} bytes`);
+      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+    { timeout: 60_000 },
+  );
+
+  it("advertises a detached HEAD as the commit it holds", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "advertise-"));
+    try {
+      const onDisk = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provideMerge(nodeStores(root)),
+      );
+
+      const advertised = await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "one",
+            author: alice,
+          });
+
+          // What `git checkout <sha>`, a rebase or a bisect leaves behind in a
+          // served repository: HEAD holds the commit, not the name of a ref.
+          yield* Effect.promise(() => fs.writeFile(path.join(root, "HEAD"), `${commit}\n`));
+
+          const response = yield* Protocol.advertise("git-upload-pack");
+          return {
+            commit,
+            text: decoder.decode(
+              new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+            ),
+          };
+        }).pipe(Effect.provide(onDisk)) as unknown as Effect.Effect<{
+          commit: string;
+          text: string;
+        }>,
+      );
+
+      // The HEAD line is there, and no `symref=HEAD:<oid>` claims the commit
+      // is the name of a ref.
+      assert.ok(advertised.text.includes(`${advertised.commit} HEAD`), advertised.text);
+      assert.equal(advertised.text.includes("symref=HEAD:"), false, advertised.text);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a ref the store cannot write as a per-ref failure", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "receive-pack-"));
+    try {
+      const onDisk = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provideMerge(nodeStores(root)),
+      );
+
+      const report = await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "one",
+            author: alice,
+          });
+          // `refs/heads/feature` is a legal ref name, but on a filesystem
+          // backend that path is now a directory — git calls this "cannot lock
+          // ref", and it has to reach the client as `ng`, not as a 500 with a
+          // JSON body no git client can parse.
+          yield* repository.setRef({ name: "refs/heads/feature/x", to: commit });
+
+          const response = yield* Protocol.receivePack(
+            push([`${ZERO} ${ZERO} refs/heads/feature\n`]),
+          );
+          return {
+            status: response.status,
+            text: decoder.decode(
+              new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+            ),
+          };
+        }).pipe(Effect.provide(onDisk)) as Effect.Effect<{ status: number; text: string }>,
+      );
+
+      assert.equal(report.status, 200);
+      assert.ok(report.text.includes("ng refs/heads/feature"), report.text);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });

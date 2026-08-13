@@ -25,7 +25,7 @@
 import { Effect, Result, Stream } from "effect";
 
 import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
-import { bytesToHex } from "./Format.ts";
+import { bytesToHex, concatBytes as concat } from "./Format.ts";
 import { type ByteSource, inflate as zlibInflate, InflateError } from "./Inflate.ts";
 import { crc32 } from "./PackIndex.ts";
 import { Sha1 } from "./Sha1.ts";
@@ -35,16 +35,6 @@ const TYPE_CODES: Record<ObjectType, number> = { commit: 1, tree: 2, blob: 3, ta
 const CODE_TYPES: Record<number, ObjectType> = { 1: "commit", 2: "tree", 3: "blob", 4: "tag" };
 const OFS_DELTA = 6;
 const REF_DELTA = 7;
-
-const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-};
 
 const readU32 = (bytes: Uint8Array, at: number): number =>
   ((bytes[at]! << 24) | (bytes[at + 1]! << 16) | (bytes[at + 2]! << 8) | bytes[at + 3]!) >>> 0;
@@ -163,7 +153,7 @@ class Source {
    * consumes exactly the stream's bytes — the tracking here only exists to
    * feed the consumed prefix into the pack digest afterwards.
    */
-  async inflate(): Promise<Uint8Array> {
+  async inflate(limit?: number): Promise<Uint8Array> {
     const fed: Uint8Array[] = [];
     let returned = 0;
     const adapter: ByteSource = {
@@ -179,7 +169,7 @@ class Source {
     };
 
     try {
-      const out = await zlibInflate(adapter);
+      const out = await zlibInflate(adapter, limit);
       const consumed = fed.reduce((total, chunk) => total + chunk.length, 0) - returned;
       let seen = 0;
       for (const chunk of fed) {
@@ -211,6 +201,7 @@ class Source {
  * base. Pure byte work, so it returns a `Result` like the codecs in
  * `Format.ts`.
  */
+
 export const applyDelta = (
   base: Uint8Array,
   delta: Uint8Array,
@@ -238,6 +229,56 @@ export const applyDelta = (
   }
   const targetSize = varint();
   if (targetSize === null) return corrupt("delta truncated in target size");
+  /**
+   * What the instructions can actually produce.
+   *
+   * The declared size is a claim by whoever wrote the pack, and the buffer is
+   * allocated before a byte of it is justified — so a sixty-byte delta could
+   * ask for gigabytes. A fixed cap is the wrong answer: git's own threshold is
+   * far larger than anything safe here, so capping rejects packs stock git
+   * emits. Counting first is exact — a copy can produce no more than the base
+   * holds, an insert no more than the delta carries — and the total has to be
+   * what was declared.
+   */
+  const produced = (() => {
+    let at = position;
+    let total = 0;
+    while (at < delta.length) {
+      const command = delta[at++]!;
+      if (command === 0) return null;
+      if (command & 0x80) {
+        let offset = 0;
+        let size = 0;
+        for (let bit = 0; bit < 4; bit++) {
+          if (command & (1 << bit)) {
+            const byte = delta[at++];
+            if (byte === undefined) return null;
+            offset |= byte << (bit * 8);
+          }
+        }
+        for (let bit = 0; bit < 3; bit++) {
+          if (command & (1 << (bit + 4))) {
+            const byte = delta[at++];
+            if (byte === undefined) return null;
+            size |= byte << (bit * 8);
+          }
+        }
+        const length = size === 0 ? 0x10000 : size;
+        if (offset + length > base.length) return null;
+        total += length;
+      } else {
+        at += command;
+        if (at > delta.length) return null;
+        total += command;
+      }
+    }
+    return total;
+  })();
+
+  if (produced === null) return corrupt("delta instructions run past their input");
+  if (produced !== targetSize) {
+    return corrupt(`delta declares ${targetSize} bytes; its instructions produce ${produced}`);
+  }
 
   const target = new Uint8Array(targetSize);
   let written = 0;
@@ -483,7 +524,10 @@ export const unpack = <E>(
     for (let index = 0; index < count; index++) {
       const start = source.offset;
       const header = yield* step(() => source.objectHeader());
-      const data = yield* step(() => source.inflate());
+      // Bounded by what the header declared: the size check below happens
+      // after the stream is inflated, so without this a few megabytes of pack
+      // can expand to gigabytes before anything compares them.
+      const data = yield* step(() => source.inflate(header.size + 1));
       if (data.length !== header.size) {
         return yield* new PackCorrupt({
           reason: `object ${index}: header says ${header.size} bytes, inflated to ${data.length}`,

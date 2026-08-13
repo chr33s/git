@@ -99,6 +99,15 @@ export const lsRemote = (
 
 export interface FetchResult {
   readonly refs: ReadonlyArray<RefUpdate>;
+  /**
+   * Branches the remote moved somewhere this one cannot follow.
+   *
+   * A non-fast-forward is refused rather than applied — that is what keeps a
+   * local commit from becoming unreachable — but refusing silently is how a
+   * mirror stops tracking a branch and nobody notices. `git fetch` prints
+   * `! [rejected] main -> main (non-fast-forward)`; this is that line's data.
+   */
+  readonly rejected: ReadonlyArray<{ readonly name: string; readonly oid: Oid }>;
   /** The branch the remote's `HEAD` points at, when it can be named. */
   readonly defaultBranch: string | undefined;
 }
@@ -421,13 +430,19 @@ export const fetchRepository = (options: {
       (ref) =>
         (branch === undefined
           ? ref.name.startsWith("refs/heads/") || ref.name.startsWith("refs/tags/")
-          : ref.name === `refs/heads/${branch}`) && ref.name !== "HEAD",
+          : ref.name === `refs/heads/${branch}`) &&
+        ref.name !== "HEAD" &&
+        // `refs/tags/v1^{}` is what an annotated tag *points at*, advertised
+        // beside the tag itself. It is a value, not a ref: `^` is not a legal
+        // ref name, so writing it is a name no store will accept and no
+        // client asked for.
+        !ref.name.endsWith("^{}"),
     );
     if (picked.length === 0) {
       if (branch !== undefined) {
         return yield* new Invalid({ field: "branch", reason: `remote has no branch '${branch}'` });
       }
-      return { refs: [], defaultBranch: undefined };
+      return { refs: [], rejected: [], defaultBranch: undefined };
     }
 
     const wants = [...new Set(picked.map((ref) => ref.oid))];
@@ -449,15 +464,36 @@ export const fetchRepository = (options: {
       Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),
     ).pipe(Effect.provideService(ObjectStoreTag, stores.objects));
 
-    const updates: RefUpdate[] = picked.map((ref) => ({
-      name: ref.name,
-      value: ref.oid,
-      reason: "fetch",
-    }));
+    // A branch this repository already has is only moved when the move keeps
+    // its commits: `git fetch` refuses a non-fast-forward without `--force`,
+    // and overwriting one here would leave the local commits unreachable for
+    // the next `gc` to delete.
+    const repository = yield* Effect.provide(Repository, localRepository(stores));
+    const updates: RefUpdate[] = [];
+    const rejected: Array<{ name: string; oid: Oid }> = [];
+    for (const ref of picked) {
+      const current = yield* stores.refs.read(ref.name);
+      if (current !== null && current !== ref.oid) {
+        // A tag is a name that does not move: re-pointing one rewrites what
+        // this repository has already published under it, which is why
+        // `Sync.fetchFrom` refuses the same thing on the server side. A
+        // branch moves when the move keeps its commits.
+        const forward = ref.name.startsWith("refs/tags/")
+          ? false
+          : yield* repository
+              .isAncestor(current, ref.oid)
+              .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)));
+        if (!forward) {
+          rejected.push({ name: ref.name, oid: ref.oid });
+          continue;
+        }
+      }
+      updates.push({ name: ref.name, value: ref.oid, reason: "fetch" });
+    }
     yield* stores.refs.apply(updates);
 
     const defaultBranch = picked
       .find((ref) => ref.name.startsWith("refs/heads/") && ref.oid === head)
       ?.name.slice("refs/heads/".length);
-    return { refs: updates, defaultBranch: branch ?? defaultBranch };
+    return { refs: updates, rejected, defaultBranch: branch ?? defaultBranch };
   });

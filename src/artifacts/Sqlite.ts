@@ -11,6 +11,7 @@
  * Written against a minimal `Sql` port rather than `DurableObjectStorage`,
  * so the tables can be exercised anywhere a SQLite-shaped executor exists.
  */
+import { bytesToHex } from "../git/Format.ts";
 import { Effect, Layer } from "effect";
 
 import { ArtifactsError } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
@@ -144,6 +145,10 @@ export const registrySqlite = (sql: Sql) =>
             name,
           );
         }),
+      setDefaultBranch: (name, branch) =>
+        Effect.sync(() => {
+          sql.exec(`UPDATE repos SET default_branch = ? WHERE name = ?`, branch, name);
+        }),
     });
   });
 
@@ -171,9 +176,7 @@ export const tokensSqlite = (sql: Sql) =>
     const digestOf = (plaintext: string) =>
       Effect.promise(async () => {
         const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plaintext));
-        return [...new Uint8Array(bytes)]
-          .map((byte) => byte.toString(16).padStart(2, "0"))
-          .join("");
+        return bytesToHex(new Uint8Array(bytes));
       });
 
     return Tokens.of({

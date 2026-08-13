@@ -57,6 +57,56 @@ export const workTree = (options: WorkTreeOptions): Layer.Layer<WorkTree> =>
     const ignored = new Set([".git", ...(options.ignore ?? [])]);
     const resolve = (relative: string) => path.join(options.root, relative);
 
+    /**
+     * The path a relative name denotes, once it is known to be inside the
+     * checkout.
+     *
+     * `validatePath` refuses `..` and a leading `.git` in the *name*, but a
+     * name can also be innocent and still land outside: a tree may hold a
+     * symlink `link -> /etc` and then an entry `link/passwd`, and every
+     * `fs` call would follow the link. Resolving the parent and requiring it
+     * to stay under the root is what closes that — and it belongs here, in
+     * the one place every operation resolves through, rather than on the
+     * write path alone: `remove` following that same link deletes outside
+     * the checkout, and `read` follows it out to answer with someone else's
+     * file.
+     */
+    const contained = async (relative: string, create = false): Promise<string> => {
+      const target = resolve(relative);
+      const parent = path.dirname(target);
+
+      /**
+       * A path with its symlinks resolved, whether or not it exists yet.
+       *
+       * The links live in the part that exists, so that part is resolved and
+       * the remainder — which cannot be a symlink, because it is not there —
+       * is appended verbatim. Resolving only the existing prefix and then
+       * comparing prefixes is the whole check: an earlier version compared
+       * the *nearest existing ancestor* of each side and accepted a match in
+       * either direction, so a symlink pointing at `..` resolved to an
+       * ancestor of the checkout and passed. That is an arbitrary write.
+       */
+      const settled = async (from: string): Promise<string> => {
+        const absolute = path.resolve(from);
+        let at = absolute;
+        while (!fs.existsSync(at) && at !== path.dirname(at)) at = path.dirname(at);
+        const real = await fsp.realpath(at);
+        return at === absolute ? real : path.join(real, path.relative(at, absolute));
+      };
+
+      // Decided before anything is created: `mkdir -p` follows a symlink as
+      // readily as a write does, so checking after it would already have made
+      // directories on the far side of the link.
+      const base = await settled(options.root);
+      const real = await settled(parent);
+      if (real !== base && !real.startsWith(base + path.sep)) {
+        throw new Error(`path escapes the work tree: '${relative}'`);
+      }
+
+      if (create) await fsp.mkdir(parent, { recursive: true });
+      return target;
+    };
+
     const walk = async (prefix: string): Promise<string[]> => {
       const directory = prefix === "" ? options.root : path.join(options.root, prefix);
       if (!fs.existsSync(directory)) return [];
@@ -80,7 +130,7 @@ export const workTree = (options: WorkTreeOptions): Layer.Layer<WorkTree> =>
       read: (relative) =>
         Effect.tryPromise({
           try: async () => {
-            const target = resolve(relative);
+            const target = await contained(relative);
             const stat = await fsp.lstat(target);
             // A symlink's content is its target, which is what git stores.
             return stat.isSymbolicLink()
@@ -94,7 +144,7 @@ export const workTree = (options: WorkTreeOptions): Layer.Layer<WorkTree> =>
         Effect.tryPromise({
           try: async () => {
             try {
-              return statOf(await fsp.lstat(resolve(relative)));
+              return statOf(await fsp.lstat(await contained(relative)));
             } catch {
               return null;
             }
@@ -105,8 +155,7 @@ export const workTree = (options: WorkTreeOptions): Layer.Layer<WorkTree> =>
       write: (relative, content, mode) =>
         Effect.tryPromise({
           try: async () => {
-            const target = resolve(relative);
-            await fsp.mkdir(path.dirname(target), { recursive: true });
+            const target = await contained(relative, true);
             // Replacing a file with a link, or the reverse, needs the old one
             // gone first — `writeFile` would follow the link and overwrite
             // whatever it points at.
@@ -125,7 +174,7 @@ export const workTree = (options: WorkTreeOptions): Layer.Layer<WorkTree> =>
       remove: (relative) =>
         Effect.tryPromise({
           try: async () => {
-            await fsp.rm(resolve(relative), { force: true });
+            await fsp.rm(await contained(relative), { force: true });
             // git leaves no empty directories behind, so neither does this;
             // the walk up stops at the first one that is not empty.
             let directory = path.dirname(resolve(relative));

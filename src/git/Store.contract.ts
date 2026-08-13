@@ -252,6 +252,61 @@ export const storeContract = (label: string, backend: Backend, runner: Runner): 
       assert.equal(state.ok, null);
     });
 
+    it("rejects ref names that would address something outside the store", async () => {
+      // Every one of these reaches a backend as a path segment or a key, so
+      // the check is what stands between a push and an arbitrary write.
+      const bad = [
+        "refs/heads/../../../etc/passwd",
+        "refs/../HEAD",
+        "/refs/heads/absolute",
+        "refs/heads//empty",
+        "refs/heads/.hidden",
+        "refs/heads/main.lock",
+        "refs/heads/main@{0}",
+        "refs/heads/tab\there",
+        "refs/heads/star*",
+        // Nothing wrong with the spelling; everything wrong with where they
+        // point. A backend joins the name onto the repository root, and the
+        // root is also where HEAD, the objects and the logs live.
+        "HEAD",
+        "objects/e6/9de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        "webhooks.json",
+        "refs",
+      ];
+
+      const state = await run(
+        Effect.gen(function* () {
+          const refs = yield* RefStore;
+          const tags: string[] = [];
+          for (const name of bad) {
+            const failure = yield* Effect.flip(refs.apply([{ name, value: a, expected: null }]));
+            tags.push(failure._tag);
+          }
+          return { tags, listed: yield* refs.list("refs/") };
+        }),
+      );
+
+      assert.deepEqual(
+        state.tags,
+        bad.map(() => "Invalid"),
+      );
+      assert.equal(state.listed.length, 0);
+    });
+
+    it("refuses a HEAD target that is not a ref", async () => {
+      const state = await run(
+        Effect.gen(function* () {
+          const refs = yield* RefStore;
+          const failure = yield* Effect.flip(refs.setHead("refs/heads/../../../etc/hostname"));
+          return { failure, head: yield* refs.head };
+        }),
+      );
+
+      assert.equal(state.failure._tag, "Invalid");
+      // Unchanged: the default, not the target that was refused.
+      assert.equal(state.head, "refs/heads/main");
+    });
+
     it("resolves HEAD through to an oid", async () => {
       const resolved = await run(
         Effect.gen(function* () {

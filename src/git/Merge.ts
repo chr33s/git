@@ -20,6 +20,7 @@
 import { Effect } from "effect";
 
 import { isBinary, lcs, splitLines } from "./Diff.ts";
+import { isGitlink } from "./Format.ts";
 import type { ObjectNotFound, StorageFailure } from "./Error.ts";
 import type { Oid } from "./Store.ts";
 
@@ -177,7 +178,30 @@ export const mergeText = (input: MergeInput): TextMerge => {
     out.push(`>>>>>>> ${theirsLabel}`);
   }
 
-  return { content: out.length === 0 ? "" : `${out.join("\n")}\n`, conflicted };
+  // A file that ended without a newline still does: `splitLines` drops the
+  // distinction, so it is carried here from the inputs. Appending one changes
+  // every byte-for-byte comparison downstream of the merge.
+  //
+  // Which input to carry it from is the same three-way question the content
+  // answers, so it is answered the same way: the side that changed the
+  // terminator decides, and if both changed it they agree. An `||` over all
+  // three — what this was — restores a newline both sides deliberately
+  // removed, because the base still had one.
+  //
+  // A conflict that reaches the end of the file ends with a marker line, and
+  // a marker without its newline would run into whatever follows it.
+  const ourEnd = input.ours.endsWith("\n");
+  const theirEnd = input.theirs.endsWith("\n");
+  const baseEnd = input.base.endsWith("\n");
+  const lastRegion = regions.at(-1);
+  const terminated =
+    (conflicted && lastRegion?.ok === false) ||
+    (ourEnd === theirEnd ? ourEnd : ourEnd === baseEnd ? theirEnd : ourEnd);
+  const joined = out.join("\n");
+  return {
+    content: out.length === 0 ? "" : terminated ? `${joined}\n` : joined,
+    conflicted,
+  };
 };
 
 /** One side's version of a path: the blob and the mode it carries. */
@@ -194,13 +218,24 @@ export interface TreeConflict {
 
 export interface TreeChange {
   readonly path: string;
-  /** `null` removes the path. */
+  /** `null` removes the path, unless `oid` names what belongs there. */
   readonly content: Uint8Array | null;
+  /** The entry's object when it has no content here — a gitlink. */
+  readonly oid?: Oid;
   readonly mode?: string;
 }
 
 const treeEncoder = new TextEncoder();
-const treeDecoder = new TextDecoder();
+/**
+ * `ignoreBOM` keeps a leading EF BB BF as a character instead of eating it.
+ *
+ * A decoder that swallows the BOM never encodes it back, so the round-trip
+ * below came up three bytes short and every Windows-authored file in the
+ * repository was reported as binary and refused a merge — and had the guard
+ * passed it anyway, the merge would have written the file back with its BOM
+ * removed.
+ */
+const treeDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
 /**
  * The three-way decision over whole trees: what changes to apply on top of
@@ -240,13 +275,25 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
     // Same on both sides: no decision to make.
     if (mine?.oid === yours?.oid && mine?.mode === yours?.mode) continue;
 
+    /**
+     * One side's entry as a change, reading its bytes only if it has any.
+     *
+     * A gitlink names a commit in another repository. Reading it fails —
+     * the object is not here — so it travels as the oid it already is, and
+     * the tree writer puts that oid back rather than hashing a blob.
+     */
+    const taking = (side: TreeSideFile) =>
+      isGitlink(side.mode)
+        ? Effect.succeed({ path, content: null, oid: side.oid, mode: side.mode } as TreeChange)
+        : Effect.map(input.read(side.oid), (content): TreeChange => ({
+            path,
+            content,
+            mode: side.mode,
+          }));
+
     // Only they moved, so their version stands — including standing deleted.
     if (inBase?.oid === mine?.oid && inBase?.mode === mine?.mode) {
-      changes.push(
-        yours === undefined
-          ? { path, content: null }
-          : { path, content: yield* input.read(yours.oid), mode: yours.mode },
-      );
+      changes.push(yours === undefined ? { path, content: null } : yield* taking(yours));
       continue;
     }
 
@@ -262,29 +309,58 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
         continue;
       }
       if (strategy === "theirs") {
-        changes.push(
-          yours === undefined
-            ? { path, content: null }
-            : { path, content: yield* input.read(yours.oid), mode: yours.mode },
-        );
+        changes.push(yours === undefined ? { path, content: null } : yield* taking(yours));
         continue;
       }
       conflicts.push({ path, reason: "modify/delete" });
       continue;
     }
 
-    const ourBytes = yield* input.read(mine.oid);
-    const theirBytes = yield* input.read(yours.oid);
-
-    if (strategy === "ours") continue;
-    if (strategy === "theirs") {
-      changes.push({ path, content: theirBytes, mode: yours.mode });
+    // Both sides moved a submodule, and there is no content here to merge:
+    // which commit the submodule should be at is a question only the person
+    // who owns both repositories can answer. Ours stays put, as with a binary.
+    if (isGitlink(mine.mode) || isGitlink(yours.mode)) {
+      if (strategy === "theirs") changes.push(yield* taking(yours));
+      else if (strategy !== "ours") conflicts.push({ path, reason: "binary" });
       continue;
     }
+
+    // Decided before the reads, not after: a strategy that picks a side
+    // already knows the answer, and reading both blobs to throw both away is
+    // two object reads per changed path across the whole tree.
+    if (strategy === "ours") continue;
+    if (strategy === "theirs") {
+      changes.push(yield* taking(yours));
+      continue;
+    }
+
+    const ourBytes = yield* input.read(mine.oid);
+    const theirBytes = yield* input.read(yours.oid);
 
     // Conflict markers only make sense in text; a binary file has to be
     // chosen by a human, so it is reported and ours is left in place.
     if (isBinary(ourBytes) || isBinary(theirBytes)) {
+      conflicts.push({ path, reason: "binary" });
+      continue;
+    }
+
+    // And "text" here means text this can round-trip. A Latin-1 `.po` or
+    // `.properties` file has no NUL, so it passes the binary check, but
+    // decoding replaces every high byte with U+FFFD and the merge would
+    // write that back — renaming nothing and corrupting everything. Better
+    // reported as a conflict a person resolves than silently rewritten.
+    const decodable = (bytes: Uint8Array) => {
+      // Byte for byte: an invalid three-byte run decodes to one U+FFFD, which
+      // re-encodes to exactly three bytes — so comparing lengths called that
+      // content clean and the merge wrote the replacement characters back.
+      const round = treeEncoder.encode(treeDecoder.decode(bytes));
+      if (round.length !== bytes.length) return false;
+      for (let at = 0; at < bytes.length; at++) {
+        if (round[at] !== bytes[at]) return false;
+      }
+      return true;
+    };
+    if (!decodable(ourBytes) || !decodable(theirBytes)) {
       conflicts.push({ path, reason: "binary" });
       continue;
     }
@@ -296,10 +372,31 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
       theirs: treeDecoder.decode(theirBytes),
     });
 
-    if (merged.conflicted) {
-      conflicts.push({ path, reason: inBase === undefined ? "add/add" : "content" });
+    // The mode merges the same way the content does. Always taking ours drops
+    // a `chmod +x` made only on the incoming side — the merge reports success
+    // and the result is a script that will not run — and hides a genuine
+    // mode/mode disagreement by resolving it silently.
+    const mode =
+      yours.mode === mine.mode
+        ? mine.mode
+        : inBase !== undefined && mine.mode === inBase.mode
+          ? yours.mode
+          : mine.mode;
+    const modeClash =
+      yours.mode !== mine.mode &&
+      (inBase === undefined || (mine.mode !== inBase.mode && yours.mode !== inBase.mode));
+
+    // One entry per path, whatever went wrong with it. A file whose content
+    // *and* mode both disagreed was listed twice, so a caller counting
+    // conflicts counted one file as two and a caller resolving them by path
+    // met the same path a second time with nothing left to do.
+    if (merged.conflicted || modeClash) {
+      conflicts.push({
+        path,
+        reason: merged.conflicted && inBase === undefined ? "add/add" : "content",
+      });
     }
-    changes.push({ path, content: treeEncoder.encode(merged.content), mode: mine.mode });
+    changes.push({ path, content: treeEncoder.encode(merged.content), mode });
   }
 
   return { changes, conflicts };

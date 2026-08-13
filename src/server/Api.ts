@@ -25,7 +25,7 @@ import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/u
 import { push as pushToRemote } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
-import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
+import { EMPTY_TREE_OID, isGitlink, isTree, type Signature } from "../git/Format.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
@@ -153,10 +153,72 @@ const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>) =>
     ...(file.mode === undefined ? {} : { mode: file.mode }),
   }));
 
+/**
+ * A page's bounds, from query strings that are whatever a client sent.
+ *
+ * `Number.parseInt` alone answers `NaN` for `?limit=abc`, and `slice(0, NaN)`
+ * is empty — so a repository with a hundred branches reports none, with
+ * `has_more: false`, instead of an error. The cap is the other half: without
+ * one, `?limit=1e9` asks a history walk to run to the end of the graph.
+ */
+const PAGE_MAX = 100;
+
+/** The most matched lines one grep will hold, whatever the caller asks for. */
+const GREP_MAX_MATCHES = 2_000;
+
+/**
+ * The largest file grep will scan.
+ *
+ * Bounding the matches bounds what is *kept*, not what is read: a repository
+ * holding one 200 MB log had it read whole, decoded to a string of the same
+ * size again, and split into an array of several hundred megabytes of line
+ * objects — all before the first match was counted, and all inside a Durable
+ * Object with 128 MiB. A file larger than this is reported as skipped rather
+ * than scanned, which is also roughly what `git grep` does with one.
+ */
+const GREP_MAX_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Whether a path is under a caller's prefix, on path boundaries.
+ *
+ * A bare `startsWith` makes `?path=src` match `src-generated/tmp.ts`, so a
+ * scoped diff or grep silently reports files from a directory the caller
+ * never named — and `?path=s` matches most of the repository.
+ */
+const under = (path: string, prefix: string | undefined): boolean => {
+  if (prefix === undefined || prefix === "") return true;
+  const trimmed = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+  return path === trimmed || path.startsWith(`${trimmed}/`);
+};
+const CURSOR_MAX = 10_000;
+
+const bounds = (query: { cursor?: string; limit?: string }) => {
+  const whole = (value: string | undefined, fallback: number) => {
+    if (value === undefined) return fallback;
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  };
+
+  const start = whole(query.cursor, 0);
+  const size = whole(query.limit, 50);
+  // The cursor is added to the walk limit, so capping only the page size
+  // leaves `?cursor=999999999` asking for exactly the unbounded history walk
+  // the cap exists to prevent. Paging deeper than this is a different query.
+  if (start === null || size === null) return null;
+  // Past the bound is the end of what this endpoint will page through: an
+  // empty last page. Clamping the offset instead would hand the client the
+  // same page again with `has_more`, which is a loop.
+  return { size: Math.min(size, PAGE_MAX), start, beyond: start > CURSOR_MAX };
+};
+
 /** Cursors are opaque to clients; here they are simply an offset. */
 const page = <A>(items: ReadonlyArray<A>, query: { cursor?: string; limit?: string }) => {
-  const start = query.cursor === undefined ? 0 : Number.parseInt(query.cursor, 10);
-  const size = query.limit === undefined ? 50 : Number.parseInt(query.limit, 10);
+  const limits = bounds(query);
+  // A cursor that is not a number, or is past the bound, addresses nothing:
+  // an empty last page says so, where restarting at zero — or clamping —
+  // would loop a client through the list again.
+  if (limits === null || limits.beyond) return { items: [], next_cursor: null, has_more: false };
+  const { size, start } = limits;
   const slice = items.slice(start, start + size);
   const more = start + size < items.length;
   return { items: slice, next_cursor: more ? String(start + size) : null, has_more: more };
@@ -177,17 +239,24 @@ const treeFor = (
   },
 ) =>
   Effect.gen(function* () {
-    if (payload.tree !== undefined) return payload.tree;
-    if (payload.files === undefined) return EMPTY_TREE_OID;
+    if (payload.tree !== undefined) return { tree: payload.tree, from: undefined };
+    if (payload.files === undefined) return { tree: EMPTY_TREE_OID, from: undefined };
 
     const ref = branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
     const tip = yield* repository.resolve(ref);
     const base = tip === null ? undefined : (yield* repository.readCommit(tip)).tree;
 
-    return yield* repository.writeFiles({
+    const tree = yield* repository.writeFiles({
       ...(base === undefined ? {} : { base }),
       changes: changesOf(payload.files),
     });
+
+    // The tip this tree was layered onto. `commit` re-reads the ref for its
+    // parent, and the object writes above take long enough for another commit
+    // to land in between — which would then be parented over and its files
+    // silently reverted. `CommitPack.ts` pins the same value for the same
+    // reason; a caller who named their own `expected` keeps it.
+    return { tree, from: tip };
   });
 
 /** The tree a ref names, defaulting to HEAD — what "at this revision" means. */
@@ -203,7 +272,7 @@ const subtreeAt = (repository: Repository["Service"], tree: Oid, path: string) =
   repository.findPath(tree, path).pipe(
     Effect.catchTag("StorageFailure", Effect.die),
     Effect.flatMap((entry) =>
-      entry === null || entry.mode !== "40000"
+      entry === null || !isTree(entry.mode)
         ? Effect.fail(new ObjectNotFound({ oid: path }))
         : Effect.succeed(entry.oid),
     ),
@@ -226,6 +295,39 @@ const matcher = (payload: {
       );
     }
     try {
+      /**
+       * A repeated group is the shape that backtracks.
+       *
+       * `(a+)+$`, `(a|a)+$` and `([ab])*c` all take exponential time on a run
+       * of thirty characters, and this runs per line of every blob in the
+       * tree on the one thread serving the repository. Enumerating the bad
+       * forms is a losing game — an earlier version's list let `(a|a)+$`
+       * straight through — so the rule is the general one: a group may not be
+       * quantified. `foo|bar`, `[a-z]+` and `\d{3}` are unaffected.
+       */
+      /**
+       * At most one repetition, and no groups.
+       *
+       * Catastrophic backtracking needs two repetitions that can match the
+       * same text — `(a+)+`, `(a|a)+`, or plain `aa*aa*aa*b` with no
+       * parenthesis at all. Two earlier versions of this guard tried to
+       * enumerate the dangerous shapes and were wrong both times, so the rule
+       * is the conservative one that admits no combination: a single
+       * quantifier cannot pair with anything. `foo.*bar` and `\d{3}` pass;
+       * anything needing more asks for `regex: false` and a literal search.
+       */
+      const quantifiers = payload.pattern.replace(/\\./g, "").match(/[*+?]|\{\d/g)?.length ?? 0;
+      const grouped = /\((?!\?:)/.test(payload.pattern.replace(/\\./g, ""));
+      if (quantifiers > 1 || grouped || payload.pattern.length > 200) {
+        return Effect.fail(
+          new Invalid({
+            field: "pattern",
+            reason:
+              "this endpoint accepts at most one repetition and no groups, because more " +
+              "can take unbounded time to match; use `regex: false` for a literal search",
+          }),
+        );
+      }
       const expression = new RegExp(payload.pattern, payload.ignore_case === true ? "i" : "");
       return Effect.succeed((line) => expression.test(line));
     } catch (cause) {
@@ -608,6 +710,8 @@ const repo = HttpApiGroup.make("repo")
           }),
         ),
         truncated: Schema.Boolean,
+        /** Files too large to scan, named so the answer is not silently partial. */
+        skipped: Schema.Array(Schema.String),
       }),
       error: [ObjectNotFound, Invalid],
     }),
@@ -619,14 +723,23 @@ const repo = HttpApiGroup.make("repo")
         dry_run: Schema.optional(Schema.Boolean),
         /** Also write what survives into one pack and drop the loose copies. */
         repack: Schema.optional(Schema.Boolean),
+        /**
+         * How long an object only the reflog still names is protected, in
+         * milliseconds; `0` collects those too. Defaults to git's 90 days.
+         */
+        reflog_grace_ms: Schema.optional(Schema.Finite),
       }),
       success: Schema.Struct({
         scanned: Schema.Finite,
         reachable: Schema.Finite,
         removed: Schema.Array(OidString),
+        /** Unreachable, but inside a pack: `repack` is what collects these. */
+        retained: Schema.Array(OidString),
         packed: Schema.NullOr(Schema.Struct({ name: Schema.String, objects: Schema.Finite })),
       }),
-      error: ObjectNotFound,
+      // `Invalid` when the repository lends its objects to a fork: refusing is
+      // an answer the caller acts on, not a fault.
+      error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -656,7 +769,9 @@ const repo = HttpApiGroup.make("repo")
       params: { ...RepoParam, oid: OidString },
       query: Cursor,
       success: Page(Schema.Struct({ message: Schema.String, oid: OidString })),
-      error: ObjectNotFound,
+      // `Invalid` because a cursor or a limit that is not a whole number is
+      // the client's mistake, and answering an empty page would hide it.
+      error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -672,7 +787,7 @@ const repo = HttpApiGroup.make("repo")
           blob: Schema.NullOr(OidString),
         }),
       ),
-      error: ObjectNotFound,
+      error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -820,9 +935,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const repository = yield* Repository;
         const branch = payload.branch ?? "main";
 
-        const tree = yield* treeFor(repository, branch, payload).pipe(
+        const built = yield* treeFor(repository, branch, payload).pipe(
           Effect.catchTag("StorageFailure", Effect.die),
         );
+        const tree = built.tree;
 
         const oid = yield* repository
           .commit({
@@ -830,7 +946,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
             branch,
             message: payload.message ?? "",
             tree,
-            ...(payload.expected === undefined ? {} : { expected: payload.expected }),
+            ...(payload.expected === undefined
+              ? built.from === undefined
+                ? {}
+                : { expected: built.from }
+              : { expected: payload.expected }),
           })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { oid, tree };
@@ -1052,15 +1172,25 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const from = yield* listing(before);
         const to = yield* listing(after);
 
+        // A gitlink is a commit in another repository: there is no content
+        // here to diff, and reading it as a blob fails on an object this
+        // repository does not have.
+        const content = (path: string) =>
+          !isGitlink(from.get(path)?.mode ?? "") && !isGitlink(to.get(path)?.mode ?? "");
+
         const paths = [...new Set([...from.keys(), ...to.keys()])]
-          .filter((path) => payload.path === undefined || path.startsWith(payload.path))
+          .filter((path) => under(path, payload.path))
+          .filter(content)
           .sort();
 
         const files = yield* Effect.forEach(paths, (path) =>
           Effect.gen(function* () {
             const old = from.get(path);
             const now = to.get(path);
-            if (old?.oid === now?.oid) return null;
+            // The mode is part of what changed: a `chmod +x` moves no bytes,
+            // so comparing oids alone reported nothing at all for it and the
+            // diff came back empty for a commit that plainly changed something.
+            if (old?.oid === now?.oid && old?.mode === now?.mode) return null;
 
             const read = (oid: Oid | undefined) =>
               oid === undefined
@@ -1113,7 +1243,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const entry = yield* repository
           .findPath(tree, query.path)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        if (entry === null || entry.mode === "40000") {
+        if (entry === null || isTree(entry.mode)) {
           return yield* new ObjectNotFound({ oid: query.path });
         }
         const data = yield* repository
@@ -1170,8 +1300,12 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           .listFiles(tree)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
 
-        const limit = payload.max_matches ?? 200;
+        // Clamped, not taken: the caller picks how much of the budget to use,
+        // not how large it is — `max_matches: 1e9` otherwise fills memory one
+        // matched line at a time.
+        const limit = Math.max(1, Math.min(payload.max_matches ?? 200, GREP_MAX_MATCHES));
         const matches: Array<{ path: string; line: number; text: string }> = [];
+        const skipped: Array<string> = [];
         let truncated = false;
 
         for (const file of files) {
@@ -1179,28 +1313,45 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
             truncated = true;
             break;
           }
-          if (payload.path !== undefined && !file.path.startsWith(payload.path)) continue;
+          if (!under(file.path, payload.path)) continue;
+          // A gitlink names a commit in another repository: there is nothing
+          // here to read, let alone to search.
+          if (isGitlink(file.mode)) continue;
 
           const data = yield* repository
             .readBlob(file.oid)
             .pipe(Effect.catchTag("StorageFailure", Effect.die));
+          if (data.length > GREP_MAX_FILE_BYTES) {
+            skipped.push(file.path);
+            continue;
+          }
           // A binary file has no lines worth reporting, and git skips them
           // for the same reason.
-          if (data.subarray(0, 8000).includes(0)) continue;
+          if (isBinary(data)) continue;
 
-          const lines = new TextDecoder().decode(data).split("\n");
-          for (let index = 0; index < lines.length; index++) {
-            const text = lines[index]!;
-            if (!test(text)) continue;
-            matches.push({ path: file.path, line: index + 1, text });
-            if (matches.length >= limit) {
-              truncated = true;
-              break;
+          // One line decoded at a time. Decoding the whole blob and splitting
+          // it holds three copies of the file at once — the bytes, the string
+          // and the array — where this holds the bytes and one line.
+          let start = 0;
+          let line = 0;
+          while (start <= data.length) {
+            const newline = data.indexOf(0x0a, start);
+            const end = newline === -1 ? data.length : newline;
+            line++;
+            const text = decoder.decode(data.subarray(start, end));
+            if (test(text)) {
+              matches.push({ path: file.path, line, text });
+              if (matches.length >= limit) {
+                truncated = true;
+                break;
+              }
             }
+            if (newline === -1) break;
+            start = newline + 1;
           }
         }
 
-        return { matches, truncated };
+        return { matches, truncated, skipped };
       }),
     )
     .handle("gc", ({ payload }) =>
@@ -1210,12 +1361,18 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           .gc({
             ...(payload.dry_run === undefined ? {} : { dryRun: payload.dry_run }),
             ...(payload.repack === undefined ? {} : { repack: payload.repack }),
+            ...(payload.reflog_grace_ms === undefined
+              ? {}
+              : // Clamped: a negative grace would put the cutoff in the future
+                // and expire every entry, which is `0` said confusingly.
+                { reflogGrace: Math.max(0, payload.reflog_grace_ms) }),
           })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return {
           scanned: report.scanned,
           reachable: report.reachable,
           removed: report.removed,
+          retained: report.retained,
           packed: report.packed ?? null,
         };
       }),
@@ -1248,8 +1405,20 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("commits", ({ params, query }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const start = query.cursor === undefined ? 0 : Number.parseInt(query.cursor, 10);
-        const size = query.limit === undefined ? 50 : Number.parseInt(query.limit, 10);
+        const limits = bounds(query);
+        if (limits === null) {
+          return yield* new Invalid({
+            field: "limit",
+            reason: "cursor and limit must be whole numbers",
+          });
+        }
+        if (limits.beyond) {
+          return yield* new Invalid({
+            field: "cursor",
+            reason: `paging stops at ${CURSOR_MAX}; narrow the query instead`,
+          });
+        }
+        const { size, start } = limits;
         // Walk only as far as this page needs, plus one to answer `has_more`.
         const walked = yield* Stream.runCollect(
           repository.log(params.oid, { limit: start + size + 1 }),
@@ -1262,8 +1431,20 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("history", ({ params, query }) =>
       Effect.gen(function* () {
-        const start = query.cursor === undefined ? 0 : Number.parseInt(query.cursor, 10);
-        const size = query.limit === undefined ? 50 : Number.parseInt(query.limit, 10);
+        const limits = bounds(query);
+        if (limits === null) {
+          return yield* new Invalid({
+            field: "limit",
+            reason: "cursor and limit must be whole numbers",
+          });
+        }
+        if (limits.beyond) {
+          return yield* new Invalid({
+            field: "cursor",
+            reason: `paging stops at ${CURSOR_MAX}; narrow the query instead`,
+          });
+        }
+        const { size, start } = limits;
         // Same bound as `commits`: a path history walks the whole graph to
         // find its next entry, so taking only what the page needs matters
         // more here than it does for a plain log.

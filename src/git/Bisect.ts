@@ -132,16 +132,45 @@ export const next = Effect.fn("Bisect.next")(function* (input: {
     }
   }
 
-  /** How many suspects each one can reach, itself included. */
-  const ancestry = new Map<Oid, Set<Oid>>();
-  for (const oid of ordered) {
-    const own = new Set<Oid>([oid]);
+  /**
+   * How many suspects each one can reach, itself included.
+   *
+   * Counted with one reusable bitmap rather than a `Set` per suspect: keeping
+   * every set alive is memory quadratic in the range, so bisecting two
+   * releases twenty thousand commits apart allocated gigabytes and aborted.
+   * A bitmap per commit is one bit instead of one entry, and the whole table
+   * is `n²/8` bytes — 50 MB at that size, walked once.
+   */
+  const index = new Map<Oid, number>(ordered.map((oid, at) => [oid, at]));
+  const words = Math.ceil(ordered.length / 32);
+  const reach = new Uint32Array(ordered.length * words);
+
+  for (let at = 0; at < ordered.length; at++) {
+    const oid = ordered[at]!;
+    const row = at * words;
+    reach[row + (at >> 5)]! |= 1 << (at & 31);
     for (const parent of graph.get(oid) ?? []) {
-      if (!inRange(parent)) continue;
-      for (const reached of ancestry.get(parent) ?? []) own.add(reached);
+      const from = index.get(parent);
+      if (from === undefined) continue;
+      const source = from * words;
+      for (let word = 0; word < words; word++) reach[row + word]! |= reach[source + word]!;
     }
-    ancestry.set(oid, own);
   }
+
+  const reachCount = (oid: Oid): number => {
+    const at = index.get(oid);
+    if (at === undefined) return 0;
+    const row = at * words;
+    let total = 0;
+    for (let word = 0; word < words; word++) {
+      let bits = reach[row + word]!;
+      while (bits !== 0) {
+        bits &= bits - 1;
+        total++;
+      }
+    }
+    return total;
+  };
 
   // Testing a commit resolves it and everything on one side of it: bad means
   // the fault is at or below it, good means it is above. The best candidate
@@ -150,7 +179,7 @@ export const next = Effect.fn("Bisect.next")(function* (input: {
   let best = suspects[0]!;
   let bestScore = -1;
   for (const oid of suspects) {
-    const below = ancestry.get(oid)?.size ?? 1;
+    const below = reachCount(oid) || 1;
     const score = Math.min(below, suspects.length - below);
     if (score > bestScore) {
       bestScore = score;

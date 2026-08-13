@@ -34,7 +34,40 @@ export interface TreeEntry {
   readonly mode: string;
   readonly name: string;
   readonly oid: Oid;
+  /**
+   * The name as git stores it, when its bytes are not valid UTF-8.
+   *
+   * git names are bytes, not text: a repository can hold `café.txt` written
+   * in Latin-1, and decoding it for display replaces those bytes with U+FFFD.
+   * Re-encoding the replacement would rename the file — silently, on the next
+   * commit that rewrites the tree — so the original bytes ride along and
+   * `encodeTree` writes them back unchanged.
+   */
+  readonly raw?: Uint8Array;
 }
+
+/**
+ * What a tree entry's mode means, however it happens to be spelled.
+ *
+ * git writes `40000` for a subtree, but trees in the wild carry `040000` —
+ * its own `fsck` has a name for it, `zeroPaddedFilemode`, and reads them
+ * anyway. Comparing the string treats such an entry as a file, and then the
+ * directory is rebuilt empty and everything under it is dropped from the next
+ * commit. Every decision about what an entry *is* goes through these, in this
+ * one place, because the last time the comparison was written out by hand it
+ * was written out inconsistently: six call sites still said `!== "40000"`
+ * after the rest of the codebase had moved on.
+ */
+export const isTree = (mode: string): boolean => Number.parseInt(mode, 8) === 0o40000;
+
+/** A gitlink names a commit in another repository — content this one lacks. */
+export const isGitlink = (mode: string): boolean => Number.parseInt(mode, 8) === 0o160000;
+
+/** The modes a non-directory entry may carry, spelled as git spells them. */
+const FILE_MODES = new Set<number>([0o100644, 0o100755, 0o120000, 0o160000]);
+
+/** Whether a mode may name a leaf entry, zero padding and all. */
+export const isFileMode = (mode: string): boolean => FILE_MODES.has(Number.parseInt(mode, 8));
 
 /** An annotated tag: a real object, unlike a lightweight tag's bare ref. */
 export interface TagInfo {
@@ -51,6 +84,23 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const invalid = (field: string, reason: string) => Result.fail(new Invalid({ field, reason }));
+
+/**
+ * One buffer from several, which every writer here needs.
+ *
+ * `CommitPack.ts` keeps its own: it already knows the total and takes it as
+ * an argument, which is a different function wearing the same name.
+ */
+export const concatBytes = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayBuffer> => {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out as Uint8Array<ArrayBuffer>;
+};
 
 export const bytesToHex = (bytes: Uint8Array): string => {
   let hex = "";
@@ -218,6 +268,15 @@ export const encodeTag = (tag: TagInfo): Uint8Array => {
   return encoder.encode(`${lines.join("\n")}\n\n${tag.message}`);
 };
 
+/** Byte-wise, the way `memcmp` orders: a prefix sorts before what extends it. */
+const compareBytes = (left: Uint8Array, right: Uint8Array): number => {
+  const shared = Math.min(left.length, right.length);
+  for (let at = 0; at < shared; at++) {
+    if (left[at] !== right[at]) return left[at]! - right[at]!;
+  }
+  return left.length - right.length;
+};
+
 export const parseTree = (data: Uint8Array): Result.Result<ReadonlyArray<TreeEntry>, Invalid> => {
   const entries: TreeEntry[] = [];
   let offset = 0;
@@ -229,10 +288,17 @@ export const parseTree = (data: Uint8Array): Result.Result<ReadonlyArray<TreeEnt
     const nul = data.indexOf(0, space);
     if (nul === -1 || nul + 21 > data.length) return invalid("tree", "entry truncated");
 
+    const bytes = data.subarray(space + 1, nul);
+    const name = decoder.decode(bytes);
+    // Only when the decode is not reversible, so an ordinary tree entry
+    // carries nothing extra.
+    const reversible = compareBytes(encoder.encode(name), bytes) === 0;
+
     entries.push({
       mode: decoder.decode(data.subarray(offset, space)),
-      name: decoder.decode(data.subarray(space + 1, nul)),
+      name,
       oid: bytesToHex(data.subarray(nul + 1, nul + 21)) as Oid,
+      ...(reversible ? {} : { raw: new Uint8Array(bytes) }),
     });
     offset = nul + 21;
   }
@@ -241,19 +307,30 @@ export const parseTree = (data: Uint8Array): Result.Result<ReadonlyArray<TreeEnt
 };
 
 export const encodeTree = (entries: ReadonlyArray<TreeEntry>): Uint8Array => {
-  // git requires entries sorted by name, with directories sorted as `name/`.
-  const sorted = [...entries].sort((a, b) => {
-    const left = a.mode === "40000" ? `${a.name}/` : a.name;
-    const right = b.mode === "40000" ? `${b.name}/` : b.name;
-    return left < right ? -1 : left > right ? 1 : 0;
-  });
+  // git requires entries sorted by name, with directories sorted as `name/`,
+  // and it sorts the UTF-8 bytes. Comparing the strings would sort by UTF-16
+  // code unit instead, which puts a surrogate pair before U+E000..U+FFFF
+  // rather than after — a tree whose oid git disagrees with.
+  const nameOf = (entry: TreeEntry) => entry.raw ?? encoder.encode(entry.name);
+  const sorted = [...entries]
+    .map((entry) => {
+      const name = nameOf(entry);
+      // A directory sorts as `name/`, which is one byte on the end.
+      // `040000` is the same mode: sorting it as a file puts the entry in
+      // the wrong place and the tree hashes differently from git's.
+      const key = isTree(entry.mode) ? Uint8Array.from([...name, 0x2f]) : name;
+      return { entry, key, name };
+    })
+    .sort((left, right) => compareBytes(left.key, right.key));
 
   const parts: Uint8Array[] = [];
-  for (const entry of sorted) {
-    const header = encoder.encode(`${entry.mode} ${entry.name}\0`);
-    const out = new Uint8Array(header.length + 20);
-    out.set(header);
-    out.set(hexToBytes(entry.oid), header.length);
+  for (const { entry, name } of sorted) {
+    const prefix = encoder.encode(`${entry.mode} `);
+    const out = new Uint8Array(prefix.length + name.length + 1 + 20);
+    out.set(prefix);
+    out.set(name, prefix.length);
+    out[prefix.length + name.length] = 0;
+    out.set(hexToBytes(entry.oid), prefix.length + name.length + 1);
     parts.push(out);
   }
 
@@ -269,3 +346,60 @@ export const encodeTree = (entries: ReadonlyArray<TreeEntry>): Uint8Array => {
 
 /** The empty tree, which git special-cases and every first commit needs. */
 export const EMPTY_TREE_OID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904" as Oid;
+
+const ZERO_OID = "0".repeat(40);
+
+/** One line of a reflog, as the file-shaped backends store it. */
+export interface ReflogLine {
+  readonly from: Oid | null;
+  readonly to: Oid | null;
+  readonly at: Date;
+  readonly message: string;
+}
+
+/**
+ * A ref update carries a reason, not a person, so the identity in the line is
+ * this server. git only requires the field to be there and parse.
+ */
+const REFLOG_IDENTITY = "chr33s-git <git@localhost>";
+
+/**
+ * git's own reflog line — `<old> <new> <who> <unixtime> <tz>\t<message>`.
+ *
+ * The format is shared by every backend that keeps reflogs as text, and it is
+ * git's rather than one of our own because `logs/refs/heads/main` in a `Node`
+ * repository is a file `git reflog` reads.
+ */
+export const encodeReflogLine = (entry: ReflogLine): string =>
+  `${entry.from ?? ZERO_OID} ${entry.to ?? ZERO_OID} ${REFLOG_IDENTITY} ${Math.floor(
+    entry.at.getTime() / 1000,
+  )} +0000\t${entry.message}\n`;
+
+/**
+ * The inverse, tolerant of what else may be in the file.
+ *
+ * A repository this server writes is also written by `git` itself, and older
+ * builds here put an ISO timestamp where git puts the committer — so both are
+ * read. A line whose timestamp parses as neither yields an invalid `Date`,
+ * which callers must treat as "unknown", never as "now".
+ */
+export const parseReflogLine = (line: string): ReflogLine | null => {
+  if (line.length === 0) return null;
+  const [values = "", message = ""] = line.split("\t");
+  const fields = values.split(" ");
+  const [from = ZERO_OID, to = ZERO_OID] = fields;
+
+  const zone = fields.at(-1) ?? "";
+  const seconds = fields.at(-2) ?? "";
+  const at =
+    /^[-+]\d{4}$/.test(zone) && /^\d+$/.test(seconds)
+      ? new Date(Number(seconds) * 1000)
+      : new Date(fields[2] ?? "");
+
+  return {
+    from: from === ZERO_OID ? null : (from as Oid),
+    to: to === ZERO_OID ? null : (to as Oid),
+    at,
+    message,
+  };
+};

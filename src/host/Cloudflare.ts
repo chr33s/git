@@ -12,8 +12,9 @@
  * point of having kept the ports platform-shaped.
  */
 import * as Alchemy from "alchemy/Cloudflare";
+import type * as Http from "alchemy/Http";
 import { Effect, Layer } from "effect";
-import { HttpRouter } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
 import { type GitError, statusOf } from "../git/Error.ts";
@@ -22,18 +23,27 @@ import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Archive from "../server/Archive.ts";
+import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as LfsCore from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
-import { normalize, routeOf } from "../server/Route.ts";
+import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 import { Objects } from "../objects.ts";
 
-/** What other scripts may call on a repository: it is an HTTP surface. */
+/**
+ * What other scripts may call on a repository: it is an HTTP surface.
+ *
+ * An `HttpEffect` rather than a function of a `Request`, because that is what
+ * alchemy's Durable Object bridge invokes — it hands the effect the request
+ * through context (`makeRequestEffect(request, instance.fetch)`) instead of
+ * calling it. A function here type-checks and then fails every request at the
+ * edge, on the one path no test covers.
+ */
 export interface RepoShape {
-  readonly fetch: (request: Request) => Effect.Effect<Response>;
+  readonly fetch: Http.HttpEffect;
 }
 
 export class Repo extends Alchemy.DurableObject<Repo, RepoShape>()("Repo") {}
@@ -98,6 +108,44 @@ export default Repo.make(
         return built;
       };
 
+      /**
+       * Response bodies still being read, per repository.
+       *
+       * The input gate reopens when the handler returns its `Response`, but an
+       * upload-pack body reads objects as the client consumes it — so the same
+       * thing is true here as on the node host, and `gc`, which is the only
+       * caller that deletes, is the only one that waits. The wait is bounded:
+       * a client that stalls must not postpone maintenance forever.
+       */
+      const delivering = new Map<string, Set<Promise<unknown>>>();
+      const nothing: ReadonlySet<Promise<unknown>> = new Set();
+
+      const track = (repo: string, response: Response): Response => {
+        if (response.body === null) return response;
+        let finished: () => void = () => undefined;
+        const done = new Promise<void>((resolve) => {
+          finished = resolve;
+        });
+        const pending = delivering.get(repo) ?? new Set();
+        pending.add(done);
+        delivering.set(repo, pending);
+        void done.then(() => pending.delete(done));
+
+        return new Response(
+          response.body.pipeThrough(
+            new TransformStream({
+              flush: () => finished(),
+              // A client that goes away cancels the stream; without this the
+              // promise would never settle and only the timeout would clear it.
+              cancel: () => finished(),
+            }),
+          ),
+          response,
+        );
+      };
+
+      const awaitDelivery = (repo: string) => settledWithin(delivering.get(repo) ?? nothing);
+
       const api = (repo: string) => {
         const existing = handlers.get(repo);
         if (existing !== undefined) return existing;
@@ -112,53 +160,82 @@ export default Repo.make(
         return built;
       };
 
+      /** The routing, over the platform request the bridge was handed. */
+      const serve = (request: Request): Effect.Effect<Response> =>
+        Effect.suspend(() => {
+          const matched = routeOf(new URL(request.url).pathname);
+          if (matched === null) {
+            return Effect.succeed(Response.json({ error: "Invalid" }, { status: 400 }));
+          }
+          const { repo, route } = matched;
+          request = normalize(request, matched);
+
+          // LFS shares the `info/` prefix with the advertisement, so it is
+          // tried first; its bodies are the large ones.
+          if (route === "info" && matched.rest.includes("/lfs/")) {
+            return LfsCore.handle(request).pipe(
+              Effect.map(
+                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+              ),
+              Effect.provide(lfsR2({ bucket: r2, repo })),
+            );
+          }
+
+          // Also ahead of the JSON API: a bulk commit body is arbitrarily
+          // large and is read as a stream, so nothing that would buffer it
+          // may see the request first. Both hosts dispatch it here.
+          if (route === "commit-pack") {
+            return CommitPack.handle(request).pipe(
+              Effect.map(
+                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+              ),
+              Effect.provide(live(repo)),
+              Effect.map((response) => track(repo, response)),
+            );
+          }
+
+          if (route === "archive") {
+            return Archive.handle(request).pipe(
+              Effect.map(
+                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+              ),
+              Effect.catch((error: GitError) =>
+                Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
+              ),
+              Effect.provide(live(repo)),
+              // An archive reads a blob per entry as the client consumes it,
+              // which is the same lazy body a pack is.
+              Effect.map((response) => track(repo, response)),
+            );
+          }
+
+          if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
+            return Protocol.handle(request).pipe(
+              Effect.map(
+                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+              ),
+              Effect.catch((error: GitError) =>
+                Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
+              ),
+              Effect.provide(live(repo)),
+              // The pack is the body that outlives its handler.
+              Effect.map((response) => track(repo, response)),
+            );
+          }
+
+          return Effect.promise(async () => {
+            if (collects(request)) await awaitDelivery(repo);
+            return track(repo, await api(repo)(request));
+          });
+        });
+
       return {
-        fetch: (request: Request) =>
-          Effect.suspend(() => {
-            const matched = routeOf(new URL(request.url).pathname);
-            if (matched === null) {
-              return Effect.succeed(Response.json({ error: "Invalid" }, { status: 400 }));
-            }
-            const { repo, route } = matched;
-            request = normalize(request, matched);
-
-            // LFS shares the `info/` prefix with the advertisement, so it is
-            // tried first; its bodies are the large ones.
-            if (route === "info" && matched.rest.includes("/lfs/")) {
-              return LfsCore.handle(request).pipe(
-                Effect.map(
-                  (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-                ),
-                Effect.provide(lfsR2({ bucket: r2, repo })),
-              );
-            }
-
-            if (route === "archive") {
-              return Archive.handle(request).pipe(
-                Effect.map(
-                  (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-                ),
-                Effect.catch((error: GitError) =>
-                  Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
-                ),
-                Effect.provide(live(repo)),
-              );
-            }
-
-            if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
-              return Protocol.handle(request).pipe(
-                Effect.map(
-                  (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-                ),
-                Effect.catch((error: GitError) =>
-                  Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
-                ),
-                Effect.provide(live(repo)),
-              );
-            }
-
-            return Effect.promise(() => api(repo)(request));
-          }),
+        fetch: Effect.gen(function* () {
+          const incoming = yield* HttpServerRequest.HttpServerRequest;
+          // The platform request, headers and body intact — the effect wrapper
+          // was built from it, so this is that object rather than a rebuild.
+          return HttpServerResponse.raw(yield* serve(incoming.source as Request));
+        }),
       };
     });
     // One binding implementation serves both phases: at deploy time it

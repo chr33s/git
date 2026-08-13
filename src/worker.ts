@@ -74,17 +74,22 @@ export default Git.make(
         // A client that hangs up mid-clone is not a server error. 499 is
         // nginx's code for it, and it keeps aborted fetches out of the 5xx
         // rate that pages someone.
-        const response = yield* repos
+        // The stub's `fetch` speaks the effect request and response, which is
+        // what the Durable Object bridge on the other side hands its handler;
+        // passing the platform `Request` here would leave the DO rebuilding a
+        // request it cannot read a body from.
+        return yield* repos
           .getByName(route.repo)
-          .fetch(raw)
+          .fetch(HttpServerRequest.fromWeb(raw))
           .pipe(
             Effect.catchCause((cause) =>
               raw.signal.aborted
-                ? Effect.succeed(new Response(null, { status: 499 }))
-                : Effect.failCause(cause),
+                ? Effect.succeed(HttpServerResponse.empty({ status: 499 }))
+                : // The contract says this Worker does not fail: a fault
+                  // inside the DO is a 500 at the edge, not a rejected effect.
+                  Effect.as(Effect.logError(cause), HttpServerResponse.empty({ status: 500 })),
             ),
           );
-        return HttpServerResponse.raw(response);
       }),
     };
     // The host Worker's layer also provides its DO's live implementation —

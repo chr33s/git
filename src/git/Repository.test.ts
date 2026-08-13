@@ -347,6 +347,370 @@ describe("Repository.receive", () => {
     assert.equal(outcome.a, null);
   });
 
+  it("replaces a directory with a file in one call", async () => {
+    const files = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const base = yield* repository.writeFiles({
+          changes: [
+            { path: "a/b.txt", content: new TextEncoder().encode("nested\n") },
+            { path: "keep.txt", content: new TextEncoder().encode("keep\n") },
+          ],
+        });
+
+        // Emptying the directory and writing a file over its name in one
+        // batch: the tree for `a` is loaded by the first change, and must not
+        // be written back over the blob the second one puts there.
+        const tree = yield* repository.writeFiles({
+          base,
+          changes: [
+            { path: "a/b.txt", content: null },
+            { path: "a", content: new TextEncoder().encode("now a file\n") },
+          ],
+        });
+
+        return yield* repository.listFiles(tree);
+      }),
+    );
+
+    assert.deepEqual(
+      files.map((file) => file.path),
+      ["a", "keep.txt"],
+    );
+    assert.equal(files.find((file) => file.path === "a")?.mode, "100644");
+  });
+
+  it("replaces a directory with a file whichever order the changes arrive in", async () => {
+    const files = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const base = yield* repository.writeFiles({
+          changes: [
+            { path: "a/b.txt", content: new TextEncoder().encode("nested\n") },
+            { path: "keep.txt", content: new TextEncoder().encode("keep\n") },
+          ],
+        });
+
+        // The replacement first, the tidy-up second — the ordering that made
+        // the emptied directory's removal take the new file with it.
+        const tree = yield* repository.writeFiles({
+          base,
+          changes: [
+            { path: "a", content: new TextEncoder().encode("now a file\n") },
+            { path: "a/b.txt", content: null },
+          ],
+        });
+
+        return yield* repository.listFiles(tree);
+      }),
+    );
+
+    assert.deepEqual(
+      files.map((file) => file.path),
+      ["a", "keep.txt"],
+    );
+  });
+
+  it("keeps two tree entries whose names are different bytes but one decode", async () => {
+    const files = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("x\n"));
+
+        // Two Latin-1 names, `café.txt` and `cafè.txt`. Both decode to the
+        // same U+FFFD spelling, so a tree keyed by the decoded name keeps one
+        // and the next commit that rewrites the tree drops the other.
+        const named = (last: number) => ({
+          mode: "100644",
+          name: "caf\uFFFD.txt",
+          oid: blob,
+          raw: Uint8Array.from([0x63, 0x61, 0x66, last, 0x2e, 0x74, 0x78, 0x74]),
+        });
+        const base = yield* repository.writeTree([named(0xe9), named(0xe8)]);
+
+        // An unrelated write, of the kind a merge or an API commit makes.
+        const tree = yield* repository.writeFiles({
+          base,
+          changes: [{ path: "other.txt", content: new TextEncoder().encode("new\n") }],
+        });
+        return (yield* repository.readTree(tree)).length;
+      }),
+    );
+
+    assert.equal(files, 3, "a tracked file was dropped by an unrelated commit");
+  });
+
+  it("replaces a non-UTF-8 entry rather than writing a second one", async () => {
+    const names = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("x\n"));
+        const base = yield* repository.writeTree([
+          {
+            mode: "100644",
+            name: "caf\uFFFD.txt",
+            oid: blob,
+            raw: Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x2e, 0x74, 0x78, 0x74]),
+          },
+        ]);
+
+        // The only spelling a caller has is the decoded one; writing it must
+        // displace the entry it names, or the tree holds two entries with the
+        // same encoded name — which git reads as corrupt.
+        const tree = yield* repository.writeFiles({
+          base,
+          changes: [{ path: "caf\uFFFD.txt", content: new TextEncoder().encode("new\n") }],
+        });
+        return (yield* repository.readTree(tree)).map((entry) => entry.name);
+      }),
+    );
+
+    assert.deepEqual(names, ["caf\uFFFD.txt"]);
+  });
+
+  it("keeps a non-UTF-8 directory's bytes when a file inside it changes", async () => {
+    const raw = Uint8Array.from([0x63, 0x61, 0x66, 0xe9]);
+    const entries = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("x\n"));
+        const inner = yield* repository.writeTree([{ mode: "100644", name: "a.txt", oid: blob }]);
+        const base = yield* repository.writeTree([
+          { mode: "40000", name: "caf\uFFFD", oid: inner, raw },
+        ]);
+
+        // Writing inside the directory must not rename the directory — every
+        // file beneath it would move to a path nothing asked for.
+        const tree = yield* repository.writeFiles({
+          base,
+          changes: [{ path: "caf\uFFFD/b.txt", content: new TextEncoder().encode("new\n") }],
+        });
+        return yield* repository.readTree(tree);
+      }),
+    );
+
+    assert.equal(entries.length, 1);
+    assert.deepEqual(entries[0]?.raw, raw);
+  });
+
+  it("writes every level of a nested path, not only the one holding the file", async () => {
+    const files = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("deep\n"));
+        // `a/` has no direct file child, so a bottom-up pass that only knew
+        // about `a/b` never wrote `a` and never linked it into the root —
+        // the commit recorded the empty tree and the file was gone.
+        const root = yield* repository.writePaths([
+          { path: "a/b/c.txt", oid: blob, mode: "100644" },
+        ]);
+        return yield* repository.listFiles(root);
+      }),
+    );
+
+    assert.deepEqual(
+      files.map((file) => file.path),
+      ["a/b/c.txt"],
+    );
+  });
+
+  it("refuses a tree entry that names the repository or escapes it", async () => {
+    const refused = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("x\n"));
+        const bad = (name: string) =>
+          Effect.flip(repository.writeTree([{ mode: "100644", name, oid: blob }])).pipe(
+            Effect.map((error) => error._tag),
+          );
+
+        return {
+          dotGit: yield* bad(".git"),
+          upper: yield* bad(".GIT"),
+          parent: yield* bad(".."),
+          slash: yield* bad("a/b"),
+          duplicate: yield* Effect.flip(
+            repository.writeTree([
+              { mode: "100644", name: "same", oid: blob },
+              { mode: "100644", name: "same", oid: blob },
+            ]),
+          ).pipe(Effect.map((error) => error._tag)),
+        };
+      }),
+    );
+
+    assert.deepEqual(refused, {
+      dotGit: "Invalid",
+      duplicate: "Invalid",
+      parent: "Invalid",
+      slash: "Invalid",
+      upper: "Invalid",
+    });
+  });
+
+  it("reads a zero-padded directory mode as the directory it is", async () => {
+    const files = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("kept\n"));
+        const inner = yield* repository.writeTree([
+          { mode: "100644", name: "keep.txt", oid: blob },
+        ]);
+
+        // `040000` is what git's own fsck calls `zeroPaddedFilemode`, and real
+        // history carries it. Read as a file, the directory starts empty and
+        // everything under it disappears from the next commit.
+        const base = yield* repository.writeTree([{ mode: "040000", name: "dir", oid: inner }]);
+        const tree = yield* repository.writeFiles({
+          base,
+          changes: [{ path: "other.txt", content: new TextEncoder().encode("new\n") }],
+        });
+        return yield* repository.listFiles(tree);
+      }),
+    );
+
+    assert.deepEqual(files.map((file) => file.path).sort(), ["dir/keep.txt", "other.txt"]);
+  });
+
+  it("finds a path through a zero-padded directory, and writes a zero-padded mode back", async () => {
+    const found = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("kept\n"));
+        const inner = yield* repository.writeTree([
+          // `0100644` is a file mode git also writes, and `writeFiles` refused
+          // it — so a repository holding one could be read and merged but
+          // never committed back.
+          { mode: "0100644", name: "keep.txt", oid: blob },
+        ]);
+        const base = yield* repository.writeTree([{ mode: "040000", name: "dir", oid: inner }]);
+
+        // Walking to `dir/keep.txt` stops at `dir` when `040000` is compared
+        // as a string, and the file endpoint answers 404 for a file that
+        // `GET /files` plainly lists.
+        const entry = yield* repository.findPath(base, "dir/keep.txt");
+
+        // And the same mode has to survive a write: the merge and rebase
+        // paths carry a tree's own modes straight back into `writeFiles`.
+        const rewritten = yield* repository.writeFiles({
+          base,
+          changes: [
+            {
+              path: "dir/keep.txt",
+              content: new TextEncoder().encode("changed\n"),
+              mode: "0100644",
+            },
+          ],
+        });
+
+        return { entry, files: yield* repository.listFiles(rewritten) };
+      }),
+    );
+
+    assert.equal(found.entry?.name, "keep.txt");
+    assert.deepEqual(
+      found.files.map((file) => file.path),
+      ["dir/keep.txt"],
+    );
+  });
+
+  it("keeps a submodule the tree it rewrites never had content for", async () => {
+    const result = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("top\n"));
+        // A gitlink names a commit in *another* repository, so this oid is
+        // deliberately one no object here will ever have.
+        const submodule = "1".repeat(40) as never;
+        const base = yield* repository.writeTree([
+          { mode: "100644", name: "readme.md", oid: blob },
+          { mode: "160000", name: "vendor", oid: submodule },
+        ]);
+
+        const listed = yield* repository.listFiles(base);
+        // Rebuilding the tree from the listing is what checkout, merge and
+        // rebase all do; an entry missing from the listing is an entry
+        // deleted from the next commit with no error and no conflict.
+        const tree = yield* repository.writePaths(
+          listed.map((file) => ({ path: file.path, oid: file.oid, mode: file.mode })),
+        );
+
+        return { listed, tree, base };
+      }),
+    );
+
+    assert.deepEqual(
+      result.listed.map((file) => `${file.mode} ${file.path}`),
+      ["100644 readme.md", "160000 vendor"],
+    );
+    assert.equal(result.tree, result.base);
+  });
+
+  it("packs a commit whose tree holds a zero-padded gitlink", async () => {
+    const packed = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("top\n"));
+        // `0160000` is a gitlink however it is spelled, and the commit it
+        // names is in another repository. Walked as a local object — which
+        // comparing the mode as a string did — every clone and fetch of this
+        // repository fails on an object it was never supposed to have.
+        const tree = yield* repository.writeTree([
+          { mode: "100644", name: "readme.md", oid: blob },
+          { mode: "0160000", name: "vendor", oid: "1".repeat(40) as never },
+        ]);
+        const oid = yield* repository.commit({
+          branch: "main",
+          tree,
+          message: "with a submodule",
+          author: alice,
+        });
+
+        return yield* Stream.runCollect(repository.packOf([oid], []));
+      }),
+    );
+
+    assert.equal(packed.length > 0, true);
+  });
+
+  it("plans a shallow fetch whose want is an annotated tag", async () => {
+    const planned = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const first = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+        const tree = yield* repository.writeFiles({
+          changes: [{ path: "f.txt", content: new TextEncoder().encode("x\n") }],
+        });
+        const second = yield* repository.commit({
+          branch: "main",
+          tree,
+          message: "two",
+          author: alice,
+        });
+        const tag = yield* repository.tag({
+          name: "v1",
+          target: "refs/heads/main",
+          message: "release",
+        });
+
+        // What `git clone --depth 1` sends when the repository has tags: the
+        // want is the tag object, and the walk that deepens is over commits.
+        const plan = yield* repository.fetch({ wants: [tag.oid], haves: [], depth: 1 });
+        return { first, plan, second, tag: tag.oid };
+      }),
+    );
+
+    assert.equal(planned.plan.oids.includes(planned.tag), true, "the tag object itself");
+    assert.equal(planned.plan.oids.includes(planned.second), true, "the commit it names");
+    assert.equal(planned.plan.oids.includes(planned.first), false, "depth 1 cuts the parent");
+    assert.deepEqual(planned.plan.shallow, [planned.second]);
+  });
+
   it("runs post-receive with the results", async () => {
     const seen: string[] = [];
     const recording = Layer.succeed(Hooks, {

@@ -35,6 +35,7 @@ import { push } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { Invalid } from "../git/Error.ts";
+import { isGitlink } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -149,6 +150,11 @@ const clone = Command.make(
         yield* target.refs.setHead(`refs/heads/${result.defaultBranch}`);
       }
       yield* Console.log(`Cloned ${result.refs.length} ref(s) from ${url} into ${directory}`);
+      // Refused rather than applied, and said out loud: a branch that stops
+      // tracking silently is a divergence nobody sees until they compare tips.
+      for (const ref of result.rejected) {
+        yield* Console.log(`! rejected ${ref.name} (non-fast-forward)`);
+      }
     }),
 );
 
@@ -368,6 +374,12 @@ const diff = Command.make(
           const old = before.get(path);
           const now = after.get(path);
           if (old?.oid === now?.oid) continue;
+          // A gitlink names a commit in another repository: nothing to read,
+          // and nothing a text diff could say about it.
+          if (isGitlink(old?.mode ?? "") || isGitlink(now?.mode ?? "")) {
+            yield* Console.log(`Submodule ${path} ${old?.oid ?? "0".repeat(7)}..${now?.oid ?? ""}`);
+            continue;
+          }
 
           const read = (oid: Oid | undefined) =>
             oid === undefined ? Effect.succeed(new Uint8Array(0)) : repository.readBlob(oid);
@@ -454,6 +466,7 @@ const grep = Command.make(
         const expression = new RegExp(pattern, ignoreCase ? "i" : "");
 
         for (const file of yield* repository.listFiles(yield* treeOf(repository, ref))) {
+          if (isGitlink(file.mode)) continue;
           const data = yield* repository.readBlob(file.oid);
           if (isBinary(data)) continue;
           const lines = new TextDecoder().decode(data).split("\n");
@@ -508,6 +521,11 @@ const gc = Command.make(
         yield* Console.log(
           `${dryRun ? "would remove" : "removed"} ${report.removed.length} of ${report.scanned} object(s), ${report.reachable} reachable`,
         );
+        if (report.retained.length > 0) {
+          yield* Console.log(
+            `${report.retained.length} unreachable object(s) are inside a pack; run with --repack to collect them`,
+          );
+        }
         if (report.packed !== undefined) {
           yield* Console.log(
             `packed ${report.packed.objects} object(s) into ${report.packed.name}`,

@@ -11,10 +11,20 @@
  */
 import { Effect, Layer, Stream } from "effect";
 
-import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
-import { decodeObject, encodeObject, hashObject } from "../git/Format.ts";
+import { ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import {
+  decodeObject,
+  encodeObject,
+  encodeReflogLine,
+  hashObject,
+  parseReflogLine,
+} from "../git/Format.ts";
 import { noPacks } from "../git/Packed.ts";
 import {
+  checkHeadTarget,
+  checkRefAddress,
+  checkRefNames,
+  isOid,
   ObjectStore,
   type Oid,
   type ReflogEntry,
@@ -209,8 +219,18 @@ export const refStore = (
           catch: failure("write", target),
         });
 
+      /** As in `git/Node.ts`: every reader joins the name onto the root too. */
+      const addressable = (name: string) => name === "HEAD" || checkRefAddress(name) === null;
+
+      /** The file's text, whatever it holds — `resolve` needs the `ref: ` form. */
+      const readRaw = (name: string) => (addressable(name) ? readText(name) : Effect.succeed(null));
+
       const read = (name: string) =>
-        readText(name).pipe(Effect.map((value) => value as Oid | null));
+        readRaw(name).pipe(
+          // As in `git/Node.ts`: a symbolic ref's text is not an oid, and
+          // `apply` would otherwise write it into a commit's parent.
+          Effect.map((value) => (value !== null && isOid(value) ? (value as Oid) : null)),
+        );
 
       const head = readText("HEAD").pipe(
         Effect.map((value) => (value === null ? "refs/heads/main" : value.replace(/^ref:\s*/, ""))),
@@ -220,8 +240,12 @@ export const refStore = (
         Effect.tryPromise({
           try: async () => {
             const target = `logs/${update.name}`;
-            const zero = "0".repeat(40);
-            const line = `${from ?? zero} ${update.value ?? zero} ${at.toISOString()}\t${update.reason ?? "update"}\n`;
+            const line = encodeReflogLine({
+              from,
+              to: update.value,
+              at,
+              message: update.reason ?? "update",
+            });
             const existing = await readBytes(root, target);
             const appended = encoder.encode(line);
             const combined =
@@ -241,16 +265,25 @@ export const refStore = (
       const listRefs = (prefix?: string) =>
         Effect.tryPromise({
           try: async () => {
-            const found: Array<readonly [string, Oid]> = [];
+            const found = new Map<string, Oid>();
+            /** `refs/x` -> `refs/y`, for the symbolic ones. */
+            const symbolic = new Map<string, string>();
+
             const walk = async (directory: FileSystemDirectoryHandle, at: string) => {
               for await (const [name, entry] of entriesOf(directory)) {
                 const full = `${at}/${name}`;
                 if (entry.kind === "directory") {
                   await walk(entry as FileSystemDirectoryHandle, full);
-                } else {
-                  const value = await readBytes(root, full);
-                  if (value !== null) found.push([full, decoder.decode(value).trim() as Oid]);
+                  continue;
                 }
+                const value = await readBytes(root, full);
+                if (value === null) continue;
+                const text = decoder.decode(value).trim();
+                // As in `git/Node.ts`: a symbolic ref's `ref: …` text is not
+                // an oid, and branding it as one puts that text in the
+                // advertisement and in gc's root set.
+                if (text.startsWith("ref: ")) symbolic.set(full, text.slice("ref: ".length).trim());
+                else if (isOid(text)) found.set(full, text);
               }
             };
             try {
@@ -258,7 +291,15 @@ export const refStore = (
             } catch (cause) {
               if (!notFound(cause)) throw cause;
             }
-            return found.filter(([name]) => prefix === undefined || name.startsWith(prefix));
+
+            for (const [name, target] of symbolic) {
+              const value = found.get(target);
+              if (value !== undefined) found.set(name, value);
+            }
+
+            return [...found]
+              .filter(([name]) => prefix === undefined || name.startsWith(prefix))
+              .map(([name, value]) => [name, value] as const);
           },
           catch: failure("list", "refs"),
         });
@@ -269,26 +310,29 @@ export const refStore = (
           resolve: (name) =>
             Effect.gen(function* () {
               let current = name;
+              // The same walk `git/Node.ts` does, for the same reasons: a
+              // detached HEAD holds its commit, any ref may be symbolic, and
+              // text that is not an oid is not an answer.
               for (let depth = 0; depth < 8; depth++) {
+                if (isOid(current)) return current;
                 if (current === "HEAD") {
                   current = yield* head;
                   continue;
                 }
-                return yield* read(current);
+                const value = yield* readRaw(current);
+                if (value === null) return null;
+                if (value.startsWith("ref: ")) {
+                  current = value.slice("ref: ".length).trim();
+                  continue;
+                }
+                return isOid(value) ? value : null;
               }
               return null;
             }),
           list: listRefs,
           apply: (updates, options) =>
             Effect.gen(function* () {
-              for (const update of updates) {
-                if (update.name.length === 0 || update.name.includes(" ")) {
-                  return yield* new Invalid({
-                    field: "ref",
-                    reason: `bad ref name '${update.name}'`,
-                  });
-                }
-              }
+              yield* checkRefNames(updates);
 
               const at = new Date();
               const results: RefUpdateResult[] = [];
@@ -314,39 +358,99 @@ export const refStore = (
                 );
               }
 
-              for (const { from, update } of pending) {
-                yield* update.value === null
+              /** One update, as a ref write: `null` deletes. */
+              const put = (name: string, value: Oid | null) =>
+                value === null
                   ? Effect.tryPromise({
-                      try: () => removePath(root, update.name),
-                      catch: failure("delete", update.name),
+                      try: () => removePath(root, name),
+                      catch: failure("delete", name),
                     })
-                  : writeText(update.name, `${update.value}\n`);
-                yield* appendReflog(update, from, at);
+                  : writeText(name, `${value}\n`);
+
+              /** What has been written, newest last, for an atomic undo. */
+              const done: Array<{ from: Oid | null; update: RefUpdate }> = [];
+
+              for (const { from, update } of pending) {
+                const written = yield* put(update.name, update.value).pipe(
+                  Effect.as(true),
+                  Effect.catchTag("StorageFailure", () => Effect.succeed(false)),
+                );
+
+                if (!written) {
+                  // `atomic` is a promise about the batch: the refs already
+                  // written go back where they were and nothing is applied.
+                  if (options?.atomic === true) {
+                    for (const undo of done.reverse()) {
+                      yield* put(undo.update.name, undo.from).pipe(Effect.ignore);
+                    }
+                    return yield* Effect.forEach(results, (result) =>
+                      read(result.name).pipe(
+                        Effect.map((current) => ({
+                          name: result.name,
+                          applied: false,
+                          current,
+                          // The batch failed because one ref could not be
+                          // written, not because anyone else moved these.
+                          reason: "cannot lock ref",
+                        })),
+                      ),
+                    );
+                  }
+
+                  const index = results.findIndex((result) => result.name === update.name);
+                  if (index !== -1) {
+                    results[index] = {
+                      name: update.name,
+                      applied: false,
+                      current: yield* read(update.name),
+                      reason: "cannot lock ref",
+                    };
+                  }
+                  continue;
+                }
+
+                done.push({ from, update });
+                // The log is the record of a move that has already happened;
+                // failing the update because it could not be written would
+                // report a ref as untouched while it sits at its new value.
+                yield* appendReflog(update, from, at).pipe(Effect.ignore);
               }
 
               return results;
             }),
           head,
-          setHead: (target) => writeText("HEAD", `ref: ${target}\n`),
+          setHead: (target) =>
+            checkHeadTarget(target).pipe(Effect.andThen(writeText("HEAD", `ref: ${target}\n`))),
           reflog: (name) =>
             Effect.gen(function* () {
+              if (!addressable(name)) return [] as ReflogEntry[];
               const text = yield* readText(`logs/${name}`);
               if (text === null) return [] as ReflogEntry[];
-              const zero = "0".repeat(40);
               return text
                 .split("\n")
-                .filter((line) => line.length > 0)
-                .map((line): ReflogEntry => {
-                  const [values = "", message = ""] = line.split("\t");
-                  const [from = zero, to = zero, at = ""] = values.split(" ");
-                  return {
-                    from: from === zero ? null : (from as Oid),
-                    to: to === zero ? null : (to as Oid),
-                    at: new Date(at),
-                    message,
-                  };
-                });
+                .map(parseReflogLine)
+                .filter((entry): entry is ReflogEntry => entry !== null);
             }),
+          logged: Effect.tryPromise({
+            try: async () => {
+              const names: string[] = [];
+              const walk = async (directory: FileSystemDirectoryHandle, at: string) => {
+                for await (const [name, entry] of entriesOf(directory)) {
+                  const full = at === "" ? name : `${at}/${name}`;
+                  if (entry.kind === "directory") {
+                    await walk(entry as FileSystemDirectoryHandle, full);
+                  } else names.push(full);
+                }
+              };
+              try {
+                await walk(await root.getDirectoryHandle("logs"), "");
+              } catch (cause) {
+                if (!notFound(cause)) throw cause;
+              }
+              return names;
+            },
+            catch: failure("reflog.list", "logs"),
+          }),
         }),
       );
     }),

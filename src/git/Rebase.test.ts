@@ -399,7 +399,7 @@ describe("rebase", () => {
     assert.equal(result.topic, result.three, "the branch stays where it was");
   });
 
-  it("skips a commit `onto` already has, and one whose change is already there", async () => {
+  it("leaves out a commit `onto` already has, and skips one whose change is there", async () => {
     const result = await scenario(
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -423,8 +423,10 @@ describe("rebase", () => {
         });
 
         // A merge of `main` into `topic`: it puts `first` on `topic`'s
-        // first-parent walk while `main` already has it, and leaves a merge
-        // whose change is entirely present once `one` has been replayed.
+        // first-parent walk while `main` already has it — the range is
+        // `onto..branch`, so `first` is not replayed and not reported — and
+        // leaves a merge whose change is entirely present once `one` has
+        // been replayed.
         const merged = yield* repository.merge({
           ours: "refs/heads/topic",
           theirs: "refs/heads/main",
@@ -455,17 +457,17 @@ describe("rebase", () => {
     assert.equal(result.outcome.kind, "replayed");
     assert.deepEqual(
       result.outcome.commits.map((entry) => entry.original),
-      [result.first, result.one, result.merged],
+      [result.one, result.merged],
     );
 
-    assert.equal(result.outcome.commits[0]?.replayed, null, "`onto` already has `first`");
-    assert.deepEqual(result.outcome.commits[0]?.conflicts, []);
+    // `first` is not in `onto..topic` at all, so it is neither replayed nor
+    // reported — the walk stops at what `onto` contains rather than running
+    // back to the root and skipping commit by commit.
+    assert.notEqual(result.outcome.commits[0]?.replayed, null);
+    assert.equal(result.outcome.head, result.outcome.commits[0]?.replayed);
 
-    assert.notEqual(result.outcome.commits[1]?.replayed, null);
-    assert.equal(result.outcome.head, result.outcome.commits[1]?.replayed);
-
-    assert.equal(result.outcome.commits[2]?.replayed, null, "the merge had nothing left to add");
-    assert.deepEqual(result.outcome.commits[2]?.conflicts, []);
+    assert.equal(result.outcome.commits[1]?.replayed, null, "the merge had nothing left to add");
+    assert.deepEqual(result.outcome.commits[1]?.conflicts, []);
 
     assert.deepEqual(result.history, ["one", "second on main", "first"]);
     assert.equal(result.a, "alpha, edited by topic\n");

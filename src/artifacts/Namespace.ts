@@ -35,7 +35,8 @@ import * as path from "node:path";
 import { fetchRepository } from "../client/Fetch.ts";
 import { stores as memoryStores } from "../git/Memory.ts";
 import { stores as nodeStores } from "../git/Node.ts";
-import { ObjectStore, RefStore } from "../git/Store.ts";
+import { bytesToHex } from "../git/Format.ts";
+import { checkRefName, ObjectStore, RefStore } from "../git/Store.ts";
 
 const failure = (code: string, message: string) =>
   new ArtifactsError({ message: `${code}: ${message}`, cause: new Error(code) });
@@ -79,6 +80,8 @@ export class Registry extends Context.Service<
     }>;
     readonly delete: (name: string) => Effect.Effect<boolean>;
     readonly touch: (name: string, at: Date) => Effect.Effect<void>;
+    /** The default branch an import discovered, which `create` could only guess. */
+    readonly setDefaultBranch: (name: string, branch: string) => Effect.Effect<void>;
   }
 >()("artifacts/Registry") {}
 
@@ -126,6 +129,13 @@ const makeRegistry = (rows: Map<string, RepoRecord>, persist: () => Promise<void
         const record = rows.get(name);
         if (record === undefined) return;
         rows.set(name, { ...record, updatedAt: at, lastPushAt: at });
+        yield* Effect.promise(persist);
+      }),
+    setDefaultBranch: (name, branch) =>
+      Effect.gen(function* () {
+        const record = rows.get(name);
+        if (record === undefined || record.defaultBranch === branch) return;
+        rows.set(name, { ...record, defaultBranch: branch });
         yield* Effect.promise(persist);
       }),
   });
@@ -210,7 +220,7 @@ const makeTokens = (rows: TokenRow[], persist: () => Promise<void>) => {
   const digestOf = (plaintext: string) =>
     Effect.promise(async () => {
       const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plaintext));
-      return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      return bytesToHex(new Uint8Array(bytes));
     });
   const stateOf = (row: TokenRow): "active" | "expired" | "revoked" =>
     row.revoked
@@ -324,12 +334,22 @@ export class RepoStores extends Context.Service<
     readonly open: (name: string) => Effect.Effect<StoreInstances>;
     /** Open `child` with its object reads falling through to `parent`. */
     readonly fork: (child: string, parent: string) => Effect.Effect<StoreInstances>;
+    /**
+     * The repositories whose object reads fall through to this one.
+     *
+     * A fork holds no copy of what it inherited, so dropping the store it
+     * reads through erases the fork's history with it — and the fork's refs,
+     * registry row and remote URL all survive to advertise objects that are
+     * no longer anywhere. Asking first is what makes that refusable.
+     */
+    readonly dependents: (name: string) => Effect.Effect<ReadonlyArray<string>>;
     readonly drop: (name: string) => Effect.Effect<void>;
   }
 >()("artifacts/RepoStores") {}
 
 export const repoStoresMemory = Layer.sync(RepoStores)(() => {
   const instances = new Map<string, StoreInstances>();
+  const forks = new Map<string, string>();
 
   const build = Effect.gen(function* () {
     return { objects: yield* ObjectStore, refs: yield* RefStore };
@@ -355,11 +375,15 @@ export const repoStoresMemory = Layer.sync(RepoStores)(() => {
           refs: own.refs,
         };
         instances.set(child, forked);
+        forks.set(child, parent);
         return forked;
       }),
+    dependents: (name) =>
+      Effect.sync(() => [...forks].filter(([, parent]) => parent === name).map(([child]) => child)),
     drop: (name) =>
       Effect.sync(() => {
         instances.delete(name);
+        forks.delete(name);
       }),
   });
 });
@@ -400,14 +424,52 @@ export const repoStoresNode = (root: string) =>
           Effect.gen(function* () {
             forks.set(child, parent);
             yield* Effect.promise(() => saveJson(forksFile, Object.fromEntries(forks)));
+
+            // git's own way of saying "my objects are over there too". The
+            // in-memory fall-through below only exists inside this process,
+            // and the fork is served over HTTP by a host that opens the
+            // directory directly — and read by `git` itself, which has read
+            // this file since 2005.
+            yield* Effect.promise(async () => {
+              const info = path.join(root, child, "objects", "info");
+              await fs.mkdir(info, { recursive: true });
+              await fs.writeFile(
+                path.join(info, "alternates"),
+                `${path.resolve(root, parent, "objects")}\n`,
+              );
+
+              // And the other direction, which git has no file for: the parent
+              // needs to know it is lent out, because its own `gc` cannot see
+              // the refs that keep these objects alive.
+              const lent = path.join(root, parent, "objects", "info");
+              await fs.mkdir(lent, { recursive: true });
+              await fs.appendFile(path.join(lent, "borrowers"), `${child}\n`);
+            });
+
             instances.delete(child);
             return yield* open(child);
           }),
+        dependents: (name) =>
+          Effect.sync(() =>
+            [...forks].filter(([, parent]) => parent === name).map(([child]) => child),
+          ),
         drop: (name) =>
           Effect.gen(function* () {
             instances.delete(name);
+            const parent = forks.get(name);
             if (forks.delete(name)) {
               yield* Effect.promise(() => saveJson(forksFile, Object.fromEntries(forks)));
+            }
+            // The parent can collect again once nothing borrows from it.
+            if (parent !== undefined) {
+              yield* Effect.promise(async () => {
+                const borrowers = path.join(root, parent, "objects", "info", "borrowers");
+                const remaining = [...forks]
+                  .filter(([, from]) => from === parent)
+                  .map(([child]) => child);
+                if (remaining.length === 0) await fs.rm(borrowers, { force: true });
+                else await fs.writeFile(borrowers, `${remaining.join("\n")}\n`);
+              });
             }
             yield* Effect.promise(() =>
               fs.rm(path.join(root, name), { recursive: true, force: true }),
@@ -471,6 +533,14 @@ export const localNamespace = (
           Effect.gen(function* () {
             if (!REPO_NAME.test(name)) {
               return yield* failure("INVALID_REPO_NAME", `'${name}'`);
+            }
+            // Checked here rather than discovered by the store: a branch name
+            // the ref rules refuse would otherwise fail *after* the registry
+            // row exists, as a defect rather than as an answer.
+            const branch = `refs/heads/${opts?.setDefaultBranch ?? "main"}`;
+            const problem = checkRefName(branch);
+            if (problem !== null) {
+              return yield* failure("INVALID_REPO_NAME", `default branch '${branch}': ${problem}`);
             }
             const record = yield* registry.create(name, {
               description: opts?.description ?? null,
@@ -563,9 +633,40 @@ export const localNamespace = (
             ),
           delete: (name) =>
             Effect.gen(function* () {
-              const existed = yield* registry.delete(name);
+              // The same check `create` and `fork` apply, because this name
+              // reaches `fs.rm(join(root, name), { recursive: true })`: a
+              // caller passing `../../home/alice` would otherwise have an
+              // arbitrary directory removed and be told the repo did not exist.
+              if (!REPO_NAME.test(name)) {
+                return yield* failure("INVALID_REPO_NAME", `'${name}'`);
+              }
+
+              // A fork keeps no copy of the history it inherited, so deleting
+              // what it reads through would take that history with it and
+              // leave a repository advertising objects nothing holds. The
+              // caller is told which forks stand in the way instead.
+              const dependents = yield* repoStores.dependents(name);
+              if (dependents.length > 0) {
+                return yield* failure(
+                  "PRECONDITION_FAILED",
+                  `repo '${name}' is the source of ${dependents.join(", ")}; delete those first`,
+                );
+              }
+
+              // Tokens are keyed by repository *name*, and the registries do
+              // not cascade — so a token left behind would authorise pushes
+              // into whatever is created under this name next, by whoever
+              // creates it. It goes before the row it is scoped to.
+              for (const token of (yield* tokens.list(name)).tokens) {
+                yield* tokens.revoke(name, token.id);
+              }
+              // Storage first, then the row: `drop` can fail — a locked pack
+              // file, a racing write from the host serving the same directory
+              // — and a name freed ahead of it would let the next caller
+              // create that repository over a directory still holding the old
+              // one's objects and refs, and clone somebody else's history.
               yield* repoStores.drop(name);
-              return existed;
+              return yield* registry.delete(name);
             }),
           import: (opts) =>
             Effect.gen(function* () {
@@ -579,12 +680,50 @@ export const localNamespace = (
                 opts.target.opts,
                 opts.source.url,
               );
-              const cloned = yield* clone(opts.source.url, opts.source.branch, stores);
+
+              // An import that fails part-way has already taken the name,
+              // issued a token and opened storage. Leaving that behind means a
+              // repository nothing cloned into and a name the caller cannot
+              // retry with, so the creation is undone with the clone.
+              const cloned = yield* clone(opts.source.url, opts.source.branch, stores).pipe(
+                Effect.onError(() =>
+                  Effect.gen(function* () {
+                    // The write token `create` issued outlives the row it was
+                    // issued against — the registries do not cascade — so it
+                    // would still authorise pushes to whatever is created
+                    // under this name next. It goes first, while the name it
+                    // is scoped to still resolves.
+                    for (const token of (yield* tokens.list(record.name)).tokens) {
+                      yield* tokens.revoke(record.name, token.id);
+                    }
+                    // Storage before the row, the same order `delete` uses: a
+                    // `drop` that fails must not leave the name free while the
+                    // half-cloned objects are still on disk under it.
+                    yield* repoStores.drop(record.name);
+                    yield* registry.delete(record.name);
+                  }).pipe(Effect.ignore),
+                ),
+              );
               if (cloned.defaultBranch !== undefined) {
-                yield* stores.refs.setHead(`refs/heads/${cloned.defaultBranch}`).pipe(Effect.orDie);
+                // The branch name comes from the remote's advertisement, so
+                // it is as untrusted as any other name off the network.
+                const head = `refs/heads/${cloned.defaultBranch}`;
+                if (checkRefName(head) === null) {
+                  yield* stores.refs.setHead(head).pipe(Effect.orDie);
+                  // And the row has to agree with HEAD: `create` could only
+                  // guess `main` before the remote had been asked.
+                  yield* registry.setDefaultBranch(record.name, cloned.defaultBranch);
+                }
               }
               yield* registry.touch(record.name, new Date());
-              return result;
+
+              // The row now says which branch the remote actually had, and the
+              // answer has to agree with it: `result` was built before the
+              // clone, when `main` was still a guess.
+              const current = yield* registry.get(record.name);
+              return current === null
+                ? result
+                : { ...result, defaultBranch: current.defaultBranch };
             }),
         };
       };

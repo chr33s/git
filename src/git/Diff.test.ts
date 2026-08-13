@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
 import { diffLines, isBinary, lcs, similarity, splitLines, unified } from "./Diff.ts";
+import { mergeText } from "./Merge.ts";
 
 const numbered = (count: number, from = 1) =>
   Array.from({ length: count }, (_, index) => `line ${index + from}`);
@@ -31,6 +32,44 @@ describe("Diff", () => {
     const lines = numbered(500);
     assert.equal(lcs(lines, lines).length, 500);
     assert.deepEqual(diffLines(lines, lines), []);
+  });
+
+  it("still matches the untouched ends of a file whose middle is past the search bound", () => {
+    // The Myers search is bounded by edit distance, and this rewrite is well
+    // past it: 4,000 replaced lines is an edit distance of 8,000 against a
+    // bound of 2,000. Giving up used to mean returning *no* matches, which
+    // told every caller the two files had nothing in common — a 100-line
+    // append came back as a whole-file rewrite, and a merge of two edits at
+    // opposite ends became a whole-file conflict.
+    const head = numbered(200);
+    const tail = numbered(200).map((line) => `tail ${line}`);
+    const before = [...head, ...numbered(4_000).map((line) => `old ${line}`), ...tail];
+    const after = [...head, ...numbered(4_000).map((line) => `new ${line}`), ...tail];
+
+    const matched = lcs(before, after);
+    assert.equal(matched.length, 400);
+    assert.deepEqual(matched[0], [0, 0]);
+    assert.deepEqual(matched.at(-1), [before.length - 1, after.length - 1]);
+
+    // And the diff is the middle, not the file.
+    const hunks = diffLines(before, after);
+    assert.equal(hunks.length, 1);
+    assert.equal(hunks[0]?.oldStart, 200);
+    assert.equal(hunks[0]?.oldLines.length, 4_000);
+  });
+
+  it("merges edits at opposite ends of a file too different to diff in the middle", () => {
+    // The same bound, reached through `mergeText`: ours rewrites the middle,
+    // theirs appends at the end, and the two do not overlap. git merges this.
+    const middle = (mark: string) => numbered(3_000).map((line) => `${mark} ${line}`);
+    const base = `${["head", ...middle("old"), "tail"].join("\n")}\n`;
+    const ours = `${["head", ...middle("new"), "tail"].join("\n")}\n`;
+    const theirs = `${["head", ...middle("old"), "tail", "appended"].join("\n")}\n`;
+
+    const merged = mergeText({ base, ours, theirs });
+
+    assert.equal(merged.conflicted, false);
+    assert.equal(merged.content, `${["head", ...middle("new"), "tail", "appended"].join("\n")}\n`);
   });
 
   it("groups a replacement and a trailing insertion into separate hunks", () => {

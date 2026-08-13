@@ -12,12 +12,10 @@
  * plain text, so the file is only as private as the repository directory it
  * lives in — which is also true of the objects it protects.
  */
-import * as fs from "node:fs";
-import * as path from "node:path";
-
 import { Effect, Layer } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
+import { readRows, writeRows } from "./JsonRows.node.ts";
 import { duplicate, type Remote, Remotes, validate } from "./Remotes.ts";
 
 interface Stored {
@@ -27,32 +25,16 @@ interface Stored {
   readonly createdAt: string;
 }
 
-const read = (file: string): ReadonlyArray<Remote> => {
-  if (!fs.existsSync(file)) return [];
-  const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (!Array.isArray(parsed)) return [];
-  return (parsed as ReadonlyArray<Stored>).map((row) => ({
+const read = (file: string): ReadonlyArray<Remote> =>
+  readRows<Remote, Stored>(file, (row) => ({
     name: row.name,
     url: row.url,
     credential: row.credential ?? null,
     createdAt: new Date(row.createdAt),
   }));
-};
 
-/** Temp-and-rename, so a reader never sees a half-written list. */
-const write = (file: string, rows: ReadonlyArray<Remote>): void => {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(
-    temporary,
-    JSON.stringify(
-      rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })),
-      null,
-      2,
-    ),
-  );
-  fs.renameSync(temporary, file);
-};
+const write = (file: string, rows: ReadonlyArray<Remote>): void =>
+  writeRows(file, rows, (row) => ({ ...row, createdAt: row.createdAt.toISOString() }));
 
 export const file = (location: string): Layer.Layer<Remotes> =>
   Layer.sync(Remotes, () => {

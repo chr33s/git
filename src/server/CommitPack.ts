@@ -39,6 +39,16 @@ import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 
+/**
+ * What one record, and one file, may hold.
+ *
+ * Both are bounds on memory rather than on usefulness: a body streams, but a
+ * record that never ends and a file whose chunks are never released are each
+ * a way to hold all of it at once — which is what streaming was for.
+ */
+const MAX_LINE = 8 * 1024 * 1024;
+const MAX_FILE = 64 * 1024 * 1024;
+
 /** The only failure this module raises, carrying the status it becomes. */
 class Rejected extends Data.TaggedError("Rejected")<{
   readonly status: number;
@@ -227,7 +237,12 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
             branch,
             message: typeof record.message === "string" ? record.message : "",
             author: signatureOf(record.author),
-            ...(expected === undefined ? {} : { expected: expected as Oid | null }),
+            // The tip the tree was snapshotted from. Committing without it
+            // would parent this tree on whatever arrived while the body was
+            // still streaming, silently reverting that commit's files — so a
+            // caller who named no expectation still gets the one implied by
+            // the tree they are sending.
+            ...(expected === undefined ? { expected: tip } : { expected: expected as Oid | null }),
           };
           return;
         }
@@ -257,6 +272,12 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
           if (decoded === null) return yield* bad("'chunk' data is not base64");
           open.chunks.push(decoded);
           open.size += decoded.length;
+          // Per record *and* per file: bounding the record alone lets a
+          // hundred well-formed chunks hold a gigabyte before `end` releases
+          // them, which is the buffering this endpoint exists to avoid.
+          if (open.size > MAX_FILE) {
+            return yield* bad(`'${open.path}' exceeds the ${MAX_FILE}-byte limit for one file`);
+          }
           return;
         }
 
@@ -306,7 +327,26 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
       }
     });
 
-  yield* Stream.runForEach(Stream.splitLines(Stream.decodeText(bytes)), onLine);
+  /**
+   * The bound has to be applied to the bytes, not to the lines.
+   *
+   * `splitLines` accumulates until it finds a newline, so checking the line it
+   * eventually emits cannot prevent the buffering it was meant to prevent — a
+   * body containing no newline at all is held whole first. Counting bytes
+   * since the last newline is the only place the limit actually bites.
+   */
+  let sinceNewline = 0;
+  const bounded = bytes.pipe(
+    Stream.mapEffect((chunk: Uint8Array) => {
+      const newline = chunk.lastIndexOf(0x0a);
+      sinceNewline = newline === -1 ? sinceNewline + chunk.length : chunk.length - newline - 1;
+      return sinceNewline > MAX_LINE
+        ? bad(`a record may not exceed ${MAX_LINE} bytes; send the content in chunks`)
+        : Effect.succeed(chunk);
+    }),
+  );
+
+  yield* Stream.runForEach(Stream.splitLines(Stream.decodeText(bounded)), onLine);
 
   const header = state.header;
   const open = state.open;

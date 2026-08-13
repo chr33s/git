@@ -10,9 +10,11 @@
  * `atomic` a single mismatch discards the batch.
  */
 import { Effect, Layer, Stream } from "effect";
-import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
+import { ObjectNotFound, StorageFailure } from "./Error.ts";
 import { hashObject } from "./Format.ts";
 import {
+  checkHeadTarget,
+  checkRefNames,
   ObjectStore,
   type Oid,
   type RawObject,
@@ -144,14 +146,7 @@ export const refStore = Layer.effect(
           ),
         apply: (updates, options) =>
           Effect.gen(function* () {
-            for (const update of updates) {
-              if (update.name.length === 0 || update.name.includes(" ")) {
-                return yield* new Invalid({
-                  field: "ref",
-                  reason: `bad ref name '${update.name}'`,
-                });
-              }
-            }
+            yield* checkRefNames(updates);
 
             const at = new Date();
             const results: RefUpdateResult[] = [];
@@ -189,10 +184,15 @@ export const refStore = Layer.effect(
           }),
         head: Effect.sync(() => head),
         setHead: (target) =>
-          Effect.sync(() => {
-            head = target;
-          }),
+          checkHeadTarget(target).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                head = target;
+              }),
+            ),
+          ),
         reflog: (name) => Effect.sync(() => reflogs.get(name) ?? []),
+        logged: Effect.sync(() => [...reflogs.keys()]),
       }),
     );
   }),

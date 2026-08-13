@@ -130,6 +130,9 @@ interface Layout {
  * readers do it: the trailer hash is over raw bytes, so a full read of the
  * index is still not a full *parse* of it.
  */
+/** Indexes whose trailing checksum has already been checked. */
+const verified = new WeakSet<Uint8Array>();
+
 const layout = (bytes: Uint8Array): Result.Result<Layout, Invalid> => {
   if (bytes.length < HEADER_SIZE + TRAILER_SIZE) return invalid("idx", "truncated: no header");
 
@@ -141,10 +144,20 @@ const layout = (bytes: Uint8Array): Result.Result<Layout, Invalid> => {
   const version = view.getUint32(4);
   if (version !== 2) return invalid("idx", `unsupported index version ${version}`);
 
-  const expected = bytesToHex(bytes.subarray(bytes.length - 20));
-  const actual = new Sha1().update(bytes.subarray(0, bytes.length - 20)).digestHex();
-  if (actual !== expected) {
-    return invalid("idx", `checksum mismatch: index says ${expected}, content hashes to ${actual}`);
+  // Verified once per index, not once per lookup: this hashes the whole file
+  // in JS, and `findInPackIndex` runs per object per pack — on a 200k-object
+  // index that turned an O(log n) binary search into ~100ms of SHA-1. The
+  // cache is keyed by the buffer itself, so a re-read index is checked again.
+  if (!verified.has(bytes)) {
+    const expected = bytesToHex(bytes.subarray(bytes.length - 20));
+    const actual = new Sha1().update(bytes.subarray(0, bytes.length - 20)).digestHex();
+    if (actual !== expected) {
+      return invalid(
+        "idx",
+        `checksum mismatch: index says ${expected}, content hashes to ${actual}`,
+      );
+    }
+    verified.add(bytes);
   }
 
   const count = view.getUint32(8 + 255 * 4);

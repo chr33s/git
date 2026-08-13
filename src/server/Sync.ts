@@ -148,27 +148,45 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
     if (!(yield* repository.contains(oid))) wants.push(oid);
   }
 
+  /** One negotiation round, unpacked. */
+  const round = (haves: ReadonlyArray<Oid>) =>
+    Effect.gen(function* () {
+      const pack = yield* requestPack({
+        // The shared client transport, not a local copy: its prelude reader is
+        // the one that survives a server acknowledging more than one have
+        // before the pack.
+        url: input.url,
+        token,
+        wants,
+        haves,
+        depth: input.depth,
+      });
+      return yield* repository.unpack(
+        Stream.fromAsyncIterable(
+          pack,
+          (cause) => new Invalid({ field: "remote", reason: String(cause) }),
+        ),
+      );
+    });
+
   // Every wanted object is already here — a branch that was fetched under
   // another name, or a ref moved back to where it was. There is nothing to
   // ask for, and an empty `want` list is a request the server rejects.
-  const arrived =
-    wants.length === 0
-      ? []
-      : yield* repository.unpack(
-          Stream.fromAsyncIterable(
-            // The shared client transport, not a local copy: its prelude
-            // reader is the one that survives a server acknowledging more
-            // than one have before the pack.
-            yield* requestPack({
-              url: input.url,
-              token,
-              wants,
-              haves: [...new Set(local.values())],
-              depth: input.depth,
-            }),
-            (cause) => new Invalid({ field: "remote", reason: String(cause) }),
-          ),
-        );
+  const arrived: Oid[] = [];
+  if (wants.length > 0) {
+    arrived.push(...(yield* round([...new Set(local.values())])));
+
+    // A `have` claims that commit *and everything behind it*, which is what
+    // lets the remote leave that history out of the pack. After a depth-limited
+    // fetch this repository holds tips whose parents are absent, and there is
+    // no shallow list in these stores to declare that with — so the offer can
+    // be a lie, and the symptom is a pack that does not contain what was
+    // asked for. Cheaper to notice that than to prove the offer honest: the
+    // check is one `has` per want, and only the rare bad round pays for a
+    // second, which claims nothing and therefore cannot lie.
+    const held = yield* Effect.forEach(wants, (oid) => repository.contains(oid));
+    if (held.includes(false)) arrived.push(...(yield* round([])));
+  }
 
   const refs = yield* Effect.forEach(wanted, (ref) =>
     repository

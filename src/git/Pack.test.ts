@@ -75,6 +75,28 @@ const hexBytes = (hex: string): number[] => {
   return bytes;
 };
 
+describe("applyDelta bounds", () => {
+  it("refuses a delta that claims more than it could hold", () => {
+    // A varint target size is a claim by whoever wrote the pack: the
+    // allocation happens before a single byte of it is justified, so a
+    // sixty-byte push could otherwise ask for gigabytes.
+    const base = new Uint8Array([0x61]);
+    const delta = new Uint8Array([
+      0x01, // base size 1, which matches
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0x07, // target size 0x7fffffff
+      0x90,
+      0x01, // one copy instruction
+    ]);
+
+    const result = applyDelta(base, delta);
+    assert.equal(result._tag, "Failure");
+  });
+});
+
 describe("Pack", () => {
   describe("round-trip", () => {
     it("packs from one store and unpacks into another, bytes identical", async () => {

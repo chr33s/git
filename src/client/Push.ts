@@ -12,6 +12,7 @@
  * current commit is not an ancestor of what would replace it, and say so
  * before spending a pack upload on a push the operator did not mean.
  */
+import { concatBytes as concat } from "../git/Format.ts";
 import { Effect, Stream } from "effect";
 
 import { Invalid, type ObjectNotFound, PackCorrupt, type StorageFailure } from "../git/Error.ts";
@@ -35,16 +36,6 @@ export interface PushResult {
   readonly ok: boolean;
   readonly reason?: string;
 }
-
-const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayBuffer> => {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out as Uint8Array<ArrayBuffer>;
-};
 
 const unreachable = (reason: string) => new Invalid({ field: "remote", reason });
 

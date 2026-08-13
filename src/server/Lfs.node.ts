@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { Readable, Writable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import { Effect, Layer, Stream } from "effect";
@@ -69,19 +69,21 @@ export const file = (root: string): Layer.Layer<LfsStore> =>
 
               // One pass: the bytes go to disk and through the digest
               // together, so nothing is buffered and nothing is read twice.
-              const sink = fs.createWriteStream(temporary);
+              // The file stream is *part* of the pipeline rather than driven
+              // from inside a `Writable`, so a write that fails — a full disk,
+              // most of all — fails the upload. Swallowing it would let the
+              // digest, which is computed over what was fed rather than over
+              // what landed, promote a truncated file under a verified hash.
               await pipeline(
                 Readable.from(Stream.toAsyncIterable(body)),
-                new Writable({
-                  write(chunk: Buffer, _encoding, done) {
+                new Transform({
+                  transform(chunk: Buffer, _encoding, done) {
                     digest.update(chunk);
                     size += chunk.length;
-                    sink.write(chunk, () => done());
-                  },
-                  final(done) {
-                    sink.end(() => done());
+                    done(null, chunk);
                   },
                 }),
+                fs.createWriteStream(temporary),
               );
 
               return { actual: digest.digest("hex"), size };

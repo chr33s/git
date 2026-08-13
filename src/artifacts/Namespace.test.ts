@@ -45,7 +45,7 @@ const author = {
  * never touches it, so the cast discharges what nothing reads.
  */
 const run = <A, E>(
-  effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | RuntimeContext>,
+  effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | Tokens | RuntimeContext>,
 ): Promise<A> =>
   // The local provider never reads `RuntimeContext`, but alchemy's client
   // signatures carry it and no off-platform value can be constructed.
@@ -117,6 +117,27 @@ describe("Artifacts local provider", () => {
     );
   });
 
+  it("revokes a deleted repository's tokens, so the name can be reused safely", async () => {
+    await run(
+      Effect.gen(function* () {
+        const client = yield* bound;
+        const tokens = yield* Tokens;
+
+        const created = yield* client.create("recycled");
+        assert.equal(yield* tokens.verify("recycled", created.token), "write");
+
+        yield* client.delete("recycled");
+        // Tokens are keyed by repository name, and nothing cascades: an old
+        // write token that still verified would authorise pushes into whatever
+        // the next owner creates under the same name.
+        assert.equal(yield* tokens.verify("recycled", created.token), null);
+
+        yield* client.create("recycled");
+        assert.equal(yield* tokens.verify("recycled", created.token), null);
+      }),
+    );
+  });
+
   it("issues, lists, revokes tokens — and raw fails as a typed error", async () => {
     await run(
       Effect.gen(function* () {
@@ -149,6 +170,40 @@ describe("Artifacts local provider", () => {
         const raw = yield* repo.raw.pipe(Effect.flip);
         assert.equal(raw._tag, "ArtifactsError");
         assert.match(raw.message, /off-platform/);
+      }),
+    );
+  });
+
+  it("refuses a delete whose name is not a repository name", async () => {
+    await run(
+      Effect.gen(function* () {
+        const client = yield* bound;
+        // This name reaches `fs.rm(join(root, name), { recursive: true })`.
+        const refused = yield* client.delete("../../../tmp/somewhere").pipe(Effect.flip);
+        assert.match(refused.message, /INVALID_REPO_NAME/);
+      }),
+    );
+  });
+
+  it("refuses to delete a repository its forks read through", async () => {
+    await run(
+      Effect.gen(function* () {
+        const client = yield* bound;
+
+        yield* client.create("origin");
+        const origin = yield* client.get("origin");
+        yield* origin.fork("derived");
+
+        // The fork holds no copy of what it inherited, so deleting the store
+        // it reads through would erase its history while leaving its refs,
+        // its row and its remote URL advertising objects nothing holds.
+        const refused = yield* client.delete("origin").pipe(Effect.flip);
+        assert.match(refused.message, /derived/);
+        assert.notEqual(yield* client.get("origin"), null);
+
+        // In the other order it is an ordinary delete.
+        assert.equal(yield* client.delete("derived"), true);
+        assert.equal(yield* client.delete("origin"), true);
       }),
     );
   });

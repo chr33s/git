@@ -19,10 +19,12 @@
  */
 import { Effect, Layer, Option, Stream } from "effect";
 
-import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
+import { ObjectNotFound, StorageFailure } from "./Error.ts";
 import { hashObject } from "./Format.ts";
 import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
+  checkHeadTarget,
+  checkRefNames,
   ObjectStore,
   type ObjectType,
   type Oid,
@@ -305,14 +307,7 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
             }),
           apply: (updates, options) =>
             Effect.gen(function* () {
-              for (const update of updates) {
-                if (update.name.length === 0 || update.name.includes(" ")) {
-                  return yield* new Invalid({
-                    field: "ref",
-                    reason: `bad ref name '${update.name}'`,
-                  });
-                }
-              }
+              yield* checkRefNames(updates);
 
               return yield* Effect.try({
                 try: () => {
@@ -372,10 +367,14 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
             }),
           head,
           setHead: (target) =>
-            Effect.tryPromise({
-              try: () => storage.put(headKey, target),
-              catch: failure("write", headKey),
-            }),
+            checkHeadTarget(target).pipe(
+              Effect.andThen(
+                Effect.tryPromise({
+                  try: () => storage.put(headKey, target),
+                  catch: failure("write", headKey),
+                }),
+              ),
+            ),
           reflog: (name) =>
             Effect.try({
               try: () =>
@@ -400,6 +399,14 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
                   })),
               catch: failure("reflog", name),
             }),
+          logged: Effect.try({
+            try: () =>
+              sql
+                .exec<{ name: string }>(`SELECT DISTINCT name FROM reflog WHERE repo = ?`, repo)
+                .toArray()
+                .map((row) => row.name),
+            catch: failure("reflog.list", repo),
+          }),
         }),
       );
     }),

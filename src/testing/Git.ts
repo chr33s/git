@@ -18,6 +18,23 @@
  */
 import { execFileSync } from "node:child_process";
 
+/**
+ * The environment every `git` in the suite runs under.
+ *
+ * The identity flags below are not enough on their own: a developer whose
+ * `~/.gitconfig` sets `commit.gpgsign` with an SSH key cannot commit
+ * non-interactively, so every interop suite fails with a passphrase prompt on
+ * their machine and passes on everyone else's. Pointing git's config lookup at
+ * a file that does not exist is how it is told to consult nothing.
+ */
+export const gitEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  // Not merely absent: set, so nothing falls back to $HOME/.gitconfig.
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
 /** Whether a `git` binary is on the PATH; suites `describe.skipIf(!hasGit)`. */
 export const hasGit: boolean = (() => {
   try {
@@ -42,4 +59,5 @@ export const gitIn =
     execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@e.com", ...args], {
       cwd,
       encoding: "utf8",
+      env: gitEnv,
     });

@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer } from "effect";
 
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -254,6 +254,72 @@ describe("CommitPack", () => {
         // It builds on the branch rather than replacing it.
         const commit = yield* repository.readCommit(second.payload.oid as Oid);
         assert.deepEqual(commit.parents, [first.payload.oid]);
+      }),
+    ),
+  );
+
+  it.live("refuses a commit whose branch moved while its body was streaming", () =>
+    run(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        yield* send(
+          post(
+            ndjson([
+              { type: "commit", message: "first\n", author: alice },
+              { type: "file", path: "a.txt" },
+              { type: "chunk", data: utf8("a\n") },
+              { type: "end" },
+              { type: "done" },
+            ]),
+          ),
+        );
+
+        // The tree is snapshotted at the `commit` header, so the rest of the
+        // body arrives *after* another commit lands. Parenting this tree on
+        // that commit would revert its files with no conflict and a 200.
+        let release = () => undefined as void;
+        const raced = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const head = ndjson([
+          { type: "commit", message: "slow\n", author: alice },
+          { type: "file", path: "b.txt" },
+        ]);
+        const tail = ndjson([
+          { type: "chunk", data: utf8("b\n") },
+          { type: "end" },
+          { type: "done" },
+        ]);
+
+        const body = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(encoder.encode(head));
+            await raced;
+            controller.enqueue(encoder.encode(tail));
+            controller.close();
+          },
+        });
+
+        const inFlight = yield* Effect.forkChild(send(post(body)));
+
+        const meanwhile = yield* repository.writeFiles({
+          changes: [{ path: "c.txt", content: encoder.encode("c\n") }],
+        });
+        yield* repository.commit({
+          branch: "main",
+          tree: meanwhile,
+          message: "raced",
+          author: { ...alice, at: new Date(alice.at) },
+        });
+        release();
+
+        const answer = yield* Fiber.join(inFlight);
+        assert.equal(answer.status, 409, JSON.stringify(answer.payload));
+
+        // The racing commit still stands, and its file is still there.
+        const tip = (yield* repository.resolve("refs/heads/main"))!;
+        const files = yield* repository.listFiles((yield* repository.readCommit(tip)).tree);
+        assert.ok(files.some((file) => file.path === "c.txt"));
       }),
     ),
   );

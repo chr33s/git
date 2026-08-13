@@ -18,6 +18,7 @@
 import { Context, Effect, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { bytesToHex, concatBytes } from "../git/Format.ts";
 
 /** LFS object ids are SHA-256, so 64 hex characters rather than git's 40. */
 export const isLfsOid = (value: string): boolean => /^[0-9a-f]{64}$/.test(value);
@@ -241,20 +242,12 @@ export const memory = Effect.sync(() => {
     write: (oid, body) =>
       Effect.gen(function* () {
         const chunks = yield* Stream.runCollect(body);
-        const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-        const bytes = new Uint8Array(total);
-        let offset = 0;
-        for (const chunk of chunks) {
-          bytes.set(chunk, offset);
-          offset += chunk.length;
-        }
+        const bytes = concatBytes(chunks);
 
         const digest = yield* Effect.promise(() =>
           crypto.subtle.digest("SHA-256", bytes.slice().buffer),
         );
-        const actual = [...new Uint8Array(digest)]
-          .map((byte) => byte.toString(16).padStart(2, "0"))
-          .join("");
+        const actual = bytesToHex(new Uint8Array(digest));
         if (actual !== oid) {
           return yield* new Invalid({ field: "oid", reason: `content hashes to ${actual}` });
         }

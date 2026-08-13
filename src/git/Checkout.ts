@@ -20,9 +20,10 @@
 import { Effect } from "effect";
 
 import { Invalid } from "./Error.ts";
+import { hashObject, isGitlink } from "./Format.ts";
 import { addEntry, type IndexEntry, removeEntry } from "./Index.ts";
 import { Repository } from "./Repository.ts";
-import type { Oid } from "./Store.ts";
+import { isOid, type Oid } from "./Store.ts";
 import {
   entryFor,
   IndexStore,
@@ -44,6 +45,37 @@ export interface Status {
   readonly untracked: ReadonlyArray<string>;
   readonly branch: string;
 }
+
+/**
+ * A stat for a path that is not on disk.
+ *
+ * Restoring the index does not require the file to exist — unstaging a `git
+ * rm` is precisely the case where it does not — and the stat cache is an
+ * optimisation, so zeroes here only mean "hash it next time".
+ */
+const blank = (mode: number) => ({
+  mode,
+  size: 0,
+  mtimeSeconds: 0,
+  mtimeNanos: 0,
+  ctimeSeconds: 0,
+  ctimeNanos: 0,
+  device: 0,
+  inode: 0,
+  uid: 0,
+  gid: 0,
+});
+
+/**
+ * A tree's mode against an index entry's, as numbers.
+ *
+ * The index holds a number and a tree holds a string, and the string may be
+ * zero-padded — git's own `zeroPaddedFilemode`. Spelling the index mode and
+ * comparing the text called `040000` and `40000` two different modes, so
+ * every file under such a directory showed up as staged-modified forever and
+ * `checkout` refused to run.
+ */
+const sameMode = (tree: string, index: number): boolean => Number.parseInt(tree, 8) === index;
 
 /** HEAD's tree as a path -> entry map, or empty on an unborn branch. */
 const headFiles = Effect.gen(function* () {
@@ -71,7 +103,7 @@ export const status = Effect.fn("Checkout.status")(function* () {
   for (const [path, entry] of staged) {
     const committed = head.get(path);
     if (committed === undefined) stagedChanges.push({ path, change: "added" });
-    else if (committed.oid !== entry.oid || committed.mode !== modeString(entry.mode)) {
+    else if (committed.oid !== entry.oid || !sameMode(committed.mode, entry.mode)) {
       stagedChanges.push({ path, change: "modified" });
     }
   }
@@ -96,14 +128,22 @@ export const status = Effect.fn("Checkout.status")(function* () {
     if (unchanged(entry, stat)) continue;
 
     const content = yield* work.read(path);
-    const oid = yield* repository.writeBlob(content);
+    // Hashed, not written: `status` is a question, and answering it by storing
+    // every modified file would leave the object store holding a blob for work
+    // nobody has staged — garbage that only a `gc` can find its way back out of.
+    const oid = yield* hashObject({ type: "blob", data: content });
     if (oid !== entry.oid || modeString(stat.mode) !== modeString(entry.mode)) {
       unstaged.push({ path, change: "modified" });
     }
   }
 
   const present = new Set(onDisk);
-  for (const path of staged.keys()) {
+  for (const [path, entry] of staged) {
+    // A gitlink has no file of its own on disk — the submodule's work tree is
+    // that other repository's business — so "absent from `work.list`" is its
+    // normal state, not a deletion. Reporting it as one made every checkout
+    // of a repository with a submodule refuse for a dirty work tree.
+    if (entry.mode === 0o160000) continue;
     if (!present.has(path)) unstaged.push({ path, change: "deleted" });
   }
 
@@ -232,32 +272,62 @@ export const restore = Effect.fn("Checkout.restore")(function* (
   const work = yield* WorkTree;
   const index = yield* IndexStore;
 
-  const toWorktree = options?.worktree !== false || options.staged !== true;
+  // `staged` alone means index-only; anything else touches the work tree
+  // unless the caller said not to. `||` here made `worktree: false` a no-op
+  // for every caller that did not also pass `staged`.
   const toIndex = options?.staged === true;
+  const toWorktree = options?.worktree ?? !toIndex;
 
   let entries = yield* index.load;
   const restored: string[] = [];
 
   // `--source` means "take the content from that commit" rather than from
-  // whatever is staged.
+  // whatever is staged. Restoring the *index* has no other sensible source:
+  // taking the oid out of the index this call exists to rewrite makes
+  // `restore --staged` — the documented way to unstage — a silent no-op.
+  const from = options?.source ?? (toIndex ? "HEAD" : undefined);
   const source =
-    options?.source === undefined
+    from === undefined
       ? null
       : yield* Effect.gen(function* () {
-          const oid = yield* repository.resolve(options.source!);
+          const oid = yield* repository.resolve(from);
           if (oid === null) {
-            return yield* new Invalid({ field: "source", reason: `unknown '${options.source}'` });
+            // An unborn branch has no HEAD to restore from. That is an error
+            // when the caller named the source and merely nothing to take
+            // when the default supplied it — `restore --staged` on a
+            // repository without commits should not fail.
+            if (options?.source === undefined) return null;
+            return yield* new Invalid({ field: "source", reason: `unknown '${from}'` });
           }
           const commit = yield* repository.readCommit(oid);
           const files = yield* repository.listFiles(commit.tree);
           return new Map(files.map((file) => [file.path, file]));
         });
 
-  for (const requested of paths) {
-    const path = yield* validatePath(requested);
+  // Every path first, as `checkout` does: a bad one late in the batch would
+  // otherwise abort after earlier paths had already been written or removed,
+  // with `index.save` never reached.
+  const wanted = yield* Effect.forEach(paths, (requested) =>
+    validatePath(requested).pipe(Effect.map((path) => ({ path, requested }))),
+  );
 
+  for (const { path, requested } of wanted) {
     const fromSource = source?.get(path);
     const entry = entries.find((candidate) => candidate.path === path);
+
+    // Restoring the index from a source that does not hold the path is how a
+    // newly added file is unstaged — the entry goes away rather than being
+    // written back from the index it was supposed to be rewritten from.
+    if (toIndex && fromSource === undefined) {
+      if (entry === undefined) {
+        return yield* new Invalid({ field: "path", reason: `'${requested}' is not tracked` });
+      }
+      entries = removeEntry(entries, path);
+      if (toWorktree) yield* work.remove(path);
+      restored.push(path);
+      continue;
+    }
+
     const oid = fromSource?.oid ?? entry?.oid;
     if (oid === undefined) {
       return yield* new Invalid({ field: "path", reason: `'${requested}' is not tracked` });
@@ -265,12 +335,20 @@ export const restore = Effect.fn("Checkout.restore")(function* (
     const mode =
       fromSource === undefined ? (entry?.mode ?? REGULAR) : Number.parseInt(fromSource.mode, 8);
 
-    if (toWorktree) {
+    // A gitlink has no bytes here to restore; the index entry is the whole of
+    // what this repository records about it.
+    if (toWorktree && mode !== 0o160000) {
       yield* work.write(path, yield* repository.readBlob(oid), mode);
     }
     if (toIndex) {
+      // The file need not be on disk for the index to be restored: unstaging
+      // a `git rm` is exactly the case where it is not, and skipping the
+      // write there reports success while changing nothing.
       const stat = yield* work.stat(path);
-      if (stat !== null) entries = addEntry(entries, entryFor(path, oid, { ...stat, mode }));
+      entries = addEntry(
+        entries,
+        entryFor(path, oid, stat === null ? blank(mode) : { ...stat, mode }),
+      );
     }
     restored.push(path);
   }
@@ -295,24 +373,15 @@ export const checkout = Effect.fn("Checkout.checkout")(function* (
   const work = yield* WorkTree;
   const index = yield* IndexStore;
 
-  if (options?.force !== true) {
-    const current = yield* status();
-    if (current.unstaged.length > 0) {
-      return yield* new Invalid({
-        field: "worktree",
-        reason: `${current.unstaged.length} unstaged change(s) would be overwritten`,
-      });
-    }
-  }
-
   const ref = target.startsWith("refs/") ? target : `refs/heads/${target}`;
 
-  if (options?.create === true) {
-    const head = yield* repository.head;
-    yield* repository.branch({ name: target.replace(/^refs\/heads\//, ""), base: head });
-  }
-
-  const tip = yield* repository.resolve(ref);
+  // The branch is created *after* the refusals below, not before: a
+  // `checkout -b` that is refused for a dirty work tree would otherwise
+  // leave the branch behind, and the retry then fails because it exists.
+  const create = options?.create === true;
+  const tip = create
+    ? yield* repository.resolve(yield* repository.head)
+    : yield* repository.resolve(ref);
   if (tip === null) {
     return yield* new Invalid({ field: "target", reason: `unknown branch '${target}'` });
   }
@@ -321,15 +390,80 @@ export const checkout = Effect.fn("Checkout.checkout")(function* (
   const wanted = yield* repository.listFiles(commit.tree);
   const wantedPaths = new Set(wanted.map((file) => file.path));
 
+  if (options?.force !== true) {
+    const current = yield* status();
+    if (current.unstaged.length > 0) {
+      return yield* new Invalid({
+        field: "worktree",
+        reason: `${current.unstaged.length} unstaged change(s) would be overwritten`,
+      });
+    }
+
+    // An untracked file the target tree also has is content this repository
+    // has never seen: overwriting it loses work that was never hashed, and
+    // git refuses for exactly that reason. A staged addition the target does
+    // not have would be deleted from disk *and* from the index, so it is the
+    // same loss with an extra step.
+    const clobbered = current.untracked.filter((path) => wantedPaths.has(path));
+    if (clobbered.length > 0) {
+      return yield* new Invalid({
+        field: "worktree",
+        reason: `untracked file(s) would be overwritten: ${clobbered.slice(0, 3).join(", ")}`,
+      });
+    }
+
+    // Every staged change, not only additions: the index is rebuilt from the
+    // target tree, so a staged *modification* is discarded just as completely
+    // as a staged new file is deleted — and neither was ever committed.
+    const staged = current.staged.map((entry) => entry.path);
+    if (staged.length > 0) {
+      return yield* new Invalid({
+        field: "worktree",
+        reason: `${staged.length} staged change(s) would be lost: ${staged.slice(0, 3).join(", ")}`,
+      });
+    }
+  }
+
   // Anything the old index tracked and the new tree does not is removed;
   // untracked files are left alone, which is what makes a checkout safe.
-  for (const entry of yield* index.load) {
+  // Every path is validated first: these come from a tree and an index — a
+  // clone's, so from whoever wrote them — and `..`, a leading `.git` or a
+  // path that descends through a symlink written earlier in this same loop
+  // would all land outside the checkout.
+  const tracked = yield* index.load;
+  // Every path first, before a single file moves: validating inside the loops
+  // would abort a checkout that had already deleted the old tree, leaving a
+  // work tree, an index and a HEAD that disagree.
+  for (const file of wanted) yield* validatePath(file.path);
+  for (const entry of tracked) {
+    if (!wantedPaths.has(entry.path)) yield* validatePath(entry.path);
+  }
+
+  // Before a single file moves, not after the work tree has been rewritten:
+  // creating the branch is the last thing here that can fail on its own —
+  // `refs/heads/<name>` already existing is a `RefConflict` — and failing it
+  // afterwards aborted with the old tree already deleted from disk and the
+  // index never saved.
+  if (create) {
+    yield* repository.branch({ name: target.replace(/^refs\/heads\//, ""), base: tip });
+  }
+
+  for (const entry of tracked) {
     if (!wantedPaths.has(entry.path)) yield* work.remove(entry.path);
   }
 
   let entries: ReadonlyArray<IndexEntry> = [];
   for (const file of wanted) {
     const mode = Number.parseInt(file.mode, 8);
+    // A gitlink is a commit in another repository: there is nothing to write
+    // to disk, and reading it as a blob fails on an object this repository
+    // does not have. It still belongs in the index, because the index is what
+    // the next commit's tree is built from — and an entry missing from there
+    // is a submodule deleted from history with no error and no conflict.
+    if (isGitlink(file.mode)) {
+      entries = addEntry(entries, entryFor(file.path, file.oid, blank(mode)));
+      continue;
+    }
     yield* work.write(file.path, yield* repository.readBlob(file.oid), mode);
     const stat = yield* work.stat(file.path);
     if (stat !== null)
@@ -362,6 +496,21 @@ export const commit = Effect.fn("Checkout.commit")(function* (input: {
     return yield* new Invalid({ field: "index", reason: "nothing staged" });
   }
 
+  const branch = yield* repository.head;
+  // A detached HEAD holds a commit, not the name of one. Passing it on would
+  // create `refs/heads/<40-hex>` with no parent — a root commit under a
+  // branch spelled as a sha, while HEAD never moves and the work looks lost.
+  //
+  // Refused before the tree is written, not after: writing first left every
+  // tree of the refused commit in the object store, reachable from nothing
+  // and collectable only by a gc.
+  if (isOid(branch)) {
+    return yield* new Invalid({
+      field: "head",
+      reason: "HEAD is detached; check out a branch before committing",
+    });
+  }
+
   // The index already names every blob, so the tree is built from oids
   // rather than by reading the content back out to write it again.
   const tree = yield* repository.writePaths(
@@ -372,7 +521,6 @@ export const commit = Effect.fn("Checkout.commit")(function* (input: {
     })),
   );
 
-  const branch = yield* repository.head;
   const oid = yield* repository.commit({
     branch,
     tree,

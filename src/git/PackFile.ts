@@ -138,7 +138,7 @@ const parseHeader = (bytes: Uint8Array, at: number): Header => {
 export const readAt = async (
   source: PackSource,
   offset: number,
-  resolveBase: (oid: Oid) => Promise<RawObject | null>,
+  resolveBase: (oid: Oid, depth: number) => Promise<RawObject | null>,
   depth = 0,
 ): Promise<RawObject> => {
   // A delta chain is bounded in every pack git produces; an unbounded one is
@@ -151,16 +151,27 @@ export const readAt = async (
 
   let data: Uint8Array;
   try {
-    data = await inflate(windowed(source, offset + window.length, window.subarray(header.length)));
+    // Bounded by what the header declared, as the transport path already
+    // does: for a full object the size is checked below, but a delta's
+    // never was, so a stream that expands past every available byte had
+    // nothing to stop it here.
+    data = await inflate(
+      windowed(source, offset + window.length, window.subarray(header.length)),
+      header.size + 1,
+    );
   } catch (error) {
     throw error instanceof InflateError ? corrupt(error.message, offset) : error;
   }
 
   if (header.code === OFS_DELTA || header.code === REF_DELTA) {
+    // The depth travels with the ref-delta too: resolving one through the
+    // store used to start a fresh `readAt` at depth 0, so a cycle of two
+    // ref-deltas reset the cap on every hop and recursed until the stack ran
+    // out instead of failing as a corrupt pack.
     const base =
       header.baseOffset !== undefined
         ? await readAt(source, header.baseOffset, resolveBase, depth + 1)
-        : await resolveBase(header.baseOid!);
+        : await resolveBase(header.baseOid!, depth + 1);
     if (base === null) throw corrupt(`delta base ${header.baseOid} is nowhere`, offset);
 
     const applied = applyDelta(base.data, data);

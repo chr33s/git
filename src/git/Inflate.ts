@@ -179,7 +179,16 @@ class Output {
     return this.#length;
   }
 
+  #limit = MAX_INFLATED;
+
+  bound(limit: number): void {
+    this.#limit = limit;
+  }
+
   #grow(needed: number): void {
+    if (this.#length + needed > this.#limit) {
+      corrupt(`inflated stream exceeds ${this.#limit} bytes`);
+    }
     if (this.#length + needed <= this.#buffer.length) return;
     let capacity = this.#buffer.length * 2;
     while (capacity < this.#length + needed) capacity *= 2;
@@ -312,7 +321,17 @@ const adler32 = (bytes: Uint8Array): number => {
  * Inflate one complete zlib stream from the source, consuming exactly its
  * bytes: whatever was over-pulled from the final chunk is pushed back.
  */
-export const inflate = async (source: ByteSource): Promise<Uint8Array> => {
+/**
+ * The most bytes an inflate will produce before it gives up.
+ *
+ * A deflate stream expands by up to ~1000:1, so a few megabytes of pack can
+ * ask for gigabytes of output — and the size the object header declared is
+ * only compared *after* the stream has been inflated. Callers that know the
+ * expected size pass it; the default is a backstop for callers that do not.
+ */
+export const MAX_INFLATED = 512 * 1024 * 1024;
+
+export const inflate = async (source: ByteSource, limit = MAX_INFLATED): Promise<Uint8Array> => {
   const reader = new Reader(source);
   try {
     const cmf = await reader.alignedByte();
@@ -322,6 +341,10 @@ export const inflate = async (source: ByteSource): Promise<Uint8Array> => {
     if ((flg & 0x20) !== 0) corrupt("preset dictionaries are not supported");
 
     const output = new Output();
+    // Clamped, not replaced: the caller that knows the expected size reads it
+    // out of the input it is validating, so letting it raise the ceiling
+    // hands the bound to whoever wrote the pack.
+    output.bound(Math.min(limit, MAX_INFLATED));
     await inflateBlocks(reader, output);
     const bytes = output.take();
 

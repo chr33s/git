@@ -19,7 +19,9 @@ import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 import { Effect, Layer, Stream } from "effect";
 
 import { hasGit } from "../testing/Git.ts";
+import * as Maintenance from "./Maintenance.ts";
 import { stores as memoryStores } from "./Memory.ts";
+import { PackStore } from "./Packed.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
@@ -133,6 +135,191 @@ describe("packs at rest", () => {
         const remaining = yield* Stream.runCollect(objects.list);
         assert.equal(remaining.includes(orphan), false);
         assert.equal(report.packed!.objects, remaining.length);
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(memoryStores),
+          ),
+        ),
+      ) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "reports a packed object as retained rather than removed, and drops it on a repack",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+
+        yield* seed(1);
+        const tree = yield* repository.writeFiles({
+          changes: [{ path: "secret.txt", content: new TextEncoder().encode("secret\n") }],
+        });
+        yield* repository.commit({ branch: "tmp", tree, message: "secret", author });
+        yield* repository.gc({ repack: true, reflogGrace: 0 });
+
+        const secret = (yield* repository.listFiles(tree)).find(
+          (file) => file.path === "secret.txt",
+        )!.oid;
+        yield* repository.deleteRef("refs/heads/tmp");
+
+        // Unreachable, but a pack holds it — and deleting one object from a
+        // pack is a rewrite of the pack, so a plain gc cannot claim it gone.
+        const swept = yield* repository.gc({ reflogGrace: 0 });
+        assert.equal(swept.removed.includes(secret), false);
+        assert.equal(swept.retained.includes(secret), true);
+        assert.equal(yield* repository.contains(secret), true);
+
+        // The repack is what collects it: the superseded pack is deleted.
+        const repacked = yield* repository.gc({ repack: true, reflogGrace: 0 });
+        assert.equal(repacked.removed.includes(secret), true);
+        assert.equal(yield* repository.contains(secret), false);
+        assert.equal((yield* Stream.runCollect(objects.list)).includes(secret), false);
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(memoryStores),
+          ),
+        ),
+      ) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "refuses to collect when its roots name objects the store cannot read",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const refs = yield* RefStore;
+        const packs = yield* PackStore;
+
+        const head = yield* seed(2);
+        const before = (yield* Stream.runCollect(objects.list)).length;
+
+        // Every ref names something unreadable — a store pointed at the wrong
+        // prefix, a half-restored backup. Every object then looks unreachable,
+        // so a gc that trusted the walk would delete the entire repository.
+        const missing = "9".repeat(40) as Oid;
+        const broken: RefStore["Service"] = {
+          ...refs,
+          list: () => Effect.succeed([["refs/heads/main", missing] as const]),
+          logged: Effect.succeed([]),
+          resolve: () => Effect.succeed(null),
+        };
+
+        const failure = yield* Effect.flip(
+          Maintenance.gc({ objects, packs, refs: broken }, { reflogGrace: 0 }),
+        );
+
+        assert.equal(failure._tag, "StorageFailure");
+        assert.equal((yield* Stream.runCollect(objects.list)).length, before);
+        assert.equal(yield* repository.contains(head), true);
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(memoryStores),
+          ),
+        ),
+      ) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "never deletes a pack on the strength of a walk that found no roots",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const refs = yield* RefStore;
+        const packs = yield* PackStore;
+
+        yield* seed(2);
+        yield* repository.gc({ repack: true, reflogGrace: 0 });
+        const before = (yield* packs.list).length;
+        assert.ok(before > 0);
+
+        // A ref store that reports nothing — a `packed-refs` file a backend
+        // does not parse, a registry that failed to load, a prefix typo. An
+        // empty walk is an absence of evidence, not evidence that a repository
+        // is garbage, and deleting its packs is the one step that cannot be
+        // taken back.
+        const blind: RefStore["Service"] = {
+          ...refs,
+          list: () => Effect.succeed([]),
+          logged: Effect.succeed([]),
+          resolve: () => Effect.succeed(null),
+        };
+        yield* Maintenance.gc({ objects, packs, refs: blind }, { repack: true, reflogGrace: 0 });
+
+        assert.equal((yield* packs.list).length, before);
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(memoryStores),
+          ),
+        ),
+      ) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "keeps the history of a branch that was deleted, which is what the reflog is for",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+
+        yield* seed(1);
+        const tree = yield* repository.writeFiles({
+          changes: [{ path: "wip.txt", content: new TextEncoder().encode("work\n") }],
+        });
+        const doomed = yield* repository.commit({
+          branch: "wip",
+          tree,
+          message: "wip",
+          author,
+        });
+
+        // `git push origin :wip`, then the next scheduled collection. The ref
+        // is gone from `list` — its log is the only thing that still leads
+        // back to the commit, and that is precisely when it must be consulted.
+        yield* repository.deleteRef("refs/heads/wip");
+        const kept = yield* repository.gc({});
+        assert.equal(kept.removed.includes(doomed), false);
+        assert.equal(yield* repository.contains(doomed), true);
+
+        const purged = yield* repository.gc({ reflogGrace: 0 });
+        assert.equal(purged.removed.includes(doomed), true);
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(memoryStores),
+          ),
+        ),
+      ) as Effect.Effect<void>,
+  );
+
+  it.live(
+    "keeps a commit the reflog still names until the grace period is waived",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+
+        const first = yield* seed(1);
+        const second = yield* seed(1);
+        // A reset, or a force-push: the branch no longer reaches `second`, and
+        // the reflog entry that leads back to it is the only record left.
+        yield* repository.setRef({ name: "refs/heads/main", to: first });
+
+        const kept = yield* repository.gc({});
+        assert.equal(kept.removed.includes(second), false);
+        assert.equal(yield* repository.contains(second), true);
+
+        const purged = yield* repository.gc({ reflogGrace: 0 });
+        assert.equal(purged.removed.includes(second), true);
+        assert.equal(yield* repository.contains(second), false);
       }).pipe(
         Effect.provide(
           GitRepository.layer.pipe(

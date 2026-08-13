@@ -130,7 +130,11 @@ export const validatePath = (path: string): Effect.Effect<string, Invalid> =>
         new Invalid({ field: "path", reason: `path escapes the tree: '${path}'` }),
       );
     }
-    if (segments[0] === ".git") {
+    // Any segment, any case: `.GIT/hooks/post-checkout` is the same file on a
+    // case-insensitive filesystem, and `a/.git/config` is one git refuses too.
+    // `Repository.segmentsOf` applies exactly this rule when a tree is
+    // written; this is the half that reads one back onto a work tree.
+    if (segments.some((segment) => segment.toLowerCase() === ".git")) {
       return Effect.fail(new Invalid({ field: "path", reason: "the repository is not content" }));
     }
     return Effect.succeed(segments.join("/"));

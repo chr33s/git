@@ -41,6 +41,51 @@ export const routeOf = (pathname: string): Route | null => {
 };
 
 /**
+ * Whether this request is the one that deletes objects.
+ *
+ * A host serializes handlers, but a pack body keeps reading the store after
+ * its handler returned, so collection is the single caller that has to wait
+ * for the bodies still in flight. Recognising it is routing, which is why the
+ * rule lives here instead of once per host.
+ */
+export const collects = (request: Request): boolean => {
+  if (request.method !== "POST") return false;
+  const segments = new URL(request.url).pathname.split("/").filter((segment) => segment !== "");
+  return segments.at(-1) === "gc";
+};
+
+/**
+ * How long collection waits for those bodies.
+ *
+ * Bounded because the wait is on a client's pace: a stalled clone must not
+ * postpone maintenance forever. Exceeding it is rare enough to accept the
+ * narrow window it reopens — and gc's reflog grace covers recent objects.
+ */
+export const DELIVERY_WAIT_MS = 30_000;
+
+/**
+ * Wait for those bodies, but not past the bound.
+ *
+ * The timer is cleared rather than left to fire: on node an armed `setTimeout`
+ * keeps the event loop alive, so a server that answered one `gc` would refuse
+ * to exit for the full wait afterwards.
+ */
+export const settledWithin = async (
+  pending: Iterable<Promise<unknown>>,
+  withinMs: number = DELIVERY_WAIT_MS,
+): Promise<void> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, withinMs);
+  });
+  try {
+    await Promise.race([Promise.allSettled(pending), bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
  * The same request with the repository segment normalised out of the path.
  *
  * Handlers match on the tail (`info/refs`, `git-upload-pack`), so a request

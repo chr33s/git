@@ -7,7 +7,7 @@
  * exists.
  */
 import { Context, Effect, type Layer, Stream } from "effect";
-import type { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
+import { Invalid, type ObjectNotFound, type StorageFailure } from "./Error.ts";
 
 /** A 40-char lowercase hex object id. Branded so a ref name cannot pass as one. */
 export type Oid = string & { readonly Oid: unique symbol };
@@ -32,6 +32,18 @@ export class ObjectStore extends Context.Service<
     readonly has: (oid: Oid) => Effect.Effect<boolean, StorageFailure>;
     readonly delete: (oid: Oid) => Effect.Effect<void, StorageFailure>;
     readonly list: Stream.Stream<Oid, StorageFailure>;
+    /**
+     * Object storage this repository lends to, or borrows from, others.
+     *
+     * Optional because only a backend that can share objects has an answer —
+     * `Node` through git's `alternates`, nothing else today. `gc` is the one
+     * caller: it must not collect what a borrower still reaches, and it must
+     * not repack what it only borrowed.
+     */
+    readonly shared?: Effect.Effect<
+      { readonly borrowers: ReadonlyArray<string>; readonly alternates: ReadonlyArray<string> },
+      StorageFailure
+    >;
   }
 >()("git/ObjectStore") {}
 
@@ -48,6 +60,14 @@ export interface RefUpdateResult {
   readonly name: string;
   readonly applied: boolean;
   readonly current: Oid | null;
+  /**
+   * Why it was not applied, when that is not "somebody else moved it".
+   *
+   * A ref the store could not write — `refs/heads/x` where `refs/heads/x/y`
+   * is a directory, a full disk — reads as a lost race without this, and the
+   * client retries a push that cannot succeed.
+   */
+  readonly reason?: string;
 }
 
 export interface ReflogEntry {
@@ -56,6 +76,91 @@ export interface ReflogEntry {
   readonly at: Date;
   readonly message: string;
 }
+
+/**
+ * Whether a name can address anything other than a ref.
+ *
+ * This half is a boundary rather than a convention. A ref name arrives from
+ * the network and reaches a backend joined onto the repository root — as a
+ * path segment (`Node`, `Opfs`) or an object key (`Cloudflare`) — and that
+ * root also holds `HEAD`, `objects/`, `logs/` and the host's own registries.
+ * Confining the name to `refs/`, with no traversal and no empty component, is
+ * what keeps a push inside the ref namespace: `..` alone would not, since
+ * `HEAD` and `objects/ab/cdef…` contain none.
+ */
+export const checkRefAddress = (name: string): string | null => {
+  if (name.length === 0) return "empty ref name";
+  if (!name.startsWith("refs/") || name.length === "refs/".length) {
+    return "must name something under 'refs/'";
+  }
+  if (name.endsWith("/") || name.includes("//")) return "empty path component";
+  if (name.includes("..")) return "contains '..'";
+  for (const character of name) {
+    const code = character.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f) return "contains a control character";
+  }
+  for (const component of name.split("/")) {
+    if (component.startsWith(".")) return "path component starts with '.'";
+  }
+  return null;
+};
+
+/**
+ * git's `check-ref-format`, in the port rather than in each backend, so every
+ * backend refuses the same names because the rule lives in one place.
+ *
+ * Returns why the name is bad, or `null` when it is fine.
+ */
+export const checkRefName = (name: string): string | null => {
+  const addresses = checkRefAddress(name);
+  if (addresses !== null) return addresses;
+  if (name.endsWith(".")) return "ends with '.'";
+  if (name.includes("@{")) return "contains '@{'";
+  // `~^:?*[` and backslash are git's reserved set; a space would make the name
+  // unquotable in the protocol's own framing.
+  if (/[ ~^:?*[\\]/.test(name)) return "contains a reserved character";
+  for (const component of name.split("/")) {
+    if (component.endsWith(".lock")) return "path component ends with '.lock'";
+  }
+  return null;
+};
+
+/**
+ * `checkRefName` over a batch, as the failure `RefStore.apply` reports.
+ *
+ * A deletion is held only to the addressing rules. A name this version would
+ * refuse to create may already exist — written by an older build, or by other
+ * tooling in a `Node` repository — and refusing to delete it would leave a ref
+ * nothing can remove, pinning every object it reaches forever.
+ */
+export const checkRefNames = (updates: ReadonlyArray<RefUpdate>): Effect.Effect<void, Invalid> =>
+  Effect.suspend(() => {
+    for (const update of updates) {
+      const problem =
+        update.value === null ? checkRefAddress(update.name) : checkRefName(update.name);
+      if (problem !== null) {
+        return Effect.fail(
+          new Invalid({ field: "ref", reason: `bad ref name '${update.name}': ${problem}` }),
+        );
+      }
+    }
+    return Effect.void;
+  });
+
+/**
+ * The same rules for the other writer of a ref name.
+ *
+ * `setHead` takes its target from a caller — a default branch in a create
+ * request, an argument on the command line — and every backend turns it into
+ * a path the same way `apply` does, so it needs the same guard.
+ */
+export const checkHeadTarget = (target: string): Effect.Effect<void, Invalid> =>
+  Effect.suspend(() => {
+    const problem = checkRefName(target);
+    return problem === null
+      ? Effect.void
+      : Effect.fail(new Invalid({ field: "head", reason: `bad ref name '${target}': ${problem}` }));
+  });
 
 /**
  * Mutable ref namespace.
@@ -78,8 +183,17 @@ export class RefStore extends Context.Service<
       options?: { readonly atomic?: boolean },
     ) => Effect.Effect<ReadonlyArray<RefUpdateResult>, StorageFailure | Invalid>;
     readonly head: Effect.Effect<string, StorageFailure>;
-    readonly setHead: (target: string) => Effect.Effect<void, StorageFailure>;
+    readonly setHead: (target: string) => Effect.Effect<void, StorageFailure | Invalid>;
     readonly reflog: (name: string) => Effect.Effect<ReadonlyArray<ReflogEntry>, StorageFailure>;
+    /**
+     * Every ref that has a reflog, including refs `list` no longer returns.
+     *
+     * Deleting a branch does not delete the record of where it was, and that
+     * is the whole value of the record: `gc` protects what a recent reflog
+     * entry names, and the branch somebody deleted by mistake is exactly the
+     * case where "which refs exist now" is the wrong question to ask.
+     */
+    readonly logged: Effect.Effect<ReadonlyArray<string>, StorageFailure>;
   }
 >()("git/RefStore") {}
 
@@ -110,6 +224,7 @@ export const tracedObjectStore = (
   has: Effect.fn(`${backend}.ObjectStore.has`)(store.has),
   delete: Effect.fn(`${backend}.ObjectStore.delete`)(store.delete),
   list: store.list.pipe(Stream.withSpan(`${backend}.ObjectStore.list`)),
+  ...(store.shared === undefined ? {} : { shared: store.shared }),
 });
 
 export const tracedRefStore = (
@@ -123,4 +238,5 @@ export const tracedRefStore = (
   head: store.head.pipe(Effect.withSpan(`${backend}.RefStore.head`)),
   setHead: Effect.fn(`${backend}.RefStore.setHead`)(store.setHead),
   reflog: Effect.fn(`${backend}.RefStore.reflog`)(store.reflog),
+  logged: store.logged.pipe(Effect.withSpan(`${backend}.RefStore.logged`)),
 });

@@ -24,7 +24,7 @@ import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Remotes from "../server/Remotes.ts";
-import { normalize, routeOf } from "../server/Route.ts";
+import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 import { stores } from "./Cloudflare.ts";
@@ -90,6 +90,37 @@ export class GitRepo extends DurableObject<TestEnv> {
   }
 
   /**
+   * Response bodies still being read.
+   *
+   * The input gate reopens when a handler returns its `Response`, but a pack
+   * or an archive reads objects as the client consumes it — so collection,
+   * the one caller that deletes, waits for these before it starts. Bounded:
+   * a client that stalls must not postpone maintenance forever.
+   */
+  readonly #delivering = new Set<Promise<unknown>>();
+
+  #track(response: Response): Response {
+    if (response.body === null) return response;
+    let finished: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    this.#delivering.add(done);
+    void done.then(() => this.#delivering.delete(done));
+
+    return new Response(
+      response.body.pipeThrough(
+        new TransformStream({
+          flush: () => finished(),
+          // A client that goes away cancels the stream rather than ending it.
+          cancel: () => finished(),
+        }),
+      ),
+      response,
+    );
+  }
+
+  /**
    * The only place a failure becomes a status code, and it does so from the
    * error's own `httpApiStatus` annotation rather than a mapping table.
    */
@@ -100,6 +131,7 @@ export class GitRepo extends DurableObject<TestEnv> {
           Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
         ),
         Effect.provide(this.#live(repo)),
+        Effect.map((response) => this.#track(response)),
       ),
     );
   }
@@ -176,6 +208,9 @@ export class GitRepo extends DurableObject<TestEnv> {
     // Never disposed: its lifetime is the Durable Object's. `provideMerge`
     // rather than `provide` — handler contexts are request-scoped, so the
     // router looks for `Repository` among the app layer's outputs.
+    // `gc` is the request that deletes objects a body may still be reading.
+    if (collects(request)) await settledWithin(this.#delivering);
+
     this.#api ??= HttpRouter.toWebHandler(
       Api.layer(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
@@ -183,7 +218,7 @@ export class GitRepo extends DurableObject<TestEnv> {
       ),
       { disableLogger: true },
     ).handler;
-    return this.#api(request);
+    return this.#track(await this.#api(request));
   }
 
   /**

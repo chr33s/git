@@ -19,27 +19,18 @@
  */
 import { createGunzip } from "node:zlib";
 
+import { concatBytes as concat } from "../git/Format.ts";
 import { Effect, Stream } from "effect";
 
 import { type GitError, Invalid, PackCorrupt, type StorageFailure } from "../git/Error.ts";
 import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
-import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
+import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
 const decoder = new TextDecoder();
 
 const ZERO_OID = "0".repeat(40);
 const AGENT = "agent=chr33s-git/0";
-
-const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-};
 
 const corrupt = (reason: string) => new PackCorrupt({ reason });
 
@@ -65,23 +56,59 @@ const body = (request: Request): AsyncIterable<Uint8Array> => {
 
   return (async function* () {
     const gunzip = createGunzip();
-    const chunks: Uint8Array[] = [];
-    let failed: unknown = null;
-    gunzip.on("data", (chunk: Uint8Array) => chunks.push(chunk));
-    gunzip.on("error", (error) => {
-      failed = error;
-    });
-    for await (const chunk of raw) {
-      if (!gunzip.write(chunk)) await new Promise((drained) => gunzip.once("drain", drained));
-      if (failed !== null) throw failed;
-      yield* chunks.splice(0);
+
+    // Backpressure waits on `drain` *or* on the failure that means `drain`
+    // will never arrive: corrupt input mid-write would otherwise hang the
+    // request until the platform times the whole slot out.
+    const drain = () =>
+      new Promise<void>((resolve, reject) => {
+        const settle = (error?: unknown) => {
+          gunzip.off("drain", onDrain);
+          gunzip.off("error", onError);
+          gunzip.off("close", onDrain);
+          if (error === undefined) resolve();
+          else reject(error instanceof Error ? error : new Error(JSON.stringify(error)));
+        };
+        const onDrain = () => settle();
+        const onError = (error: unknown) => settle(error);
+        gunzip.once("drain", onDrain);
+        gunzip.once("error", onError);
+        gunzip.once("close", onDrain);
+      });
+
+    /**
+     * The writes run beside the reads, not before them.
+     *
+     * Draining the transform into an array and yielding the array afterwards
+     * — which is what this did — is not backpressure at all: attaching a
+     * `data` handler puts the readable side in flowing mode, so zlib expands
+     * as fast as it can and every byte lands in memory first. Deflate reaches
+     * about 1000:1, so one 64 KiB request chunk becomes ~64 MiB and a few of
+     * them exhaust a 128 MiB Durable Object. Iterating the transform leaves
+     * it paused between reads, and then a full readable buffer stalls the
+     * transform, `write` returns false, and the whole pipe is bounded by the
+     * two high-water marks however compressible the body is.
+     */
+    // The failure travels through `gunzip`, which the loop below is reading:
+    // destroying it there is what turns a broken body into a thrown error at
+    // the consumer instead of a body that simply stops.
+    const pumped = (async () => {
+      try {
+        for await (const chunk of raw) {
+          if (!gunzip.write(chunk)) await drain();
+        }
+        gunzip.end();
+      } catch (error) {
+        gunzip.destroy(error instanceof Error ? error : new Error(String(error)));
+      }
+    })().catch(() => undefined);
+
+    try {
+      for await (const chunk of gunzip as AsyncIterable<Uint8Array>) yield chunk;
+    } finally {
+      gunzip.destroy();
+      await pumped;
     }
-    await new Promise<void>((resolve, reject) => {
-      gunzip.end(() => resolve());
-      gunzip.on("error", reject);
-    });
-    if (failed !== null) throw failed;
-    yield* chunks.splice(0);
   })();
 };
 
@@ -127,15 +154,21 @@ export const advertise = (
     const refs = yield* repository.refs;
     const head = yield* repository.head;
 
+    // A detached HEAD holds the commit rather than the name of a ref — git
+    // leaves one behind after `checkout <sha>`, a rebase or a bisect — and
+    // there is no symbolic target to announce for it.
+    const detached = isOid(head);
+    const symref = detached ? "" : ` symref=HEAD:${head}`;
+
     const caps =
       service === "git-upload-pack"
-        ? `multi_ack_detailed shallow deepen-since deepen-not side-band-64k symref=HEAD:${head} ${AGENT}`
+        ? `multi_ack_detailed shallow deepen-since deepen-not side-band-64k${symref} ${AGENT}`
         : `report-status delete-refs atomic side-band-64k ${AGENT}`;
 
     const lines: string[] = [];
     if (service === "git-upload-pack") {
-      const target = refs.find(([name]) => name === head);
-      if (target !== undefined) lines.push(`${target[1]} HEAD`);
+      const target = detached ? head : refs.find(([name]) => name === head)?.[1];
+      if (target !== undefined) lines.push(`${target} HEAD`);
     }
     for (const [name, oid] of refs) lines.push(`${oid} ${name}`);
 
@@ -430,15 +463,18 @@ const lsRefs = (request: V2Request): Effect.Effect<Response, GitError, Repositor
 
     const lines: Uint8Array[] = [];
 
-    const headOid = refs.find(([name]) => name === head)?.[1];
+    // Detached: HEAD is the commit itself, and has no symbolic target.
+    const detached = isOid(head);
+    const target = symrefs && !detached ? ` symref-target:${head}` : "";
+    const headOid = detached ? head : refs.find(([name]) => name === head)?.[1];
     if (matches("HEAD")) {
       if (headOid !== undefined) {
-        lines.push(pkt(`${headOid} HEAD${symrefs ? ` symref-target:${head}` : ""}\n`));
+        lines.push(pkt(`${headOid} HEAD${target}\n`));
       } else if (unborn) {
         // A repository with no commits still has a HEAD, and v2 has a way to
         // say so — which is what lets a clone of an empty repo set up the
         // right branch name rather than guessing.
-        lines.push(pkt(`unborn HEAD${symrefs ? ` symref-target:${head}` : ""}\n`));
+        lines.push(pkt(`unborn HEAD${target}\n`));
       }
     }
 
@@ -579,6 +615,8 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     const reader = new PktReader(body(request));
 
     const updates: RefUpdate[] = [];
+    /** Commands refused by name, reported per-ref rather than as a failure. */
+    const refused: ReceiveResult[] = [];
     let atomic = false;
     let sideband = false;
     let first = true;
@@ -606,8 +644,24 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         const name = command.slice(82);
         const validOld = old === ZERO_OID || isOid(old);
         const validNext = next === ZERO_OID || isOid(next);
-        if (!validOld || !validNext || name.length === 0) {
+        if (!validOld || !validNext) {
           throw new Invalid({ field: "receive-pack", reason: `malformed command '${command}'` });
+        }
+        // A name the stores would refuse is reported the way git reports it —
+        // `ng <ref> funny refname`, the rest of the push applied — because
+        // failing the request instead would silently drop the good commands.
+        // A delete is held only to the addressing rules, so a ref written
+        // under a laxer version can still be removed.
+        const problem = next === ZERO_OID ? checkRefAddress(name) : checkRefName(name);
+        if (problem !== null) {
+          refused.push({
+            ref: name,
+            from: old === ZERO_OID ? null : (old as Oid),
+            to: null,
+            ok: false,
+            reason: `funny refname: ${problem}`,
+          });
+          continue;
         }
 
         updates.push({
@@ -619,12 +673,29 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       }
     });
 
-    if (updates.length === 0) {
+    /**
+     * Read the pack the client is sending and throw it away.
+     *
+     * A response written while the client is still streaming its body leaves
+     * that body unconsumed, and the connection is torn down rather than
+     * finished — so the client sees "the remote end hung up unexpectedly"
+     * instead of the report explaining which ref was refused.
+     */
+    const drain = step(async () => {
+      for await (const _ of reader.rest()) {
+        // The bytes are not wanted; finishing the request is.
+      }
+    });
+
+    if (updates.length === 0 && refused.length === 0) {
+      yield* drain;
       return yield* new Invalid({ field: "receive-pack", reason: "no commands" });
     }
 
-    const respond = (results: ReadonlyArray<ReceiveResult>, unpacked: string) => {
-      const status = report(results, unpacked);
+    const respond = (applied: ReadonlyArray<ReceiveResult>, unpacked: string) => {
+      // The refused commands ride along in the same report, so a client sees
+      // one `ng` per bad ref beside the `ok`s for everything that worked.
+      const status = report([...applied, ...refused], unpacked);
       // A client that asked for side-band expects the report on band 1, and
       // a flush to close the stream; sending it raw would desynchronise it.
       const payload = sideband ? concat([...bandChunks(status), FLUSH]) : status;
@@ -641,6 +712,20 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         reason,
       }));
 
+    // An atomic push is all-or-nothing, and a refused name is part of the all:
+    // applying the rest would be exactly what the capability promises not to.
+    if (refused.length > 0 && (atomic || updates.length === 0)) {
+      yield* drain;
+      return respond(allFailed("atomic push refused: funny refname"), "ok");
+    }
+
+    // A refused command may have had a pack behind it even when every command
+    // this server accepted was a delete: the client sends one body, and the
+    // report only reaches it if that body is read first.
+    if (refused.length > 0 && !updates.some((update) => update.value !== null)) {
+      yield* drain;
+    }
+
     // The object phase. A pack arrives whenever any command creates or moves
     // a ref; a delete-only push sends none.
     if (updates.some((update) => update.value !== null)) {
@@ -652,6 +737,9 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         );
       if (unpacked !== null) {
         const reason = unpacked instanceof PackCorrupt ? unpacked.reason : unpacked._tag;
+        // The unpacker stopped part-way, so the rest of the pack is still
+        // arriving; the report only reaches the client if it is read first.
+        yield* drain;
         return respond(allFailed("unpacker error"), reason);
       }
 
@@ -659,6 +747,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       // repository does not hold.
       for (const update of updates) {
         if (update.value !== null && !(yield* repository.contains(update.value))) {
+          yield* drain;
           return respond(allFailed("missing necessary objects"), "ok");
         }
       }
@@ -668,6 +757,12 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       Effect.catchTags({
         HookRejected: (error) => Effect.succeed(allFailed(error.message)),
         Invalid: (error) => Effect.succeed(allFailed(error.reason)),
+        // No `StorageFailure` catch: the stores report a ref they could not
+        // write as an unapplied result carrying its own reason, which comes
+        // through as `ng <ref> cannot lock ref` below. What is left here is a
+        // backend that is down — and answering that with 200 and a per-ref
+        // conflict would tell the client to retry forever and hide the outage
+        // from whoever is watching the status codes.
       }),
     );
 

@@ -15,15 +15,17 @@ import { Effect, Result, Stream } from "effect";
 import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 import {
   bytesToHex,
+  concatBytes,
   EMPTY_TREE_OID,
   hashObject,
+  isGitlink,
   parseCommit,
   parseTag,
   parseTree,
 } from "./Format.ts";
 import * as Pack from "./Pack.ts";
 import { bufferSource, readAt } from "./PackFile.ts";
-import { buildPackIndex } from "./PackIndex.ts";
+import { buildPackIndex, parsePackIndex } from "./PackIndex.ts";
 import type { PackStore } from "./Packed.ts";
 import { isOid, ObjectStore, type Oid, type RawObject, type RefStore } from "./Store.ts";
 
@@ -133,8 +135,12 @@ export const reachable = (
           const entries = yield* Effect.fromResult(parseTree(object.data)).pipe(
             Effect.mapError(() => new ObjectNotFound({ oid })),
           );
+          // By mode, not by spelling: a gitlink written `0160000` compared
+          // unequal here and its commit — an object in another repository —
+          // was pushed onto the walk, so every clone of that repository
+          // failed on an object it was never supposed to have.
           for (const entry of entries) {
-            if (entry.mode === "160000") continue;
+            if (isGitlink(entry.mode)) continue;
             stack.push(entry.oid);
             if (options.classify === true) names.set(entry.oid, nameHash(entry.name));
           }
@@ -279,6 +285,8 @@ const repack = Effect.fn("Maintenance.repack")(function* (
   objects: ObjectStore["Service"],
   packs: PackStore["Service"],
   classified: Classified,
+  /** Packs the new one supersedes; deleting them is what collects their garbage. */
+  superseded: ReadonlyArray<string>,
 ) {
   const ordered = deltaOrder(classified).filter((oid) => oid !== EMPTY_TREE_OID);
   if (ordered.length === 0) return null;
@@ -297,13 +305,8 @@ const repack = Effect.fn("Maintenance.repack")(function* (
     }).pipe(Stream.provideService(ObjectStore, objects)),
   );
 
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const bytes = new Uint8Array(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, at);
-    at += chunk.length;
-  }
+  const bytes = concatBytes(chunks);
+  const total = bytes.length;
 
   // The trailer is the pack's own name, which is how git names the pair.
   const checksum = bytes.subarray(total - 20);
@@ -332,54 +335,198 @@ const repack = Effect.fn("Maintenance.repack")(function* (
   yield* packs.write({ name, pack: bytes, index });
 
   // Only now: the objects are in the pack, verified, and the pack is stored.
+  // The old packs go first — everything reachable that was in them is in the
+  // new one, and what was not reachable is the garbage this whole call is for.
+  // Leaving them is how a repository grows a pack per gc and never collects an
+  // object that was ever packed.
+  yield* Effect.forEach(
+    superseded.filter((old) => old !== name),
+    (old) => packs.delete(old),
+    { discard: true },
+  );
   yield* Effect.forEach(ordered, (oid) => objects.delete(oid), { discard: true });
 
   return { name, objects: ordered.length };
 });
 
 export interface GcReport {
+  /** Set when `repack` was asked for and could not be done, and why. */
+  readonly repackSkipped?: string;
   readonly scanned: number;
   readonly reachable: number;
+  /** Objects this call actually deleted. */
   readonly removed: ReadonlyArray<Oid>;
+  /**
+   * Unreachable objects that survive because a pack holds them. Deleting from
+   * a pack means rewriting it, so `repack` is what collects these.
+   */
+  readonly retained: ReadonlyArray<Oid>;
   /** The pack a repack wrote, and how many objects went into it. */
   readonly packed?: { readonly name: string; readonly objects: number };
 }
 
+/**
+ * How long an object the reflog alone names is protected. git's own default,
+ * and the reason `git reflog expire --expire=now` exists: a reflog entry is
+ * the record that makes "recover what I just reset away" possible, so
+ * collecting what one names is a data loss the user cannot see coming.
+ */
+export const REFLOG_GRACE_MS = 90 * 24 * 60 * 60 * 1000;
+
 export const gc = Effect.fn("Maintenance.gc")(function* (
   stores: Stores & { readonly packs: PackStore["Service"] },
-  options?: { readonly dryRun?: boolean; readonly repack?: boolean },
+  options?: {
+    readonly dryRun?: boolean;
+    readonly repack?: boolean;
+    /** Milliseconds; `0` collects everything only the reflog still names. */
+    readonly reflogGrace?: number;
+  },
 ) {
   const { objects, packs, refs } = stores;
 
-  const roots = (yield* refs.list("refs/")).map(([, oid]) => oid);
+  // Asked once, before anything is deleted: a fork reads these objects
+  // through git's `alternates` and keeps no copy of them, and its refs cannot
+  // be seen from here — so collecting would destroy history it still
+  // advertises. Answered as a refusal the caller can act on, not as a failure
+  // part-way through a deletion loop.
+  const shared = objects.shared === undefined ? null : yield* objects.shared;
+  if (shared !== null && shared.borrowers.length > 0) {
+    return yield* new Invalid({
+      field: "gc",
+      reason: `this repository lends its objects to ${shared.borrowers.join(", ")}; collect those first`,
+    });
+  }
+
+  const named = yield* refs.list("refs/");
+  /** Only refs gate the walk below; a reflog may name what a purge collected. */
+  const refRoots = named.map(([, oid]) => oid);
+  const roots = [...refRoots];
   const head = yield* refs.resolve("HEAD");
-  if (head !== null) roots.push(head);
+  if (head !== null) {
+    refRoots.push(head);
+    roots.push(head);
+  }
+
+  // Where a ref has been, not only where it is. Without these, a reset or a
+  // force-push destroys the commit it moved off the moment gc next runs, and
+  // the reflog entry that was supposed to lead back to it dangles.
+  const cutoff = Date.now() - (options?.reflogGrace ?? REFLOG_GRACE_MS);
+  // Every ref that has a log, not only the refs that still exist: a branch
+  // deleted by mistake is precisely the case this protection is for, and it
+  // is gone from `list` the moment it is deleted.
+  const logs = new Set([...named.map(([ref]) => ref), ...(yield* refs.logged), "HEAD"]);
+  for (const name of logs) {
+    for (const entry of yield* refs.reflog(name)) {
+      const at = entry.at.getTime();
+      // Strictly newer than the cutoff, so a grace of `0` protects nothing
+      // even when the entry was written in this same millisecond. An entry
+      // whose timestamp will not parse is treated as expired rather than as
+      // infinitely young — otherwise one unreadable line pins a repository's
+      // garbage forever and no grace setting can release it.
+      if (Number.isNaN(at) || at <= cutoff) continue;
+      if (entry.from !== null) roots.push(entry.from);
+      if (entry.to !== null) roots.push(entry.to);
+    }
+  }
 
   // Tolerant: a ref pointing at a missing object is fsck's problem to
   // report, not a reason to refuse to collect everything else. Classified
   // only when a repack will consume it — classification is free inside the
   // walk but pointless without one.
-  const willRepack = options?.repack === true && options.dryRun !== true;
+  //
+  // Borrowed objects are in this walk but not in this repository: packing them
+  // here would copy the parent's whole history into the fork and undo the
+  // sharing a fork exists for.
+  const borrowing = (shared?.alternates.length ?? 0) > 0;
+  const willRepack = options?.repack === true && options?.dryRun !== true && !borrowing;
   const walked = yield* reachable(objects, roots, {
     ignoreMissing: true,
     classify: willRepack,
   });
   const keep = walked.seen;
 
-  const removed: Oid[] = [];
+  // What a pack holds cannot be deleted object by object, so an unreachable
+  // object that is packed is only reported as removed when a repack — which
+  // drops the packs it supersedes — is going to run.
+  const packedOids = new Set<Oid>();
+  const handles = yield* packs.list;
+  for (const handle of handles) {
+    const parsed = parsePackIndex(handle.index);
+    if (parsed._tag === "Failure") {
+      return yield* new StorageFailure({
+        operation: "packs.list",
+        path: handle.name,
+        cause: parsed.failure,
+      });
+    }
+    for (const entry of parsed.success) packedOids.add(entry.oid);
+  }
+
+  /**
+   * Roots that lead nowhere are not a licence to delete.
+   *
+   * A repository with roots whose objects the store cannot read back is broken
+   * in a way `fsck` diagnoses, and every object in it would look unreachable —
+   * so the walk would name the whole store as garbage. Refusing here, before
+   * anything is deleted, is the difference between reporting a problem and
+   * being the problem. An empty repository has no roots at all and still
+   * collects normally.
+   */
+  // Reflog roots are deliberately not counted: a zero-grace purge leaves
+  // entries naming objects it just collected, and treating those as evidence
+  // of a broken store would wedge every later collection for the whole grace
+  // window.
+  if (refRoots.length > 0) {
+    // The refs' *own* walk, not the one the reflog roots also fed: a single
+    // readable reflog entry would otherwise disarm the guard for a store
+    // whose every ref is unreadable, and gc would sweep what was salvageable.
+    const fromRefs = yield* reachable(objects, refRoots, { ignoreMissing: true });
+    if (fromRefs.order.length === 0) {
+      return yield* new StorageFailure({
+        operation: "gc",
+        path: "refs",
+        cause: `refs name ${refRoots.length} object(s) this store cannot read; run fsck`,
+      });
+    }
+  }
+
+  const unreachable: Oid[] = [];
   let scanned = 0;
   yield* Stream.runForEach(objects.list, (oid) =>
     Effect.gen(function* () {
       scanned++;
       if (keep.has(oid) || oid === EMPTY_TREE_OID) return;
-      removed.push(oid);
+      unreachable.push(oid);
+      // Loose-only, by the port's contract; the pack copy goes with the pack.
       if (options?.dryRun !== true) yield* objects.delete(oid);
     }),
   );
 
-  const report: GcReport = { scanned, reachable: keep.size, removed };
-  if (!willRepack) return report;
+  const written = !willRepack
+    ? null
+    : yield* repack(
+        objects,
+        packs,
+        walked.classified,
+        handles.map((handle) => handle.name),
+      );
 
-  const written = yield* repack(objects, packs, walked.classified);
+  // What survives is decided by what actually happened, not by what was asked
+  // for: an object inside a pack is gone only if that pack was superseded, and
+  // a repack that wrote nothing superseded nothing. Reporting it either way
+  // would tell a caller a secret was collected while it is still clonable.
+  const collected = (oid: Oid) => !packedOids.has(oid) || written !== null;
+  const report: GcReport = {
+    scanned,
+    reachable: keep.size,
+    removed: unreachable.filter(collected),
+    retained: unreachable.filter((oid) => !collected(oid)),
+    ...(options?.repack === true && borrowing
+      ? {
+          repackSkipped:
+            "this repository borrows objects through alternates; packing them here would copy the history it shares",
+        }
+      : {}),
+  };
   return written === null ? report : ({ ...report, packed: written } satisfies GcReport);
 });
