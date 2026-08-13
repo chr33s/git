@@ -531,6 +531,11 @@ const gc = Command.make(
             `packed ${report.packed.objects} object(s) into ${report.packed.name}`,
           );
         }
+        // `--repack` that quietly did nothing is the confusing outcome this
+        // reports its way out of: the run refused to pack, and said why.
+        if (report.repackSkipped !== undefined) {
+          yield* Console.log(`did not repack: ${report.repackSkipped}`);
+        }
       }),
     ),
 );

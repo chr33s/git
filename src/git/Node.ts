@@ -486,22 +486,72 @@ export const refStore = (root: string) =>
        * Writes stay loose: a loose ref shadows the packed entry, which is what
        * git itself does, so nothing here has to rewrite the file.
        */
-      const packedRefs = Effect.tryPromise({
-        try: async () => {
-          const target = path.join(root, "packed-refs");
-          const packed = new Map<string, Oid>();
-          if (!existsSync(target)) return packed;
+      const packedRefsPath = path.join(root, "packed-refs");
 
-          for (const line of (await fs.readFile(target, "utf8")).split("\n")) {
-            // `#` is the header, `^<oid>` the previous line's peeled target —
-            // which is a tag's commit, not a ref of its own.
-            if (line.length === 0 || line.startsWith("#") || line.startsWith("^")) continue;
-            const [value = "", name = ""] = line.split(" ");
-            if (name !== "" && isOid(value)) packed.set(name, value);
-          }
-          return packed;
-        },
-        catch: failure("read", path.join(root, "packed-refs")),
+      /**
+       * Re-read only when the file changes, for the same reason the pack
+       * handles above are.
+       *
+       * Every loose miss lands here, and `resolve` follows up to eight links
+       * per name — so an advertisement or a push touching N refs read and
+       * re-parsed this whole file O(N) times on the request path, which on a
+       * repository whose refs `git pack-refs` has collected is *every* ref.
+       *
+       * The stamp is the file's mtime and size together, which leaves one gap
+       * worth naming: a rewrite by another process that changes no byte count
+       * and lands inside the filesystem's mtime resolution is not seen. Size
+       * closes the common case of a ref being added or removed, and every
+       * writer *here* clears the memo outright rather than trusting the stamp
+       * — so what is left is a `git gc` from outside moving a ref to a
+       * same-length oid in the same tick, on a filesystem coarse enough to
+       * round them together. The pack handles above take the same bet.
+       */
+      let packedStamp: string | null = null;
+      let packedMemo: ReadonlyMap<string, Oid> = new Map();
+
+      const packedStampOf = (): string | null => {
+        try {
+          if (!existsSync(packedRefsPath)) return null;
+          const stats = statSync(packedRefsPath);
+          return `${stats.mtimeMs}:${stats.size}`;
+        } catch {
+          return null;
+        }
+      };
+
+      /** Dropped when this store rewrites the file, so no stamp is involved. */
+      const forgetPackedRefs = () => {
+        packedStamp = null;
+        packedMemo = new Map();
+      };
+
+      const packedRefs = Effect.suspend(() => {
+        const stamp = packedStampOf();
+        if (stamp !== null && stamp === packedStamp) return Effect.succeed(packedMemo);
+        return Effect.tryPromise({
+          try: async () => {
+            const packed = new Map<string, Oid>();
+            if (!existsSync(packedRefsPath)) return packed;
+
+            for (const line of (await fs.readFile(packedRefsPath, "utf8")).split("\n")) {
+              // `#` is the header, `^<oid>` the previous line's peeled target —
+              // which is a tag's commit, not a ref of its own.
+              if (line.length === 0 || line.startsWith("#") || line.startsWith("^")) continue;
+              const [value = "", name = ""] = line.split(" ");
+              if (name !== "" && isOid(value)) packed.set(name, value);
+            }
+            return packed;
+          },
+          catch: failure("read", packedRefsPath),
+        }).pipe(
+          Effect.map((packed): ReadonlyMap<string, Oid> => {
+            // Stamped from before the read, so a write that landed *during* it
+            // leaves a stamp that will not match and is re-read next time.
+            packedStamp = stamp;
+            packedMemo = packed;
+            return packed;
+          }),
+        );
       });
 
       /**
@@ -538,7 +588,7 @@ export const refStore = (root: string) =>
        * every other.
        */
       const removePacked = async (name: string): Promise<void> => {
-        const target = path.join(root, "packed-refs");
+        const target = packedRefsPath;
         if (!existsSync(target)) return;
 
         const lines = (await fs.readFile(target, "utf8")).split("\n");
@@ -557,6 +607,7 @@ export const refStore = (root: string) =>
         const temporary = `${target}.${crypto.randomUUID()}.tmp`;
         await fs.writeFile(temporary, kept.length === 0 ? "" : `${kept.join("\n")}\n`);
         await fs.rename(temporary, target);
+        forgetPackedRefs();
       };
 
       const head = readFile(headPath).pipe(
@@ -784,10 +835,20 @@ export const refStore = (root: string) =>
                 }
 
                 done.push({ from, update });
-                // A reflog is the record of a move that has already happened:
-                // failing the update because the record could not be written
-                // would report a ref as untouched while it sits at its new
-                // value. `fsck` is where an unwritable `logs/` is diagnosed.
+              }
+
+              // Once every write in the batch has landed, not as each one does.
+              // An atomic batch that rolls back puts the refs themselves back,
+              // but a line already appended here cannot be taken out of the
+              // log — so `logs/refs/heads/x` recorded a move that was undone,
+              // and `Maintenance.gc` reads reflog entries as roots, pinning
+              // those rolled-back commits for the whole grace window.
+              //
+              // A reflog is the record of a move that has already happened:
+              // failing the update because the record could not be written
+              // would report a ref as untouched while it sits at its new
+              // value. `fsck` is where an unwritable `logs/` is diagnosed.
+              for (const { from, update } of done) {
                 yield* appendReflog(update, from, at).pipe(Effect.ignore);
               }
 

@@ -196,8 +196,14 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   /** The ref to move on success; absent computes the replay and stops. */
   readonly into?: string;
 }) {
+  const repository = yield* Repository;
   const commit = yield* resolveCommit(input.commit);
   const onto = yield* resolveCommit(input.onto);
+  // Read before the replay, as `rebase` does: a pick reads trees, merges them
+  // and writes objects, and a push landing in that window is a real race. With
+  // no `expected` the swap below is an unconditional write, so the pick would
+  // silently overwrite whatever arrived.
+  const intoWas = input.into === undefined ? null : yield* repository.resolve(input.into);
 
   const replayed = yield* replayOne({
     commit,
@@ -208,7 +214,7 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   return yield* settle({
     onto,
     commits: [replayed],
-    ...(input.into === undefined ? {} : { into: input.into }),
+    ...(input.into === undefined ? {} : { into: input.into, expected: intoWas }),
   });
 });
 

@@ -410,9 +410,18 @@ export const refStore = (
                 }
 
                 done.push({ from, update });
-                // The log is the record of a move that has already happened;
-                // failing the update because it could not be written would
-                // report a ref as untouched while it sits at its new value.
+              }
+
+              // Once every write in the batch has landed, not as each one does:
+              // the atomic undo above puts the refs back, but an appended log
+              // line cannot be taken out again — so the log recorded a move
+              // that did not happen, and `Maintenance.gc` treats reflog entries
+              // as roots, pinning the rolled-back commits for the grace window.
+              //
+              // The log is the record of a move that has already happened;
+              // failing the update because it could not be written would
+              // report a ref as untouched while it sits at its new value.
+              for (const { from, update } of done) {
                 yield* appendReflog(update, from, at).pipe(Effect.ignore);
               }
 

@@ -208,7 +208,12 @@ const bounds = (query: { cursor?: string; limit?: string }) => {
   // Past the bound is the end of what this endpoint will page through: an
   // empty last page. Clamping the offset instead would hand the client the
   // same page again with `has_more`, which is a loop.
-  return { size: Math.min(size, PAGE_MAX), start, beyond: start > CURSOR_MAX };
+  //
+  // The floor is the same argument from the other end: `?limit=0` advances the
+  // cursor by nothing, so an empty page comes back with `has_more` and the
+  // cursor the client just sent, and following it never terminates. One is the
+  // smallest page that makes progress.
+  return { size: Math.min(Math.max(size, 1), PAGE_MAX), start, beyond: start > CURSOR_MAX };
 };
 
 /** Cursors are opaque to clients; here they are simply an offset. */
@@ -736,6 +741,12 @@ const repo = HttpApiGroup.make("repo")
         /** Unreachable, but inside a pack: `repack` is what collects these. */
         retained: Schema.Array(OidString),
         packed: Schema.NullOr(Schema.Struct({ name: Schema.String, objects: Schema.Finite })),
+        /**
+         * Why a requested repack did not happen, when it did not. Without it a
+         * fork that borrows through alternates gets `packed: null` and no way
+         * to tell a refusal from a repository that had nothing to pack.
+         */
+        repack_skipped: Schema.NullOr(Schema.String),
       }),
       // `Invalid` when the repository lends its objects to a fork: refusing is
       // an answer the caller acts on, not a fault.
@@ -1374,6 +1385,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           removed: report.removed,
           retained: report.retained,
           packed: report.packed ?? null,
+          repack_skipped: report.repackSkipped ?? null,
         };
       }),
     )

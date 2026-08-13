@@ -485,6 +485,20 @@ export const layer = Layer.effect(
         ? Effect.succeed<ReadonlyArray<TreeEntry>>([])
         : readTyped(oid, "tree", parseTree);
 
+    /**
+     * The tree object itself, with no opinion about what is in it.
+     *
+     * The checks live in `writeTree` rather than here because they are checks
+     * on what a *caller* asked for. A rewrite passes the whole directory —
+     * every untouched sibling read back out of the base tree along with the
+     * one entry that changed — so validating at this level would judge history
+     * the caller never touched and cannot fix: one entry git itself tolerates,
+     * say a `100664` that arrived through `receive-pack`, would fail every
+     * later commit, merge and rebase that goes anywhere near its directory.
+     */
+    const storeTree = (entries: ReadonlyArray<TreeEntry>) =>
+      objects.write({ type: "tree", data: encodeTree(entries) });
+
     const writeTree = (entries: ReadonlyArray<TreeEntry>) =>
       Effect.gen(function* () {
         // `writeFiles` validates the paths it is given; this is the other way
@@ -514,7 +528,7 @@ export const layer = Layer.effect(
             });
           }
         }
-        return yield* objects.write({ type: "tree", data: encodeTree(entries) });
+        return yield* storeTree(entries);
       });
 
     /** `a/b/c.txt` -> `["a","b","c.txt"]`, or a failure naming the path. */
@@ -688,7 +702,12 @@ export const layer = Layer.effect(
         const entries = [...directories.get(prefix)!.values()];
 
         if (prefix === "") {
-          root = yield* writeTree(entries);
+          // `storeTree`, not `writeTree`: every change above was checked as it
+          // was applied — its path by `segmentsOf`, its mode by `isFileMode`,
+          // its name against the others by the map it went into — and what is
+          // left in here beside it is the base tree's own entries, which are
+          // not this caller's to answer for.
+          root = yield* storeTree(entries);
           continue;
         }
 
@@ -712,7 +731,7 @@ export const layer = Layer.effect(
           parent.set(key, {
             mode: TREE_MODE,
             name,
-            oid: yield* writeTree(entries),
+            oid: yield* storeTree(entries),
             ...(raw === undefined ? {} : { raw }),
           });
         }

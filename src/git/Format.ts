@@ -69,6 +69,20 @@ const FILE_MODES = new Set<number>([0o100644, 0o100755, 0o120000, 0o160000]);
 /** Whether a mode may name a leaf entry, zero padding and all. */
 export const isFileMode = (mode: string): boolean => FILE_MODES.has(Number.parseInt(mode, 8));
 
+/**
+ * Whether two entries carry the same mode, however each is spelled — and an
+ * absent entry, which has no mode, matches only another absent one.
+ *
+ * The comparison a three-way merge makes about every path it touches. Done as
+ * string equality, one side's `0100644` against the other's `100644` misses
+ * the "identical on both sides" shortcut, elects a mode by falling through to
+ * ours, and reports a `content` conflict on a file nobody changed.
+ */
+export const sameMode = (left: string | undefined, right: string | undefined): boolean =>
+  left === undefined || right === undefined
+    ? left === right
+    : Number.parseInt(left, 8) === Number.parseInt(right, 8);
+
 /** An annotated tag: a real object, unlike a lightweight tag's bare ref. */
 export interface TagInfo {
   readonly object: Oid;

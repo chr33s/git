@@ -150,6 +150,37 @@ const forked = (topic: {
     return { onMain, onTopic };
   });
 
+/**
+ * A `RefStore` that lets one push land in the middle of a replay.
+ *
+ * `resolve(name)` answers truthfully and *then*, once and only while armed,
+ * moves the ref. That is the window a replay actually has: the tip is read
+ * before the pick starts reading trees and writing objects, and somebody
+ * else's push arrives while it does. Without a seam like this the race is real
+ * but not reproducible.
+ */
+const racing = (name: string, arrival: { oid: Oid | null }) =>
+  Layer.effect(RefStore)(
+    Effect.gen(function* () {
+      const refs = yield* RefStore;
+      return {
+        ...refs,
+        resolve: (asked: string) =>
+          Effect.gen(function* () {
+            const value = yield* refs.resolve(asked);
+            const landing = arrival.oid;
+            if (asked === name && landing !== null) {
+              arrival.oid = null;
+              // Swallowed rather than surfaced: `resolve` promises only a
+              // `StorageFailure`, and this write is the test's, not its caller's.
+              yield* refs.apply([{ name, value: landing }]).pipe(Effect.ignore);
+            }
+            return value;
+          }),
+      };
+    }),
+  ).pipe(Layer.provideMerge(stores));
+
 describe("cherryPick", () => {
   it("carries the commit's change across and leaves the file it did not touch alone", async () => {
     const result = await scenario(
@@ -239,6 +270,46 @@ describe("cherryPick", () => {
 
     assert.equal(result.main, result.onMain, "the ref must not move on a conflict");
     assert.equal(result.a, "alpha, edited by main\n");
+  });
+
+  it("loses a race with a push instead of overwriting it", async () => {
+    const arrival: { oid: Oid | null } = { oid: null };
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const { onTopic } = yield* forked({ file: "b.txt", content: "beta, edited by topic\n" });
+        yield* repository.branch({ name: "target", base: "refs/heads/main" });
+
+        // Somebody else's commit, armed to land on `target` the moment the
+        // pick reads where `target` stands.
+        const theirs = yield* commitOn({
+          branch: "side",
+          message: "a push that arrives during the pick",
+          files: { "c.txt": "gamma\n" },
+        });
+        arrival.oid = theirs;
+
+        const picked = yield* cherryPick({
+          commit: onTopic,
+          onto: "refs/heads/main",
+          into: "refs/heads/target",
+        }).pipe(Effect.result);
+
+        return { picked, target: yield* repository.resolve("refs/heads/target"), theirs };
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(racing("refs/heads/target", arrival)),
+          ),
+        ),
+      ) as unknown as Effect.Effect<{ picked: { _tag: string }; target: Oid | null; theirs: Oid }>,
+    );
+
+    // The push stands. Without the compare-and-swap the pick wrote straight
+    // over it and the commit that arrived mid-replay was gone from the branch.
+    assert.equal(outcome.picked._tag, "Failure");
+    assert.equal(outcome.target, outcome.theirs);
   });
 });
 

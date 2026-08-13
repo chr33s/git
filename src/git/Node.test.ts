@@ -105,6 +105,40 @@ describe("packed-refs", () => {
     assert.equal(read, moved);
   });
 
+  it("re-reads packed-refs after another process rewrites it", async () => {
+    const later = "4".repeat(40) as Oid;
+    const seen = await withRoot(async (root) => {
+      const file = path.join(root, "packed-refs");
+      await fs.writeFile(file, packedRefsFile);
+      return Effect.runPromise(
+        Effect.gen(function* () {
+          const refs = yield* RefStore;
+
+          // Read once, so the parse is memoized…
+          const before = yield* refs.read("refs/heads/main");
+
+          // …then `git pack-refs` (or `git gc`) rewrites the file underneath.
+          // The memo is keyed on the file, not on how long ago it was read, or
+          // this store would serve a branch's old tip until the process died.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              file,
+              `# pack-refs with: peeled fully-peeled sorted \n${later} refs/heads/main\n`,
+            ),
+          );
+
+          return { before, after: yield* refs.read("refs/heads/main") };
+        }).pipe(Effect.provide(stores(root))) as Effect.Effect<{
+          before: Oid | null;
+          after: Oid | null;
+        }>,
+      );
+    });
+
+    assert.equal(seen.before, oid);
+    assert.equal(seen.after, later);
+  });
+
   it("deletes a ref that lives only in packed-refs", async () => {
     const after = await withRoot(async (root) => {
       await fs.writeFile(path.join(root, "packed-refs"), packedRefsFile);
@@ -302,6 +336,41 @@ describe("the ref directory", () => {
     assert.equal(state.applied, 0);
     assert.equal(state.feature, null, "an atomic batch left half of itself applied");
     assert.equal(state.keep, oid);
+  });
+
+  it("writes no reflog for an atomic batch it rolled back", async () => {
+    const state = await withRoot((root) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const refs = yield* RefStore;
+
+          // Same shape as above: the first write lands, the second cannot, and
+          // the batch is undone. The ref goes back — but a log line already
+          // appended cannot be taken out again, so `logs/refs/heads/feature`
+          // recorded a move that did not happen. `Maintenance.gc` reads reflog
+          // entries as roots, so that phantom entry also pinned the commit it
+          // named for the whole grace window.
+          yield* refs.apply(
+            [
+              { name: "refs/heads/feature", value: other },
+              { name: "refs/heads/feature/sub", value: other },
+            ],
+            { atomic: true },
+          );
+
+          return {
+            log: (yield* refs.reflog("refs/heads/feature")).length,
+            logged: yield* refs.logged,
+          };
+        }).pipe(Effect.provide(stores(root))) as unknown as Effect.Effect<{
+          log: number;
+          logged: ReadonlyArray<string>;
+        }>,
+      ),
+    );
+
+    assert.equal(state.log, 0, "a rolled-back update left its move in the reflog");
+    assert.deepEqual(state.logged, []);
   });
 
   it("lists loose objects without mistaking pack files for them", async () => {

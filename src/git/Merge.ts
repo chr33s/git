@@ -20,7 +20,7 @@
 import { Effect } from "effect";
 
 import { isBinary, lcs, splitLines } from "./Diff.ts";
-import { isGitlink } from "./Format.ts";
+import { isGitlink, sameMode } from "./Format.ts";
 import type { ObjectNotFound, StorageFailure } from "./Error.ts";
 import type { Oid } from "./Store.ts";
 
@@ -273,7 +273,7 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
     const yours = input.theirs.get(path);
 
     // Same on both sides: no decision to make.
-    if (mine?.oid === yours?.oid && mine?.mode === yours?.mode) continue;
+    if (mine?.oid === yours?.oid && sameMode(mine?.mode, yours?.mode)) continue;
 
     /**
      * One side's entry as a change, reading its bytes only if it has any.
@@ -292,13 +292,13 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
           }));
 
     // Only they moved, so their version stands — including standing deleted.
-    if (inBase?.oid === mine?.oid && inBase?.mode === mine?.mode) {
+    if (inBase?.oid === mine?.oid && sameMode(inBase?.mode, mine?.mode)) {
       changes.push(yours === undefined ? { path, content: null } : yield* taking(yours));
       continue;
     }
 
     // Only we moved; ours is already the tree the changes apply to.
-    if (inBase?.oid === yours?.oid && inBase?.mode === yours?.mode) continue;
+    if (inBase?.oid === yours?.oid && sameMode(inBase?.mode, yours?.mode)) continue;
 
     // Both moved, one of them to nothing. A path absent from the base and
     // from one side is unchanged on that side and was handled above, so the
@@ -376,15 +376,15 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
     // a `chmod +x` made only on the incoming side — the merge reports success
     // and the result is a script that will not run — and hides a genuine
     // mode/mode disagreement by resolving it silently.
-    const mode =
-      yours.mode === mine.mode
-        ? mine.mode
-        : inBase !== undefined && mine.mode === inBase.mode
-          ? yours.mode
-          : mine.mode;
+    const mode = sameMode(yours.mode, mine.mode)
+      ? mine.mode
+      : inBase !== undefined && sameMode(mine.mode, inBase.mode)
+        ? yours.mode
+        : mine.mode;
     const modeClash =
-      yours.mode !== mine.mode &&
-      (inBase === undefined || (mine.mode !== inBase.mode && yours.mode !== inBase.mode));
+      !sameMode(yours.mode, mine.mode) &&
+      (inBase === undefined ||
+        (!sameMode(mine.mode, inBase.mode) && !sameMode(yours.mode, inBase.mode)));
 
     // One entry per path, whatever went wrong with it. A file whose content
     // *and* mode both disagreed was listed twice, so a caller counting

@@ -6,9 +6,9 @@ import { Effect, Layer, Stream } from "effect";
 import { stores } from "./Memory.ts";
 import * as GitRepository from "./Repository.ts";
 import { Hooks, Repository } from "./Repository.ts";
-import { EMPTY_TREE_OID, type Signature } from "./Format.ts";
+import { EMPTY_TREE_OID, encodeTree, type Signature } from "./Format.ts";
 import { HookRejected } from "./Error.ts";
-import { RefStore } from "./Store.ts";
+import { ObjectStore, RefStore } from "./Store.ts";
 
 const alice: Signature = {
   name: "Alice",
@@ -18,7 +18,7 @@ const alice: Signature = {
 };
 
 /** Each test gets its own stores, so there is no shared global state to reset. */
-const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore>) =>
+const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore | ObjectStore>) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(
@@ -466,6 +466,51 @@ describe("Repository.receive", () => {
     );
 
     assert.deepEqual(names, ["caf\uFFFD.txt"]);
+  });
+
+  it("rewrites a directory holding a mode it would not have written", async () => {
+    const files = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const blob = yield* repository.writeBlob(new TextEncoder().encode("x\n"));
+
+        // `100664` is a mode git itself reads, and `receive-pack` unpacks a
+        // tree carrying one without ever consulting `writeTree`. Written here
+        // the same way it would arrive: as an object, not through the API that
+        // validates what a caller asked for.
+        const inner = yield* objects.write({
+          type: "tree",
+          data: encodeTree([
+            { mode: "100664", name: "legacy.txt", oid: blob },
+            { mode: "100644", name: "ok.txt", oid: blob },
+          ]),
+        });
+        const base = yield* objects.write({
+          type: "tree",
+          data: encodeTree([{ mode: "40000", name: "dir", oid: inner }]),
+        });
+
+        // Validating the whole rebuilt directory would judge `legacy.txt` —
+        // which this caller did not touch and has no way to fix — and every
+        // commit, merge and rebase anywhere near `dir/` would fail from here on.
+        const tree = yield* repository.writeFiles({
+          base,
+          changes: [{ path: "dir/ok.txt", content: new TextEncoder().encode("new\n") }],
+        });
+
+        const [directory] = yield* repository.readTree(tree);
+        return yield* repository.readTree(directory!.oid);
+      }),
+    );
+
+    assert.deepEqual(
+      files.map((entry) => [entry.name, entry.mode]),
+      [
+        ["legacy.txt", "100664"],
+        ["ok.txt", "100644"],
+      ],
+    );
   });
 
   it("keeps a non-UTF-8 directory's bytes when a file inside it changes", async () => {

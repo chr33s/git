@@ -285,4 +285,61 @@ describe("Merge", () => {
     assert.equal(merged.conflicted, false);
     assert.equal(merged.content, base);
   });
+
+  it("reads a zero-padded mode as the mode it is, not as a change", async () => {
+    const oid = (digit: string) => digit.repeat(40) as Oid;
+    const read = () => Effect.succeed(new TextEncoder().encode("one\n"));
+
+    // Both sides added the same file; one spells the mode with git's own
+    // `zeroPaddedFilemode` leading zero. Compared as strings that is not the
+    // "same on both sides" shortcut, so the path fell through to an add/add
+    // content merge and came back as a conflict over nothing.
+    const merged = await Effect.runPromise(
+      mergeTrees({
+        base: new Map(),
+        ours: new Map([["readme.md", { mode: "0100644", oid: oid("1") }]]),
+        theirs: new Map([["readme.md", { mode: "100644", oid: oid("1") }]]),
+        read,
+      }) as unknown as Effect.Effect<{
+        changes: ReadonlyArray<{ path: string }>;
+        conflicts: ReadonlyArray<{ path: string; reason: string }>;
+      }>,
+    );
+
+    assert.deepEqual(merged.conflicts, []);
+    assert.deepEqual(merged.changes, []);
+  });
+
+  it("elects a mode across spellings instead of calling one a clash", async () => {
+    const oid = (digit: string) => digit.repeat(40) as Oid;
+    const content = new Map<Oid, Uint8Array>([
+      [oid("1"), new TextEncoder().encode("one\ntwo\nthree\n")],
+      [oid("2"), new TextEncoder().encode("ONE\ntwo\nthree\n")],
+      [oid("3"), new TextEncoder().encode("one\ntwo\nTHREE\n")],
+    ]);
+
+    // Both sides edited different lines. Ours kept the base's mode but spelled
+    // it padded; theirs made it executable. Compared as strings that reads as
+    // three different modes — a clash — so the merge reported a `content`
+    // conflict on a file that merges cleanly and dropped the `chmod +x`.
+    const merged = await Effect.runPromise(
+      mergeTrees({
+        base: new Map([["script.sh", { mode: "100644", oid: oid("1") }]]),
+        ours: new Map([["script.sh", { mode: "0100644", oid: oid("2") }]]),
+        theirs: new Map([["script.sh", { mode: "0100755", oid: oid("3") }]]),
+        read: (wanted) => Effect.succeed(content.get(wanted)!),
+      }) as unknown as Effect.Effect<{
+        changes: ReadonlyArray<{ path: string; mode?: string; content: Uint8Array | null }>;
+        conflicts: ReadonlyArray<{ path: string; reason: string }>;
+      }>,
+    );
+
+    assert.deepEqual(merged.conflicts, []);
+    assert.equal(
+      new TextDecoder().decode(merged.changes[0]?.content ?? new Uint8Array(0)),
+      "ONE\ntwo\nTHREE\n",
+    );
+    // The side that actually changed the mode is the side that wins it.
+    assert.equal(merged.changes[0]?.mode, "0100755");
+  });
 });

@@ -98,6 +98,16 @@ describe("Api", () => {
         );
         assert.equal(nextPage.has_more, false);
 
+        // `limit=0` asks for a page that advances the cursor by nothing. Left
+        // unclamped it answered with no items, `has_more`, and the very cursor
+        // it was handed — a client following `next_cursor` never terminates.
+        const zero = yield* client.repo.commits({
+          params: { repo: "r", oid: second.oid },
+          query: { limit: "0" },
+        });
+        assert.equal(zero.items.length, 1);
+        assert.notEqual(zero.next_cursor, "0");
+
         // Branch creation, and the paged branch list that follows it.
         const created2 = yield* client.repo.branch({
           params: { repo: "r" },
@@ -742,6 +752,9 @@ describe("Api", () => {
 
         const swept = yield* client.repo.gc({ params: { repo: "r" }, payload: {} });
         assert.deepEqual(swept.removed, [orphan.oid]);
+        // A repack that was not asked for is not a refusal, and says so — the
+        // field exists so a caller can tell "nothing to pack" from "would not".
+        assert.equal(swept.repack_skipped, null);
 
         const gone = yield* client.repo
           .readBlob({ params: { repo: "r", oid: orphan.oid } })
