@@ -148,7 +148,7 @@ class Reader {
       first = (first + count) << 1;
       code <<= 1;
     }
-    return corrupt("invalid Huffman code") as never;
+    return corrupt("invalid Huffman code");
   }
 
   /** Hand everything unconsumed back to the source. */

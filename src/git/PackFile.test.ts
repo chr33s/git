@@ -116,6 +116,8 @@ describe.skipIf(!hasGit)("PackFile", () => {
     const source = bufferSource(packBytes);
 
     for (const oid of deltas) {
+      // SAFETY: each entry in `deltas` is the first column of a verify-pack
+      // object row — a full 40-hex object id.
       const entry = byOid.get(oid as Oid)!;
       const object = await readAt(source, entry.offset, noBases);
       assert.equal(

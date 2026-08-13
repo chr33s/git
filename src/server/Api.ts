@@ -22,14 +22,15 @@ import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
 import { Etag, HttpPlatform } from "effect/unstable/http";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 
-import { push as pushToRemote } from "../client/Push.ts";
+import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
+import { type Strategy as MergeStrategy } from "../git/Merge.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
-import { Repository, treeAt } from "../git/Repository.ts";
+import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
@@ -146,12 +147,25 @@ const FileWire = Schema.Struct({
   mode: Schema.optional(Schema.String),
 });
 
-const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>) =>
-  files.map((file) => ({
-    path: file.path,
-    content: file.content === null ? null : decodeContent(file.content, file.encoding),
-    ...(file.mode === undefined ? {} : { mode: file.mode }),
-  }));
+const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArray<FileChange> =>
+  files.map((file) => {
+    const content = file.content === null ? null : decodeContent(file.content, file.encoding);
+    return file.mode === undefined
+      ? { path: file.path, content }
+      : { path: file.path, content, mode: file.mode };
+  });
+
+/** `writeFiles`, with `base` threaded through only when the caller has one. */
+const writeFilesOf = (
+  repository: Repository["Service"],
+  base: Oid | undefined,
+  files: ReadonlyArray<(typeof FileWire)["Type"]>,
+) => {
+  const changes = changesOf(files);
+  return base === undefined
+    ? repository.writeFiles({ changes })
+    : repository.writeFiles({ base, changes });
+};
 
 /** Cursors are opaque to clients; here they are simply an offset. */
 const page = <A>(items: ReadonlyArray<A>, query: { cursor?: string; limit?: string }) => {
@@ -184,10 +198,7 @@ const treeFor = (
     const tip = yield* repository.resolve(ref);
     const base = tip === null ? undefined : (yield* repository.readCommit(tip)).tree;
 
-    return yield* repository.writeFiles({
-      ...(base === undefined ? {} : { base }),
-      changes: changesOf(payload.files),
-    });
+    return yield* writeFilesOf(repository, base, payload.files);
   });
 
 /** The tree a ref names, defaulting to HEAD — what "at this revision" means. */
@@ -812,6 +823,77 @@ const remotes = HttpApiGroup.make("remotes")
 
 export const api = HttpApi.make("git").add(repo).add(remotes);
 
+/**
+ * Wire payloads mark an omitted option with `undefined`, while the domain
+ * contracts mark it by leaving the property out. These request types are the
+ * mutable middle ground: a handler starts from the required fields and adds
+ * an optional one only when the payload actually carried it, so the domain
+ * never has to wonder whether `undefined` was said or merely implied.
+ */
+type CommitRequest = {
+  branch: string;
+  tree: Oid;
+  message: string;
+  author: Signature;
+  expected?: Oid | null;
+};
+
+type TagRequest = {
+  name: string;
+  target: string;
+  message?: string;
+  tagger?: Signature;
+  force?: boolean;
+};
+
+type SetRefRequest = {
+  name: string;
+  to: string;
+  expected?: Oid | null;
+};
+
+type MergeRequest = {
+  ours: string;
+  theirs: string;
+  author: Signature;
+  message?: string;
+  strategy?: MergeStrategy;
+  into?: string;
+  noFastForward?: boolean;
+};
+
+type CherryPickRequest = {
+  commit: string;
+  onto: string;
+  author?: Signature;
+  into?: string;
+};
+
+type RebaseRequest = {
+  branch: string;
+  onto: string;
+  into?: string;
+};
+
+type PatchOptions = {
+  beforeName: string;
+  afterName: string;
+  context?: number;
+};
+
+type GcRequest = {
+  dryRun?: boolean;
+  repack?: boolean;
+};
+
+type PushRequest = {
+  url: string;
+  refs: ReadonlyArray<PushRef>;
+  token?: string;
+  force?: boolean;
+  atomic?: boolean;
+};
+
 /** `StorageFailure` is a defect here: a 500 no caller can act on. */
 export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
   group
@@ -824,14 +906,16 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           Effect.catchTag("StorageFailure", Effect.die),
         );
 
+        const request: CommitRequest = {
+          author: signatureFrom(payload.author),
+          branch,
+          message: payload.message ?? "",
+          tree,
+        };
+        if (payload.expected !== undefined) request.expected = payload.expected;
+
         const oid = yield* repository
-          .commit({
-            author: signatureFrom(payload.author),
-            branch,
-            message: payload.message ?? "",
-            tree,
-            ...(payload.expected === undefined ? {} : { expected: payload.expected }),
-          })
+          .commit(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { oid, tree };
       }),
@@ -859,10 +943,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const repository = yield* Repository;
         const oid = yield* (
           payload.entries === undefined
-            ? repository.writeFiles({
-                ...(payload.base === undefined ? {} : { base: payload.base }),
-                changes: changesOf(payload.files ?? []),
-              })
+            ? writeFilesOf(repository, payload.base, payload.files ?? [])
             : repository.writeTree(payload.entries.map((entry) => ({ ...entry, oid: entry.oid })))
         ).pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { oid };
@@ -929,15 +1010,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("tagCreate", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        return yield* repository
-          .tag({
-            name: payload.name,
-            target: payload.target,
-            ...(payload.message === undefined ? {} : { message: payload.message }),
-            ...(payload.tagger === undefined ? {} : { tagger: signatureFrom(payload.tagger) }),
-            ...(payload.force === undefined ? {} : { force: payload.force }),
-          })
-          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        const request: TagRequest = { name: payload.name, target: payload.target };
+        if (payload.message !== undefined) request.message = payload.message;
+        if (payload.tagger !== undefined) request.tagger = signatureFrom(payload.tagger);
+        if (payload.force !== undefined) request.force = payload.force;
+        return yield* repository.tag(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
     )
     .handle("tags", ({ query }) =>
@@ -993,12 +1070,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("reset", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        const request: SetRefRequest = { name: payload.ref, to: payload.to };
+        if (payload.expected !== undefined) request.expected = payload.expected;
         const moved = yield* repository
-          .setRef({
-            name: payload.ref,
-            to: payload.to,
-            ...(payload.expected === undefined ? {} : { expected: payload.expected }),
-          })
+          .setRef(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return moved;
       }),
@@ -1006,37 +1081,32 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("merge", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        const request: MergeRequest = {
+          ours: payload.ours,
+          theirs: payload.theirs,
+          author: signatureFrom(payload.author),
+        };
+        if (payload.message !== undefined) request.message = payload.message;
+        if (payload.strategy !== undefined) request.strategy = payload.strategy;
+        if (payload.into !== undefined) request.into = payload.into;
+        if (payload.no_fast_forward !== undefined) request.noFastForward = payload.no_fast_forward;
         const outcome = yield* repository
-          .merge({
-            ours: payload.ours,
-            theirs: payload.theirs,
-            author: signatureFrom(payload.author),
-            ...(payload.message === undefined ? {} : { message: payload.message }),
-            ...(payload.strategy === undefined ? {} : { strategy: payload.strategy }),
-            ...(payload.into === undefined ? {} : { into: payload.into }),
-            ...(payload.no_fast_forward === undefined
-              ? {}
-              : { noFastForward: payload.no_fast_forward }),
-          })
+          .merge(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return outcome;
       }),
     )
-    .handle("cherry-pick", ({ payload }) =>
-      cherryPick({
-        commit: payload.commit,
-        onto: payload.onto,
-        ...(payload.author === undefined ? {} : { author: signatureFrom(payload.author) }),
-        ...(payload.into === undefined ? {} : { into: payload.into }),
-      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
-    )
-    .handle("rebase", ({ payload }) =>
-      rebase({
-        branch: payload.branch,
-        onto: payload.onto,
-        ...(payload.into === undefined ? {} : { into: payload.into }),
-      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
-    )
+    .handle("cherry-pick", ({ payload }) => {
+      const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
+      if (payload.author !== undefined) request.author = signatureFrom(payload.author);
+      if (payload.into !== undefined) request.into = payload.into;
+      return cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
+    })
+    .handle("rebase", ({ payload }) => {
+      const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
+      if (payload.into !== undefined) request.into = payload.into;
+      return rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
+    })
     .handle("diff", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -1076,15 +1146,14 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
               return { path, status, binary: true, patch: "" } as const;
             }
 
+            const options: PatchOptions = { beforeName: path, afterName: path };
+            if (payload.context !== undefined) options.context = payload.context;
+
             return {
               path,
               status,
               binary: false,
-              patch: unified(decoder.decode(oldBytes), decoder.decode(newBytes), {
-                beforeName: path,
-                afterName: path,
-                ...(payload.context === undefined ? {} : { context: payload.context }),
-              }),
+              patch: unified(decoder.decode(oldBytes), decoder.decode(newBytes), options),
             } as const;
           }),
         );
@@ -1206,11 +1275,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("gc", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        const request: GcRequest = {};
+        if (payload.dry_run !== undefined) request.dryRun = payload.dry_run;
+        if (payload.repack !== undefined) request.repack = payload.repack;
         const report = yield* repository
-          .gc({
-            ...(payload.dry_run === undefined ? {} : { dryRun: payload.dry_run }),
-            ...(payload.repack === undefined ? {} : { repack: payload.repack }),
-          })
+          .gc(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return {
           scanned: report.scanned,
@@ -1310,12 +1379,14 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     .handle("fetch", ({ payload }) =>
       Effect.gen(function* () {
         const target = yield* remoteFor(payload);
+        // `fetchFrom` declares both options as possibly-undefined and treats an
+        // absent value and an undefined one the same way.
         const fetched = yield* fetchFrom({
           remote: target.name,
           url: target.url,
           credential: target.credential,
-          ...(payload.refs === undefined ? {} : { refs: payload.refs }),
-          ...(payload.depth === undefined ? {} : { depth: payload.depth }),
+          refs: payload.refs,
+          depth: payload.depth,
         });
         return { remote: target.name, refs: fetched.refs, objects: fetched.objects };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
@@ -1323,17 +1394,19 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     .handle("push", ({ payload }) =>
       Effect.gen(function* () {
         const target = yield* remoteFor(payload);
-        const results = yield* pushToRemote({
+        const request: PushRequest = {
           url: target.url,
-          refs: payload.refs.map((ref) => ({
-            local: ref.local,
-            remote: ref.remote ?? ref.local,
-            ...(ref.delete === undefined ? {} : { delete: ref.delete }),
-          })),
-          ...(target.credential === null ? {} : { token: target.credential }),
-          ...(payload.force === undefined ? {} : { force: payload.force }),
-          ...(payload.atomic === undefined ? {} : { atomic: payload.atomic }),
-        });
+          refs: payload.refs.map((ref): PushRef => {
+            const remote = ref.remote ?? ref.local;
+            return ref.delete === undefined
+              ? { local: ref.local, remote }
+              : { local: ref.local, remote, delete: ref.delete };
+          }),
+        };
+        if (target.credential !== null) request.token = target.credential;
+        if (payload.force !== undefined) request.force = payload.force;
+        if (payload.atomic !== undefined) request.atomic = payload.atomic;
+        const results = yield* pushToRemote(request);
         return {
           refs: results.map((result) => ({
             ref: result.ref,
@@ -1346,11 +1419,9 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     .handle("pull", ({ payload }) =>
       Effect.gen(function* () {
         const target = yield* remoteFor(payload);
-        return yield* pull({
-          target,
-          branch: payload.branch,
-          ...(payload.depth === undefined ? {} : { depth: payload.depth }),
-        });
+        // `pull` declares `depth` as possibly-undefined and treats an absent
+        // value and an undefined one the same way.
+        return yield* pull({ target, branch: payload.branch, depth: payload.depth });
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     ),
 );

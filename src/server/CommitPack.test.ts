@@ -10,12 +10,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Predicate } from "effect";
 
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { isOid, type Oid } from "../git/Store.ts";
 import * as CommitPack from "./CommitPack.ts";
 
 const live = GitRepository.layer.pipe(
@@ -42,10 +42,26 @@ const base64 = (bytes: Uint8Array): string => {
 
 const utf8 = (value: string): string => base64(encoder.encode(value));
 
-const ndjson = (records: ReadonlyArray<Record<string, unknown>>): string =>
+/** A JSON value, which is all a protocol line or a response body may hold. */
+type Json = string | number | boolean | null | ReadonlyArray<Json> | JsonRecord;
+
+interface JsonRecord {
+  readonly [field: string]: Json;
+}
+
+const isJsonRecord = (value: Json): value is JsonRecord => Predicate.isObject(value);
+
+/** One line as a test spells it; `JSON.stringify` drops `undefined` fields. */
+interface WireRecord {
+  readonly [field: string]: Json | undefined;
+}
+
+const ndjson = (records: ReadonlyArray<WireRecord>): string =>
   `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
 
 const post = (body: string | ReadableStream<Uint8Array>): Request =>
+  // SAFETY: Node's fetch takes `duplex: "half"` — required for a streamed
+  // request body — but the bundled RequestInit type does not know the field.
   new Request("http://git.test/r/commit-pack", {
     method: "POST",
     body,
@@ -69,16 +85,23 @@ const sliced = (body: string, size: number): ReadableStream<Uint8Array> => {
 interface Answer {
   readonly status: number;
   readonly type: string | null;
-  readonly payload: Record<string, unknown>;
+  readonly payload: JsonRecord;
 }
+
+/** Payload fields that must be oids are checked, not trusted: a miss fails here. */
+const oidOf = (value: Json | undefined): Oid => {
+  if (Predicate.isString(value) && isOid(value)) return value;
+  return assert.fail(`expected an oid, got ${JSON.stringify(value)}`);
+};
 
 const send = (request: Request): Effect.Effect<Answer, never, Repository> =>
   Effect.gen(function* () {
     const response = yield* CommitPack.handle(request);
     assert.ok(response !== null, "commit-pack should have claimed the request");
-    const payload = yield* Effect.promise(
-      () => response.json() as Promise<Record<string, unknown>>,
-    );
+    const raw = yield* Effect.promise((): Promise<Json> => response.json());
+    const payload = isJsonRecord(raw)
+      ? raw
+      : assert.fail("every commit-pack body is a JSON object");
     return { status: response.status, type: response.headers.get("content-type"), payload };
   });
 
@@ -117,10 +140,10 @@ describe("CommitPack", () => {
         assert.equal(answer.status, 200);
         assert.equal(answer.type, "application/json");
         assert.equal(answer.payload.files, 2);
-        assert.match(String(answer.payload.oid), /^[0-9a-f]{40}$/);
+        assert.match(oidOf(answer.payload.oid), /^[0-9a-f]{40}$/);
 
         const repository = yield* Repository;
-        const files = yield* repository.listFiles(answer.payload.tree as Oid);
+        const files = yield* repository.listFiles(oidOf(answer.payload.tree));
         assert.deepEqual(
           files.map((file) => [file.path, file.mode]),
           [
@@ -138,7 +161,7 @@ describe("CommitPack", () => {
 
         // …and the commit is on the branch, pointing at that tree.
         assert.equal(yield* repository.resolve("refs/heads/main"), answer.payload.oid);
-        const commit = yield* repository.readCommit(answer.payload.oid as Oid);
+        const commit = yield* repository.readCommit(oidOf(answer.payload.oid));
         assert.equal(commit.tree, answer.payload.tree);
         assert.equal(commit.message, "seed\n");
         assert.deepEqual(commit.parents, []);
@@ -183,7 +206,7 @@ describe("CommitPack", () => {
         const content = new Uint8Array(1024);
         for (let at = 0; at < content.length; at++) content[at] = (at * 37 + (at % 7)) % 256;
 
-        const chunks: Array<Record<string, unknown>> = [];
+        const chunks: WireRecord[] = [];
         for (let at = 0; at < content.length; at += 7) {
           chunks.push({ type: "chunk", data: base64(content.slice(at, at + 7)) });
         }
@@ -204,7 +227,7 @@ describe("CommitPack", () => {
         assert.equal(answer.status, 200);
 
         const repository = yield* Repository;
-        const files = yield* repository.listFiles(answer.payload.tree as Oid);
+        const files = yield* repository.listFiles(oidOf(answer.payload.tree));
         const stored = yield* repository.readBlob(files[0]!.oid);
         assert.equal(stored.length, content.length);
         assert.deepEqual([...stored], [...content]);
@@ -245,14 +268,14 @@ describe("CommitPack", () => {
         assert.equal(second.payload.files, 0);
 
         const repository = yield* Repository;
-        const files = yield* repository.listFiles(second.payload.tree as Oid);
+        const files = yield* repository.listFiles(oidOf(second.payload.tree));
         assert.deepEqual(
           files.map((file) => file.path),
           ["kept.txt"],
         );
 
         // It builds on the branch rather than replacing it.
-        const commit = yield* repository.readCommit(second.payload.oid as Oid);
+        const commit = yield* repository.readCommit(oidOf(second.payload.oid));
         assert.deepEqual(commit.parents, [first.payload.oid]);
       }),
     ),
@@ -289,7 +312,7 @@ describe("CommitPack", () => {
           ),
         );
         assert.equal(fresh.status, 409);
-        assert.equal(typeof fresh.payload.error, "string");
+        assert.ok(Predicate.isString(fresh.payload.error), "a conflict names its reason");
         assert.equal(yield* repository.resolve("refs/heads/main"), first.payload.oid);
 
         // An oid that is real but not the tip loses the same way.
@@ -393,7 +416,7 @@ describe("CommitPack", () => {
           const answer = yield* send(post(body));
           assert.equal(answer.status, status, name);
           assert.equal(answer.type, "application/json", name);
-          assert.equal(typeof answer.payload.error, "string", name);
+          assert.ok(Predicate.isString(answer.payload.error), name);
           // The ref is moved only after the body is drained, so every one of
           // these leaves the repository exactly as it found it.
           assert.equal(yield* repository.resolve("refs/heads/main"), null, name);

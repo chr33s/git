@@ -28,6 +28,9 @@ const read = (file: string): ReadonlyArray<Subscriber> => {
   if (!fs.existsSync(file)) return [];
   const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
   if (!Array.isArray(parsed)) return [];
+  // SAFETY: this file is written only by `write` below, which serialises
+  // `Stored` rows; a hand-edited file that lies about them surfaces as a bad
+  // subscriber at use, not as corruption here.
   return (parsed as ReadonlyArray<Stored>).map((row) => ({
     id: row.id,
     url: row.url,

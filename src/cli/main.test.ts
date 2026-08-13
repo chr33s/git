@@ -155,6 +155,8 @@ describe("cli", () => {
 
       const response = await fetch(`${url}/hosted/refs`);
       assert.equal(response.status, 200);
+      // SAFETY: the assertion below inspects exactly the payload the refs
+      // endpoint documents; a response of any other shape fails the test.
       const body = (await response.json()) as { refs: Array<{ name: string }> };
       assert.deepEqual(
         body.refs.map((ref) => ref.name),
@@ -292,6 +294,8 @@ describe("cli", () => {
       assert.match(pushed, /^ok refs\/heads\/main/m);
 
       // The server really has it: its own API says so.
+      // SAFETY: the assertion below inspects exactly the payload the refs
+      // endpoint documents; a response of any other shape fails the test.
       const refs = (await (await fetch(`${server.url}/remote/refs`)).json()) as {
         refs: Array<{ name: string }>;
       };

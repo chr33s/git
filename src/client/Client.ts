@@ -26,20 +26,22 @@ export { fetchRepository, lsRemote };
  * from the server's own declaration. `token` rides as a Bearer header on
  * every request.
  */
-export const remote = (baseUrl: string, options?: { readonly token?: string }) =>
-  HttpApiClient.make(Api.api, {
-    baseUrl,
-    ...(options?.token === undefined
-      ? {}
-      : {
-          transformClient: (client: HttpClient.HttpClient) =>
-            client.pipe(
-              HttpClient.mapRequest(
-                HttpClientRequest.setHeader("authorization", `Bearer ${options.token}`),
-              ),
-            ),
-        }),
-  }).pipe(Effect.provide(FetchHttpClient.layer));
+export const remote = (baseUrl: string, options?: { readonly token?: string }) => {
+  const token = options?.token;
+  // `make` documents `transformClient` as optionally `undefined` and treats
+  // that the same as leaving it out, so an anonymous client passes no
+  // transform rather than a transform that does nothing.
+  const withAuthorization =
+    token === undefined
+      ? undefined
+      : (client: HttpClient.HttpClient) =>
+          client.pipe(
+            HttpClient.mapRequest(HttpClientRequest.setHeader("authorization", `Bearer ${token}`)),
+          );
+  return HttpApiClient.make(Api.api, { baseUrl, transformClient: withAuthorization }).pipe(
+    Effect.provide(FetchHttpClient.layer),
+  );
+};
 
 /**
  * The local repository over the given stores: in a browser,

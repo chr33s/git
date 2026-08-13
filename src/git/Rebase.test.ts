@@ -62,11 +62,11 @@ const disk = (root: string) =>
 
 /** Each test gets its own stores, so there is no shared global state to reset. */
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(memory)) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(memory)));
 
 /** The same, backed by a directory `git` itself can be pointed at. */
 const onDisk = <A, E>(root: string, effect: Effect.Effect<A, E, Repository | RefStore>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(disk(root))) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(disk(root))));
 
 /** A commit on `branch` with `files` applied to whatever is there now. */
 const commitOn = (input: {
@@ -80,13 +80,13 @@ const commitOn = (input: {
     const head = yield* repository.resolve(`refs/heads/${input.branch}`);
     const base = head === null ? null : (yield* repository.readCommit(head)).tree;
 
-    const tree = yield* repository.writeFiles({
-      ...(base === null ? {} : { base }),
-      changes: Object.entries(input.files).map(([file, content]) => ({
-        path: file,
-        content: content === null ? null : encoder.encode(content),
-      })),
-    });
+    const changes = Object.entries(input.files).map(([file, content]) => ({
+      path: file,
+      content: content === null ? null : encoder.encode(content),
+    }));
+    const tree = yield* base === null
+      ? repository.writeFiles({ changes })
+      : repository.writeFiles({ base, changes });
 
     return yield* repository.commit({
       branch: input.branch,

@@ -15,9 +15,9 @@
  * streaming digest is the one primitive that differs per platform
  * (`node:crypto` on node, `crypto.DigestStream` on Workers).
  */
-import { Context, Effect, Stream } from "effect";
+import { Context, Effect, Predicate, Schema, Stream } from "effect";
 
-import { Invalid, ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 
 /** LFS object ids are SHA-256, so 64 hex characters rather than git's 40. */
 export const isLfsOid = (value: string): boolean => /^[0-9a-f]{64}$/.test(value);
@@ -49,7 +49,29 @@ export class LfsStore extends Context.Service<
   }
 >()("server/LfsStore") {}
 
-const json = (value: unknown, status = 200): Response =>
+/** The one thing a client is told to do next with an object, and for how long. */
+interface BatchAction {
+  readonly href: string;
+  readonly expires_in: number;
+}
+
+/** The batch endpoint's verdict on one requested object. */
+interface BatchVerdict {
+  readonly oid: string;
+  readonly size: number;
+  readonly actions?: {
+    readonly download?: BatchAction;
+    readonly upload?: BatchAction;
+  };
+  readonly error?: { readonly code: number; readonly message: string };
+}
+
+/** Every body this module puts on the wire. */
+type ResponseBody =
+  | { readonly message: string }
+  | { readonly transfer: "basic"; readonly objects: ReadonlyArray<BatchVerdict> };
+
+const json = (value: ResponseBody, status = 200): Response =>
   new Response(JSON.stringify(value), {
     status,
     headers: { "content-type": MEDIA_TYPE, "cache-control": "no-cache" },
@@ -57,11 +79,23 @@ const json = (value: unknown, status = 200): Response =>
 
 const failure = (status: number, message: string): Response => json({ message }, status);
 
-interface BatchRequest {
-  readonly operation?: string;
-  readonly transfers?: ReadonlyArray<string>;
-  readonly objects?: ReadonlyArray<{ readonly oid?: unknown; readonly size?: unknown }>;
-}
+/**
+ * What a client may claim in a batch request. Everything is optional on the
+ * wire, and `oid` and `size` stay unchecked here because each object is
+ * judged individually — one bad entry gets a per-object error, not a 400.
+ */
+const BatchRequest = Schema.Struct({
+  operation: Schema.optional(Schema.String),
+  transfers: Schema.optional(Schema.Array(Schema.String)),
+  objects: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        oid: Schema.optional(Schema.Unknown),
+        size: Schema.optional(Schema.Unknown),
+      }),
+    ),
+  ),
+});
 
 /**
  * The href a client should use for one object.
@@ -80,8 +114,9 @@ const batch = (request: Request): Effect.Effect<Response, never, LfsStore> =>
   Effect.gen(function* () {
     const store = yield* LfsStore;
 
-    const parsed = yield* Effect.tryPromise(() => request.json() as Promise<BatchRequest>).pipe(
-      Effect.orElseSucceed((): BatchRequest | null => null),
+    const parsed = yield* Effect.tryPromise(() => request.json()).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(BatchRequest)),
+      Effect.orElseSucceed(() => null),
     );
     if (parsed === null) return failure(400, "malformed batch request");
 
@@ -99,8 +134,8 @@ const batch = (request: Request): Effect.Effect<Response, never, LfsStore> =>
 
     const objects = yield* Effect.forEach(parsed.objects ?? [], (requested) =>
       Effect.gen(function* () {
-        const oid = typeof requested.oid === "string" ? requested.oid : "";
-        const size = typeof requested.size === "number" ? requested.size : -1;
+        const oid = Predicate.isString(requested.oid) ? requested.oid : "";
+        const size = Predicate.isNumber(requested.size) ? requested.size : -1;
 
         if (!isLfsOid(oid) || size < 0) {
           return {
@@ -165,10 +200,10 @@ const upload = (request: Request, oid: string): Effect.Effect<Response, never, L
     const bytes: Stream.Stream<Uint8Array, StorageFailure> =
       body === null
         ? Stream.empty
-        : (Stream.fromReadableStream({
-            evaluate: () => body as ReadableStream<Uint8Array>,
-            onError: (cause) => cause,
-          }) as unknown as Stream.Stream<Uint8Array, StorageFailure>);
+        : Stream.fromReadableStream({
+            evaluate: () => body,
+            onError: (cause) => new StorageFailure({ operation: "lfs.upload", path: oid, cause }),
+          });
 
     return yield* store.write(oid, bytes).pipe(
       Effect.map(() => new Response(null, { status: 200 })),

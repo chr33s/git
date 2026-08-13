@@ -23,7 +23,7 @@ import { stores as memoryStores } from "./Memory.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
-import { ObjectStore, type Oid, RefStore } from "./Store.ts";
+import { ObjectStore, RefStore } from "./Store.ts";
 
 const author = {
   name: "Alice",
@@ -41,106 +41,105 @@ const seed = (count: number) =>
       // previous tree, and threading it through the loop makes the inference
       // circular for no benefit.
       const tip = yield* repository.resolve("refs/heads/main");
-      const base = tip === null ? undefined : (yield* repository.readCommit(tip)).tree;
-      const tree = yield* repository.writeFiles({
-        ...(base === undefined ? {} : { base }),
-        changes: [
-          { path: "stable.txt", content: new TextEncoder().encode("unchanging\n") },
-          {
-            path: `nested/file-${index}.txt`,
-            content: new TextEncoder().encode(`revision ${index}\n`),
-          },
-        ],
-      });
+      const changes = [
+        { path: "stable.txt", content: new TextEncoder().encode("unchanging\n") },
+        {
+          path: `nested/file-${index}.txt`,
+          content: new TextEncoder().encode(`revision ${index}\n`),
+        },
+      ];
+      const tree =
+        tip === null
+          ? yield* repository.writeFiles({ changes })
+          : yield* repository.writeFiles({
+              base: (yield* repository.readCommit(tip)).tree,
+              changes,
+            });
       yield* repository.commit({ branch: "main", tree, message: `commit ${index}`, author });
     }
     return (yield* repository.resolve("refs/heads/main"))!;
   });
 
 describe("packs at rest", () => {
-  it.live(
-    "serves a repository whose objects live only in a pack",
-    () =>
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const objects = yield* ObjectStore;
+  it.live("serves a repository whose objects live only in a pack", () =>
+    Effect.gen(function* () {
+      const repository = yield* Repository;
+      const objects = yield* ObjectStore;
 
-        const head = yield* seed(6);
-        const before = yield* Stream.runCollect(objects.list);
-        assert.ok(before.length > 10);
+      const head = yield* seed(6);
+      const before = yield* Stream.runCollect(objects.list);
+      assert.ok(before.length > 10);
 
-        const report = yield* repository.gc({ repack: true });
-        assert.notEqual(report.packed, undefined);
-        assert.equal(report.packed!.objects, before.length);
+      const report = yield* repository.gc({ repack: true });
+      assert.notEqual(report.packed, undefined);
+      assert.equal(report.packed!.objects, before.length);
 
-        // Nothing loose is left, and the same objects are still listed —
-        // through the pack index this time.
-        const after = yield* Stream.runCollect(objects.list);
-        assert.deepEqual([...after].sort(), [...before].sort());
+      // Nothing loose is left, and the same objects are still listed —
+      // through the pack index this time.
+      const after = yield* Stream.runCollect(objects.list);
+      assert.deepEqual([...after].sort(), [...before].sort());
 
-        // Everything still reads: the commit, its history, and the content.
-        const commit = yield* repository.readCommit(head);
-        assert.equal(commit.message, "commit 5");
-        const log = yield* Stream.runCollect(repository.log(head));
-        assert.equal(log.length, 6);
+      // Everything still reads: the commit, its history, and the content.
+      const commit = yield* repository.readCommit(head);
+      assert.equal(commit.message, "commit 5");
+      const log = yield* Stream.runCollect(repository.log(head));
+      assert.equal(log.length, 6);
 
-        const files = yield* repository.listFiles(commit.tree);
-        assert.deepEqual(files.map((file) => file.path).sort(), [
-          "nested/file-0.txt",
-          "nested/file-1.txt",
-          "nested/file-2.txt",
-          "nested/file-3.txt",
-          "nested/file-4.txt",
-          "nested/file-5.txt",
-          "stable.txt",
-        ]);
-        const blob = yield* repository.readBlob(
-          files.find((file) => file.path === "stable.txt")!.oid,
-        );
-        assert.equal(new TextDecoder().decode(blob), "unchanging\n");
+      const files = yield* repository.listFiles(commit.tree);
+      assert.deepEqual(files.map((file) => file.path).sort(), [
+        "nested/file-0.txt",
+        "nested/file-1.txt",
+        "nested/file-2.txt",
+        "nested/file-3.txt",
+        "nested/file-4.txt",
+        "nested/file-5.txt",
+        "stable.txt",
+      ]);
+      const blob = yield* repository.readBlob(
+        files.find((file) => file.path === "stable.txt")!.oid,
+      );
+      assert.equal(new TextDecoder().decode(blob), "unchanging\n");
 
-        // Integrity holds when every object is read back out of the pack.
-        const fsck = yield* repository.fsck;
-        assert.deepEqual(fsck.problems, []);
-        assert.deepEqual(fsck.danglingRefs, []);
+      // Integrity holds when every object is read back out of the pack.
+      const fsck = yield* repository.fsck;
+      assert.deepEqual(fsck.problems, []);
+      assert.deepEqual(fsck.danglingRefs, []);
 
-        // And a fetch can still be served, which walks and re-packs them.
-        const plan = yield* repository.fetch({ wants: [head], haves: [] });
-        assert.equal(plan.oids.length, before.length);
-      }).pipe(
-        Effect.provide(
-          GitRepository.layer.pipe(
-            Layer.provide(GitRepository.hooksNoop),
-            Layer.provideMerge(memoryStores),
-          ),
+      // And a fetch can still be served, which walks and re-packs them.
+      const plan = yield* repository.fetch({ wants: [head], haves: [] });
+      assert.equal(plan.oids.length, before.length);
+    }).pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(memoryStores),
         ),
-      ) as Effect.Effect<void>,
+      ),
+    ),
   );
 
-  it.live(
-    "collects garbage before packing, so the pack holds only live objects",
-    () =>
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const objects = yield* ObjectStore;
+  it.live("collects garbage before packing, so the pack holds only live objects", () =>
+    Effect.gen(function* () {
+      const repository = yield* Repository;
+      const objects = yield* ObjectStore;
 
-        yield* seed(2);
-        const orphan = yield* repository.writeBlob(new TextEncoder().encode("unreferenced\n"));
+      yield* seed(2);
+      const orphan = yield* repository.writeBlob(new TextEncoder().encode("unreferenced\n"));
 
-        const report = yield* repository.gc({ repack: true });
-        assert.deepEqual(report.removed, [orphan]);
+      const report = yield* repository.gc({ repack: true });
+      assert.deepEqual(report.removed, [orphan]);
 
-        const remaining = yield* Stream.runCollect(objects.list);
-        assert.equal(remaining.includes(orphan), false);
-        assert.equal(report.packed!.objects, remaining.length);
-      }).pipe(
-        Effect.provide(
-          GitRepository.layer.pipe(
-            Layer.provide(GitRepository.hooksNoop),
-            Layer.provideMerge(memoryStores),
-          ),
+      const remaining = yield* Stream.runCollect(objects.list);
+      assert.equal(remaining.includes(orphan), false);
+      assert.equal(report.packed!.objects, remaining.length);
+    }).pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(memoryStores),
         ),
-      ) as Effect.Effect<void>,
+      ),
+    ),
   );
 });
 
@@ -167,15 +166,15 @@ describe.skipIf(!hasGit)("packs at rest, on disk", () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         yield* (yield* RefStore).setHead("refs/heads/main");
-      }).pipe(Effect.provide(nodeStores(directory))) as Effect.Effect<void>,
+      }).pipe(Effect.provide(nodeStores(directory))),
     );
 
-    const head = await Effect.runPromise(seed(8).pipe(Effect.provide(layer)) as Effect.Effect<Oid>);
+    const head = await Effect.runPromise(seed(8).pipe(Effect.provide(layer)));
 
     const report = await Effect.runPromise(
       Effect.gen(function* () {
         return yield* (yield* Repository).gc({ repack: true });
-      }).pipe(Effect.provide(layer)) as Effect.Effect<GcReport>,
+      }).pipe(Effect.provide(layer)),
     );
     assert.notEqual(report.packed, undefined);
 
@@ -210,14 +209,9 @@ describe.skipIf(!hasGit)("packs at rest, on disk", () => {
         const repository = yield* Repository;
         const commit = yield* repository.readCommit(head);
         return { message: commit.message, files: yield* repository.listFiles(commit.tree) };
-      }).pipe(Effect.provide(layer)) as unknown as Effect.Effect<{
-        message: string;
-        files: ReadonlyArray<{ path: string }>;
-      }>,
+      }).pipe(Effect.provide(layer)),
     );
     assert.equal(readBack.message, "commit 7");
     assert.equal(readBack.files.length, 9);
   });
 });
-
-type GcReport = GitRepository.GcReport;

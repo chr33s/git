@@ -23,18 +23,24 @@ export interface CloudflareLfsOptions {
 const hex = (buffer: ArrayBuffer): string =>
   [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-/**
- * `crypto.DigestStream` is a workerd global. The ambient `Crypto` in scope
- * here is the standard one, which has no such member, so the shape is named
- * locally — the same seam the R2 binding cast crosses in `host/Cloudflare.ts`.
- */
 interface DigestStream extends WritableStream<Uint8Array> {
   readonly digest: Promise<ArrayBuffer>;
 }
+
+/**
+ * `crypto.DigestStream` is a workerd extension of the Web Crypto API. The
+ * ambient `Crypto` in scope here is the standard one, which has no such
+ * member, so the extension is declared locally — the same seam the R2
+ * binding cast crosses in `host/Cloudflare.ts`.
+ */
+interface WorkerdCrypto extends Crypto {
+  readonly DigestStream: new (algorithm: string) => DigestStream;
+}
+
+// SAFETY: this layer only ever runs on workerd, where the runtime `crypto`
+// carries the `DigestStream` constructor the standard declaration omits.
 const digestStream = (algorithm: string): DigestStream =>
-  new (crypto as unknown as { DigestStream: new (name: string) => DigestStream }).DigestStream(
-    algorithm,
-  );
+  new (crypto as WorkerdCrypto).DigestStream(algorithm);
 
 export const r2 = (options: CloudflareLfsOptions): Layer.Layer<LfsStore> =>
   Layer.sync(LfsStore, () => {
@@ -62,6 +68,8 @@ export const r2 = (options: CloudflareLfsOptions): Layer.Layer<LfsStore> =>
               ? Effect.fail(new ObjectNotFound({ oid }))
               : Effect.succeed(
                   Stream.fromReadableStream({
+                    // SAFETY: R2 serves an object's bytes; the runtime types
+                    // declare `body` without a chunk type.
                     evaluate: () => object.body as ReadableStream<Uint8Array>,
                     onError: (cause) =>
                       new StorageFailure({ operation: "lfs.read", path: key(oid), cause }),
@@ -74,7 +82,7 @@ export const r2 = (options: CloudflareLfsOptions): Layer.Layer<LfsStore> =>
         Effect.gen(function* () {
           const written = yield* Effect.tryPromise({
             try: async () => {
-              const source = Stream.toReadableStream(body) as ReadableStream<Uint8Array>;
+              const source = Stream.toReadableStream(body);
               const [toBucket, toDigest] = source.tee();
 
               const digest = digestStream("SHA-256");

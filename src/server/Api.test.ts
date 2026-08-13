@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
 import { Effect, FileSystem, Layer, Path } from "effect";
-import { Etag, HttpPlatform } from "effect/unstable/http";
+import { Etag, HttpPlatform, HttpRouter } from "effect/unstable/http";
 import { HttpApiTest } from "effect/unstable/httpapi";
 
 import { stores } from "../git/Memory.ts";
@@ -33,6 +33,28 @@ const live = Layer.mergeAll(
   Path.layer,
 ).pipe(Layer.provideMerge(repository), Layer.provideMerge(Subscribers.memory));
 
+/**
+ * The handlers reach `Repository` and `Subscribers` through the request
+ * context: a host discharges those `Request<"Requires", …>` markers by
+ * handing its layer to `HttpRouter.toWebHandler`, which resolves them from
+ * the layer's outputs. `HttpApiTest` dispatches in-process instead and
+ * resolves the same services from the ambient context — where `live` merges
+ * them — so the markers are satisfied at dispatch, just not anywhere the
+ * type system can watch it happen.
+ *
+ * SAFETY: `live` merges `Repository` and `Subscribers` into the test context,
+ * which is exactly where the in-process dispatch resolves these request-scoped
+ * markers; the cast erases what every dispatched request already receives.
+ */
+const dispatched = <E>(
+  effect: Effect.Effect<
+    void,
+    E,
+    | HttpRouter.Request<"Requires", GitRepository.Repository>
+    | HttpRouter.Request<"Requires", Subscribers.Subscribers>
+  >,
+): Effect.Effect<void, E> => effect as Effect.Effect<void, E>;
+
 const alice = {
   name: "Alice",
   email: "alice@example.com",
@@ -49,9 +71,8 @@ const alice = {
  * reported as a `Cause` with its fiber trace.
  */
 describe("Api", () => {
-  it.live(
-    "drives the derived client end to end, typed errors included",
-    () =>
+  it.live("drives the derived client end to end, typed errors included", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -130,15 +151,12 @@ describe("Api", () => {
           })
           .pipe(Effect.flip);
         assert.equal(conflict._tag, "RefConflict");
-        // `HttpApiTest`'s client carries the router's request-scoped
-        // requirement, which the handlers layer satisfies at dispatch time but
-        // the type cannot see discharged here.
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 
-  it.live(
-    "commits real content, and reads it back",
-    () =>
+  it.live("commits real content, and reads it back", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -256,12 +274,12 @@ describe("Api", () => {
           })
           .pipe(Effect.flip);
         assert.equal(escaped._tag, "Invalid");
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 
-  it.live(
-    "tags, annotated and lightweight, and checks its own integrity",
-    () =>
+  it.live("tags, annotated and lightweight, and checks its own integrity", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -328,12 +346,12 @@ describe("Api", () => {
 
         const removed = yield* client.repo.tagRemove({ params: { repo: "r", name: "latest" } });
         assert.equal(removed.deleted, true);
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 
-  it.live(
-    "merges: fast-forward, clean three-way, and a reported conflict",
-    () =>
+  it.live("merges: fast-forward, clean three-way, and a reported conflict", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -502,12 +520,12 @@ describe("Api", () => {
           query: { ref: theirs.tree!, path: "shared.txt" },
         });
         assert.equal(atob(resolved.content), "one\nTHEIRS\nthree\n");
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 
-  it.live(
-    "diffs two revisions as unified patches",
-    () =>
+  it.live("diffs two revisions as unified patches", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -558,12 +576,12 @@ describe("Api", () => {
         assert.match(edited.patch, /^-two$/m);
         assert.match(edited.patch, /^\+TWO$/m);
         assert.match(edited.patch, /^@@ -1,3 \+1,3 @@$/m);
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 
-  it.live(
-    "reads the tree by path: files, one file, raw objects, reflog and grep",
-    () =>
+  it.live("reads the tree by path: files, one file, raw objects, reflog and grep", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -671,12 +689,12 @@ describe("Api", () => {
           payload: { pattern: "([unclosed", fixed: true },
         });
         assert.deepEqual(literal.matches, []);
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 
-  it.live(
-    "collects what no ref can reach, and nothing else",
-    () =>
+  it.live("collects what no ref can reach, and nothing else", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -717,12 +735,12 @@ describe("Api", () => {
         // A second pass has nothing left to do.
         const again = yield* client.repo.gc({ params: { repo: "r" }, payload: {} });
         assert.deepEqual(again.removed, []);
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 
-  it.live(
-    "registers, lists and removes webhooks without ever echoing the secret",
-    () =>
+  it.live("registers, lists and removes webhooks without ever echoing the secret", () =>
+    dispatched(
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
 
@@ -771,6 +789,7 @@ describe("Api", () => {
 
         const empty = yield* client.repo.webhookList({ params: { repo: "r" } });
         assert.deepEqual(empty.webhooks, []);
-      }).pipe(Effect.scoped, Effect.provide(live)) as Effect.Effect<void> as Effect.Effect<void>,
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
   );
 });

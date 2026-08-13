@@ -29,6 +29,7 @@ import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 import { decodeObject, encodeObject, hashObject } from "./Format.ts";
 import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
+  isOid,
   ObjectStore,
   type Oid,
   type ReflogEntry,
@@ -73,12 +74,7 @@ export const objectStore = (root: string) =>
       const loose: ObjectStore["Service"] = {
         read,
         readStream: (oid) =>
-          read(oid).pipe(
-            Effect.map(
-              (object) =>
-                Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
-            ),
-          ),
+          read(oid).pipe(Effect.map((object) => Stream.fromIterable([object.data]))),
         write: (object) =>
           Effect.gen(function* () {
             const oid = yield* hashObject(object);
@@ -113,14 +109,17 @@ export const objectStore = (root: string) =>
               const oids: Oid[] = [];
               for (const prefix of await fs.readdir(objectsDir)) {
                 for (const rest of await fs.readdir(path.join(objectsDir, prefix))) {
-                  oids.push(`${prefix}${rest}` as Oid);
+                  // Temp files from in-flight writes live beside the objects;
+                  // anything that is not forty hex characters is not an object.
+                  const oid = `${prefix}${rest}`;
+                  if (isOid(oid)) oids.push(oid);
                 }
               }
               return oids;
             },
             catch: failure("list", objectsDir),
           }).pipe(Effect.map(Stream.fromIterable)),
-        ) as Stream.Stream<Oid, StorageFailure>,
+        ),
       };
 
       return ObjectStore.of(packed(loose, packs, "Node"));
@@ -238,7 +237,11 @@ export const refStore = (root: string) =>
         });
 
       const read = (name: string) =>
-        readFile(pathFor(name)).pipe(Effect.map((value) => value as Oid | null));
+        readFile(pathFor(name)).pipe(
+          // A ref file holds one oid and a newline; anything else — a torn
+          // write, a stray file — reads as "no such ref" rather than as an oid.
+          Effect.map((value) => (value !== null && isOid(value) ? value : null)),
+        );
 
       const head = readFile(headPath).pipe(
         Effect.map((value) => (value === null ? "refs/heads/main" : value.replace(/^ref:\s*/, ""))),
@@ -274,8 +277,6 @@ export const refStore = (root: string) =>
             Effect.tryPromise({
               try: async () => {
                 const base = path.join(root, "refs");
-                if (!existsSync(base)) return [] as Array<readonly [string, Oid]>;
-
                 const found: Array<readonly [string, Oid]> = [];
                 const walk = async (dir: string): Promise<void> => {
                   for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
@@ -286,11 +287,13 @@ export const refStore = (root: string) =>
                     }
                     if (full.endsWith(".tmp")) continue;
                     const name = path.relative(root, full).split(path.sep).join("/");
-                    const value = (await fs.readFile(full, "utf8")).trim() as Oid;
-                    found.push([name, value] as const);
+                    const value = (await fs.readFile(full, "utf8")).trim();
+                    // A file under refs/ that does not hold an oid is not a
+                    // ref, whatever put it there.
+                    if (isOid(value)) found.push([name, value] as const);
                   }
                 };
-                await walk(base);
+                if (existsSync(base)) await walk(base);
                 return found.filter(([name]) => prefix === undefined || name.startsWith(prefix));
               },
               catch: failure("list", root),
@@ -350,7 +353,7 @@ export const refStore = (root: string) =>
             Effect.tryPromise({
               try: async () => {
                 const target = path.join(root, "logs", name);
-                if (!existsSync(target)) return [] as ReflogEntry[];
+                if (!existsSync(target)) return [];
                 const zero = "0".repeat(40);
                 const lines: string[] = (await fs.readFile(target, "utf8")).split("\n");
                 return lines
@@ -358,9 +361,12 @@ export const refStore = (root: string) =>
                   .map((line: string): ReflogEntry => {
                     const [values = "", message = ""] = line.split("\t");
                     const [from = zero, to = zero, at = ""] = values.split(" ");
+                    // The all-zero oid is this format's spelling of "no ref on
+                    // this side"; anything else that fails to parse as an oid
+                    // is a mangled line and reads the same way.
                     return {
-                      from: from === zero ? null : (from as Oid),
-                      to: to === zero ? null : (to as Oid),
+                      from: from !== zero && isOid(from) ? from : null,
+                      to: to !== zero && isOid(to) ? to : null,
                       at: new Date(at),
                       message,
                     };

@@ -17,7 +17,7 @@ import {
   type Signature,
   type TreeEntry,
 } from "./Format.ts";
-import type { Oid } from "./Store.ts";
+import { isOid, type Oid } from "./Store.ts";
 
 const alice: Signature = {
   name: "Alice",
@@ -45,7 +45,10 @@ const expectFailure = <A, E>(result: Result.Result<A, E>): E => {
   return result.failure;
 };
 
-const oid = (hex: string) => hex as Oid;
+const oid = (hex: string): Oid => {
+  if (!isOid(hex)) throw new Error(`not a valid oid: '${hex}'`);
+  return hex;
+};
 const blob = oid("0".repeat(39) + "1");
 const tree = oid("0".repeat(39) + "2");
 

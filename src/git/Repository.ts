@@ -429,6 +429,18 @@ export const hooksNoop = Layer.succeed(Hooks, {
   postReceive: () => Effect.void,
 });
 
+/**
+ * A `RefUpdate` under construction: the same contract, writable, so a caller
+ * can decide field by field whether `expected` participates — the store reads
+ * an absent `expected` as "don't care".
+ */
+type RefUpdateDraft = {
+  name: string;
+  value: Oid | null;
+  expected?: Oid | null;
+  reason?: string;
+};
+
 export const layer = Layer.effect(
   Repository,
   Effect.gen(function* () {
@@ -818,10 +830,13 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         // What the client has is walked tolerantly: a `have` can reference
         // history this repository never saw, and that is not an error.
-        const excluded = (yield* reachable(objects, haves, {
-          ignoreMissing: true,
-          ...(clientShallow === undefined ? {} : { boundary: clientShallow }),
-        })).seen;
+        const excluded = (yield* reachable(
+          objects,
+          haves,
+          clientShallow === undefined
+            ? { ignoreMissing: true }
+            : { ignoreMissing: true, boundary: clientShallow },
+        )).seen;
         return (yield* reachable(objects, wants, { ignoreMissing: false, skip: excluded })).order;
       });
 
@@ -1044,77 +1059,72 @@ export const layer = Layer.effect(
          * is. `seen` is what keeps a commit reachable twice from being
          * reported twice.
          */
-        return Stream.paginate(
-          { frontier: [from] as ReadonlyArray<Oid>, seen: new Set<Oid>() },
-          (state) =>
-            Effect.gen(function* () {
-              let frontier = state.frontier.filter((oid) => !state.seen.has(oid));
-              if (frontier.length === 0) {
-                return [[] as ReadonlyArray<Commit>, Option.none<typeof state>()] as const;
+        return Stream.paginate({ frontier: [from], seen: new Set<Oid>() }, (state) =>
+          Effect.gen(function* () {
+            let frontier = state.frontier.filter((oid) => !state.seen.has(oid));
+            if (frontier.length === 0) {
+              return [[], Option.none<typeof state>()] as const;
+            }
+
+            const commits = yield* Effect.forEach(frontier, (oid) =>
+              readCommit(oid).pipe(Effect.map((commit) => ({ ...commit, oid }))),
+            );
+
+            const latest = Math.max(...commits.map((commit) => commit.committer.at.getTime()));
+            const tied = commits.filter((commit) => commit.committer.at.getTime() === latest);
+
+            /**
+             * Date order alone would sometimes print a parent above its
+             * child, which `git log` never does. It only can when the two
+             * share a timestamp — a parent is otherwise older — and then
+             * every commit between them shares it too, so the disagreement
+             * can be resolved by walking just the commits at this instant.
+             */
+            const reachesWithinTie = Effect.fn("Repository.log.reaches")(function* (
+              start: Oid,
+              target: Oid,
+            ) {
+              const pending = [start];
+              const visited = new Set<Oid>();
+              while (pending.length > 0) {
+                const oid = pending.pop()!;
+                if (oid === target) return true;
+                if (visited.has(oid) || state.seen.has(oid)) continue;
+                visited.add(oid);
+                const commit = yield* readCommit(oid);
+                if (commit.committer.at.getTime() !== latest) continue;
+                pending.push(...commit.parents);
               }
+              return false;
+            });
 
-              const commits = yield* Effect.forEach(frontier, (oid) =>
-                readCommit(oid).pipe(Effect.map((commit) => ({ ...commit, oid }))),
-              );
-
-              const latest = Math.max(...commits.map((commit) => commit.committer.at.getTime()));
-              const tied = commits.filter((commit) => commit.committer.at.getTime() === latest);
-
-              /**
-               * Date order alone would sometimes print a parent above its
-               * child, which `git log` never does. It only can when the two
-               * share a timestamp — a parent is otherwise older — and then
-               * every commit between them shares it too, so the disagreement
-               * can be resolved by walking just the commits at this instant.
-               */
-              const reachesWithinTie = Effect.fn("Repository.log.reaches")(function* (
-                start: Oid,
-                target: Oid,
-              ) {
-                const pending = [start];
-                const visited = new Set<Oid>();
-                while (pending.length > 0) {
-                  const oid = pending.pop()!;
-                  if (oid === target) return true;
-                  if (visited.has(oid) || state.seen.has(oid)) continue;
-                  visited.add(oid);
-                  const commit = yield* readCommit(oid);
-                  if (commit.committer.at.getTime() !== latest) continue;
-                  pending.push(...commit.parents);
+            const eligible: Array<Commit> = [];
+            for (const candidate of tied) {
+              let shadowed = false;
+              for (const other of tied) {
+                if (other.oid === candidate.oid) continue;
+                if (yield* reachesWithinTie(other.oid, candidate.oid)) {
+                  shadowed = true;
+                  break;
                 }
-                return false;
-              });
-
-              const eligible: Array<Commit> = [];
-              for (const candidate of tied) {
-                let shadowed = false;
-                for (const other of tied) {
-                  if (other.oid === candidate.oid) continue;
-                  if (yield* reachesWithinTie(other.oid, candidate.oid)) {
-                    shadowed = true;
-                    break;
-                  }
-                }
-                if (!shadowed) eligible.push(candidate);
               }
+              if (!shadowed) eligible.push(candidate);
+            }
 
-              // Oid decides only between commits that are genuinely unordered,
-              // so the output is stable run to run rather than merely valid.
-              const newest = (eligible.length > 0 ? eligible : tied).reduce((best, candidate) =>
-                candidate.oid > best.oid ? candidate : best,
-              );
+            // Oid decides only between commits that are genuinely unordered,
+            // so the output is stable run to run rather than merely valid.
+            const newest = (eligible.length > 0 ? eligible : tied).reduce((best, candidate) =>
+              candidate.oid > best.oid ? candidate : best,
+            );
 
-              state.seen.add(newest.oid);
-              frontier = [
-                ...frontier.filter((oid) => oid !== newest.oid),
-                ...newest.parents.filter((oid) => !state.seen.has(oid)),
-              ];
+            state.seen.add(newest.oid);
+            frontier = [
+              ...frontier.filter((oid) => oid !== newest.oid),
+              ...newest.parents.filter((oid) => !state.seen.has(oid)),
+            ];
 
-              return [
-                [newest] as ReadonlyArray<Commit>,
-                Option.some({ frontier, seen: state.seen }),
-              ] as const;
-            }),
+            return [[newest], Option.some({ frontier, seen: state.seen })] as const;
+          }),
         ).pipe(options?.limit === undefined ? (self) => self : Stream.take(options.limit));
       },
 
@@ -1147,13 +1157,12 @@ export const layer = Layer.effect(
         yield* Effect.forEach(updates, hooks.update, { concurrency: "unbounded" });
 
         const applied = yield* refs.apply(updates, options);
-        const results = applied.map((result, index): ReceiveResult => ({
-          ref: result.name,
-          from: updates[index]?.expected ?? null,
-          to: result.current,
-          ok: result.applied,
-          ...(result.applied ? {} : { reason: "ref moved" }),
-        }));
+        const results = applied.map((result, index): ReceiveResult => {
+          const from = updates[index]?.expected ?? null;
+          return result.applied
+            ? { ref: result.name, from, to: result.current, ok: true }
+            : { ref: result.name, from, to: result.current, ok: false, reason: "ref moved" };
+        });
 
         yield* hooks.postReceive(results);
         return results;
@@ -1195,30 +1204,20 @@ export const layer = Layer.effect(
 
         // An annotated tag is an object of its own; a lightweight one is the
         // ref alone, pointing straight at the target.
-        const oid =
-          message === undefined
-            ? resolved
-            : yield* objects.write({
-                type: "tag",
-                data: encodeTag({
-                  object: resolved,
-                  type: object.type,
-                  tag: name,
-                  ...(tagger === undefined ? {} : { tagger }),
-                  message,
-                }),
-              });
+        let oid = resolved;
+        if (message !== undefined) {
+          const info: TagInfo =
+            tagger === undefined
+              ? { object: resolved, type: object.type, tag: name, message }
+              : { object: resolved, type: object.type, tag: name, tagger, message };
+          oid = yield* objects.write({ type: "tag", data: encodeTag(info) });
+        }
 
         const ref = `refs/tags/${name}`;
-        const [result] = yield* refs.apply([
-          {
-            name: ref,
-            value: oid,
-            // A tag is meant to be stable, so replacing one is opt-in.
-            ...(force === true ? {} : { expected: null }),
-            reason: `tag: ${name}`,
-          },
-        ]);
+        const update: RefUpdateDraft = { name: ref, value: oid, reason: `tag: ${name}` };
+        // A tag is meant to be stable, so replacing one is opt-in.
+        if (force !== true) update.expected = null;
+        const [result] = yield* refs.apply([update]);
 
         if (result === undefined || !result.applied) {
           return yield* new RefConflict({
@@ -1251,14 +1250,9 @@ export const layer = Layer.effect(
         if (!(yield* objects.has(target))) return yield* new ObjectNotFound({ oid: target });
 
         const previous = yield* refs.read(name);
-        const [result] = yield* refs.apply([
-          {
-            name,
-            value: target,
-            ...(expected === undefined ? {} : { expected }),
-            reason: `set: ${to}`,
-          },
-        ]);
+        const update: RefUpdateDraft = { name, value: target, reason: `set: ${to}` };
+        if (expected !== undefined) update.expected = expected;
+        const [result] = yield* refs.apply([update]);
 
         if (result === undefined || !result.applied) {
           return yield* new RefConflict({
@@ -1317,14 +1311,13 @@ export const layer = Layer.effect(
           Effect.gen(function* () {
             if (input.into !== undefined && kind !== "up-to-date") {
               const expected = isOid(input.into) ? undefined : yield* refs.read(input.into);
-              const [result] = yield* refs.apply([
-                {
-                  name: input.into,
-                  value: commit,
-                  ...(expected === undefined ? {} : { expected }),
-                  reason: `merge: ${input.theirs}`,
-                },
-              ]);
+              const update: RefUpdateDraft = {
+                name: input.into,
+                value: commit,
+                reason: `merge: ${input.theirs}`,
+              };
+              if (expected !== undefined) update.expected = expected;
+              const [result] = yield* refs.apply([update]);
               if (result === undefined || !result.applied) {
                 return yield* new RefConflict({
                   ref: input.into,

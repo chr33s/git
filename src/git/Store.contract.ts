@@ -20,7 +20,10 @@ import { Effect, Stream } from "effect";
 
 import { ObjectStore, type Oid, RefStore } from "./Store.ts";
 
+// SAFETY: forty lowercase hex characters by construction, which is exactly
+// what the Oid brand stands for.
 const a = "a".repeat(40) as Oid;
+// SAFETY: as above — forty lowercase hex characters by construction.
 const b = "b".repeat(40) as Oid;
 
 export interface Backend {

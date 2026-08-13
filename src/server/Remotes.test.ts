@@ -137,8 +137,8 @@ describe("Remotes", () => {
       const failure = yield* registry
         .add({ name: "origin", url: "https://example.com/b.git" })
         .pipe(Effect.flip);
-      assert.equal(failure._tag, "Invalid");
-      assert.match((failure as { reason: string }).reason, /already exists/);
+      if (failure._tag !== "Invalid") assert.fail(`expected Invalid, got ${failure._tag}`);
+      assert.match(failure.reason, /already exists/);
       // The first one is untouched: a refused registration changes nothing.
       assert.equal((yield* registry.get("origin"))?.url, "https://example.com/a.git");
     }).pipe(Effect.provide(Remotes.memory)),
@@ -250,13 +250,15 @@ describe("Remotes", () => {
           const kind = query.trimStart().slice(0, 6).toUpperCase();
           if (kind === "CREATE" || kind === "DROP") {
             database.exec(query);
-            return { toArray: () => [] as Row[] };
+            return { toArray: (): Row[] => [] };
           }
           const statement = database.prepare(query);
           if (kind !== "SELECT") {
             statement.run(...bindings);
-            return { toArray: () => [] as Row[] };
+            return { toArray: (): Row[] => [] };
           }
+          // SAFETY: the `Sql` port's caller names the row type its own query
+          // produces; `node:sqlite` returns rows it cannot type any closer.
           return { toArray: () => statement.all(...bindings) as Row[] };
         },
       };

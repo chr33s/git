@@ -208,7 +208,7 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
     url: input.target.url,
     credential: input.target.credential,
     refs: [`refs/heads/${short}`],
-    ...(input.depth === undefined ? {} : { depth: input.depth }),
+    depth: input.depth,
   });
 
   // Absent from the fetch's own report means the tracking ref was

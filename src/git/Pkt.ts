@@ -5,6 +5,8 @@
  * (`client/Fetch.ts`) — and platform-neutral, because the client side of it
  * runs in browsers.
  */
+import { Predicate } from "effect";
+
 import { PackCorrupt } from "./Error.ts";
 
 const encoder = new TextEncoder();
@@ -14,7 +16,7 @@ const corrupt = (reason: string) => new PackCorrupt({ reason });
 
 /** `<4-hex length including itself><payload>`; "0000" is the flush packet. */
 export const pkt = (line: string | Uint8Array): Uint8Array => {
-  const payload = typeof line === "string" ? encoder.encode(line) : line;
+  const payload = Predicate.isString(line) ? encoder.encode(line) : line;
   const header = encoder.encode((payload.length + 4).toString(16).padStart(4, "0"));
   const out = new Uint8Array(header.length + payload.length);
   out.set(header);
@@ -43,7 +45,7 @@ export const SIDEBAND_MAX = 65_520;
 
 /** One side-band packet. Callers on band 1 must respect `SIDEBAND_MAX`. */
 export const band = (channel: (typeof BAND)[keyof typeof BAND], payload: string | Uint8Array) => {
-  const bytes = typeof payload === "string" ? encoder.encode(payload) : payload;
+  const bytes = Predicate.isString(payload) ? encoder.encode(payload) : payload;
   const framed = new Uint8Array(bytes.length + 1);
   framed[0] = channel;
   framed.set(bytes, 1);

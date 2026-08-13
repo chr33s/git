@@ -17,11 +17,12 @@ import { execFile } from "node:child_process";
 import { createHmac } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
-import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
+
+import { Predicate } from "effect";
 
 import { serve, type Server } from "../host/Node.ts";
 import { hasGit } from "../testing/Git.ts";
@@ -44,6 +45,10 @@ interface Delivery {
   readonly event: string | null;
 }
 
+/** These headers are sent at most once, so a repeated one keeps its first value. */
+const single = (value: string | string[] | undefined): string | undefined =>
+  Array.isArray(value) ? value[0] : value;
+
 /** A receiver that records what it was sent. */
 const receiver = async () => {
   const deliveries: Delivery[] = [];
@@ -53,8 +58,8 @@ const receiver = async () => {
     incoming.on("end", () => {
       deliveries.push({
         body: Buffer.concat(chunks).toString("utf8"),
-        signature: (incoming.headers["x-signature-256"] as string | undefined) ?? null,
-        event: (incoming.headers["x-event"] as string | undefined) ?? null,
+        signature: single(incoming.headers["x-signature-256"]) ?? null,
+        event: single(incoming.headers["x-event"]) ?? null,
       });
       outgoing.writeHead(204);
       outgoing.end();
@@ -62,11 +67,14 @@ const receiver = async () => {
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 
+  const address = server.address();
+  assert.ok(address !== null && !Predicate.isString(address), "bound to a TCP port");
+
   return {
     deliveries,
     // `localhost` rather than `127.0.0.1`: the registry refuses plain http
     // anywhere else, which is the policy under test everywhere but here.
-    url: `http://localhost:${(server.address() as AddressInfo).port}/hook`,
+    url: `http://localhost:${address.port}/hook`,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 };
@@ -126,6 +134,8 @@ describe.skipIf(!hasGit)("webhook delivery on push", () => {
       const delivery = await waitFor(() => hook.deliveries);
       assert.equal(delivery.event, "push");
 
+      // SAFETY: the receiver recorded the exact bytes the server posted, and
+      // delivery writes them as this JSON.
       const payload = JSON.parse(delivery.body) as {
         event: string;
         refs: Array<{ ref: string; before: string | null; after: string | null }>;
@@ -150,6 +160,8 @@ describe.skipIf(!hasGit)("webhook delivery on push", () => {
     const hook = await receiver();
 
     try {
+      // SAFETY: registration replies with the stored webhook, id included;
+      // an id that is not there fails the DELETE below.
       const created = (await (
         await fetch(`${server.url}/unhooked/webhooks`, {
           method: "POST",
@@ -193,6 +205,8 @@ describe.skipIf(!hasGit)("webhook delivery on push", () => {
       // looks like from the registry's point of view.
       const restarted = await serve({ root });
       try {
+        // SAFETY: the list endpoint replies with the registry's rows; a
+        // reply of any other form fails the deep equality below.
         const listed = (await (await fetch(`${restarted.url}/durable/webhooks`)).json()) as {
           webhooks: Array<{ url: string }>;
         };

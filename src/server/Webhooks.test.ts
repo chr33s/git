@@ -5,10 +5,9 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import * as http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Predicate } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 
 import type { ReceiveResult } from "../git/Repository.ts";
@@ -21,6 +20,10 @@ interface Received {
   readonly event: string | undefined;
 }
 
+/** These headers are sent at most once, so a repeated one keeps its first value. */
+const single = (value: string | string[] | undefined): string | undefined =>
+  Array.isArray(value) ? value[0] : value;
+
 /** A receiver whose reply is scripted per test: status codes in, calls out. */
 const receiver = async () => {
   const calls: Received[] = [];
@@ -29,11 +32,15 @@ const receiver = async () => {
   const server = http.createServer((incoming, outgoing) => {
     void (async () => {
       const chunks: Buffer[] = [];
-      for await (const chunk of incoming) chunks.push(chunk as Buffer);
+      for await (const chunk of incoming) {
+        // SAFETY: a request without an encoding set yields Buffer chunks;
+        // node types the async iteration as `any`.
+        chunks.push(chunk as Buffer);
+      }
       calls.push({
         body: Buffer.concat(chunks).toString(),
-        signature: incoming.headers["x-signature-256"] as string | undefined,
-        event: incoming.headers["x-event"] as string | undefined,
+        signature: single(incoming.headers["x-signature-256"]),
+        event: single(incoming.headers["x-event"]),
       });
       outgoing.writeHead(replies.shift() ?? 200);
       outgoing.end();
@@ -41,8 +48,11 @@ const receiver = async () => {
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 
+  const address = server.address();
+  assert.ok(address !== null && !Predicate.isString(address), "bound to a TCP port");
+
   return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/hook`,
+    url: `http://127.0.0.1:${address.port}/hook`,
     calls,
     reply: (...statuses: number[]) => {
       replies = statuses;
@@ -51,6 +61,8 @@ const receiver = async () => {
   };
 };
 
+// SAFETY: forty-character stand-ins for real commit ids; delivery treats an
+// oid as an opaque string and never dereferences it.
 const results: ReadonlyArray<ReceiveResult> = [
   { ref: "refs/heads/main", from: "a".repeat(40) as Oid, to: "b".repeat(40) as Oid, ok: true },
   { ref: "refs/heads/nope", from: null, to: null, ok: false, reason: "ref moved" },
@@ -75,7 +87,7 @@ describe("Webhooks", () => {
             FetchHttpClient.layer,
           ),
         ),
-      ) as Effect.Effect<void>,
+      ),
     );
 
   it("posts only the refs that moved, signed the way receivers verify", async () => {
@@ -87,6 +99,8 @@ describe("Webhooks", () => {
     const call = hook.calls[0]!;
     assert.equal(call.event, "push");
 
+    // SAFETY: the receiver recorded the exact bytes `deliver` posted, and
+    // `deliver` writes them as this JSON.
     const body = JSON.parse(call.body) as { event: string; refs: unknown[] };
     assert.equal(body.event, "push");
     // The rejected ref is not an event: nothing happened to it.
@@ -139,7 +153,7 @@ describe("Webhooks", () => {
               FetchHttpClient.layer,
             ),
           ),
-        ) as Effect.Effect<void>,
+        ),
       );
       assert.equal(hook.calls.length, 1);
       assert.equal(second.calls.length, 1);
@@ -153,7 +167,7 @@ describe("Webhooks", () => {
     await Effect.runPromise(
       deliver(results).pipe(
         Effect.provide(Layer.mergeAll(subscribersOf([]), FetchHttpClient.layer)),
-      ) as Effect.Effect<void>,
+      ),
     );
     assert.equal(hook.calls.length, 0);
   });
@@ -170,7 +184,7 @@ describe("Webhooks", () => {
             FetchHttpClient.layer,
           ),
         ),
-      ) as Effect.Effect<void>,
+      ),
     );
     assert.equal(hook.calls.length, 0);
   });

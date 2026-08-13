@@ -67,10 +67,7 @@ describe("Client", () => {
         const refs = yield* client.repo.refs({ params: { repo: "origin" } });
         const log = yield* client.repo.log({ params: { repo: "origin", oid: head } });
         return { refs: refs.refs, commits: log.commits };
-      }).pipe(Effect.scoped) as unknown as Effect.Effect<{
-        refs: ReadonlyArray<{ name: string; oid: string }>;
-        commits: ReadonlyArray<{ message: string }>;
-      }>,
+      }).pipe(Effect.scoped),
     );
     assert.deepEqual(refs, [{ name: "refs/heads/main", oid: head }]);
     assert.deepEqual(

@@ -36,6 +36,8 @@ const expectFailure = <A, E>(result: Result.Result<A, E>): E => {
 };
 
 /** Deterministic but well-spread oids, so the fanout buckets are not all one. */
+// SAFETY: a hex-encoded SHA-1 digest is exactly the 40 lowercase hex
+// characters an oid is.
 const oidOf = (seed: string): Oid => createHash("sha1").update(seed).digest("hex") as Oid;
 
 const sample = (count: number): PackIndexEntry[] =>
@@ -86,7 +88,9 @@ describe("PackIndex", () => {
       assert.deepEqual(expectSuccess(findInPackIndex(bytes, entry.oid)), entry);
     }
     assert.equal(expectSuccess(findInPackIndex(bytes, oidOf("absent"))), null);
+    // SAFETY: forty '0's are a well-formed oid at the very bottom of the table.
     assert.equal(expectSuccess(findInPackIndex(bytes, "0".repeat(40) as Oid)), null);
+    // SAFETY: forty 'f's are a well-formed oid at the very top of the table.
     assert.equal(expectSuccess(findInPackIndex(bytes, "f".repeat(40) as Oid)), null);
   });
 
@@ -198,6 +202,8 @@ describe.skipIf(!hasGit)("PackIndex interop with git", () => {
       );
 
       for (const [oid, offset] of reported) {
+        // SAFETY: only lines matching the 40-hex capture group above populate
+        // `reported`, so every key is a well-formed oid.
         const found = expectSuccess(findInPackIndex(idx, oid as Oid));
         assert.notEqual(found, null, `findInPackIndex missed ${oid}`);
         assert.equal(found!.offset, offset, `wrong offset for ${oid}`);

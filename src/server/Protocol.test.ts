@@ -36,7 +36,7 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
           Layer.provideMerge(stores),
         ),
       ),
-    ) as Effect.Effect<A, E>,
+    ),
   );
 
 /** main: a <- b <- c, plus an unrelated root on `side`. */
@@ -59,7 +59,7 @@ const body = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayBuffer> => {
     out.set(part, offset);
     offset += part.length;
   }
-  return out as Uint8Array<ArrayBuffer>;
+  return out;
 };
 
 const v0Request = (input: {
@@ -97,7 +97,12 @@ const v2Request = (args: ReadonlyArray<string>): Request =>
  * time it says so the four bytes are gone — here those four bytes are the
  * pack's own magic, which is exactly what the assertions need to see.
  */
-const linesOf = (bytes: Uint8Array): { lines: string[]; sawPack: boolean } => {
+interface Preamble {
+  readonly lines: ReadonlyArray<string>;
+  readonly sawPack: boolean;
+}
+
+const linesOf = (bytes: Uint8Array): Preamble => {
   const lines: string[] = [];
   let at = 0;
   while (at + 4 <= bytes.length) {

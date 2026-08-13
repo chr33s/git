@@ -99,14 +99,14 @@ const replayTree = Effect.fn("Rebase.replayTree")(function* (input: {
 
   return {
     tree: yield* repository.writeFiles({ base: input.onto.tree, changes }),
-    conflicts: [] as ReadonlyArray<MergeConflict>,
+    conflicts: [],
   };
 });
 
 const replayOne = Effect.fn("Rebase.replayOne")(function* (input: {
   readonly commit: Oid;
   readonly onto: Oid;
-  readonly author?: Signature;
+  readonly author?: Signature | undefined;
 }) {
   const repository = yield* Repository;
 
@@ -147,7 +147,7 @@ const replayOne = Effect.fn("Rebase.replayOne")(function* (input: {
 const settle = Effect.fn("Rebase.settle")(function* (input: {
   readonly onto: Oid;
   readonly commits: ReadonlyArray<Replayed>;
-  readonly into?: string;
+  readonly into?: string | undefined;
 }) {
   const repository = yield* Repository;
   const head = input.commits.reduce<Oid>((last, entry) => entry.replayed ?? last, input.onto);
@@ -195,17 +195,9 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   const commit = yield* resolveCommit(input.commit);
   const onto = yield* resolveCommit(input.onto);
 
-  const replayed = yield* replayOne({
-    commit,
-    onto,
-    ...(input.author === undefined ? {} : { author: input.author }),
-  });
+  const replayed = yield* replayOne({ commit, onto, author: input.author });
 
-  return yield* settle({
-    onto,
-    commits: [replayed],
-    ...(input.into === undefined ? {} : { into: input.into }),
-  });
+  return yield* settle({ onto, commits: [replayed], into: input.into });
 });
 
 /** Replay `branch`'s commits that are not in `onto`, in order. */
@@ -246,9 +238,5 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
     if (replayed.replayed !== null) head = replayed.replayed;
   }
 
-  return yield* settle({
-    onto,
-    commits,
-    ...(input.into === undefined ? {} : { into: input.into }),
-  });
+  return yield* settle({ onto, commits, into: input.into });
 });

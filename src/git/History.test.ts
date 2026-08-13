@@ -51,6 +51,8 @@ describe.skipIf(!hasGit)("path history", () => {
   });
 
   /** Ours, as a list of oids newest-first. */
+  // SAFETY: `from` always comes from `git rev-parse`, whose output is a
+  // forty-hex oid.
   const ours = (from: string, file: string) =>
     Effect.runPromise(
       Stream.runCollect(forPath(from as Oid, file)).pipe(

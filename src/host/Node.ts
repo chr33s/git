@@ -14,8 +14,9 @@ import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
-import { Config, Effect, Layer } from "effect";
+import { Config, Effect, Layer, Predicate } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
@@ -52,6 +53,14 @@ export interface ServeOptions {
 export interface Server {
   readonly url: string;
   readonly close: () => Promise<void>;
+}
+
+/**
+ * `RequestInit` plus the `duplex` member undici requires whenever the body is
+ * a stream — the lib declaration has not caught up with the fetch spec.
+ */
+interface StreamingRequestInit extends RequestInit {
+  duplex?: "half";
 }
 
 export const serve = async (options: ServeOptions): Promise<Server> => {
@@ -108,22 +117,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // LFS first: it shares the `info/` prefix with the advertisement, and
       // its bodies are the large ones, so it must not be behind a handler
       // that would read them.
-      const lfs = await Effect.runPromise(
-        Lfs.handle(request).pipe(Effect.provide(state.lfs)) as Effect.Effect<Response | null>,
-      );
+      const lfs = await Effect.runPromise(Lfs.handle(request).pipe(Effect.provide(state.lfs)));
       if (lfs !== null) return lfs;
 
       // Also ahead of the API: a bulk commit body is arbitrarily large and is
       // consumed as a stream, so nothing that would buffer it may see it first.
       const bulk = await Effect.runPromise(
-        CommitPack.handle(request).pipe(
-          Effect.provide(state.layer),
-        ) as Effect.Effect<Response | null>,
+        CommitPack.handle(request).pipe(Effect.provide(state.layer)),
       );
       if (bulk !== null) return bulk;
 
       const exported = await Effect.runPromise(
-        Archive.handle(request).pipe(Effect.provide(state.layer)) as Effect.Effect<Response | null>,
+        Archive.handle(request).pipe(Effect.provide(state.layer)),
       );
       if (exported !== null) return exported;
 
@@ -133,7 +138,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
             Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
           ),
           Effect.provide(state.layer),
-        ) as Effect.Effect<Response | null>,
+        ),
       );
       return matched ?? state.api(request);
     };
@@ -185,17 +190,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       ]);
       for (const [name, value] of Object.entries(incoming.headers)) {
         if (hopByHop.has(name)) continue;
-        if (typeof value === "string") headers.set(name, value);
+        if (Predicate.isString(value)) headers.set(name, value);
       }
       const method = incoming.method ?? "GET";
-      const request = new Request(url, {
-        method,
-        headers,
+      const init: StreamingRequestInit = { method, headers };
+      if (method !== "GET" && method !== "HEAD") {
         // Streamed, not buffered: a push flows straight into the pack parser.
-        ...(method === "GET" || method === "HEAD"
-          ? {}
-          : { body: Readable.toWeb(incoming) as ReadableStream<Uint8Array>, duplex: "half" }),
-      } as RequestInit);
+        // SAFETY: node's web stream and the fetch body type are the same
+        // class at runtime; only the lib declarations disagree.
+        init.body = Readable.toWeb(incoming) as ReadableStream<Uint8Array>;
+        init.duplex = "half";
+      }
+      const request = new Request(url, init);
 
       const verify = options.verify;
       const denied =
@@ -206,11 +212,16 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
             );
       const response = denied ?? (await dispatch(repo, request));
       outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
-      if (response.body === null) outgoing.end();
-      else await pipeline(Readable.fromWeb(response.body as never), outgoing);
-    })().catch((error: unknown) => {
+      if (response.body === null) {
+        outgoing.end();
+      } else {
+        // SAFETY: a fetch `Response` body is the same web stream class
+        // node's `fromWeb` consumes; only the lib declarations disagree.
+        await pipeline(Readable.fromWeb(response.body as WebReadableStream), outgoing);
+      }
+    })().catch((cause: unknown) => {
       if (!outgoing.headersSent) outgoing.writeHead(500);
-      outgoing.end(String(error));
+      outgoing.end(String(cause));
     });
   });
 
@@ -219,6 +230,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   });
 
   // Known only now, because port 0 means "whichever one is free".
+  // SAFETY: the server listens on a TCP port, never a pipe, so `address()`
+  // returns an `AddressInfo` once `listen` has resolved.
   const bound = (server.address() as AddressInfo).port;
   fallbackAuthority = `${hostname}:${bound}`;
 

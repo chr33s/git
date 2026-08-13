@@ -69,7 +69,7 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
     );
 
   const inRepo = <A, E>(repo: string, effect: Effect.Effect<A, E, Repository>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layerFor(repo))) as Effect.Effect<A, E>);
+    Effect.runPromise(effect.pipe(Effect.provide(layerFor(repo))));
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-protocol-interop-"));
@@ -411,12 +411,16 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
       [200, 200, 200, 200, 200],
     );
 
+    // SAFETY: `/refs` is the JSON API under test, and its success schema is
+    // `{ refs: [{ name, oid }, …] }` — a drift would fail the count below.
     const refs = (await (await fetch(`${base}/gated/refs`)).json()) as {
       refs: Array<{ oid: string }>;
     };
     const head = refs.refs[0]!.oid;
+    // SAFETY: `/log/:oid` answers `{ commits: [{ message, oid }, …] }` per the
+    // API's schema; only the count is read here.
     const log = (await (await fetch(`${base}/gated/log/${head}`)).json()) as {
-      commits: unknown[];
+      commits: Array<{ message: string; oid: string }>;
     };
     assert.equal(log.commits.length, 5);
   });

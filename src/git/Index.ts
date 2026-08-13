@@ -117,6 +117,9 @@ export const decodeIndex = (
     if (end >= body.length) return invalid("index", `entry ${index} truncated`);
     if (body[end] !== 0) return invalid("index", `entry ${index} path is unterminated`);
 
+    // SAFETY: the entry-header bound check above guarantees the twenty oid
+    // bytes are present, and twenty bytes hex-encode to the forty characters
+    // the Oid brand names.
     entries.push({
       path: decoder.decode(body.subarray(start, end)),
       oid: bytesToHex(body.subarray(offset + 40, offset + 60)) as Oid,

@@ -50,6 +50,9 @@ export const file = (root: string): Layer.Layer<LfsStore> =>
           if (!fs.existsSync(target)) return Effect.fail(new ObjectNotFound({ oid }));
           return Effect.succeed(
             Stream.fromAsyncIterable(
+              // SAFETY: a read stream opened without an encoding yields
+              // Buffer chunks, which are Uint8Arrays; node types the async
+              // iteration as `any`.
               fs.createReadStream(target) as AsyncIterable<Uint8Array>,
               (cause) => new StorageFailure({ operation: "lfs.read", path: oid, cause }),
             ),

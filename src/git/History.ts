@@ -46,7 +46,7 @@ export const forPath = (
   options?: { readonly limit?: number },
 ): Stream.Stream<PathChange, ObjectNotFound | StorageFailure, Repository> =>
   Stream.unfold(
-    { pending: [from] as ReadonlyArray<Oid>, seen: new Set<Oid>() },
+    { pending: [from], seen: new Set<Oid>() },
     Effect.fn("History.step")(function* (state: {
       readonly pending: ReadonlyArray<Oid>;
       readonly seen: Set<Oid>;

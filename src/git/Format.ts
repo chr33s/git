@@ -103,6 +103,8 @@ export const hashObject = (object: RawObject): Effect.Effect<Oid> =>
   Effect.promise(async () => {
     const framed = encodeObject(object);
     const digest = await crypto.subtle.digest("SHA-1", framed.slice().buffer);
+    // SAFETY: a SHA-1 digest is twenty bytes, so its hex form is exactly the
+    // forty lowercase hex characters the Oid brand names.
     return bytesToHex(new Uint8Array(digest)) as Oid;
   });
 
@@ -196,20 +198,14 @@ export const parseTag = (data: Uint8Array): Result.Result<TagInfo, Invalid> => {
 
   // git allows a tag without a tagger — older repositories have them.
   const taggerLine = lines.find((line) => line.startsWith("tagger "))?.slice(7);
-  let tagger: Signature | undefined;
-  if (taggerLine !== undefined) {
-    const parsed = parseSignature(taggerLine, "tagger");
-    if (Result.isFailure(parsed)) return Result.fail(parsed.failure);
-    tagger = parsed.success;
+  if (taggerLine === undefined) {
+    return Result.succeed({ object, type, tag: name, message });
   }
 
-  return Result.succeed({
-    object,
-    type,
-    tag: name,
-    ...(tagger === undefined ? {} : { tagger }),
-    message,
-  });
+  const tagger = parseSignature(taggerLine, "tagger");
+  if (Result.isFailure(tagger)) return Result.fail(tagger.failure);
+
+  return Result.succeed({ object, type, tag: name, tagger: tagger.success, message });
 };
 
 export const encodeTag = (tag: TagInfo): Uint8Array => {
@@ -229,6 +225,8 @@ export const parseTree = (data: Uint8Array): Result.Result<ReadonlyArray<TreeEnt
     const nul = data.indexOf(0, space);
     if (nul === -1 || nul + 21 > data.length) return invalid("tree", "entry truncated");
 
+    // SAFETY: the bound check above guarantees twenty bytes after the NUL,
+    // and twenty bytes hex-encode to the forty characters the Oid brand names.
     entries.push({
       mode: decoder.decode(data.subarray(offset, space)),
       name: decoder.decode(data.subarray(space + 1, nul)),
@@ -268,4 +266,7 @@ export const encodeTree = (entries: ReadonlyArray<TreeEntry>): Uint8Array => {
 };
 
 /** The empty tree, which git special-cases and every first commit needs. */
-export const EMPTY_TREE_OID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904" as Oid;
+export const EMPTY_TREE_OID =
+  // SAFETY: the literal is git's well-known empty-tree id, forty lowercase
+  // hex characters as the Oid brand requires.
+  "4b825dc642cb6eb9a060e54bf8d69288fbee4904" as Oid;

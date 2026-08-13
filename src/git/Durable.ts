@@ -28,7 +28,6 @@ import { normalize, routeOf } from "../server/Route.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 import { stores } from "./Cloudflare.ts";
-import type { Sql } from "./Sql.ts";
 import { collector } from "./Conformance.ts";
 import { type GitError, statusOf } from "./Error.ts";
 import * as GitRepository from "./Repository.ts";
@@ -58,13 +57,13 @@ export class GitRepo extends DurableObject<TestEnv> {
 
   /** The registry on this instance's own SQLite, beside the refs. */
   #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
-    this.#subscribers ??= Subscribers.sql(this.ctx.storage.sql as unknown as Sql, repo);
+    this.#subscribers ??= Subscribers.sql(this.ctx.storage.sql, repo);
     return this.#subscribers;
   }
 
   /** The remotes this repository fetches from, on that same SQLite. */
   #remoteRegistry(repo: string): Layer.Layer<Remotes.Remotes> {
-    this.#remotes ??= Remotes.sql(this.ctx.storage.sql as unknown as Sql, repo);
+    this.#remotes ??= Remotes.sql(this.ctx.storage.sql, repo);
     return this.#remotes;
   }
 

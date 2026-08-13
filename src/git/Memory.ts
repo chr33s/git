@@ -10,7 +10,7 @@
  * `atomic` a single mismatch discards the batch.
  */
 import { Effect, Layer, Stream } from "effect";
-import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
+import { Invalid, ObjectNotFound } from "./Error.ts";
 import { hashObject } from "./Format.ts";
 import {
   ObjectStore,
@@ -47,12 +47,7 @@ export const objectStore = Layer.effect(
         const object = objects.get(oid);
         return object === undefined
           ? Effect.fail(new ObjectNotFound({ oid }))
-          : Effect.succeed(
-              Stream.fromIterable([new Uint8Array(object.data)]) as Stream.Stream<
-                Uint8Array,
-                StorageFailure
-              >,
-            );
+          : Effect.succeed(Stream.fromIterable([new Uint8Array(object.data)]));
       },
       write: (object) =>
         hashObject(object).pipe(
@@ -67,9 +62,7 @@ export const objectStore = Layer.effect(
         Effect.sync(() => {
           objects.delete(oid);
         }),
-      list: Stream.suspend(
-        () => Stream.fromIterable([...objects.keys()]) as Stream.Stream<Oid, StorageFailure>,
-      ),
+      list: Stream.suspend(() => Stream.fromIterable([...objects.keys()])),
     };
 
     return ObjectStore.of(packed(loose, packs, "Memory"));

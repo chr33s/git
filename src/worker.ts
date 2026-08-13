@@ -19,7 +19,7 @@ import * as Auth from "./server/Auth.ts";
 import { normalize, routeOf } from "./server/Route.ts";
 
 /** The Worker's public contract: it serves HTTP, nothing more. */
-export type GitShape = {
+export type GitBindings = {
   readonly fetch: Effect.Effect<
     HttpServerResponse.HttpServerResponse,
     never,
@@ -28,7 +28,7 @@ export type GitShape = {
 };
 
 /** `Repo` in the third slot: this Worker hosts the DO, so it is contract. */
-export class Git extends Alchemy.Worker<Git, GitShape, Repo>()("git") {}
+export class Git extends Alchemy.Worker<Git, GitBindings, Repo>()("git") {}
 
 /**
  * Pinned here and asserted against `wrangler.test.json` in
@@ -58,10 +58,10 @@ export default Git.make(
           return HttpServerResponse.text("No repository in URL", { status: 400 });
         }
 
-        // The platform request, headers and body intact — the effect wrapper
-        // was built from it (`HttpServerRequest.fromWeb`), so this is the
-        // same object, not a reconstruction. Normalised so the DO sees one
-        // spelling of the path whichever the client used.
+        // SAFETY: the effect wrapper was built from the platform request
+        // (`HttpServerRequest.fromWeb`), so `source` is that same `Request`,
+        // headers and body intact — not a reconstruction. Normalised so the
+        // DO sees one spelling of the path whichever the client used.
         const raw = normalize(request.source as Request, route);
 
         // Auth lives at the edge: the DO trusts its callers, because the

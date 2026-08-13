@@ -187,6 +187,9 @@ const entryAt = (
 ): Result.Result<PackIndexEntry, Invalid> => {
   const offset = offsetAt(self, index);
   if (Result.isFailure(offset)) return Result.fail(offset.failure);
+  // SAFETY: `layout` verified the buffer is large enough for `count` rows, so
+  // this 20-byte oid row is in bounds and hex-encodes to exactly the 40
+  // lowercase hex characters an oid is.
   return Result.succeed({
     oid: bytesToHex(bytes.subarray(self.oidsAt + index * 20, self.oidsAt + index * 20 + 20)) as Oid,
     offset: offset.success,

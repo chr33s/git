@@ -15,6 +15,7 @@ import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { decodeObject, encodeObject, hashObject } from "../git/Format.ts";
 import { noPacks } from "../git/Packed.ts";
 import {
+  isOid,
   ObjectStore,
   type Oid,
   type ReflogEntry,
@@ -35,23 +36,19 @@ const notFound = (cause: unknown): boolean =>
 
 const pipeThrough = async (
   bytes: Uint8Array,
-  transform: { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> },
-) =>
-  new Uint8Array(
-    await new Response(
-      new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(transform),
-    ).arrayBuffer(),
+  transform: CompressionStream | DecompressionStream,
+) => {
+  // SAFETY: every view this adapter produces or is handed sits on a plain
+  // ArrayBuffer — nothing here allocates shared memory — and `Blob` insists
+  // on the distinction.
+  const source = bytes as Uint8Array<ArrayBuffer>;
+  return new Uint8Array(
+    await new Response(new Blob([source]).stream().pipeThrough(transform)).arrayBuffer(),
   );
+};
 
-const asPair = (stream: CompressionStream | DecompressionStream) =>
-  stream as unknown as {
-    readable: ReadableStream<Uint8Array>;
-    writable: WritableStream<Uint8Array>;
-  };
-
-const deflate = (bytes: Uint8Array) => pipeThrough(bytes, asPair(new CompressionStream("deflate")));
-const inflate = (bytes: Uint8Array) =>
-  pipeThrough(bytes, asPair(new DecompressionStream("deflate")));
+const deflate = (bytes: Uint8Array) => pipeThrough(bytes, new CompressionStream("deflate"));
+const inflate = (bytes: Uint8Array) => pipeThrough(bytes, new DecompressionStream("deflate"));
 
 /** Walk `a/b/c` to the parent directory handle plus the leaf name. */
 const parentOf = async (root: FileSystemDirectoryHandle, target: string, create: boolean) => {
@@ -80,6 +77,8 @@ const writeBytes = async (root: FileSystemDirectoryHandle, target: string, bytes
   const { directory, leaf } = await parentOf(root, target, true);
   const handle = await directory.getFileHandle(leaf, { create: true });
   const writable = await handle.createWritable();
+  // SAFETY: as in `pipeThrough`, the bytes are never backed by shared memory;
+  // the writable stream's chunk type just spells that out.
   await writable.write(bytes as Uint8Array<ArrayBuffer>);
   await writable.close();
 };
@@ -92,9 +91,6 @@ const removePath = async (root: FileSystemDirectoryHandle, target: string) => {
     if (!notFound(cause)) throw cause;
   }
 };
-
-const entriesOf = (directory: FileSystemDirectoryHandle) =>
-  (directory as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries();
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -129,12 +125,7 @@ export const objectStore = (
         tracedObjectStore("OPFS", {
           read,
           readStream: (oid) =>
-            read(oid).pipe(
-              Effect.map(
-                (object) =>
-                  Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
-              ),
-            ),
+            read(oid).pipe(Effect.map((object) => Stream.fromIterable([object.data]))),
           write: (object) =>
             Effect.gen(function* () {
               const oid = yield* hashObject(object);
@@ -170,17 +161,20 @@ export const objectStore = (
                   if (notFound(cause)) return [];
                   throw cause;
                 }
-                for await (const [prefix, entry] of entriesOf(objects)) {
+                for await (const [prefix, entry] of objects.entries()) {
                   if (entry.kind !== "directory") continue;
-                  for await (const [rest] of entriesOf(entry as FileSystemDirectoryHandle)) {
-                    oids.push(`${prefix}${rest}` as Oid);
+                  for await (const [rest] of entry.entries()) {
+                    // Fan-out directory plus file name is the oid; anything
+                    // else under `objects/` is not a loose object.
+                    const oid = `${prefix}${rest}`;
+                    if (isOid(oid)) oids.push(oid);
                   }
                 }
                 return oids;
               },
               catch: failure("list", "objects"),
             }).pipe(Effect.map(Stream.fromIterable)),
-          ) as Stream.Stream<Oid, StorageFailure>,
+          ),
         }),
       );
     }),
@@ -209,8 +203,10 @@ export const refStore = (
           catch: failure("write", target),
         });
 
+      // A loose ref holds nothing but an oid; a file that holds anything else
+      // is not a readable ref.
       const read = (name: string) =>
-        readText(name).pipe(Effect.map((value) => value as Oid | null));
+        readText(name).pipe(Effect.map((value) => (value !== null && isOid(value) ? value : null)));
 
       const head = readText("HEAD").pipe(
         Effect.map((value) => (value === null ? "refs/heads/main" : value.replace(/^ref:\s*/, ""))),
@@ -243,13 +239,15 @@ export const refStore = (
           try: async () => {
             const found: Array<readonly [string, Oid]> = [];
             const walk = async (directory: FileSystemDirectoryHandle, at: string) => {
-              for await (const [name, entry] of entriesOf(directory)) {
+              for await (const [name, entry] of directory.entries()) {
                 const full = `${at}/${name}`;
                 if (entry.kind === "directory") {
-                  await walk(entry as FileSystemDirectoryHandle, full);
+                  await walk(entry, full);
                 } else {
                   const value = await readBytes(root, full);
-                  if (value !== null) found.push([full, decoder.decode(value).trim() as Oid]);
+                  if (value === null) continue;
+                  const oid = decoder.decode(value).trim();
+                  if (isOid(oid)) found.push([full, oid]);
                 }
               }
             };
@@ -331,17 +329,18 @@ export const refStore = (
           reflog: (name) =>
             Effect.gen(function* () {
               const text = yield* readText(`logs/${name}`);
-              if (text === null) return [] as ReflogEntry[];
               const zero = "0".repeat(40);
+              if (text === null) return [];
               return text
                 .split("\n")
                 .filter((line) => line.length > 0)
                 .map((line): ReflogEntry => {
                   const [values = "", message = ""] = line.split("\t");
                   const [from = zero, to = zero, at = ""] = values.split(" ");
+                  // All-zeros is git's spelling for "no object on this side".
                   return {
-                    from: from === zero ? null : (from as Oid),
-                    to: to === zero ? null : (to as Oid),
+                    from: from === zero || !isOid(from) ? null : from,
+                    to: to === zero || !isOid(to) ? null : to,
                     at: new Date(at),
                     message,
                   };

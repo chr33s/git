@@ -38,7 +38,7 @@ const check = (condition: boolean, message: string): void => {
   if (!condition) throw new Error(message);
 };
 
-const equal = (actual: unknown, expected: unknown, what: string): void => {
+const equal = <A>(actual: A, expected: A, what: string): void => {
   check(
     actual === expected,
     `${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,

@@ -8,7 +8,7 @@ import * as GitRepository from "./Repository.ts";
 import { Hooks, Repository } from "./Repository.ts";
 import { EMPTY_TREE_OID, type Signature } from "./Format.ts";
 import { HookRejected } from "./Error.ts";
-import { RefStore } from "./Store.ts";
+import { type Oid, RefStore } from "./Store.ts";
 
 const alice: Signature = {
   name: "Alice",
@@ -29,7 +29,7 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore>) =>
           Layer.provideMerge(stores),
         ),
       ),
-    ) as Effect.Effect<A, E>,
+    ),
   );
 
 describe("Repository", () => {
@@ -236,7 +236,7 @@ describe("Repository.receive", () => {
     Effect.runPromise(
       effect.pipe(
         Effect.provide(GitRepository.layer.pipe(Layer.provide(hooks), Layer.provideMerge(stores))),
-      ) as Effect.Effect<A, E>,
+      ),
     );
 
   it("applies a batch and reports each ref", async () => {
@@ -331,9 +331,11 @@ describe("Repository.receive", () => {
       Effect.gen(function* () {
         const repository = yield* Repository;
         const refs = yield* RefStore;
+        // SAFETY: forty zeros are a well-formed oid; that it names no object is
+        // the point — the rejecting hook must fire before anything reads it.
         const failure = yield* Effect.flip(
           repository.receive([
-            { name: "refs/heads/a", value: "0".repeat(40) as never, expected: null },
+            { name: "refs/heads/a", value: "0".repeat(40) as Oid, expected: null },
           ]),
         );
         return { a: yield* refs.read("refs/heads/a"), failure };

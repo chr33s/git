@@ -27,7 +27,6 @@ import { chromium } from "playwright";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
 import { serve } from "../host/Node.ts";
 
 const projectRoot = path.join(import.meta.dirname, "..", "..");
@@ -132,6 +131,16 @@ const scenarioEntry = `
   };
 `;
 
+/** What `scenario` above resolves with, once the browser has run it. */
+interface ScenarioResult {
+  readonly reread: ReadonlyArray<string>;
+  readonly api: {
+    readonly refs: ReadonlyArray<{ readonly name: string; readonly oid: string }>;
+    readonly messages: ReadonlyArray<string>;
+  };
+  readonly clonedMessages: ReadonlyArray<string>;
+}
+
 /** Resolved once, at collection time, so the skip is a fact not a branch. */
 const hasChromium = await chromium
   .launch()
@@ -161,7 +170,7 @@ describe.skipIf(!hasChromium)("Client in real Chromium", () => {
               Layer.provide(nodeStores(path.join(root, "origin"))),
             ),
           ),
-        ) as unknown as Effect.Effect<Oid>,
+        ),
       );
 
       const bundle = await build({
@@ -179,17 +188,18 @@ describe.skipIf(!hasChromium)("Client in real Chromium", () => {
       await page.goto(server.url);
       await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
 
-      const result = (await page.evaluate(
+      // SAFETY: the script tag added above ran `scenarioEntry`, which installs
+      // `scenario` on the page's global and resolves with exactly the members
+      // `ScenarioResult` names.
+      const result = await page.evaluate(
         ([repo, oid]) =>
           (
-            globalThis as unknown as { scenario(repo: string, oid: string): Promise<unknown> }
+            globalThis as typeof globalThis & {
+              scenario(repo: string, oid: string): Promise<ScenarioResult>;
+            }
           ).scenario(repo, oid),
         ["origin", head] as const,
-      )) as {
-        reread: string[];
-        api: { refs: Array<{ name: string; oid: string }>; messages: string[] };
-        clonedMessages: string[];
-      };
+      );
 
       assert.deepEqual(result.reread, ["second from OPFS", "first from OPFS"]);
       assert.deepEqual(result.api.refs, [{ name: "refs/heads/main", oid: head }]);

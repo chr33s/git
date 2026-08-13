@@ -39,7 +39,7 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore | R
           Layer.provideMerge(stores),
         ),
       ),
-    ) as Effect.Effect<A, E>,
+    ),
   );
 
 /**
@@ -59,16 +59,16 @@ const history = Effect.gen(function* () {
     const tip = yield* repository.resolve("refs/heads/main");
     const base = tip === null ? undefined : (yield* repository.readCommit(tip)).tree;
     const story = `chapter ${index}\n${"the same long-running text, revised a little each time\n".repeat(Math.ceil(storySizes[index]! / 55))}`;
-    const tree = yield* repository.writeFiles({
-      ...(base === undefined ? {} : { base }),
-      changes: [
-        { path: "story.txt", content: encoder.encode(story) },
-        ...Array.from({ length: 12 }, (_, filler) => ({
-          path: `filler-${String(filler).padStart(2, "0")}.txt`,
-          content: encoder.encode(`filler ${filler} at commit ${index} `.padEnd(120, "x")),
-        })),
-      ],
-    });
+    const changes = [
+      { path: "story.txt", content: encoder.encode(story) },
+      ...Array.from({ length: 12 }, (_, filler) => ({
+        path: `filler-${String(filler).padStart(2, "0")}.txt`,
+        content: encoder.encode(`filler ${filler} at commit ${index} `.padEnd(120, "x")),
+      })),
+    ];
+    const tree = yield* base === undefined
+      ? repository.writeFiles({ changes })
+      : repository.writeFiles({ base, changes });
     yield* repository.commit({ branch: "main", tree, message: `commit ${index}`, author: alice });
     const files = yield* repository.listFiles(tree);
     storyOids.push(files.find((file) => file.path === "story.txt")!.oid);
@@ -146,6 +146,8 @@ describe("Maintenance.gc with repack", () => {
         // The exact case gc's tolerance comment promises to survive: a ref
         // whose target no store holds. The walk records the oid as seen but
         // never classifies it, so repack must neither pack nor trip on it.
+        // SAFETY: forty lowercase hex characters by construction, which is
+        // exactly what the Oid brand stands for.
         const fake = "a".repeat(40) as Oid;
         yield* refStore.apply([{ name: "refs/heads/dangling", value: fake, reason: "test" }]);
         const report = yield* repository.gc({ repack: true });

@@ -25,6 +25,7 @@ import { Repository } from "./Repository.ts";
 import type { Oid } from "./Store.ts";
 import {
   entryFor,
+  type FileStat,
   IndexStore,
   modeString,
   REGULAR,
@@ -209,9 +210,24 @@ export const move = Effect.fn("Checkout.move")(function* (from: string, to: stri
   yield* work.remove(source);
 
   const moved = yield* work.stat(target);
+  // A work tree that cannot stat what it just wrote still gets a real entry:
+  // zeroed stat fields only mean the cache is cold, so the next `status`
+  // re-hashes the file instead of trusting the cache.
+  const cold = {
+    size: content.length,
+    mtimeSeconds: 0,
+    mtimeNanos: 0,
+    ctimeSeconds: 0,
+    ctimeNanos: 0,
+    device: 0,
+    inode: 0,
+    uid: 0,
+    gid: 0,
+    mode: entry.mode,
+  } satisfies FileStat;
   const next = addEntry(
     removeEntry(entries, source),
-    entryFor(target, entry.oid, moved ?? { ...(stat ?? ({} as never)), mode: entry.mode }),
+    entryFor(target, entry.oid, moved ?? { ...(stat ?? cold), mode: entry.mode }),
   );
   yield* index.save(next);
 
@@ -373,13 +389,10 @@ export const commit = Effect.fn("Checkout.commit")(function* (input: {
   );
 
   const branch = yield* repository.head;
-  const oid = yield* repository.commit({
-    branch,
-    tree,
-    message: input.message,
-    author: input.author,
-    ...(input.expected === undefined ? {} : { expected: input.expected }),
-  });
+  const request = { branch, tree, message: input.message, author: input.author };
+  const oid = yield* input.expected === undefined
+    ? repository.commit(request)
+    : repository.commit({ ...request, expected: input.expected });
 
   return { oid, tree, files: entries.length };
 });
