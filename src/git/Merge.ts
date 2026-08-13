@@ -282,6 +282,8 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
      * the object is not here — so it travels as the oid it already is, and
      * the tree writer puts that oid back rather than hashing a blob.
      */
+    // SAFETY: a gitlink change carries no content, and `TreeChange` spells
+    // that as `content: null` beside the oid — which is what this builds.
     const taking = (side: TreeSideFile) =>
       isGitlink(side.mode)
         ? Effect.succeed({ path, content: null, oid: side.oid, mode: side.mode } as TreeChange)

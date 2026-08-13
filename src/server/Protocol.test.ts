@@ -46,7 +46,7 @@ const alice: Signature = {
 
 /** Each test gets its own stores, so there is no shared state to reset. */
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(live)) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(live)));
 
 /** main: a <- b <- c, plus an unrelated root on `side`. */
 const history = Effect.gen(function* () {
@@ -68,7 +68,7 @@ const body = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayBuffer> => {
     out.set(part, offset);
     offset += part.length;
   }
-  return out as Uint8Array<ArrayBuffer>;
+  return out;
 };
 
 const v0Request = (input: {
@@ -106,7 +106,12 @@ const v2Request = (args: ReadonlyArray<string>): Request =>
  * time it says so the four bytes are gone — here those four bytes are the
  * pack's own magic, which is exactly what the assertions need to see.
  */
-const linesOf = (bytes: Uint8Array): { lines: string[]; sawPack: boolean } => {
+interface Preamble {
+  readonly lines: ReadonlyArray<string>;
+  readonly sawPack: boolean;
+}
+
+const linesOf = (bytes: Uint8Array): Preamble => {
   const lines: string[] = [];
   let at = 0;
   while (at + 4 <= bytes.length) {
@@ -229,99 +234,93 @@ describe("Protocol negotiation", () => {
 });
 
 describe("receive-pack", () => {
-  it.live(
-    "refuses a ref name per-ref and applies the rest of the push",
-    () =>
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const refs = yield* RefStore;
+  it.live("refuses a ref name per-ref and applies the rest of the push", () =>
+    Effect.gen(function* () {
+      const repository = yield* Repository;
+      const refs = yield* RefStore;
 
-        const commit = yield* repository.commit({
-          branch: "main",
-          tree: EMPTY_TREE_OID,
-          message: "one",
-          author: alice,
-        });
-        yield* repository.setRef({ name: "refs/heads/gone", to: commit });
+      const commit = yield* repository.commit({
+        branch: "main",
+        tree: EMPTY_TREE_OID,
+        message: "one",
+        author: alice,
+      });
+      yield* repository.setRef({ name: "refs/heads/gone", to: commit });
 
-        // One delete this server accepts, and one command naming a file in the
-        // repository root rather than a ref. `HEAD` passes git's character
-        // rules, which is exactly why the check has to be about *where* the
-        // name points and not only about how it is spelled.
-        const response = yield* Protocol.receivePack(
-          push([`${commit} ${ZERO} refs/heads/gone\n`, `${ZERO} ${commit} HEAD\n`]),
-        );
-        const report = decoder.decode(
-          new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
-        );
+      // One delete this server accepts, and one command naming a file in the
+      // repository root rather than a ref. `HEAD` passes git's character
+      // rules, which is exactly why the check has to be about *where* the
+      // name points and not only about how it is spelled.
+      const response = yield* Protocol.receivePack(
+        push([`${commit} ${ZERO} refs/heads/gone\n`, `${ZERO} ${commit} HEAD\n`]),
+      );
+      const report = decoder.decode(
+        new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+      );
 
-        assert.equal(response.status, 200);
-        assert.ok(report.includes("unpack ok"), report);
-        assert.ok(report.includes("ok refs/heads/gone"), report);
-        assert.ok(report.includes("ng HEAD funny refname"), report);
+      assert.equal(response.status, 200);
+      assert.ok(report.includes("unpack ok"), report);
+      assert.ok(report.includes("ok refs/heads/gone"), report);
+      assert.ok(report.includes("ng HEAD funny refname"), report);
 
-        // The good command took effect and the refused one did not: HEAD is
-        // still the symbolic ref it was, not a file holding an oid.
-        assert.equal(yield* refs.read("refs/heads/gone"), null);
-        assert.equal(yield* repository.head, "refs/heads/main");
-      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+      // The good command took effect and the refused one did not: HEAD is
+      // still the symbolic ref it was, not a file holding an oid.
+      assert.equal(yield* refs.read("refs/heads/gone"), null);
+      assert.equal(yield* repository.head, "refs/heads/main");
+    }).pipe(Effect.provide(live)),
   );
 
-  it.live(
-    "reads the pack of a push it refuses, so the client sees the report",
-    () =>
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const commit = yield* repository.commit({
-          branch: "main",
-          tree: EMPTY_TREE_OID,
-          message: "one",
-          author: alice,
-        });
+  it.live("reads the pack of a push it refuses, so the client sees the report", () =>
+    Effect.gen(function* () {
+      const repository = yield* Repository;
+      const commit = yield* repository.commit({
+        branch: "main",
+        tree: EMPTY_TREE_OID,
+        message: "one",
+        author: alice,
+      });
 
-        // A create for a refused name: the client has already begun sending
-        // its pack. Answering without reading it abandons the request body,
-        // and the client sees a torn-down connection instead of this report.
-        const body = `${pktLine(`${ZERO} ${commit} HEAD\n`)}0000PACK-and-then-some-bytes`;
-        const response = yield* Protocol.receivePack(
-          new Request("http://git.test/r/git-receive-pack", { method: "POST", body }),
-        );
-        const report = decoder.decode(
-          new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
-        );
+      // A create for a refused name: the client has already begun sending
+      // its pack. Answering without reading it abandons the request body,
+      // and the client sees a torn-down connection instead of this report.
+      const body = `${pktLine(`${ZERO} ${commit} HEAD\n`)}0000PACK-and-then-some-bytes`;
+      const response = yield* Protocol.receivePack(
+        new Request("http://git.test/r/git-receive-pack", { method: "POST", body }),
+      );
+      const report = decoder.decode(
+        new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+      );
 
-        assert.equal(response.status, 200);
-        assert.ok(report.includes("ng HEAD"), report);
-      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+      assert.equal(response.status, 200);
+      assert.ok(report.includes("ng HEAD"), report);
+    }).pipe(Effect.provide(live)),
   );
 
-  it.live(
-    "fails an atomic push whole when one of its names is refused",
-    () =>
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const refs = yield* RefStore;
+  it.live("fails an atomic push whole when one of its names is refused", () =>
+    Effect.gen(function* () {
+      const repository = yield* Repository;
+      const refs = yield* RefStore;
 
-        const commit = yield* repository.commit({
-          branch: "main",
-          tree: EMPTY_TREE_OID,
-          message: "one",
-          author: alice,
-        });
-        yield* repository.setRef({ name: "refs/heads/gone", to: commit });
+      const commit = yield* repository.commit({
+        branch: "main",
+        tree: EMPTY_TREE_OID,
+        message: "one",
+        author: alice,
+      });
+      yield* repository.setRef({ name: "refs/heads/gone", to: commit });
 
-        const response = yield* Protocol.receivePack(
-          push([`${commit} ${ZERO} refs/heads/gone\0atomic\n`, `${ZERO} ${commit} HEAD\n`]),
-        );
-        const report = decoder.decode(
-          new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
-        );
+      const response = yield* Protocol.receivePack(
+        push([`${commit} ${ZERO} refs/heads/gone\0atomic\n`, `${ZERO} ${commit} HEAD\n`]),
+      );
+      const report = decoder.decode(
+        new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+      );
 
-        assert.ok(report.includes("ng refs/heads/gone"), report);
-        assert.ok(report.includes("ng HEAD"), report);
-        // Atomic means the delete did not happen either.
-        assert.equal(yield* refs.read("refs/heads/gone"), commit);
-      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+      assert.ok(report.includes("ng refs/heads/gone"), report);
+      assert.ok(report.includes("ng HEAD"), report);
+      // Atomic means the delete did not happen either.
+      assert.equal(yield* refs.read("refs/heads/gone"), commit);
+    }).pipe(Effect.provide(live)),
   );
 
   it.live(
@@ -377,7 +376,7 @@ describe("receive-pack", () => {
         assert.equal(yield* refs.read("refs/heads/gone"), null);
         // …without the 256 MiB behind it ever being held at once.
         assert.ok(peak - before < 64 * 1024 * 1024, `peak grew by ${peak - before} bytes`);
-      }).pipe(Effect.provide(live)) as Effect.Effect<void>,
+      }).pipe(Effect.provide(live)),
     { timeout: 60_000 },
   );
 
@@ -410,10 +409,7 @@ describe("receive-pack", () => {
               new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
             ),
           };
-        }).pipe(Effect.provide(onDisk)) as unknown as Effect.Effect<{
-          commit: string;
-          text: string;
-        }>,
+        }).pipe(Effect.provide(onDisk)),
       );
 
       // The HEAD line is there, and no `symref=HEAD:<oid>` claims the commit
@@ -465,7 +461,7 @@ describe("receive-pack", () => {
             }
           }
           return said;
-        }).pipe(Effect.provide(onDisk)) as Effect.Effect<string[]>,
+        }).pipe(Effect.provide(onDisk)),
       );
 
       // Every one refused per-ref, as a report the client can read — not as a
@@ -515,7 +511,7 @@ describe("receive-pack", () => {
               new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
             ),
           };
-        }).pipe(Effect.provide(onDisk)) as Effect.Effect<{ status: number; text: string }>,
+        }).pipe(Effect.provide(onDisk)),
       );
 
       assert.equal(report.status, 200);

@@ -113,7 +113,7 @@ export const concatBytes = (parts: ReadonlyArray<Uint8Array>): Uint8Array<ArrayB
     out.set(part, offset);
     offset += part.length;
   }
-  return out as Uint8Array<ArrayBuffer>;
+  return out;
 };
 
 export const bytesToHex = (bytes: Uint8Array): string => {
@@ -167,6 +167,8 @@ export const hashObject = (object: RawObject): Effect.Effect<Oid> =>
   Effect.promise(async () => {
     const framed = encodeObject(object);
     const digest = await crypto.subtle.digest("SHA-1", framed.slice().buffer);
+    // SAFETY: a SHA-1 digest is twenty bytes, so its hex form is exactly the
+    // forty lowercase hex characters the Oid brand names.
     return bytesToHex(new Uint8Array(digest)) as Oid;
   });
 
@@ -260,20 +262,14 @@ export const parseTag = (data: Uint8Array): Result.Result<TagInfo, Invalid> => {
 
   // git allows a tag without a tagger — older repositories have them.
   const taggerLine = lines.find((line) => line.startsWith("tagger "))?.slice(7);
-  let tagger: Signature | undefined;
-  if (taggerLine !== undefined) {
-    const parsed = parseSignature(taggerLine, "tagger");
-    if (Result.isFailure(parsed)) return Result.fail(parsed.failure);
-    tagger = parsed.success;
+  if (taggerLine === undefined) {
+    return Result.succeed({ object, type, tag: name, message });
   }
 
-  return Result.succeed({
-    object,
-    type,
-    tag: name,
-    ...(tagger === undefined ? {} : { tagger }),
-    message,
-  });
+  const tagger = parseSignature(taggerLine, "tagger");
+  if (Result.isFailure(tagger)) return Result.fail(tagger.failure);
+
+  return Result.succeed({ object, type, tag: name, tagger: tagger.success, message });
 };
 
 export const encodeTag = (tag: TagInfo): Uint8Array => {
@@ -308,12 +304,14 @@ export const parseTree = (data: Uint8Array): Result.Result<ReadonlyArray<TreeEnt
     // carries nothing extra.
     const reversible = compareBytes(encoder.encode(name), bytes) === 0;
 
-    entries.push({
+    // SAFETY: the bound check above guarantees twenty bytes after the NUL,
+    // and twenty bytes hex-encode to the forty characters the Oid brand names.
+    const entry = {
       mode: decoder.decode(data.subarray(offset, space)),
       name,
       oid: bytesToHex(data.subarray(nul + 1, nul + 21)) as Oid,
-      ...(reversible ? {} : { raw: new Uint8Array(bytes) }),
-    });
+    };
+    entries.push(reversible ? entry : { ...entry, raw: new Uint8Array(bytes) });
     offset = nul + 21;
   }
 
@@ -359,7 +357,10 @@ export const encodeTree = (entries: ReadonlyArray<TreeEntry>): Uint8Array => {
 };
 
 /** The empty tree, which git special-cases and every first commit needs. */
-export const EMPTY_TREE_OID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904" as Oid;
+export const EMPTY_TREE_OID =
+  // SAFETY: the literal is git's well-known empty-tree id, forty lowercase
+  // hex characters as the Oid brand requires.
+  "4b825dc642cb6eb9a060e54bf8d69288fbee4904" as Oid;
 
 const ZERO_OID = "0".repeat(40);
 
@@ -411,8 +412,10 @@ export const parseReflogLine = (line: string): ReflogLine | null => {
       : new Date(fields[2] ?? "");
 
   return {
-    from: from === ZERO_OID ? null : (from as Oid),
-    to: to === ZERO_OID ? null : (to as Oid),
+    // The all-zero oid is this format's "no ref on this side"; anything else
+    // that fails to parse as an oid is a mangled line and reads the same way.
+    from: from === ZERO_OID || !isOid(from) ? null : from,
+    to: to === ZERO_OID || !isOid(to) ? null : to,
     at,
     message,
   };

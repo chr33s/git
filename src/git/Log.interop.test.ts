@@ -99,6 +99,8 @@ describe.skipIf(!hasGit)("log, against git", () => {
     Effect.runPromise(
       Effect.gen(function* () {
         const repository = yield* Repository;
+        // SAFETY: `from` always comes from `git rev-parse`, whose output is a
+        // forty-hex oid.
         const commits = yield* Stream.runCollect(repository.log(from as Oid, options));
         return commits.map((entry) => entry.oid);
       }).pipe(

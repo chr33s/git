@@ -8,7 +8,7 @@ import * as GitRepository from "./Repository.ts";
 import { Hooks, Repository } from "./Repository.ts";
 import { EMPTY_TREE_OID, encodeTree, type Signature } from "./Format.ts";
 import { HookRejected } from "./Error.ts";
-import { ObjectStore, RefStore } from "./Store.ts";
+import { ObjectStore, type Oid, RefStore } from "./Store.ts";
 
 const alice: Signature = {
   name: "Alice",
@@ -29,7 +29,7 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore | Obje
           Layer.provideMerge(stores),
         ),
       ),
-    ) as Effect.Effect<A, E>,
+    ),
   );
 
 describe("Repository", () => {
@@ -236,7 +236,7 @@ describe("Repository.receive", () => {
     Effect.runPromise(
       effect.pipe(
         Effect.provide(GitRepository.layer.pipe(Layer.provide(hooks), Layer.provideMerge(stores))),
-      ) as Effect.Effect<A, E>,
+      ),
     );
 
   it("applies a batch and reports each ref", async () => {
@@ -331,9 +331,11 @@ describe("Repository.receive", () => {
       Effect.gen(function* () {
         const repository = yield* Repository;
         const refs = yield* RefStore;
+        // SAFETY: forty zeros are a well-formed oid; that it names no object is
+        // the point — the rejecting hook must fire before anything reads it.
         const failure = yield* Effect.flip(
           repository.receive([
-            { name: "refs/heads/a", value: "0".repeat(40) as never, expected: null },
+            { name: "refs/heads/a", value: "0".repeat(40) as Oid, expected: null },
           ]),
         );
         return { a: yield* refs.read("refs/heads/a"), failure };
@@ -664,8 +666,9 @@ describe("Repository.receive", () => {
       Effect.gen(function* () {
         const repository = yield* Repository;
         const blob = yield* repository.writeBlob(new TextEncoder().encode("top\n"));
-        // A gitlink names a commit in *another* repository, so this oid is
-        // deliberately one no object here will ever have.
+        // SAFETY: a gitlink names a commit in *another* repository, so this
+        // oid is deliberately one no object here will ever have — `never`
+        // states that nothing in this store answers to it.
         const submodule = "1".repeat(40) as never;
         const base = yield* repository.writeTree([
           { mode: "100644", name: "readme.md", oid: blob },
@@ -702,6 +705,7 @@ describe("Repository.receive", () => {
         // repository fails on an object it was never supposed to have.
         const tree = yield* repository.writeTree([
           { mode: "100644", name: "readme.md", oid: blob },
+          // SAFETY: as above — a gitlink's oid belongs to another repository.
           { mode: "0160000", name: "vendor", oid: "1".repeat(40) as never },
         ]);
         const oid = yield* repository.commit({

@@ -21,7 +21,13 @@ import { PackCorrupt } from "./Error.ts";
 import { applyDelta } from "./Pack.ts";
 import type { ObjectType, Oid, RawObject } from "./Store.ts";
 
-const CODE_TYPES: Record<number, ObjectType> = { 1: "commit", 2: "tree", 3: "blob", 4: "tag" };
+/** Keyed by the pack's type code, which is why lookups can miss. */
+const CODE_TYPES = new Map<number, ObjectType>([
+  [1, "commit"],
+  [2, "tree"],
+  [3, "blob"],
+  [4, "tag"],
+]);
 const OFS_DELTA = 6;
 const REF_DELTA = 7;
 
@@ -118,8 +124,12 @@ const parseHeader = (bytes: Uint8Array, at: number): Header => {
   }
 
   if (code === REF_DELTA) {
-    const oid = bytesToHex(bytes.subarray(position, position + 20)) as Oid;
-    if (oid.length !== 40) throw corrupt("ref-delta base oid runs past the window", at);
+    const hex = bytesToHex(bytes.subarray(position, position + 20));
+    if (hex.length !== 40) throw corrupt("ref-delta base oid runs past the window", at);
+    // SAFETY: the length check above proved the window held all 20 base-oid
+    // bytes, and hex-encoding them yields exactly the 40 lowercase hex
+    // characters an oid is.
+    const oid = hex as Oid;
     position += 20;
     return { code, size, length: position, baseOid: oid };
   }
@@ -179,7 +189,7 @@ export const readAt = async (
     return { type: base.type, data: applied.success };
   }
 
-  const type = CODE_TYPES[header.code];
+  const type = CODE_TYPES.get(header.code);
   if (type === undefined) throw corrupt(`unknown object type ${header.code}`, offset);
   if (data.length !== header.size) {
     throw corrupt(`header says ${header.size} bytes, inflated to ${data.length}`, offset);

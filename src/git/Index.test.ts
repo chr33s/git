@@ -40,6 +40,8 @@ const expectFailure = <A, E>(result: Result.Result<A, E>): E => {
   return result.failure;
 };
 
+// SAFETY: a small non-negative seed prints as lowercase hex and pads to the
+// forty characters the Oid brand names.
 const oid = (seed: number) => seed.toString(16).padStart(40, "0") as Oid;
 
 const entry = (overrides: Partial<IndexEntry> & { readonly path: string }): IndexEntry => ({
@@ -209,6 +211,8 @@ describe.skipIf(!hasGit)("Index interop with git", () => {
         { path: "run.sh", content: "#!/bin/sh\n", mode: 0o100755 },
         { path: `${"n".repeat(120)}.txt`, content: "long\n", mode: 0o100644 },
       ];
+      // SAFETY: `git hash-object` prints the forty-hex oid of the blob it
+      // just wrote, which is exactly the Oid brand's domain.
       const entries = files.map((file) =>
         entry({
           path: file.path,
@@ -271,7 +275,7 @@ describe.skipIf(!hasGit)("Index interop with git", () => {
       assert.deepEqual(
         decoded.map((found) => ({
           mode: found.mode.toString(8),
-          oid: found.oid as string,
+          oid: found.oid,
           path: found.path,
         })),
         listed,

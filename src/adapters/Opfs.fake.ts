@@ -28,7 +28,7 @@ class FakeFile {
   getFile() {
     const bytes = this.#data;
     return Promise.resolve({
-      arrayBuffer: () => Promise.resolve(bytes.slice().buffer as ArrayBuffer),
+      arrayBuffer: () => Promise.resolve(bytes.slice().buffer),
     });
   }
 
@@ -88,4 +88,9 @@ class FakeDirectory {
   }
 }
 
-export const fakeRoot = () => new FakeDirectory() as unknown as FileSystemDirectoryHandle;
+export const fakeRoot = () => {
+  // SAFETY: the fake implements exactly the directory surface
+  // `adapters/Opfs.ts` reaches for; the intersection lets it stand in for the
+  // DOM handle type that node never provides at runtime.
+  return new FakeDirectory() as FakeDirectory & FileSystemDirectoryHandle;
+};

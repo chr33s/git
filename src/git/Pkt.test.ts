@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
+import type { PackCorrupt } from "./Error.ts";
 import { bandChunks, pkt, PktReader } from "./Pkt.ts";
 
 const encoder = new TextEncoder();
@@ -8,7 +9,7 @@ const decoder = new TextDecoder();
 
 const stream = (...chunks: ReadonlyArray<Uint8Array | string>): AsyncIterable<Uint8Array> =>
   (async function* () {
-    for (const chunk of chunks) yield typeof chunk === "string" ? encoder.encode(chunk) : chunk;
+    for (const chunk of chunks) yield chunk instanceof Uint8Array ? chunk : encoder.encode(chunk);
   })();
 
 describe("PktReader", () => {
@@ -16,6 +17,8 @@ describe("PktReader", () => {
     const reader = new PktReader(stream(pkt("want\n"), "0000", "0001", "0002"));
 
     const first = await reader.next();
+    // SAFETY: the reader answers a payload packet as its bytes and the
+    // special packets as strings; this stream opens with a payload.
     assert.equal(decoder.decode(first as Uint8Array), "want\n");
     assert.equal(await reader.next(), "flush");
     assert.equal(await reader.next(), "delim");
@@ -29,6 +32,7 @@ describe("PktReader", () => {
       stream(line.subarray(0, 2), line.subarray(2, 7), line.subarray(7)),
     );
 
+    // SAFETY: as above — the next packet in this stream is a payload.
     assert.equal(decoder.decode((await reader.next()) as Uint8Array), "have 1234\n");
   });
 
@@ -52,7 +56,7 @@ describe("PktReader", () => {
 
     const failure = await reader.next().then(
       () => null,
-      (error: unknown) => error as { _tag?: string },
+      (error: PackCorrupt) => error,
     );
     assert.equal(failure?._tag, "PackCorrupt");
   });

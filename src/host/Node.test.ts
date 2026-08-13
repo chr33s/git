@@ -19,13 +19,26 @@ import { serve, type Server } from "./Node.ts";
 let root: string;
 let server: Server;
 
-const post = async (url: string, body: unknown) => {
+/** What these tests send: a blob to write, or nothing at all for `gc`. */
+interface PostBody {
+  readonly content?: string;
+}
+
+/** The fields these tests read back; the endpoints answer with more. */
+interface PostReply {
+  readonly oid?: string;
+  readonly removed?: ReadonlyArray<string>;
+}
+
+const post = async (url: string, body: PostBody) => {
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  // SAFETY: these endpoints answer JSON objects, and `PostReply` claims only
+  // the two optional fields the assertions below read.
+  return { status: response.status, body: (await response.json()) as PostReply };
 };
 
 beforeAll(async () => {
@@ -47,7 +60,7 @@ describe("the per-repository gate", () => {
     const big = await post(`${base}/blob`, { content: "x".repeat(4_000_000) });
     assert.equal(big.status, 200);
 
-    const stalled = await fetch(`${base}/blob/${String(big.body["oid"])}`);
+    const stalled = await fetch(`${base}/blob/${String(big.body.oid)}`);
     assert.equal(stalled.status, 200);
 
     try {
@@ -65,11 +78,11 @@ describe("the per-repository gate", () => {
     const base = `${server.url}/collected`;
 
     const orphan = await post(`${base}/blob`, { content: "unreferenced\n" });
-    const read = await fetch(`${base}/blob/${String(orphan.body["oid"])}`);
+    const read = await fetch(`${base}/blob/${String(orphan.body.oid)}`);
     await read.arrayBuffer();
 
     const swept = await post(`${base}/gc`, {});
     assert.equal(swept.status, 200);
-    assert.deepEqual(swept.body["removed"], [orphan.body["oid"]]);
+    assert.deepEqual(swept.body.removed, [orphan.body.oid]);
   });
 });

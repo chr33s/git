@@ -18,13 +18,12 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
-import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Predicate } from "effect";
 
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -80,7 +79,7 @@ const layerFor = (dir: string) =>
   GitRepository.layer.pipe(Layer.provide(GitRepository.hooksNoop), Layer.provide(stores(dir)));
 
 const inRepo = <A, E>(dir: string, effect: Effect.Effect<A, E, Repository>): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provide(layerFor(dir))) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(layerFor(dir))));
 
 /** One commit on `main`, appended to whatever is already there. */
 const commitFile = (dir: string, file: string, content: string, message: string): Promise<Oid> =>
@@ -89,10 +88,14 @@ const commitFile = (dir: string, file: string, content: string, message: string)
     Effect.gen(function* () {
       const repository = yield* Repository;
       const parent = yield* repository.resolve("refs/heads/main");
-      const tree = yield* repository.writeFiles({
-        ...(parent === null ? {} : { base: (yield* repository.readCommit(parent)).tree }),
-        changes: [{ path: file, content: encoder.encode(content) }],
-      });
+      const changes = [{ path: file, content: encoder.encode(content) }];
+      const tree =
+        parent === null
+          ? yield* repository.writeFiles({ changes })
+          : yield* repository.writeFiles({
+              base: (yield* repository.readCommit(parent)).tree,
+              changes,
+            });
       return yield* repository.commit({ branch: "main", tree, message, author });
     }),
   );
@@ -102,7 +105,7 @@ const fetchInto = (dir: string, url: string): Promise<FetchResult> =>
     Effect.gen(function* () {
       const target = { objects: yield* ObjectStore, refs: yield* RefStore };
       return yield* fetchRepository({ url, stores: target });
-    }).pipe(Effect.provide(stores(dir))) as Effect.Effect<FetchResult>,
+    }).pipe(Effect.provide(stores(dir))),
   );
 
 const refsOf = (dir: string): Promise<ReadonlyArray<readonly [string, Oid]>> =>
@@ -122,7 +125,7 @@ const setHead = (dir: string, ref: string): Promise<void> =>
   Effect.runPromise(
     Effect.gen(function* () {
       yield* (yield* RefStore).setHead(ref);
-    }).pipe(Effect.provide(stores(dir))) as Effect.Effect<void>,
+    }).pipe(Effect.provide(stores(dir))),
   );
 
 /** The object count in a packfile, or `null` when the bytes carry no pack. */
@@ -162,12 +165,11 @@ const capturing = async <A>(
   const packs: number[] = [];
 
   const patched: typeof globalThis.fetch = async (input, init) => {
-    const target =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : (input as Request).url;
+    const target = Predicate.isString(input)
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
     if (!target.endsWith("/git-upload-pack")) return original(input, init);
 
     const body = init?.body;
@@ -420,9 +422,14 @@ const httpBackend = async (projectRoot: string): Promise<Server> => {
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
   });
-  const { port } = server.address() as AddressInfo;
+  // A TCP listener's address is always the object form; the string form is
+  // for pipes and unix sockets, and `null` for a server not yet listening.
+  const address = server.address();
+  if (address === null || Predicate.isString(address)) {
+    throw new Error("the backend host did not bind a TCP port");
+  }
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: `http://127.0.0.1:${address.port}`,
     close: () =>
       new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

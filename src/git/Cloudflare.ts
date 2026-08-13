@@ -25,6 +25,7 @@ import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
   checkHeadTarget,
   checkRefNames,
+  isOid,
   ObjectStore,
   type ObjectType,
   type Oid,
@@ -75,7 +76,9 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
       const typeOf = (object: R2Object, oid: Oid) => {
         const type = object.customMetadata?.["type"];
         return type === "blob" || type === "tree" || type === "commit" || type === "tag"
-          ? Effect.succeed(type as ObjectType)
+          ? // Stated as `ObjectType` so inference does not widen the narrowed
+            // literals back to `string`.
+            Effect.succeed<ObjectType>(type)
           : Effect.fail(new ObjectNotFound({ oid }));
       };
 
@@ -96,8 +99,10 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
         readStream: (oid) =>
           get(oid).pipe(
             Effect.map((object) =>
-              Stream.fromReadableStream({
-                evaluate: () => object.body as ReadableStream<Uint8Array>,
+              // The element type is stated up front because workerd leaves R2
+              // bodies untyped; what comes out of a body is always bytes.
+              Stream.fromReadableStream<Uint8Array, StorageFailure>({
+                evaluate: () => object.body,
                 onError: failure("readStream", key(oid)),
               }),
             ),
@@ -113,7 +118,7 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
 
             yield* Effect.tryPromise({
               try: () =>
-                bucket.put(key(oid), object.data as unknown as ArrayBuffer, {
+                bucket.put(key(oid), object.data, {
                   customMetadata: { type: object.type },
                 }),
               catch: failure("write", key(oid)),
@@ -127,26 +132,26 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
             try: () => bucket.delete(key(oid)),
             catch: failure("delete", key(oid)),
           }),
-        list: Stream.paginate(undefined as string | undefined, (cursor) =>
-          Effect.tryPromise({
-            try: () =>
-              bucket.list({
-                prefix: `${repo}/objects/`,
-                ...(cursor === undefined ? {} : { cursor }),
-              }),
+        list: Stream.paginate<string | undefined, Oid, StorageFailure>(undefined, (cursor) => {
+          const options: R2ListOptions = { prefix: `${repo}/objects/` };
+          if (cursor !== undefined) options.cursor = cursor;
+          return Effect.tryPromise({
+            try: () => bucket.list(options),
             catch: failure("list", repo),
           }).pipe(
             Effect.map(
               (page) =>
                 [
-                  page.objects.map(
-                    (object) => object.key.slice(object.key.lastIndexOf("/") + 1) as Oid,
-                  ),
+                  // Every key under the prefix ends in the oid it was written
+                  // under; anything else is not an object and is not listed.
+                  page.objects
+                    .map((object) => object.key.slice(object.key.lastIndexOf("/") + 1))
+                    .filter(isOid),
                   page.truncated ? Option.some(page.cursor) : Option.none<string>(),
                 ] as const,
             ),
-          ),
-        ),
+          );
+        }),
       };
 
       return ObjectStore.of(packed(loose, packs, "Cloudflare"));
@@ -171,7 +176,9 @@ export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] =>
         let cursor: string | undefined;
 
         do {
-          const page = await bucket.list({ prefix, ...(cursor === undefined ? {} : { cursor }) });
+          const options: R2ListOptions = { prefix };
+          if (cursor !== undefined) options.cursor = cursor;
+          const page = await bucket.list(options);
           for (const entry of page.objects) {
             if (!entry.key.endsWith(".idx")) continue;
             const name = entry.key.slice(prefix.length, -4);
@@ -211,8 +218,8 @@ export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] =>
         try: async () => {
           // Pack before index, so a reader never sees an index pointing into
           // bytes that are not there yet.
-          await bucket.put(`${prefix}${name}.pack`, pack as unknown as ArrayBuffer);
-          await bucket.put(`${prefix}${name}.idx`, index as unknown as ArrayBuffer);
+          await bucket.put(`${prefix}${name}.pack`, pack);
+          await bucket.put(`${prefix}${name}.idx`, index);
         },
         catch: failure("packs.write", prefix),
       }),
@@ -265,7 +272,10 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
         const rows = sql
           .exec<{ oid: string }>(`SELECT oid FROM refs WHERE repo = ? AND name = ?`, repo, name)
           .toArray();
-        return (rows[0]?.oid ?? null) as Oid | null;
+        const oid = rows[0]?.oid;
+        // Only `apply` writes this table and it only writes oids, so a row
+        // that does not hold one reads as a missing ref, not as an oid.
+        return oid !== undefined && isOid(oid) ? oid : null;
       };
 
       const read = (name: string) =>
@@ -302,7 +312,10 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
                   )
                   .toArray()
                   .filter((row) => prefix === undefined || row.name.startsWith(prefix))
-                  .map((row) => [row.name, row.oid as Oid] as const),
+                  // The oid column is only ever written by `apply`, but the
+                  // filter keeps a mangled row out of the list instead of
+                  // dressing it up as an oid.
+                  .flatMap((row) => (isOid(row.oid) ? [[row.name, row.oid] as const] : [])),
               catch: failure("list", repo),
             }),
           apply: (updates, options) =>
@@ -391,9 +404,11 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
                     name,
                   )
                   .toArray()
+                  // A null column is "no ref on this side"; a non-oid value in
+                  // a non-null column is a mangled row and reads the same way.
                   .map((row): ReflogEntry => ({
-                    from: row.old_oid as Oid | null,
-                    to: row.new_oid as Oid | null,
+                    from: row.old_oid !== null && isOid(row.old_oid) ? row.old_oid : null,
+                    to: row.new_oid !== null && isOid(row.new_oid) ? row.new_oid : null,
                     at: new Date(row.at),
                     message: row.message,
                   })),

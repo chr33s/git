@@ -13,6 +13,8 @@ import { Effect } from "effect";
 
 import { checkRefAddress, checkRefName, checkRefNames, type Oid } from "./Store.ts";
 
+// SAFETY: forty lowercase hex characters by construction, which is exactly
+// what the Oid brand stands for.
 const oid = "a".repeat(40) as Oid;
 
 describe("ref names", () => {

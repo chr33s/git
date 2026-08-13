@@ -45,6 +45,8 @@ describe("Git LFS", () => {
       body: JSON.stringify({ operation, transfers: ["basic"], objects }),
     });
     assert.equal(response.headers.get("content-type"), MEDIA_TYPE);
+    // SAFETY: the server under test speaks the batch protocol; a reply that
+    // does not, fails the assertions each test makes on these fields.
     return { status: response.status, body: (await response.json()) as { objects: BatchObject[] } };
   };
 
@@ -66,9 +68,10 @@ describe("Git LFS", () => {
     const asked = await batch("r", "upload", [{ oid, size: content.length }]);
     const action = asked.body.objects[0]!;
     assert.equal(action.oid, oid);
-    assert.equal(typeof action.actions?.upload?.href, "string");
+    const target = action.actions?.upload?.href;
+    assert.ok(target !== undefined, "the batch reply offers an upload href");
 
-    const put = await fetch(action.actions!.upload!.href, { method: "PUT", body: content });
+    const put = await fetch(target, { method: "PUT", body: content });
     assert.equal(put.status, 200);
 
     // Asking again offers no action: the object is already here, which is
@@ -79,9 +82,9 @@ describe("Git LFS", () => {
 
     const download = await batch("r", "download", [{ oid, size: content.length }]);
     const href = download.body.objects[0]!.actions?.download?.href;
-    assert.equal(typeof href, "string");
+    assert.ok(href !== undefined, "the batch reply offers a download href");
 
-    const got = await fetch(href!);
+    const got = await fetch(href);
     assert.equal(got.status, 200);
     assert.equal(await got.text(), content);
     assert.equal(got.headers.get("content-length"), String(content.length));

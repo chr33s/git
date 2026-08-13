@@ -14,7 +14,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const run = <A, E>(effect: Effect.Effect<A, E, ObjectStore>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(stores)) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(stores)));
 
 /** Split into deliberately awkward chunk sizes to stress boundary handling. */
 const chunked = (bytes: Uint8Array, size: number): Uint8Array[] => {
@@ -36,6 +36,8 @@ const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
 const sha1 = (bytes: Uint8Array): Uint8Array =>
   Uint8Array.from(createHash("sha1").update(bytes).digest());
 
+// SAFETY: a hex-encoded SHA-1 digest is exactly the 40 lowercase hex
+// characters an oid is — this computes real object ids for test fixtures.
 const oidOf = (object: RawObject): Oid =>
   createHash("sha1")
     .update(`${object.type} ${object.data.length}\0`)
@@ -243,7 +245,8 @@ describe("Pack", () => {
 
     const expectCorrupt = async (bytes: Uint8Array, chunk = 9) => {
       const error = await run(unpack(Stream.fromIterable(chunked(bytes, chunk))).pipe(Effect.flip));
-      assert.equal(error._tag, "PackCorrupt");
+      // `assert.ok` narrows, so callers get the failure with its `reason`.
+      assert.ok(error._tag === "PackCorrupt", `expected PackCorrupt, got ${error._tag}`);
       return error;
     };
 
@@ -251,7 +254,7 @@ describe("Pack", () => {
       const bytes = packOf([{ type: "blob", data: encoder.encode("payload") }]);
       bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 0xff;
       const error = await expectCorrupt(bytes);
-      assert.match(String((error as { reason: string }).reason), /checksum/);
+      assert.match(error.reason, /checksum/);
     });
 
     it("rejects a truncated pack", async () => {

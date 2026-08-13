@@ -122,12 +122,10 @@ export const registrySqlite = (sql: Sql) =>
           const rows = sql
             .exec<RepoRow>(`SELECT * FROM repos ORDER BY name LIMIT ? OFFSET ?`, limit + 1, offset)
             .toArray();
-          const page = rows.slice(0, limit);
-          return {
-            repos: page.map(toRecord),
-            total,
-            ...(rows.length > limit ? { cursor: String(offset + limit) } : {}),
-          };
+          const page = rows.slice(0, limit).map(toRecord);
+          return rows.length > limit
+            ? { repos: page, total, cursor: String(offset + limit) }
+            : { repos: page, total };
         }),
       delete: (name) =>
         Effect.sync(() => {

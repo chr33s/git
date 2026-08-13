@@ -31,11 +31,11 @@ export type Format = "tar" | "tar.gz" | "zip";
 /** What reading a tree can go wrong with; the archive inherits it verbatim. */
 export type ArchiveError = ObjectNotFound | StorageFailure | Invalid;
 
-const CONTENT_TYPES: Record<Format, string> = {
+const CONTENT_TYPES = {
   tar: "application/x-tar",
   "tar.gz": "application/gzip",
   zip: "application/zip",
-};
+} as const satisfies Record<Format, string>;
 
 /** `null` for an extension this module cannot write, so a router can fall through. */
 export const formatOf = (name: string): Format | null => {
@@ -322,19 +322,27 @@ const gzip = (
   stream: Stream.Stream<Uint8Array, ArchiveError>,
 ): Stream.Stream<Uint8Array, ArchiveError> =>
   Stream.fromReadableStream({
-    evaluate: () =>
-      // `CompressionStream` accepts any `BufferSource`, which its declared pair
-      // type does not narrow to what the source emits.
-      (Stream.toReadableStream(stream) as ReadableStream<BufferSource>).pipeThrough(
-        new CompressionStream("gzip"),
-      ),
-    // The web stream squashes the cause to its failure value, so the typed
-    // error survives the round trip; anything else is not ours to classify.
-    onError: (cause) => cause as ArchiveError,
+    evaluate: () => {
+      // SAFETY: `CompressionStream` accepts any `BufferSource`, which its
+      // declared pair type does not narrow to what the source emits.
+      const source = Stream.toReadableStream(stream) as ReadableStream<BufferSource>;
+      return source.pipeThrough(new CompressionStream("gzip"));
+    },
+    onError: (cause) => {
+      // SAFETY: the web stream squashes the cause to its failure value, so
+      // the typed error survives the round trip; anything else is not ours
+      // to classify.
+      return cause as ArchiveError;
+    },
   });
 
-/** Zip stores mtime as DOS date/time, whose epoch is 1980. */
-const dosStamp = (date: Date): { readonly time: number; readonly date: number } => {
+/** Zip's mtime encoding: packed DOS date and time fields, whose epoch is 1980. */
+interface DosStamp {
+  readonly time: number;
+  readonly date: number;
+}
+
+const dosStamp = (date: Date): DosStamp => {
   const year = Math.max(date.getUTCFullYear(), 1980);
   return {
     time: (date.getUTCHours() << 11) | (date.getUTCMinutes() << 5) | (date.getUTCSeconds() >>> 1),
@@ -354,7 +362,7 @@ interface Central {
 /** UTF-8 names, stored (method 0), sizes known up front — no data descriptor. */
 const FLAGS = 0x0800;
 
-const localHeader = (record: Central, stamp: ReturnType<typeof dosStamp>): Uint8Array => {
+const localHeader = (record: Central, stamp: DosStamp): Uint8Array => {
   const bytes = new Uint8Array(30 + record.name.length);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, 0x0403_4b50, true);
@@ -375,7 +383,7 @@ const localHeader = (record: Central, stamp: ReturnType<typeof dosStamp>): Uint8
 const centralDirectory = (
   records: ReadonlyArray<Central>,
   offset: number,
-  stamp: ReturnType<typeof dosStamp>,
+  stamp: DosStamp,
 ): ReadonlyArray<Uint8Array> => {
   const chunks: Uint8Array[] = [];
   let size = 0;

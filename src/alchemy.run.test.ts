@@ -10,6 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
+import { Predicate } from "effect";
 
 import harness from "../wrangler.test.json" with { type: "json" };
 
@@ -30,9 +31,9 @@ describe("alchemy stack", () => {
     // The CLI contract: `alchemy.run.ts` default-exports the stack, and the
     // worker module default-exports its layer (the bundler resolves `main`'s
     // default export), which in turn provides the DO's layer.
-    assert.equal(typeof stack.default, "object", "the stack is the default export");
-    assert.equal(typeof worker.default, "object", "the worker layer is worker.ts's default export");
-    assert.equal(typeof host.default, "object", "the durable object layer is the default export");
+    assert.ok(Predicate.isObject(stack.default), "the stack is the default export");
+    assert.ok(Predicate.isObject(worker.default), "the worker layer is worker.ts's default export");
+    assert.ok(Predicate.isObject(host.default), "the durable object layer is the default export");
   });
 
   it("deploys the runtime the integration suite proves", async () => {

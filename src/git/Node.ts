@@ -161,12 +161,7 @@ export const objectStore = (root: string) =>
       const loose: ObjectStore["Service"] = {
         read,
         readStream: (oid) =>
-          read(oid).pipe(
-            Effect.map(
-              (object) =>
-                Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
-            ),
-          ),
+          read(oid).pipe(Effect.map((object) => Stream.fromIterable([object.data]))),
         write: (object) =>
           Effect.gen(function* () {
             const oid = yield* hashObject(object);
@@ -220,6 +215,8 @@ export const objectStore = (root: string) =>
                 // an object of that name.
                 if (!/^[0-9a-f]{2}$/.test(prefix)) continue;
                 for (const rest of await fs.readdir(path.join(objectsDir, prefix))) {
+                  // Temp files from in-flight writes live beside the objects;
+                  // anything that is not forty hex characters is not an object.
                   const oid = `${prefix}${rest}`;
                   if (isOid(oid)) oids.push(oid);
                 }
@@ -228,7 +225,7 @@ export const objectStore = (root: string) =>
             },
             catch: failure("list", objectsDir),
           }).pipe(Effect.map(Stream.fromIterable)),
-        ) as Stream.Stream<Oid, StorageFailure>,
+        ),
       };
 
       return ObjectStore.of(packed(loose, packs, "Node"));
@@ -577,7 +574,7 @@ export const refStore = (root: string) =>
           // The port's contract is an oid: `apply` compares this against
           // `expected` and writes it into a commit's parent header, so a
           // symbolic ref's text must not come back branded as one.
-          Effect.map((value) => (value !== null && isOid(value) ? (value as Oid) : null)),
+          Effect.map((value) => (value !== null && isOid(value) ? value : null)),
         );
 
       /**
@@ -860,9 +857,9 @@ export const refStore = (root: string) =>
           reflog: (name) =>
             Effect.tryPromise({
               try: async () => {
-                if (!addressable(name)) return [] as ReflogEntry[];
+                if (!addressable(name)) return [];
                 const target = path.join(root, "logs", name);
-                if (!existsSync(target)) return [] as ReflogEntry[];
+                if (!existsSync(target)) return [];
                 return (await fs.readFile(target, "utf8"))
                   .split("\n")
                   .map(parseReflogLine)
@@ -873,7 +870,7 @@ export const refStore = (root: string) =>
           logged: Effect.tryPromise({
             try: async () => {
               const base = path.join(root, "logs");
-              if (!existsSync(base)) return [] as string[];
+              if (!existsSync(base)) return [];
 
               const names: string[] = [];
               const walk = async (dir: string): Promise<void> => {

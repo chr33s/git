@@ -52,10 +52,20 @@ const repoName = () => `repo-${crypto.randomUUID()}`;
  * generated worker types put workerd's `Response` in ambient scope. This file
  * runs in node, so it should not care which one it got.
  */
-const json = async <T>(response: { json(): Promise<unknown> }): Promise<T> =>
-  (await response.json()) as T;
+// SAFETY: each caller names the shape the Worker's own handler encodes, and
+// asserts on the fields right after — a body that does not match fails the
+// test rather than slipping through.
+const json = async <T>(response: { text(): Promise<string> }): Promise<T> =>
+  JSON.parse(await response.text()) as T;
 
-const commit = (repo: string, body: Record<string, unknown>) =>
+/** The slice of the `/commit` payload these tests exercise. */
+interface CommitBody {
+  readonly message: string;
+  /** `null` pins "the branch must not exist", mirroring `RefUpdate.expected`. */
+  readonly expected?: string | null;
+}
+
+const commit = (repo: string, body: CommitBody) =>
   harness.fetch(`/${repo}/commit`, {
     method: "POST",
     headers: { "content-type": "application/json" },

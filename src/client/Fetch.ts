@@ -42,6 +42,25 @@ export interface FetchStores {
 
 const unreachable = (reason: string) => new Invalid({ field: "remote", reason });
 
+/**
+ * A response body as the chunks it delivers. Every runtime this client targets
+ * can iterate a `ReadableStream` natively, but the lib this project compiles
+ * against does not say so — and Safari genuinely cannot — so the stream is
+ * read through an explicit reader, which is true everywhere.
+ */
+const chunks = async function* (stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
+  const reader = stream.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done === true) return;
+      yield value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+};
+
 interface Advertisement {
   readonly refs: ReadonlyArray<RemoteRef>;
   /** What the first ref line carried after its NUL — the server's offer. */
@@ -52,7 +71,7 @@ const advertisedRefs = async (body: ReadableStream<Uint8Array> | null): Promise<
   const capabilities = new Set<string>();
   const refs: RemoteRef[] = [];
   if (body === null) return { refs, capabilities };
-  const reader = new PktReader(body as unknown as AsyncIterable<Uint8Array>);
+  const reader = new PktReader(chunks(body));
   for (;;) {
     const item = await reader.next();
     if (item === "eof") break;
@@ -174,11 +193,12 @@ const negotiation = (input: {
     ].join(""),
   );
 
+/** One POST to upload-pack; what comes back is the response body's chunks. */
 const uploadPack = async (
   url: string,
   token: string | undefined,
   body: Uint8Array<ArrayBuffer>,
-): Promise<Response> => {
+): Promise<AsyncIterable<Uint8Array>> => {
   const response = await fetch(`${url}/git-upload-pack`, {
     method: "POST",
     headers: {
@@ -190,7 +210,7 @@ const uploadPack = async (
   if (!response.ok || response.body === null) {
     throw new Error(`upload-pack returned ${response.status}`);
   }
-  return response;
+  return chunks(response.body);
 };
 
 /**
@@ -348,12 +368,12 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
     const next = Math.min(offered + HAVES_PER_ROUND, haves.length);
     const stop = yield* Effect.tryPromise({
       try: async () => {
-        const response = await uploadPack(
+        const body = await uploadPack(
           url,
           token,
           negotiation({ wants, haves: haves.slice(0, next), done: false, capabilities }),
         );
-        const { lines } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);
+        const { lines } = await prelude(body);
         return acknowledged(lines);
       },
       catch: (cause) => unreachable(String(cause)),
@@ -389,7 +409,7 @@ export const requestPack = (input: {
 }): Effect.Effect<AsyncIterable<Uint8Array>, Invalid> =>
   Effect.tryPromise({
     try: async () => {
-      const response = await uploadPack(
+      const body = await uploadPack(
         input.url,
         input.token,
         // The one place `undefined` becomes "request nothing": callers like
@@ -403,7 +423,7 @@ export const requestPack = (input: {
           capabilities: input.capabilities ?? [],
         }),
       );
-      const { rest } = await prelude(response.body as unknown as AsyncIterable<Uint8Array>);
+      const { rest } = await prelude(body);
       return rest;
     },
     catch: (cause) => unreachable(String(cause)),

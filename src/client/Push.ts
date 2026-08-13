@@ -37,6 +37,25 @@ export interface PushResult {
   readonly reason?: string;
 }
 
+/**
+ * A response body as the chunks it delivers. Every runtime this client targets
+ * can iterate a `ReadableStream` natively, but the lib this project compiles
+ * against does not say so — and Safari genuinely cannot — so the stream is
+ * read through an explicit reader, which is true everywhere.
+ */
+const chunks = async function* (stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
+  const reader = stream.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done === true) return;
+      yield value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+};
+
 const unreachable = (reason: string) => new Invalid({ field: "remote", reason });
 
 /**
@@ -74,11 +93,11 @@ const readAdvertisement = async (
   const capabilities = new Set<string>();
   if (body === null) return { refs, capabilities };
 
-  const reader = new PktReader(body as unknown as AsyncIterable<Uint8Array>);
+  const reader = new PktReader(chunks(body));
   for (;;) {
     const item = await reader.next();
     if (item === "eof") break;
-    if (typeof item === "string") continue;
+    if (item === "flush" || item === "delim" || item === "end") continue;
 
     const line = text(item);
     if (line.startsWith("# service=")) continue;
@@ -104,7 +123,8 @@ interface Command {
   readonly index: number;
   readonly ref: string;
   readonly old: string;
-  readonly next: string;
+  /** The value to move the ref to, or `null` for a delete — sent as the zero oid. */
+  readonly next: Oid | null;
 }
 
 /** The report, demultiplexed when the request asked for side-band. */
@@ -115,13 +135,13 @@ const readReport = async (
   if (body === null) return [];
   const lines: string[] = [];
 
-  const outer = new PktReader(body as unknown as AsyncIterable<Uint8Array>);
+  const outer = new PktReader(chunks(body));
   const banded: Uint8Array[] = [];
 
   for (;;) {
     const item = await outer.next();
     if (item === "eof" || item === "flush") break;
-    if (typeof item === "string") continue;
+    if (item === "delim" || item === "end") continue;
 
     if (!sideband) {
       lines.push(text(item));
@@ -146,7 +166,7 @@ const readReport = async (
   for (;;) {
     const item = await inner.next();
     if (item === "eof" || item === "flush") break;
-    if (typeof item === "string") continue;
+    if (item === "delim" || item === "end") continue;
     lines.push(text(item));
   }
   return lines;
@@ -185,16 +205,17 @@ export const push = Effect.fn("Client.push")(function* (input: {
 
   for (const [index, request] of refs.entries()) {
     const name = request.remote;
-    const old = advertisement.refs.get(name) ?? ZERO_OID;
+    const advertised = advertisement.refs.get(name);
+    const old = advertised ?? ZERO_OID;
 
     if (request.delete === true) {
       // Nothing to delete is a failed command, not a silent success: the
       // caller named a ref the remote does not have.
-      if (old === ZERO_OID) {
+      if (advertised === undefined) {
         outcomes[index] = { ref: name, ok: false, reason: "remote ref does not exist" };
         continue;
       }
-      commands.push({ index, ref: name, old, next: ZERO_OID });
+      commands.push({ index, ref: name, old, next: null });
       continue;
     }
 
@@ -203,7 +224,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
       return yield* new Invalid({ field: "local", reason: `unknown ref '${request.local}'` });
     }
 
-    if (old === next) {
+    if (advertised === next) {
       outcomes[index] = { ref: name, ok: true, reason: "up to date" };
       continue;
     }
@@ -213,8 +234,8 @@ export const push = Effect.fn("Client.push")(function* (input: {
      * commit this clone never fetched — would be lost by the update. `force`
      * is the caller saying that is the intent.
      */
-    if (old !== ZERO_OID && force !== true) {
-      const fastForward = yield* repository.isAncestor(old as Oid, next);
+    if (advertised !== undefined && force !== true) {
+      const fastForward = yield* repository.isAncestor(advertised, next);
       if (!fastForward) {
         outcomes[index] = { ref: name, ok: false, reason: "non-fast-forward" };
         continue;
@@ -235,9 +256,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
   if (commands.length === 0) return settle();
 
   const wants = [
-    ...new Set(
-      commands.filter((command) => command.next !== ZERO_OID).map((command) => command.next as Oid),
-    ),
+    ...new Set(commands.flatMap((command) => (command.next === null ? [] : [command.next]))),
   ];
 
   /**
@@ -265,7 +284,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
 
   const body = concat([
     ...commands.map((command, index) => {
-      const line = `${command.old} ${command.next} ${command.ref}`;
+      const line = `${command.old} ${command.next ?? ZERO_OID} ${command.ref}`;
       // Capabilities follow a NUL on the first command — receive-pack's
       // spelling, where upload-pack uses a space after the first `want`.
       return pkt(index === 0 ? `${line}\0${capabilities}\n` : `${line}\n`);

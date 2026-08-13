@@ -25,13 +25,19 @@ export interface ConformanceReport {
   readonly results: ReadonlyArray<ConformanceResult>;
 }
 
+/** What `collector` hands back: the runner to register with, and the run. */
+export interface Collector {
+  readonly report: () => Promise<ConformanceReport>;
+  readonly runner: Runner;
+}
+
 /**
  * A `Runner` that records tests rather than reporting them.
  *
  * `describe`/`it` are registration calls, so the suite is collected
  * synchronously and run afterwards by `report()`, one test at a time.
  */
-export const collector = (): { report: () => Promise<ConformanceReport>; runner: Runner } => {
+export const collector = (): Collector => {
   const cases: Array<{ body: () => Promise<void> | void; name: string }> = [];
   let prefix = "";
 

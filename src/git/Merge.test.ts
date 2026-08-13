@@ -49,6 +49,8 @@ describe("Merge", () => {
 
   it("merges a file that begins with a byte-order mark", async () => {
     const bom = "﻿";
+    // SAFETY: forty characters cut from a repeated hex digit, which is what
+    // the Oid brand stands for.
     const oid = (suffix: string) => suffix.repeat(40).slice(0, 40) as Oid;
     const encoder = new TextEncoder();
     const content = new Map([
@@ -66,10 +68,7 @@ describe("Merge", () => {
         ours: new Map([["readme.md", { mode: "100644", oid: oid("2") }]]),
         theirs: new Map([["readme.md", { mode: "100644", oid: oid("3") }]]),
         read: (wanted) => Effect.succeed(content.get(wanted)!),
-      }) as unknown as Effect.Effect<{
-        changes: ReadonlyArray<{ content: Uint8Array | null }>;
-        conflicts: ReadonlyArray<{ reason: string }>;
-      }>,
+      }),
     );
 
     assert.deepEqual(merged.conflicts, []);
@@ -82,11 +81,14 @@ describe("Merge", () => {
   });
 
   it("carries a submodule across instead of reading it as a file", async () => {
+    // SAFETY: forty lowercase hex characters by construction, which is exactly
+    // what the Oid brand stands for.
     const oid = (digit: string) => digit.repeat(40) as Oid;
     const side = (at: string) => new Map([["vendor", { mode: "160000", oid: oid(at) }]]);
 
-    // The commit a gitlink names lives in another repository, so `read` here
-    // fails the way the real object store does.
+    // SAFETY: the commit a gitlink names lives in another repository, so
+    // `read` fails here the way the real object store does; the error channel
+    // is `never` because no caller in this test is meant to recover from it.
     const read = () => Effect.fail(new Error("no such object") as never);
 
     const moved = await Effect.runPromise(
@@ -95,10 +97,7 @@ describe("Merge", () => {
         ours: side("1"),
         theirs: side("2"),
         read,
-      }) as unknown as Effect.Effect<{
-        changes: ReadonlyArray<{ oid?: string; mode?: string; content: Uint8Array | null }>;
-        conflicts: ReadonlyArray<{ reason: string }>;
-      }>,
+      }),
     );
 
     assert.deepEqual(moved.conflicts, []);
@@ -113,7 +112,7 @@ describe("Merge", () => {
         ours: side("2"),
         theirs: side("3"),
         read,
-      }) as unknown as Effect.Effect<{ conflicts: ReadonlyArray<{ reason: string }> }>,
+      }),
     );
     assert.deepEqual(
       both.conflicts.map((conflict) => conflict.reason),
@@ -122,6 +121,8 @@ describe("Merge", () => {
   });
 
   it("reports one conflict for a path whose content and mode both disagree", async () => {
+    // SAFETY: forty lowercase hex characters by construction, which is exactly
+    // what the Oid brand stands for.
     const oid = (digit: string) => digit.repeat(40) as Oid;
     const content = new Map([
       [oid("1"), new TextEncoder().encode("one\n")],
@@ -139,15 +140,15 @@ describe("Merge", () => {
         ours: new Map([["script.sh", { mode: "100755", oid: oid("2") }]]),
         theirs: new Map([["script.sh", { mode: "120000", oid: oid("3") }]]),
         read: (wanted) => Effect.succeed(content.get(wanted)!),
-      }) as unknown as Effect.Effect<{
-        conflicts: ReadonlyArray<{ path: string; reason: string }>;
-      }>,
+      }),
     );
 
     assert.deepEqual(merged.conflicts, [{ path: "script.sh", reason: "content" }]);
   });
 
   it("takes a mode change made only on the incoming side", async () => {
+    // SAFETY: forty lowercase hex characters by construction, which is exactly
+    // what the Oid brand stands for.
     const oid = ("0".repeat(39) + "1") as Oid;
     const side = (mode: string) => new Map([["deploy.sh", { mode, oid }]]);
 
@@ -160,10 +161,7 @@ describe("Merge", () => {
         ours: side("100644"),
         theirs: side("100755"),
         read: () => Effect.succeed(new TextEncoder().encode("#!/bin/sh\n")),
-      }) as unknown as Effect.Effect<{
-        changes: ReadonlyArray<{ mode?: string }>;
-        conflicts: ReadonlyArray<unknown>;
-      }>,
+      }),
     );
 
     assert.deepEqual(merged.conflicts, []);
@@ -287,6 +285,8 @@ describe("Merge", () => {
   });
 
   it("reads a zero-padded mode as the mode it is, not as a change", async () => {
+    // SAFETY: forty lowercase hex characters by construction, which is exactly
+    // what the Oid brand stands for.
     const oid = (digit: string) => digit.repeat(40) as Oid;
     const read = () => Effect.succeed(new TextEncoder().encode("one\n"));
 
@@ -300,10 +300,7 @@ describe("Merge", () => {
         ours: new Map([["readme.md", { mode: "0100644", oid: oid("1") }]]),
         theirs: new Map([["readme.md", { mode: "100644", oid: oid("1") }]]),
         read,
-      }) as unknown as Effect.Effect<{
-        changes: ReadonlyArray<{ path: string }>;
-        conflicts: ReadonlyArray<{ path: string; reason: string }>;
-      }>,
+      }),
     );
 
     assert.deepEqual(merged.conflicts, []);
@@ -311,6 +308,8 @@ describe("Merge", () => {
   });
 
   it("elects a mode across spellings instead of calling one a clash", async () => {
+    // SAFETY: forty lowercase hex characters by construction, which is exactly
+    // what the Oid brand stands for.
     const oid = (digit: string) => digit.repeat(40) as Oid;
     const content = new Map<Oid, Uint8Array>([
       [oid("1"), new TextEncoder().encode("one\ntwo\nthree\n")],
@@ -328,10 +327,7 @@ describe("Merge", () => {
         ours: new Map([["script.sh", { mode: "0100644", oid: oid("2") }]]),
         theirs: new Map([["script.sh", { mode: "0100755", oid: oid("3") }]]),
         read: (wanted) => Effect.succeed(content.get(wanted)!),
-      }) as unknown as Effect.Effect<{
-        changes: ReadonlyArray<{ path: string; mode?: string; content: Uint8Array | null }>;
-        conflicts: ReadonlyArray<{ path: string; reason: string }>;
-      }>,
+      }),
     );
 
     assert.deepEqual(merged.conflicts, []);

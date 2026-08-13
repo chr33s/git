@@ -25,6 +25,9 @@ export const readRows = <Row, Stored>(
   // A file somebody edited into a shape this does not understand is an empty
   // list rather than a crash on every request that touches it.
   if (!Array.isArray(parsed)) return [];
+  // SAFETY: this file is written only by `writeRows`, which serialises `Stored`
+  // rows; a hand-edited file that lies about them surfaces at `revive`, not as
+  // corruption here.
   return (parsed as ReadonlyArray<Stored>).map(revive);
 };
 

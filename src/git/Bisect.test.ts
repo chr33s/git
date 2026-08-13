@@ -123,6 +123,8 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  // SAFETY: every commit handed in below comes from `git rev-parse` or from a
+  // previous step's own answer, both of which are forty-hex oids.
   const ours = (bad: string, good: ReadonlyArray<string>) =>
     Effect.runPromise(
       next({ bad: bad as Oid, good: good as ReadonlyArray<Oid> }).pipe(

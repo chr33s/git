@@ -49,20 +49,23 @@ registryContract(
  * row-returning statements (`all`) and the rest (`run`).
  */
 const nodeSql = (database: DatabaseSync): Sql => ({
-  exec: <Row = Record<string, unknown>>(
+  exec: <Row extends Record<string, ArrayBuffer | string | number | null>>(
     query: string,
     ...bindings: ReadonlyArray<string | number | null>
   ) => {
     const kind = query.trimStart().slice(0, 6).toUpperCase();
     if (kind === "CREATE" || kind === "DROP") {
       database.exec(query);
-      return { toArray: () => [] as Row[] };
+      return { toArray: (): Row[] => [] };
     }
     const statement = database.prepare(query);
     if (kind !== "SELECT") {
       statement.run(...bindings);
-      return { toArray: () => [] as Row[] };
+      return { toArray: (): Row[] => [] };
     }
+    // SAFETY: the caller names `Row` after the columns its SELECT projects,
+    // and the suite's tables hold only TEXT and INTEGER values, so every row
+    // `node:sqlite` hands back already has that form.
     return { toArray: () => statement.all(...bindings) as Row[] };
   },
 });

@@ -298,6 +298,8 @@ describe("working tree", () => {
       // of the tree the next `commit` writes, and the submodule disappears
       // from history with no error and no conflict.
       const submodule = "1".repeat(40);
+      // SAFETY: a gitlink's oid names a commit in another repository, so no
+      // object here answers to it — which is exactly what this test asserts.
       const withModule = yield* repository.writeTree([
         ...(yield* repository.readTree(first.tree)),
         { mode: "160000", name: "vendor", oid: submodule as never },
@@ -354,7 +356,7 @@ describe("a checkout of a tree it did not write", () => {
       Effect.gen(function* () {
         const work = yield* WorkTree;
         yield* work.write("a/b.txt", encode("made\n"), 0o100644);
-      }).pipe(Effect.provide(layer)) as unknown as Effect.Effect<void>,
+      }).pipe(Effect.provide(layer)),
     );
 
     assert.equal(fsSync.existsSync(path.join(checkout, "a", "b.txt")), true);
@@ -378,7 +380,7 @@ describe("a checkout of a tree it did not write", () => {
       Effect.gen(function* () {
         const work = yield* WorkTree;
         yield* Effect.flip(work.write("link/pwned.txt", encode("owned\n"), 0o100644));
-      }).pipe(Effect.provide(layer)) as unknown as Effect.Effect<void>,
+      }).pipe(Effect.provide(layer)),
     );
 
     assert.equal(fsSync.existsSync(path.join(root, "pwned.txt")), false);
@@ -404,7 +406,7 @@ describe("a checkout of a tree it did not write", () => {
         // `link/keep.txt` names nothing inside the checkout: the name is
         // innocent and the path still lands in another directory.
         yield* Effect.flip(work.remove("link/keep.txt"));
-      }).pipe(Effect.provide(layer)) as unknown as Effect.Effect<void>,
+      }).pipe(Effect.provide(layer)),
     );
 
     assert.equal(fsSync.existsSync(path.join(outside, "keep.txt")), true);
@@ -439,7 +441,7 @@ describe("a checkout of a tree it did not write", () => {
         yield* repository.commit({ branch: "main", tree, message: "hostile", author });
 
         return yield* Effect.flip(Checkout.checkout("main"));
-      }).pipe(Effect.provide(layer)) as unknown as Effect.Effect<{ _tag: string }>,
+      }).pipe(Effect.provide(layer)),
     );
 
     assert.equal(failure._tag, "Invalid");

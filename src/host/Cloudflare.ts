@@ -42,11 +42,11 @@ import { Objects } from "../objects.ts";
  * calling it. A function here type-checks and then fails every request at the
  * edge, on the one path no test covers.
  */
-export interface RepoShape {
+export interface RepoBindings {
   readonly fetch: Http.HttpEffect;
 }
 
-export class Repo extends Alchemy.DurableObject<Repo, RepoShape>()("Repo") {}
+export class Repo extends Alchemy.DurableObject<Repo, RepoBindings>()("Repo") {}
 
 export default Repo.make(
   Effect.gen(function* () {
@@ -59,11 +59,12 @@ export default Repo.make(
     // per request with `RuntimeContext` available.
     // @effect-diagnostics-next-line returnEffectInGen:off
     return Effect.gen(function* () {
-      // `raw` is RuntimeContext-coloured: available here, not at init. The
-      // cast crosses one seam only — alchemy types bindings from
-      // `@cloudflare/workers-types`, the backend from the generated worker
-      // types, and they are the same object at runtime.
-      const r2 = (yield* bucket.raw) as unknown as R2Bucket;
+      // `raw` is RuntimeContext-coloured: available here, not at init.
+      // SAFETY: alchemy types bindings from `@cloudflare/workers-types`, the
+      // backend from the generated worker types; the declarations disagree
+      // (their `Headers` differ) but describe the same runtime object, so
+      // one conversion crosses that seam here and nowhere else.
+      const r2: R2Bucket = (yield* bucket.raw) as never;
 
       /**
        * Built per instance, not per request: `Repository` is constructed
@@ -77,11 +78,14 @@ export default Repo.make(
        * The subscriber registry on this instance's own SQLite, beside the
        * refs it reports on — and serialized by the same input gate.
        */
-      const subscribers = (repo: string) =>
-        Subscribers.sql(state.raw.storage.sql as unknown as Sql, repo);
+      // SAFETY: workerd's `SqlStorage` satisfies the `Sql` port structurally
+      // — same value domain, cursor with `toArray` — the declarations differ
+      // only in workers-types' wider `any[]` bindings parameter.
+      const sql = state.raw.storage.sql as Sql;
+      const subscribers = (repo: string) => Subscribers.sql(sql, repo);
 
       /** The remotes this repository fetches from, on that same SQLite. */
-      const remotes = (repo: string) => Remotes.sql(state.raw.storage.sql as unknown as Sql, repo);
+      const remotes = (repo: string) => Remotes.sql(sql, repo);
 
       const live = (repo: string): Layer.Layer<Repository> => {
         const existing = layers.get(repo);
@@ -232,8 +236,9 @@ export default Repo.make(
       return {
         fetch: Effect.gen(function* () {
           const incoming = yield* HttpServerRequest.HttpServerRequest;
-          // The platform request, headers and body intact — the effect wrapper
-          // was built from it, so this is that object rather than a rebuild.
+          // SAFETY: the platform request, headers and body intact — the effect
+          // wrapper was built from it, so `source` is that very object rather
+          // than a rebuild of it.
           return HttpServerResponse.raw(yield* serve(incoming.source as Request));
         }),
       };

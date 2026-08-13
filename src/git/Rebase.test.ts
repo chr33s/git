@@ -31,6 +31,11 @@ import { type Oid, RefStore } from "./Store.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/** Where a push that races the replay left the ref, once it has landed. */
+interface RacingPush {
+  oid: Oid | null;
+}
+
 const alice: Signature = {
   name: "Alice",
   email: "alice@example.com",
@@ -62,11 +67,11 @@ const disk = (root: string) =>
 
 /** Each test gets its own stores, so there is no shared global state to reset. */
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(memory)) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(memory)));
 
 /** The same, backed by a directory `git` itself can be pointed at. */
 const onDisk = <A, E>(root: string, effect: Effect.Effect<A, E, Repository | RefStore>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(disk(root))) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(disk(root))));
 
 /** A commit on `branch` with `files` applied to whatever is there now. */
 const commitOn = (input: {
@@ -80,13 +85,13 @@ const commitOn = (input: {
     const head = yield* repository.resolve(`refs/heads/${input.branch}`);
     const base = head === null ? null : (yield* repository.readCommit(head)).tree;
 
-    const tree = yield* repository.writeFiles({
-      ...(base === null ? {} : { base }),
-      changes: Object.entries(input.files).map(([file, content]) => ({
-        path: file,
-        content: content === null ? null : encoder.encode(content),
-      })),
-    });
+    const changes = Object.entries(input.files).map(([file, content]) => ({
+      path: file,
+      content: content === null ? null : encoder.encode(content),
+    }));
+    const tree = yield* base === null
+      ? repository.writeFiles({ changes })
+      : repository.writeFiles({ base, changes });
 
     return yield* repository.commit({
       branch: input.branch,
@@ -273,7 +278,7 @@ describe("cherryPick", () => {
   });
 
   it("loses a race with a push instead of overwriting it", async () => {
-    const arrival: { oid: Oid | null } = { oid: null };
+    const arrival: RacingPush = { oid: null };
     const outcome = await Effect.runPromise(
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -303,7 +308,7 @@ describe("cherryPick", () => {
             Layer.provideMerge(racing("refs/heads/target", arrival)),
           ),
         ),
-      ) as unknown as Effect.Effect<{ picked: { _tag: string }; target: Oid | null; theirs: Oid }>,
+      ),
     );
 
     // The push stands. Without the compare-and-swap the pick wrote straight

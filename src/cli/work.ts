@@ -132,11 +132,10 @@ export const restore = Command.make(
     withWork(
       work,
       Effect.gen(function* () {
-        const restored = yield* Checkout.restore(paths, {
-          staged,
-          worktree: !staged,
-          ...(source._tag === "Some" ? { source: source.value } : {}),
-        });
+        const options = { staged, worktree: !staged };
+        const restored = yield* source._tag === "Some"
+          ? Checkout.restore(paths, { ...options, source: source.value })
+          : Checkout.restore(paths, options);
         for (const path of restored) yield* Console.log(path);
       }),
     ),

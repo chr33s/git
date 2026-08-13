@@ -86,11 +86,11 @@ const collect = (format: Archive.Format, prefix?: string) =>
   Effect.runPromise(
     Effect.gen(function* () {
       const tree = yield* seed;
-      const stream = yield* Archive.archive({
-        tree,
-        format,
-        ...(prefix === undefined ? {} : { prefix }),
-      });
+      // Two calls rather than one with a conditional property: leaving
+      // `prefix` out entirely is what exercises the default under test.
+      const stream = yield* prefix === undefined
+        ? Archive.archive({ tree, format })
+        : Archive.archive({ tree, format, prefix });
       return join(yield* Stream.runCollect(stream));
     }).pipe(Effect.provide(repository)),
   );

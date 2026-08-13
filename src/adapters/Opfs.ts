@@ -45,23 +45,19 @@ const notFound = (cause: unknown): boolean =>
 
 const pipeThrough = async (
   bytes: Uint8Array,
-  transform: { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> },
-) =>
-  new Uint8Array(
-    await new Response(
-      new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(transform),
-    ).arrayBuffer(),
+  transform: CompressionStream | DecompressionStream,
+) => {
+  // SAFETY: every view this adapter produces or is handed sits on a plain
+  // ArrayBuffer — nothing here allocates shared memory — and `Blob` insists
+  // on the distinction.
+  const source = bytes as Uint8Array<ArrayBuffer>;
+  return new Uint8Array(
+    await new Response(new Blob([source]).stream().pipeThrough(transform)).arrayBuffer(),
   );
+};
 
-const asPair = (stream: CompressionStream | DecompressionStream) =>
-  stream as unknown as {
-    readable: ReadableStream<Uint8Array>;
-    writable: WritableStream<Uint8Array>;
-  };
-
-const deflate = (bytes: Uint8Array) => pipeThrough(bytes, asPair(new CompressionStream("deflate")));
-const inflate = (bytes: Uint8Array) =>
-  pipeThrough(bytes, asPair(new DecompressionStream("deflate")));
+const deflate = (bytes: Uint8Array) => pipeThrough(bytes, new CompressionStream("deflate"));
+const inflate = (bytes: Uint8Array) => pipeThrough(bytes, new DecompressionStream("deflate"));
 
 /** Walk `a/b/c` to the parent directory handle plus the leaf name. */
 const parentOf = async (root: FileSystemDirectoryHandle, target: string, create: boolean) => {
@@ -90,6 +86,8 @@ const writeBytes = async (root: FileSystemDirectoryHandle, target: string, bytes
   const { directory, leaf } = await parentOf(root, target, true);
   const handle = await directory.getFileHandle(leaf, { create: true });
   const writable = await handle.createWritable();
+  // SAFETY: as in `pipeThrough`, the bytes are never backed by shared memory;
+  // the writable stream's chunk type just spells that out.
   await writable.write(bytes as Uint8Array<ArrayBuffer>);
   await writable.close();
 };
@@ -102,9 +100,6 @@ const removePath = async (root: FileSystemDirectoryHandle, target: string) => {
     if (!notFound(cause)) throw cause;
   }
 };
-
-const entriesOf = (directory: FileSystemDirectoryHandle) =>
-  (directory as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries();
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -139,12 +134,7 @@ export const objectStore = (
         tracedObjectStore("OPFS", {
           read,
           readStream: (oid) =>
-            read(oid).pipe(
-              Effect.map(
-                (object) =>
-                  Stream.fromIterable([object.data]) as Stream.Stream<Uint8Array, StorageFailure>,
-              ),
-            ),
+            read(oid).pipe(Effect.map((object) => Stream.fromIterable([object.data]))),
           write: (object) =>
             Effect.gen(function* () {
               const oid = yield* hashObject(object);
@@ -180,17 +170,20 @@ export const objectStore = (
                   if (notFound(cause)) return [];
                   throw cause;
                 }
-                for await (const [prefix, entry] of entriesOf(objects)) {
+                for await (const [prefix, entry] of objects.entries()) {
                   if (entry.kind !== "directory") continue;
-                  for await (const [rest] of entriesOf(entry as FileSystemDirectoryHandle)) {
-                    oids.push(`${prefix}${rest}` as Oid);
+                  for await (const [rest] of entry.entries()) {
+                    // Fan-out directory plus file name is the oid; anything
+                    // else under `objects/` is not a loose object.
+                    const oid = `${prefix}${rest}`;
+                    if (isOid(oid)) oids.push(oid);
                   }
                 }
                 return oids;
               },
               catch: failure("list", "objects"),
             }).pipe(Effect.map(Stream.fromIterable)),
-          ) as Stream.Stream<Oid, StorageFailure>,
+          ),
         }),
       );
     }),
@@ -229,7 +222,7 @@ export const refStore = (
         readRaw(name).pipe(
           // As in `git/Node.ts`: a symbolic ref's text is not an oid, and
           // `apply` would otherwise write it into a commit's parent.
-          Effect.map((value) => (value !== null && isOid(value) ? (value as Oid) : null)),
+          Effect.map((value) => (value !== null && isOid(value) ? value : null)),
         );
 
       const head = readText("HEAD").pipe(
@@ -270,10 +263,10 @@ export const refStore = (
             const symbolic = new Map<string, string>();
 
             const walk = async (directory: FileSystemDirectoryHandle, at: string) => {
-              for await (const [name, entry] of entriesOf(directory)) {
+              for await (const [name, entry] of directory.entries()) {
                 const full = `${at}/${name}`;
                 if (entry.kind === "directory") {
-                  await walk(entry as FileSystemDirectoryHandle, full);
+                  await walk(entry, full);
                   continue;
                 }
                 const value = await readBytes(root, full);
@@ -432,9 +425,9 @@ export const refStore = (
             checkHeadTarget(target).pipe(Effect.andThen(writeText("HEAD", `ref: ${target}\n`))),
           reflog: (name) =>
             Effect.gen(function* () {
-              if (!addressable(name)) return [] as ReflogEntry[];
+              if (!addressable(name)) return [];
               const text = yield* readText(`logs/${name}`);
-              if (text === null) return [] as ReflogEntry[];
+              if (text === null) return [];
               return text
                 .split("\n")
                 .map(parseReflogLine)
@@ -444,10 +437,10 @@ export const refStore = (
             try: async () => {
               const names: string[] = [];
               const walk = async (directory: FileSystemDirectoryHandle, at: string) => {
-                for await (const [name, entry] of entriesOf(directory)) {
+                for await (const [name, entry] of directory.entries()) {
                   const full = at === "" ? name : `${at}/${name}`;
                   if (entry.kind === "directory") {
-                    await walk(entry as FileSystemDirectoryHandle, full);
+                    await walk(entry, full);
                   } else names.push(full);
                 }
               };

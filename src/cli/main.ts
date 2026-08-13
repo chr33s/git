@@ -27,7 +27,7 @@ import { pipeline } from "node:stream/promises";
 // reaches.
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Config, Console, Effect, Stream } from "effect";
+import { Config, Console, Effect, Predicate, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { fetchRepository } from "../client/Fetch.ts";
@@ -39,10 +39,10 @@ import { isGitlink } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
+import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
-import { hmacMint, hmacVerify, type Scope } from "../server/Auth.ts";
+import { hmacMint, hmacVerify } from "../server/Auth.ts";
 import * as replay from "./replay.ts";
 import {
   cliSignature,
@@ -177,7 +177,7 @@ const token = Command.make(
   },
   ({ repo, scope, secret, ttl }) =>
     Effect.gen(function* () {
-      const minted = yield* hmacMint(secret, repo, scope as Scope, ttl);
+      const minted = yield* hmacMint(secret, repo, scope, ttl);
       yield* Console.log(minted);
     }),
 );
@@ -301,12 +301,12 @@ const tag = Command.make(
           return yield* Console.log(deleted ? `Deleted tag ${remove}` : `No such tag: ${remove}`);
         }
         if (name !== "") {
-          const created = yield* repository.tag({
-            name,
-            target,
-            force,
-            ...(message === "" ? {} : { message: `${message}\n`, tagger: cliSignature() }),
-          });
+          // A message makes it an annotated tag object; without one the tag
+          // is nothing but a ref.
+          const input = { name, target, force };
+          const created = yield* message === ""
+            ? repository.tag(input)
+            : repository.tag({ ...input, message: `${message}\n`, tagger: cliSignature() });
           return yield* Console.log(`${created.oid}\t${created.ref}`);
         }
 
@@ -446,13 +446,10 @@ const merge = Command.make(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const outcome = yield* repository.merge({
-          ours,
-          theirs,
-          author: cliSignature(),
-          strategy: strategy as "recursive" | "ours" | "theirs",
-          ...(into === "" ? {} : { into }),
-        });
+        const input = { ours, theirs, author: cliSignature(), strategy };
+        const outcome = yield* into === ""
+          ? repository.merge(input)
+          : repository.merge({ ...input, into });
 
         yield* Console.log(`${outcome.kind}${outcome.commit === null ? "" : ` ${outcome.commit}`}`);
         for (const conflict of outcome.conflicts) {
@@ -586,13 +583,10 @@ const pushCommand = Command.make(
         // else is what an explicit `refs/…:refs/…` spelling would be for,
         // and this CLI does not pretend to offer one.
         const remote = refNameOf(ref);
-        const results = yield* push({
-          url,
-          refs: [{ local: remote, remote, delete: remove }],
-          force,
-          atomic,
-          ...(accessToken === "" ? {} : { token: accessToken }),
-        });
+        const request = { url, refs: [{ local: remote, remote, delete: remove }], force, atomic };
+        const results = yield* accessToken === ""
+          ? push(request)
+          : push({ ...request, token: accessToken });
 
         for (const result of results) {
           yield* Console.log(
@@ -634,11 +628,10 @@ const archiveCommand = Command.make(
         }
 
         const repository = yield* Repository;
-        const stream = yield* Archive.archive({
-          tree: yield* treeOf(repository, ref),
-          format,
-          ...(prefix === "" ? {} : { prefix }),
-        });
+        const tree = yield* treeOf(repository, ref);
+        const stream = yield* prefix === ""
+          ? Archive.archive({ tree, format })
+          : Archive.archive({ tree, format, prefix });
 
         // Streamed to disk rather than collected: the whole point of the
         // archive being a Stream is that a big repository never lands in
@@ -698,13 +691,19 @@ const reset = Command.make(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const moved = yield* repository.setRef({
-          name: refNameOf(ref),
-          to: yield* mustResolve(repository, to),
-          ...(expected._tag === "Some"
-            ? { expected: expected.value === "" ? null : (expected.value as Oid) }
-            : {}),
-        });
+        const input = { name: refNameOf(ref), to: yield* mustResolve(repository, to) };
+        // An empty `--expected` claims the ref does not exist yet; anything
+        // else must spell the oid the ref currently holds.
+        const previous = expected._tag === "Some" && expected.value !== "" ? expected.value : null;
+        if (previous !== null && !isOid(previous)) {
+          return yield* new Invalid({
+            field: "expected",
+            reason: `'${previous}' is not an object id`,
+          });
+        }
+        const moved = yield* expected._tag === "None"
+          ? repository.setRef(input)
+          : repository.setRef({ ...input, expected: previous });
         yield* Console.log(`${moved.ref} ${moved.previous ?? "(new)"} -> ${moved.oid}`);
       }),
     ),
@@ -761,10 +760,13 @@ const main = Command.runWith(git, { version: "0.0.0" });
  * its detail in fields, not `message`, and a stack trace helps nobody at a
  * shell prompt.
  */
-const rendered = (error: unknown): unknown => {
-  if (typeof error === "object" && error !== null && "_tag" in error) {
-    const { _tag, ...fields } = error as Record<string, unknown>;
-    const detail = typeof fields["reason"] === "string" ? fields["reason"] : JSON.stringify(fields);
+const rendered = <E>(error: E): E | Error => {
+  if (Predicate.hasProperty(error, "_tag")) {
+    const { _tag, ...fields } = error;
+    const detail =
+      Predicate.hasProperty(fields, "reason") && Predicate.isString(fields.reason)
+        ? fields.reason
+        : JSON.stringify(fields);
     return new Error(`${String(_tag)}: ${detail}`);
   }
   return error;

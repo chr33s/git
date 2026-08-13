@@ -99,14 +99,14 @@ const replayTree = Effect.fn("Rebase.replayTree")(function* (input: {
 
   return {
     tree: yield* repository.writeFiles({ base: input.onto.tree, changes }),
-    conflicts: [] as ReadonlyArray<MergeConflict>,
+    conflicts: [],
   };
 });
 
 const replayOne = Effect.fn("Rebase.replayOne")(function* (input: {
   readonly commit: Oid;
   readonly onto: Oid;
-  readonly author?: Signature;
+  readonly author?: Signature | undefined;
 }) {
   const repository = yield* Repository;
 
@@ -147,7 +147,7 @@ const replayOne = Effect.fn("Rebase.replayOne")(function* (input: {
 const settle = Effect.fn("Rebase.settle")(function* (input: {
   readonly onto: Oid;
   readonly commits: ReadonlyArray<Replayed>;
-  readonly into?: string;
+  readonly into?: string | undefined;
   /** Where `into` stood when the replay began; the swap compares against it. */
   readonly expected?: Oid | null;
 }) {
@@ -175,11 +175,10 @@ const settle = Effect.fn("Rebase.settle")(function* (input: {
     // another push loses cleanly instead of overwriting it. `expected` is
     // where the ref stood when the replay began — reading it here instead
     // would be comparing the value against itself, which no race can fail.
-    yield* repository.setRef({
-      name: input.into,
-      to: head,
-      ...(input.expected === undefined ? {} : { expected: input.expected }),
-    });
+    const update = { name: input.into, to: head };
+    yield* repository.setRef(
+      input.expected === undefined ? update : { ...update, expected: input.expected },
+    );
   }
 
   const outcome: ReplayOutcome = { kind: "replayed", head, commits: input.commits };
@@ -205,17 +204,13 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   // silently overwrite whatever arrived.
   const intoWas = input.into === undefined ? null : yield* repository.resolve(input.into);
 
-  const replayed = yield* replayOne({
-    commit,
-    onto,
-    ...(input.author === undefined ? {} : { author: input.author }),
-  });
+  const replayed = yield* replayOne({ commit, onto, author: input.author });
 
-  return yield* settle({
-    onto,
-    commits: [replayed],
-    ...(input.into === undefined ? {} : { into: input.into, expected: intoWas }),
-  });
+  return yield* settle(
+    input.into === undefined
+      ? { onto, commits: [replayed] }
+      : { onto, commits: [replayed], into: input.into, expected: intoWas },
+  );
 });
 
 /** Every commit `onto` already contains — the walk's stop condition. */
@@ -283,9 +278,9 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
     if (replayed.replayed !== null) head = replayed.replayed;
   }
 
-  return yield* settle({
-    onto,
-    commits,
-    ...(input.into === undefined ? {} : { into: input.into, expected: intoWas }),
-  });
+  return yield* settle(
+    input.into === undefined
+      ? { onto, commits }
+      : { onto, commits, into: input.into, expected: intoWas },
+  );
 });

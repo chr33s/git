@@ -34,9 +34,6 @@ const AGENT = "agent=chr33s-git/0";
 
 const corrupt = (reason: string) => new PackCorrupt({ reason });
 
-/** `Response` wants an `ArrayBuffer`-backed view; everything built here is. */
-const asBody = (bytes: Uint8Array): Uint8Array<ArrayBuffer> => bytes as Uint8Array<ArrayBuffer>;
-
 /** A text pkt-line, the conventional trailing newline stripped. */
 const text = (payload: Uint8Array): string => {
   const decoded = decoder.decode(payload);
@@ -49,9 +46,8 @@ const text = (payload: Uint8Array): string => {
  * so pushes arrive identity-encoded.
  */
 const body = (request: Request): AsyncIterable<Uint8Array> => {
-  const stream = request.body;
-  if (stream === null) return (async function* () {})();
-  const raw = stream as unknown as AsyncIterable<Uint8Array>;
+  const raw = request.body;
+  if (raw === null) return (async function* () {})();
   if (request.headers.get("content-encoding")?.includes("gzip") !== true) return raw;
 
   return (async function* () {
@@ -62,15 +58,15 @@ const body = (request: Request): AsyncIterable<Uint8Array> => {
     // request until the platform times the whole slot out.
     const drain = () =>
       new Promise<void>((resolve, reject) => {
-        const settle = (error?: unknown) => {
+        const settle = (error?: Error) => {
           gunzip.off("drain", onDrain);
           gunzip.off("error", onError);
           gunzip.off("close", onDrain);
           if (error === undefined) resolve();
-          else reject(error instanceof Error ? error : new Error(JSON.stringify(error)));
+          else reject(error);
         };
         const onDrain = () => settle();
-        const onError = (error: unknown) => settle(error);
+        const onError = (error: Error) => settle(error);
         gunzip.once("drain", onDrain);
         gunzip.once("error", onError);
         gunzip.once("close", onDrain);
@@ -104,6 +100,8 @@ const body = (request: Request): AsyncIterable<Uint8Array> => {
     })().catch(() => undefined);
 
     try {
+      // SAFETY: a zlib transform is a readable stream, which node makes async
+      // iterable at runtime; only the bundled lib declarations omit it.
       for await (const chunk of gunzip as AsyncIterable<Uint8Array>) yield chunk;
     } finally {
       gunzip.destroy();
@@ -132,16 +130,14 @@ const isVersionTwo = (request: Request): boolean =>
  */
 const advertiseV2 = (): Response =>
   new Response(
-    asBody(
-      concat([
-        pkt("version 2\n"),
-        pkt(`${AGENT}\n`),
-        pkt("ls-refs=unborn\n"),
-        pkt("fetch=shallow\n"),
-        pkt("object-format=sha1\n"),
-        FLUSH,
-      ]),
-    ),
+    concat([
+      pkt("version 2\n"),
+      pkt(`${AGENT}\n`),
+      pkt("ls-refs=unborn\n"),
+      pkt("fetch=shallow\n"),
+      pkt("object-format=sha1\n"),
+      FLUSH,
+    ]),
     { headers: headers("application/x-git-upload-pack-advertisement") },
   );
 
@@ -184,7 +180,7 @@ export const advertise = (
     }
     parts.push(FLUSH);
 
-    return new Response(asBody(concat(parts)), {
+    return new Response(concat(parts), {
       headers: headers(`application/x-${service}-advertisement`),
     });
   });
@@ -343,19 +339,14 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
             pkt("NAK\n"),
           ]
         : [last === undefined ? pkt("NAK\n") : pkt(`ACK ${last}\n`)];
-      return new Response(asBody(concat(lines)), {
+      return new Response(concat(lines), {
         headers: headers("application/x-git-upload-pack-result"),
       });
     }
 
-    const plan = yield* repository.fetch({
-      wants,
-      haves,
-      clientShallow,
-      ...(depth === undefined ? {} : { depth }),
-      ...(since === undefined ? {} : { since }),
-      ...(notRefs.length === 0 ? {} : { notRefs }),
-    });
+    // `fetch` reads an undefined `depth` or `since` exactly as it reads their
+    // absence, and an empty `notRefs` as no stops — the locals pass through.
+    const plan = yield* repository.fetch({ wants, haves, clientShallow, depth, since, notRefs });
 
     /**
      * The boundary section comes before anything else, and only when the
@@ -375,7 +366,7 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
       // *alone*, and the difference is not cosmetic: fetch-pack reads exactly
       // that much before deciding what to ask for next, and a trailing NAK
       // leaves it reading a pack that is not there.
-      return new Response(asBody(concat(boundary)), {
+      return new Response(concat(boundary), {
         headers: headers("application/x-git-upload-pack-result"),
       });
     }
@@ -493,7 +484,7 @@ const lsRefs = (request: V2Request): Effect.Effect<Response, GitError, Repositor
     }
 
     lines.push(FLUSH);
-    return new Response(asBody(concat(lines)), {
+    return new Response(concat(lines), {
       headers: headers("application/x-git-upload-pack-result"),
     });
   });
@@ -559,21 +550,16 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
       else for (const oid of common) acks.push(pkt(`ACK ${oid}\n`));
 
       if (!ready) {
-        return new Response(asBody(concat([...acks, FLUSH])), {
+        return new Response(concat([...acks, FLUSH]), {
           headers: headers("application/x-git-upload-pack-result"),
         });
       }
       acks.push(pkt("ready\n"), DELIM);
     }
 
-    const plan = yield* repository.fetch({
-      wants,
-      haves,
-      clientShallow,
-      ...(depth === undefined ? {} : { depth }),
-      ...(since === undefined ? {} : { since }),
-      ...(notRefs.length === 0 ? {} : { notRefs }),
-    });
+    // As in the v0 round: `fetch` treats undefined options and an empty
+    // `notRefs` exactly like their absence, so the locals pass through.
+    const plan = yield* repository.fetch({ wants, haves, clientShallow, depth, since, notRefs });
 
     const prelude: Uint8Array[] = [...acks];
     if (deepening) {
@@ -599,7 +585,7 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
     });
   });
 
-const report = (results: ReadonlyArray<ReceiveResult>, unpacked: string): Uint8Array =>
+const report = (results: ReadonlyArray<ReceiveResult>, unpacked: string): Uint8Array<ArrayBuffer> =>
   concat([
     pkt(`unpack ${unpacked}\n`),
     ...results.map((result) =>
@@ -642,9 +628,11 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         const old = command.slice(0, 40);
         const next = command.slice(41, 81);
         const name = command.slice(82);
-        const validOld = old === ZERO_OID || isOid(old);
-        const validNext = next === ZERO_OID || isOid(next);
-        if (!validOld || !validNext) {
+        // The all-zero id is checked first: it is forty hex digits too, but it
+        // means "no object" — `null` on the update — rather than naming one.
+        const expected = old === ZERO_OID ? null : isOid(old) ? old : undefined;
+        const value = next === ZERO_OID ? null : isOid(next) ? next : undefined;
+        if (expected === undefined || value === undefined || name.length === 0) {
           throw new Invalid({ field: "receive-pack", reason: `malformed command '${command}'` });
         }
         // A name the stores would refuse is reported the way git reports it —
@@ -656,7 +644,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         if (problem !== null) {
           refused.push({
             ref: name,
-            from: old === ZERO_OID ? null : (old as Oid),
+            from: expected,
             to: null,
             ok: false,
             reason: `funny refname: ${problem}`,
@@ -664,12 +652,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
           continue;
         }
 
-        updates.push({
-          name,
-          value: next === ZERO_OID ? null : (next as Oid),
-          expected: old === ZERO_OID ? null : (old as Oid),
-          reason: "push",
-        });
+        updates.push({ name, value, expected, reason: "push" });
       }
     });
 
@@ -699,7 +682,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       // A client that asked for side-band expects the report on band 1, and
       // a flush to close the stream; sending it raw would desynchronise it.
       const payload = sideband ? concat([...bandChunks(status), FLUSH]) : status;
-      return new Response(asBody(payload), {
+      return new Response(payload, {
         headers: headers("application/x-git-receive-pack-result"),
       });
     };

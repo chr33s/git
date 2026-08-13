@@ -516,17 +516,21 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   // a repack that wrote nothing superseded nothing. Reporting it either way
   // would tell a caller a secret was collected while it is still clonable.
   const collected = (oid: Oid) => !packedOids.has(oid) || written !== null;
-  const report: GcReport = {
+  const counted: GcReport = {
     scanned,
     reachable: keep.size,
     removed: unreachable.filter(collected),
     retained: unreachable.filter((oid) => !collected(oid)),
-    ...(options?.repack === true && borrowing
+  };
+  // Said only when a repack was asked for and declined, so an ordinary gc
+  // report does not carry an empty explanation of something that never came up.
+  const report: GcReport =
+    options?.repack === true && borrowing
       ? {
+          ...counted,
           repackSkipped:
             "this repository borrows objects through alternates; packing them here would copy the history it shares",
         }
-      : {}),
-  };
+      : counted;
   return written === null ? report : ({ ...report, packed: written } satisfies GcReport);
 });

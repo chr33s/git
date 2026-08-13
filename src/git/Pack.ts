@@ -31,8 +31,17 @@ import { crc32 } from "./PackIndex.ts";
 import { Sha1 } from "./Sha1.ts";
 import { ObjectStore, type ObjectType, type Oid, type RawObject } from "./Store.ts";
 
-const TYPE_CODES: Record<ObjectType, number> = { commit: 1, tree: 2, blob: 3, tag: 4 };
-const CODE_TYPES: Record<number, ObjectType> = { 1: "commit", 2: "tree", 3: "blob", 4: "tag" };
+const TYPE_CODES = { commit: 1, tree: 2, blob: 3, tag: 4 } as const satisfies Record<
+  ObjectType,
+  number
+>;
+/** Keyed by the wire's type code, which is why lookups can miss. */
+const CODE_TYPES = new Map<number, ObjectType>([
+  [1, "commit"],
+  [2, "tree"],
+  [3, "blob"],
+  [4, "tag"],
+]);
 const OFS_DELTA = 6;
 const REF_DELTA = 7;
 
@@ -140,10 +149,12 @@ class Source {
       return { kind: "ofs", distance, size };
     }
     if (code === REF_DELTA) {
+      // SAFETY: `take` either returns exactly 20 bytes or throws, and hex-encoding
+      // them yields exactly the 40 lowercase hex characters an oid is.
       return { kind: "ref", base: bytesToHex(await this.take(20)) as Oid, size };
     }
 
-    const type = CODE_TYPES[code];
+    const type = CODE_TYPES.get(code);
     if (type === undefined) throw this.corrupt(`unknown object type code ${code}`);
     return { kind: "full", type, size };
   }
@@ -557,7 +568,7 @@ export const unpack = <E>(
     }
 
     yield* step(() => source.trailer());
-    return oids as ReadonlyArray<Oid>;
+    return oids;
   });
 
 const encodeObjectHeader = (code: number, size: number): Uint8Array => {
@@ -574,15 +585,15 @@ const encodeObjectHeader = (code: number, size: number): Uint8Array => {
 };
 
 /** One-shot per-object deflate; boundary detection is only a reading problem. */
+// SAFETY: every byte source in this module is allocated with `new Uint8Array`
+// or sliced from one, so the backing buffer is a plain `ArrayBuffer` — the
+// `Blob` constructor's type merely cannot see that through the generic default.
 const deflate = async (bytes: Uint8Array): Promise<Uint8Array> =>
   new Uint8Array(
     await new Response(
-      new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(
-        new CompressionStream("deflate") as unknown as {
-          readable: ReadableStream<Uint8Array>;
-          writable: WritableStream<Uint8Array>;
-        },
-      ),
+      new Blob([bytes as Uint8Array<ArrayBuffer>])
+        .stream()
+        .pipeThrough(new CompressionStream("deflate")),
     ).arrayBuffer(),
   );
 

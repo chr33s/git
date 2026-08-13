@@ -217,15 +217,19 @@ export type ServerStoreLayer = Layer.Layer<ServerStores>;
 export const tracedObjectStore = (
   backend: string,
   store: ObjectStore["Service"],
-): ObjectStore["Service"] => ({
-  read: Effect.fn(`${backend}.ObjectStore.read`)(store.read),
-  readStream: Effect.fn(`${backend}.ObjectStore.readStream`)(store.readStream),
-  write: Effect.fn(`${backend}.ObjectStore.write`)(store.write),
-  has: Effect.fn(`${backend}.ObjectStore.has`)(store.has),
-  delete: Effect.fn(`${backend}.ObjectStore.delete`)(store.delete),
-  list: store.list.pipe(Stream.withSpan(`${backend}.ObjectStore.list`)),
-  ...(store.shared === undefined ? {} : { shared: store.shared }),
-});
+): ObjectStore["Service"] => {
+  const traced = {
+    read: Effect.fn(`${backend}.ObjectStore.read`)(store.read),
+    readStream: Effect.fn(`${backend}.ObjectStore.readStream`)(store.readStream),
+    write: Effect.fn(`${backend}.ObjectStore.write`)(store.write),
+    has: Effect.fn(`${backend}.ObjectStore.has`)(store.has),
+    delete: Effect.fn(`${backend}.ObjectStore.delete`)(store.delete),
+    list: store.list.pipe(Stream.withSpan(`${backend}.ObjectStore.list`)),
+  };
+  // `shared` is forwarded only when the backend has one: it is optional on the
+  // port, and adding the key as `undefined` is not the same as leaving it out.
+  return store.shared === undefined ? traced : { ...traced, shared: store.shared };
+};
 
 export const tracedRefStore = (
   backend: string,

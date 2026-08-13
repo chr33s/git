@@ -20,6 +20,7 @@ import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
+import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -75,7 +76,7 @@ const localOf = (name: string) =>
   );
 
 const inLocal = <A, E>(name: string, effect: Effect.Effect<A, E, Repository>): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provide(localOf(name))) as Effect.Effect<A, E>);
+  Effect.runPromise(effect.pipe(Effect.provide(localOf(name))));
 
 /** One commit on `main` in a local repository, appended to whatever is there. */
 const commitFile = (repo: string, file: string, content: string, message: string): Promise<Oid> =>
@@ -84,10 +85,14 @@ const commitFile = (repo: string, file: string, content: string, message: string
     Effect.gen(function* () {
       const repository = yield* Repository;
       const parent = yield* repository.resolve("refs/heads/main");
-      const tree = yield* repository.writeFiles({
-        ...(parent === null ? {} : { base: (yield* repository.readCommit(parent)).tree }),
-        changes: [{ path: file, content: encoder.encode(content) }],
-      });
+      const changes = [{ path: file, content: encoder.encode(content) }];
+      const tree =
+        parent === null
+          ? yield* repository.writeFiles({ changes })
+          : yield* repository.writeFiles({
+              base: (yield* repository.readCommit(parent)).tree,
+              changes,
+            });
       return yield* repository.commit({ branch: "main", tree, message, author });
     }),
   );
@@ -98,9 +103,7 @@ const pushFrom = (
   refs: ReadonlyArray<PushRef>,
   options?: { readonly force?: boolean; readonly atomic?: boolean },
 ): Promise<ReadonlyArray<PushResult>> =>
-  inLocal(repo, push({ url: `${server.url}/${remote}`, refs, ...options })) as Promise<
-    ReadonlyArray<PushResult>
-  >;
+  inLocal(repo, push({ url: `${server.url}/${remote}`, refs, ...options }));
 
 /**
  * The object count in a packfile the client sent, or `null` when the request
@@ -151,7 +154,7 @@ const serverRef = (repo: string, name: string): Promise<Oid | null> =>
           Layer.provide(stores(path.join(root, repo))),
         ),
       ),
-    ) as Effect.Effect<Oid | null>,
+    ),
   );
 
 beforeAll(async () => {
@@ -316,10 +319,9 @@ describe("Push", () => {
 
     await assert.rejects(
       pushFrom("byoid", "byoid", [{ local: "refs/heads/nope", remote: "refs/heads/nope" }]),
-      (error: unknown) => {
-        const failure = error as { _tag?: string; reason?: string };
-        assert.equal(failure._tag, "Invalid");
-        assert.match(failure.reason ?? "", /unknown ref 'refs\/heads\/nope'/);
+      (error) => {
+        assert.ok(error instanceof Invalid, "the rejection must be the push's own Invalid");
+        assert.match(error.reason, /unknown ref 'refs\/heads\/nope'/);
         return true;
       },
     );

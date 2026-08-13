@@ -30,7 +30,7 @@ const namespace = {
   kind: "Cloudflare.Artifacts.Namespace",
   name: "REPOS",
   namespace: "test-ns",
-} as ArtifactsNamespace;
+} satisfies ArtifactsNamespace;
 
 const author = {
   name: "Alice",
@@ -47,8 +47,9 @@ const author = {
 const run = <A, E>(
   effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | Tokens | RuntimeContext>,
 ): Promise<A> =>
-  // The local provider never reads `RuntimeContext`, but alchemy's client
-  // signatures carry it and no off-platform value can be constructed.
+  // SAFETY: the local provider never reads `RuntimeContext`; alchemy's client
+  // signatures carry it only because no off-platform value can be constructed,
+  // so providing the memory layers discharges every requirement actually read.
   Effect.runPromise(
     effect.pipe(Effect.provide(localMemory({ remoteBase: "http://git.local" }))) as Effect.Effect<
       A,
@@ -268,6 +269,9 @@ describe("Artifacts local provider", () => {
   it("survives a provider restart when backed by the node layers", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "artifacts-durable-"));
     const provider = () => localNode({ root, remoteBase: "http://git.local" });
+    // SAFETY: as with `run` above, the local provider never reads
+    // `RuntimeContext`, so the node layers discharge every requirement
+    // actually read.
     const session = <A, E>(
       effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | Tokens | RuntimeContext>,
     ) => Effect.runPromise(effect.pipe(Effect.provide(provider())) as Effect.Effect<A, E>);

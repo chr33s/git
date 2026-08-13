@@ -48,7 +48,10 @@ describe("packed-refs", () => {
     }
   };
 
+  // SAFETY: forty lowercase hex characters by construction, which is exactly
+  // what the Oid brand stands for.
   const oid = "1".repeat(40) as Oid;
+  // SAFETY: as above — forty lowercase hex characters by construction.
   const tagged = "2".repeat(40) as Oid;
 
   const packedRefsFile = [
@@ -71,11 +74,7 @@ describe("packed-refs", () => {
             read: yield* refs.read("refs/heads/main"),
             resolved: yield* refs.resolve("refs/tags/v1"),
           };
-        }).pipe(Effect.provide(stores(root))) as Effect.Effect<{
-          all: ReadonlyArray<readonly [string, Oid]>;
-          read: Oid | null;
-          resolved: Oid | null;
-        }>,
+        }).pipe(Effect.provide(stores(root))),
       );
     });
 
@@ -90,6 +89,8 @@ describe("packed-refs", () => {
   });
 
   it("prefers a loose ref over the packed entry, as git does", async () => {
+    // SAFETY: forty lowercase hex characters by construction, which is exactly
+    // what the Oid brand stands for.
     const moved = "3".repeat(40) as Oid;
     const read = await withRoot(async (root) => {
       await fs.writeFile(path.join(root, "packed-refs"), packedRefsFile);
@@ -98,7 +99,7 @@ describe("packed-refs", () => {
           const refs = yield* RefStore;
           yield* refs.apply([{ name: "refs/heads/main", value: moved }]);
           return yield* refs.read("refs/heads/main");
-        }).pipe(Effect.provide(stores(root))) as Effect.Effect<Oid | null>,
+        }).pipe(Effect.provide(stores(root))),
       );
     });
 
@@ -106,6 +107,8 @@ describe("packed-refs", () => {
   });
 
   it("re-reads packed-refs after another process rewrites it", async () => {
+    // SAFETY: forty lowercase hex characters by construction, which is exactly
+    // what the Oid brand stands for.
     const later = "4".repeat(40) as Oid;
     const seen = await withRoot(async (root) => {
       const file = path.join(root, "packed-refs");
@@ -128,10 +131,7 @@ describe("packed-refs", () => {
           );
 
           return { before, after: yield* refs.read("refs/heads/main") };
-        }).pipe(Effect.provide(stores(root))) as Effect.Effect<{
-          before: Oid | null;
-          after: Oid | null;
-        }>,
+        }).pipe(Effect.provide(stores(root))),
       );
     });
 
@@ -154,11 +154,7 @@ describe("packed-refs", () => {
             read: yield* refs.read("refs/heads/main"),
             listed: (yield* refs.list("refs/")).map(([name]) => name),
           };
-        }).pipe(Effect.provide(stores(root))) as unknown as Effect.Effect<{
-          applied: boolean;
-          read: Oid | null;
-          listed: ReadonlyArray<string>;
-        }>,
+        }).pipe(Effect.provide(stores(root))),
       );
     });
 
@@ -183,7 +179,7 @@ describe("packed-refs", () => {
             const refs = yield* RefStore;
             // What `GET /repo/reflog?ref=…` passes straight through.
             return yield* refs.reflog(`../${path.basename(other)}/logs/refs/heads/main`);
-          }).pipe(Effect.provide(stores(root))) as Effect.Effect<ReadonlyArray<unknown>>,
+          }).pipe(Effect.provide(stores(root))),
         );
       } finally {
         await fs.rm(other, { force: true, recursive: true });
@@ -200,7 +196,7 @@ describe("packed-refs", () => {
         Effect.gen(function* () {
           const refs = yield* RefStore;
           return yield* refs.resolve("HEAD");
-        }).pipe(Effect.provide(stores(root))) as Effect.Effect<Oid | null>,
+        }).pipe(Effect.provide(stores(root))),
       );
     });
 
@@ -234,7 +230,7 @@ describe("packed-refs", () => {
           yield* Maintenance.gc({ objects, packs, refs }, { reflogGrace: 0 });
 
           return yield* objects.has(blob);
-        }).pipe(Effect.provide(layer)) as Effect.Effect<boolean>,
+        }).pipe(Effect.provide(layer)),
       );
     });
 
@@ -252,7 +248,10 @@ describe("the ref directory", () => {
     }
   };
 
+  // SAFETY: forty lowercase hex characters by construction, which is exactly
+  // what the Oid brand stands for.
   const oid = "5".repeat(40) as Oid;
+  // SAFETY: as above — forty lowercase hex characters by construction.
   const other = "6".repeat(40) as Oid;
 
   it("lists a ref whose name ends in .tmp", async () => {
@@ -265,7 +264,7 @@ describe("the ref directory", () => {
           // while the push that created it reports success.
           yield* refs.apply([{ name: "refs/heads/foo.tmp", value: oid }]);
           return (yield* refs.list("refs/")).map(([name]) => name);
-        }).pipe(Effect.provide(stores(root))) as unknown as Effect.Effect<ReadonlyArray<string>>,
+        }).pipe(Effect.provide(stores(root))),
       ),
     );
 
@@ -285,9 +284,7 @@ describe("the ref directory", () => {
         Effect.gen(function* () {
           const refs = yield* RefStore;
           return yield* refs.list("refs/");
-        }).pipe(Effect.provide(stores(root))) as Effect.Effect<
-          ReadonlyArray<readonly [string, Oid]>
-        >,
+        }).pipe(Effect.provide(stores(root))),
       );
     });
 
@@ -325,11 +322,7 @@ describe("the ref directory", () => {
             feature: yield* refs.read("refs/heads/feature"),
             keep: yield* refs.read("refs/heads/keep"),
           };
-        }).pipe(Effect.provide(stores(root))) as unknown as Effect.Effect<{
-          applied: number;
-          feature: Oid | null;
-          keep: Oid | null;
-        }>,
+        }).pipe(Effect.provide(stores(root))),
       ),
     );
 
@@ -362,10 +355,7 @@ describe("the ref directory", () => {
             log: (yield* refs.reflog("refs/heads/feature")).length,
             logged: yield* refs.logged,
           };
-        }).pipe(Effect.provide(stores(root))) as unknown as Effect.Effect<{
-          log: number;
-          logged: ReadonlyArray<string>;
-        }>,
+        }).pipe(Effect.provide(stores(root))),
       ),
     );
 
@@ -388,10 +378,7 @@ describe("the ref directory", () => {
             data: new TextEncoder().encode("real\n"),
           });
           return { written, all: yield* Stream.runCollect(objects.list) };
-        }).pipe(Effect.provide(stores(root))) as unknown as Effect.Effect<{
-          written: Oid;
-          all: ReadonlyArray<Oid>;
-        }>,
+        }).pipe(Effect.provide(stores(root))),
       );
     });
 
@@ -423,7 +410,7 @@ describe("alternates", () => {
             type: "blob",
             data: new TextEncoder().encode("shared\n"),
           });
-        }).pipe(Effect.provide(stores(a))) as Effect.Effect<Oid>,
+        }).pipe(Effect.provide(stores(a))),
       );
 
       // A fork of a fork: `c` reaches `a`'s object only if the chain is
@@ -435,10 +422,7 @@ describe("alternates", () => {
         Effect.gen(function* () {
           const objects = yield* ObjectStore;
           return { has: yield* objects.has(oid), read: (yield* objects.read(oid)).type };
-        }).pipe(Effect.provide(stores(c))) as unknown as Effect.Effect<{
-          has: boolean;
-          read: string;
-        }>,
+        }).pipe(Effect.provide(stores(c))),
       );
 
       assert.equal(held.has, true, "a fork of a fork lost its grandparent's objects");
@@ -467,7 +451,7 @@ describe("alternates", () => {
           // index was enumerated as if the fork owned every object in it.
           yield* Maintenance.gc({ objects, packs, refs }, { repack: true, reflogGrace: 0 });
           return blob;
-        }).pipe(Effect.provide(stores(parent))) as Effect.Effect<Oid>,
+        }).pipe(Effect.provide(stores(parent))),
       );
 
       await lend(child, parent);
@@ -476,10 +460,7 @@ describe("alternates", () => {
         Effect.gen(function* () {
           const objects = yield* ObjectStore;
           return { has: yield* objects.has(lent), all: yield* Stream.runCollect(objects.list) };
-        }).pipe(Effect.provide(stores(child))) as unknown as Effect.Effect<{
-          has: boolean;
-          all: ReadonlyArray<Oid>;
-        }>,
+        }).pipe(Effect.provide(stores(child))),
       );
 
       assert.equal(listed.has, true, "the fork cannot read what it borrows");
@@ -501,7 +482,7 @@ describe("alternates", () => {
             type: "blob",
             data: new TextEncoder().encode("borrowed\n"),
           });
-        }).pipe(Effect.provide(stores(parent))) as Effect.Effect<Oid>,
+        }).pipe(Effect.provide(stores(parent))),
       );
 
       // What `git clone --shared` leaves behind: the child's alternates point
@@ -514,10 +495,7 @@ describe("alternates", () => {
           const refs = yield* RefStore;
           const packs = yield* PackStore;
           return yield* Effect.flip(Maintenance.gc({ objects, packs, refs }, { reflogGrace: 0 }));
-        }).pipe(Effect.provide(stores(parent))) as unknown as Effect.Effect<{
-          _tag: string;
-          reason?: string;
-        }>,
+        }).pipe(Effect.provide(stores(parent))),
       );
 
       assert.equal(outcome._tag, "Invalid");
@@ -528,7 +506,7 @@ describe("alternates", () => {
         Effect.gen(function* () {
           const objects = yield* ObjectStore;
           return yield* objects.has(lent);
-        }).pipe(Effect.provide(stores(parent))) as Effect.Effect<boolean>,
+        }).pipe(Effect.provide(stores(parent))),
       );
       assert.equal(held, true);
     } finally {
@@ -549,7 +527,7 @@ describe("alternates", () => {
             type: "blob",
             data: new TextEncoder().encode("later\n"),
           });
-        }).pipe(Effect.provide(stores(parent))) as Effect.Effect<Oid>,
+        }).pipe(Effect.provide(stores(parent))),
       );
 
       const seen = await Effect.runPromise(
@@ -560,10 +538,7 @@ describe("alternates", () => {
           const before = yield* objects.has(oid);
           yield* Effect.promise(() => lend(child, parent));
           return { after: yield* objects.has(oid), before };
-        }).pipe(Effect.provide(layer)) as unknown as Effect.Effect<{
-          after: boolean;
-          before: boolean;
-        }>,
+        }).pipe(Effect.provide(layer)),
       );
 
       assert.equal(seen.before, false);
@@ -581,6 +556,8 @@ describe("reflog bound", () => {
       Effect.promise(async () => {
         const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-reflog-"));
         try {
+          // SAFETY: forty lowercase hex characters by construction, which is exactly
+          // what the Oid brand stands for.
           const oid = "4".repeat(40) as Oid;
           await Effect.runPromise(
             Effect.gen(function* () {
@@ -592,7 +569,7 @@ describe("reflog bound", () => {
                   { name: "refs/heads/main", value: oid, reason: `commit: ${"m".repeat(400)}` },
                 ]);
               }
-            }).pipe(Effect.provide(stores(root))) as Effect.Effect<void>,
+            }).pipe(Effect.provide(stores(root))),
           );
           return (await fs.stat(path.join(root, "logs", "refs", "heads", "main"))).size;
         } finally {

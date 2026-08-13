@@ -16,7 +16,7 @@ import { Effect } from "effect";
 import GitLive, { Git } from "./worker.ts";
 
 export { Objects } from "./objects.ts";
-export { Git, type GitShape } from "./worker.ts";
+export { Git, type GitBindings } from "./worker.ts";
 
 export default Alchemy.Stack(
   "git",

@@ -32,7 +32,7 @@
  * written before a rejection stay in the object store, unreachable, for `gc` —
  * git's own push does the same, and the alternative is buffering the commit.
  */
-import { Data, Effect, Stream } from "effect";
+import { Data, Effect, Predicate, Stream } from "effect";
 
 import type { Invalid, ObjectNotFound, RefConflict, StorageFailure } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
@@ -55,7 +55,12 @@ class Rejected extends Data.TaggedError("Rejected")<{
   readonly message: string;
 }> {}
 
-const json = (value: unknown, status = 200): Response =>
+/** Every body this endpoint answers: the commit it made, or why it would not. */
+type Reply =
+  | { readonly oid: Oid; readonly tree: Oid; readonly files: number }
+  | { readonly error: string };
+
+const json = (value: Reply, status = 200): Response =>
   new Response(JSON.stringify(value), {
     status,
     headers: { "content-type": "application/json", "cache-control": "no-cache" },
@@ -91,13 +96,25 @@ const rejected = <A, R>(
     }),
   );
 
+/**
+ * What `JSON.parse` can hand back. Naming the domain keeps every field read
+ * below a real value, never an unexamined `unknown`.
+ */
+type Json = string | number | boolean | null | ReadonlyArray<Json> | JsonRecord;
+
+/** One protocol line, parsed but not yet interpreted: fields are read one by one. */
+interface JsonRecord {
+  readonly [field: string]: Json;
+}
+
+/** Among JSON values, the non-null non-array objects are exactly the records. */
+const isJsonRecord = (value: Json | undefined): value is JsonRecord => Predicate.isObject(value);
+
 /** `null` rather than a throw: a bad line is an answer, not an exception. */
-const parseLine = (line: string): Record<string, unknown> | null => {
+const parseLine = (line: string): JsonRecord | null => {
   try {
-    const value: unknown = JSON.parse(line);
-    return typeof value === "object" && value !== null && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null;
+    const value: Json = JSON.parse(line);
+    return isJsonRecord(value) ? value : null;
   } catch {
     return null;
   }
@@ -124,21 +141,14 @@ const concat = (chunks: ReadonlyArray<Uint8Array>, size: number): Uint8Array => 
   return bytes;
 };
 
-interface SignatureWire {
-  readonly name?: unknown;
-  readonly email?: unknown;
-  readonly at?: unknown;
-  readonly offset?: unknown;
-}
-
-const signatureOf = (value: unknown): Signature => {
-  const wire: SignatureWire = typeof value === "object" && value !== null ? value : {};
-  const at = typeof wire.at === "string" ? new Date(wire.at) : new Date();
+const signatureOf = (value: Json | undefined): Signature => {
+  const wire: JsonRecord = isJsonRecord(value) ? value : {};
+  const at = Predicate.isString(wire.at) ? new Date(wire.at) : new Date();
   return {
-    name: typeof wire.name === "string" ? wire.name : "Anonymous",
-    email: typeof wire.email === "string" ? wire.email : "anonymous@example.com",
+    name: Predicate.isString(wire.name) ? wire.name : "Anonymous",
+    email: Predicate.isString(wire.email) ? wire.email : "anonymous@example.com",
     at: Number.isNaN(at.getTime()) ? new Date() : at,
-    offset: typeof wire.offset === "number" ? wire.offset : 0,
+    offset: Predicate.isNumber(wire.offset) ? wire.offset : 0,
   };
 };
 
@@ -184,7 +194,7 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
     body === null
       ? Stream.empty
       : Stream.fromReadableStream({
-          evaluate: () => body as ReadableStream<Uint8Array>,
+          evaluate: () => body,
           onError: () => new Rejected({ status: 400, message: "the request body ended abruptly" }),
         });
 
@@ -207,8 +217,11 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
       if (record === null) return yield* bad("a line is not a JSON object");
 
       const type = record.type;
+      // A non-string `type` shows as its JSON in the rejections below, rather
+      // than as an object's default stringification.
+      const label = Predicate.isString(type) ? type : JSON.stringify(type);
       if (type !== "commit" && state.header === null) {
-        return yield* bad(`'${String(type)}' arrived before the commit header`);
+        return yield* bad(`'${label}' arrived before the commit header`);
       }
 
       switch (type) {
@@ -216,12 +229,12 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
           if (state.header !== null) return yield* bad("a second commit header");
 
           const branch =
-            typeof record.branch === "string" && record.branch !== "" ? record.branch : "main";
+            Predicate.isString(record.branch) && record.branch !== "" ? record.branch : "main";
           const expected = record.expected;
           if (
             expected !== undefined &&
             expected !== null &&
-            !(typeof expected === "string" && isOid(expected))
+            !(Predicate.isString(expected) && isOid(expected))
           ) {
             return yield* bad("'expected' is neither an oid nor null");
           }
@@ -233,16 +246,21 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
           state.tree =
             tip === null ? EMPTY_TREE_OID : (yield* rejected(repository.readCommit(tip))).tree;
 
+          // The rejection above leaves `expected` an oid, `null`, or absent —
+          // exactly the three states the header's compare-and-swap field has.
           state.header = {
             branch,
-            message: typeof record.message === "string" ? record.message : "",
+            message: Predicate.isString(record.message) ? record.message : "",
             author: signatureOf(record.author),
             // The tip the tree was snapshotted from. Committing without it
             // would parent this tree on whatever arrived while the body was
             // still streaming, silently reverting that commit's files — so a
             // caller who named no expectation still gets the one implied by
             // the tree they are sending.
-            ...(expected === undefined ? { expected: tip } : { expected: expected as Oid | null }),
+            //
+            // SAFETY: the rejection above leaves `expected` an oid, `null`, or
+            // absent, so what is left here is exactly `Oid | null`.
+            expected: expected === undefined ? tip : (expected as Oid | null),
           };
           return;
         }
@@ -250,12 +268,12 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
         case "file": {
           const open = state.open;
           if (open !== null) return yield* bad(`'file' while '${open.path}' is still open`);
-          if (typeof record.path !== "string" || record.path === "") {
+          if (!Predicate.isString(record.path) || record.path === "") {
             return yield* unprocessable("'file' needs a non-empty path");
           }
           state.open = {
             path: record.path,
-            mode: typeof record.mode === "string" ? record.mode : "100644",
+            mode: Predicate.isString(record.mode) ? record.mode : "100644",
             chunks: [],
             size: 0,
           };
@@ -265,7 +283,7 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
         case "chunk": {
           const open = state.open;
           if (open === null) return yield* bad("'chunk' outside a file");
-          if (typeof record.data !== "string") return yield* bad("'chunk' needs base64 'data'");
+          if (!Predicate.isString(record.data)) return yield* bad("'chunk' needs base64 'data'");
           // Each chunk is padded base64 in its own right, so the client may
           // cut a file at any byte it likes and the pieces still concatenate.
           const decoded = decodeBase64(record.data);
@@ -303,7 +321,7 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
         case "delete": {
           const open = state.open;
           if (open !== null) return yield* bad(`'delete' while '${open.path}' is still open`);
-          if (typeof record.path !== "string" || record.path === "") {
+          if (!Predicate.isString(record.path) || record.path === "") {
             return yield* unprocessable("'delete' needs a non-empty path");
           }
           state.tree = yield* rejected(
@@ -323,7 +341,7 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
         }
 
         default:
-          return yield* bad(`unknown record type '${String(type)}'`);
+          return yield* bad(`unknown record type '${label}'`);
       }
     });
 
@@ -362,7 +380,9 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
       tree: state.tree,
       message: header.message,
       author: header.author,
-      ...(header.expected === undefined ? {} : { expected: header.expected }),
+      // `commit` reads a missing `expected` and an undefined one the same
+      // way: both say "wherever the branch happens to be".
+      expected: header.expected,
     }),
   );
 

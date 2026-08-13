@@ -163,7 +163,7 @@ export const packed = (
         ),
       );
 
-  return tracedObjectStore(backend, {
+  const store: ObjectStore["Service"] = {
     read,
 
     // A packed object is stored deflated and possibly as a delta, so there is
@@ -191,7 +191,6 @@ export const packed = (
     // Deleting from a pack is a repack; `gc` owns that, and silently doing it
     // here would turn one delete into rewriting a gigabyte.
     delete: loose.delete,
-    ...(loose.shared === undefined ? {} : { shared: loose.shared }),
 
     /**
      * `Stream.suspend`, so the dedupe set below belongs to one run of the
@@ -233,5 +232,12 @@ export const packed = (
         }),
       );
     }),
-  });
+  };
+
+  // `shared` is forwarded only when the loose backend has one: it is optional
+  // on the port, and adding the key as `undefined` is not the same as omitting.
+  return tracedObjectStore(
+    backend,
+    loose.shared === undefined ? store : { ...store, shared: loose.shared },
+  );
 };

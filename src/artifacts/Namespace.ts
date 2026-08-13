@@ -112,11 +112,10 @@ const makeRegistry = (rows: Map<string, RepoRecord>, persist: () => Promise<void
         const start = options?.cursor === undefined ? 0 : Number.parseInt(options.cursor, 10);
         const limit = options?.limit ?? 100;
         const page = all.slice(start, start + limit);
-        return {
-          repos: page,
-          total: all.length,
-          ...(start + limit < all.length ? { cursor: String(start + limit) } : {}),
-        };
+        const next = start + limit;
+        return next < all.length
+          ? { repos: page, total: all.length, cursor: String(next) }
+          : { repos: page, total: all.length };
       }),
     delete: (name) =>
       Effect.gen(function* () {
@@ -144,8 +143,14 @@ export const registryMemory = Layer.sync(Registry)(() =>
   makeRegistry(new Map(), () => Promise.resolve()),
 );
 
+/** The documents this provider keeps on disk: registry rows, token rows, fork links. */
+type PersistedDocument =
+  | ReadonlyArray<RepoRecord>
+  | ReadonlyArray<TokenRow>
+  | Record<string, string>;
+
 /** Atomic enough for one process: temp file plus rename, like every backend. */
-const saveJson = async (target: string, value: unknown) => {
+const saveJson = async (target: string, value: PersistedDocument) => {
   await fs.mkdir(path.dirname(target), { recursive: true });
   const temporary = `${target}.${crypto.randomUUID()}.tmp`;
   await fs.writeFile(temporary, JSON.stringify(value, null, 1));
@@ -154,6 +159,9 @@ const saveJson = async (target: string, value: unknown) => {
 
 const loadJson = async <A>(target: string): Promise<A | null> => {
   try {
+    // SAFETY: these files are written only by `saveJson`, so a successful
+    // parse yields the caller's persisted shape; anything unreadable lands in
+    // the catch and reads as an empty store.
     return JSON.parse(await fs.readFile(target, "utf8")) as A;
   } catch {
     return null;
@@ -622,14 +630,15 @@ export const localNamespace = (
             }),
           list: (opts) =>
             registry.list(opts).pipe(
-              Effect.map(({ cursor, repos, total }) => ({
-                repos: repos.map((record) => {
+              Effect.map(({ cursor, repos, total }) => {
+                const listed = repos.map((record) => {
                   const { remote: _remote, ...rest } = info(record);
                   return rest;
-                }),
-                total,
-                ...(cursor === undefined ? {} : { cursor }),
-              })),
+                });
+                return cursor === undefined
+                  ? { repos: listed, total }
+                  : { repos: listed, total, cursor };
+              }),
             ),
           delete: (name) =>
             Effect.gen(function* () {

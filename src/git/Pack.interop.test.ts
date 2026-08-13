@@ -102,6 +102,7 @@ describe.skipIf(!hasGit)("Pack interop with git", () => {
         Effect.gen(function* () {
           const store = yield* ObjectStore;
           const oids = yield* unpack(Stream.fromIterable(chunked(packBytes, 1013)));
+          // SAFETY: `rev-parse HEAD` prints a full 40-hex commit id.
           const head = git(root, "rev-parse", "HEAD").trim() as Oid;
           return { oids, headCommit: yield* store.read(head) };
         }).pipe(Effect.provide(stores)),
