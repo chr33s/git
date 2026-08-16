@@ -53,6 +53,8 @@ export class GitRepo extends DurableObject<TestEnv> {
   #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
   #nonceStore: Layer.Layer<Auth.Nonces> | null = null;
+  /** The requester of the request being handled; the DO serializes them. */
+  #requester: Layer.Layer<Auth.Requester> | null = null;
 
   /** The registry on this instance's own SQLite, beside the refs. */
   #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
@@ -142,7 +144,9 @@ export class GitRepo extends DurableObject<TestEnv> {
         Effect.catch((error: GitError) =>
           Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
         ),
-        Effect.provide(this.#live(repo)),
+        Effect.provide(
+          Layer.merge(this.#live(repo), this.#requester ?? Auth.requester(Auth.anonymous)),
+        ),
         Effect.map((response) => this.#track(response)),
       ),
     );
@@ -158,10 +162,14 @@ export class GitRepo extends DurableObject<TestEnv> {
     // state is: the guard reads the repository's own genesis and membership
     // log. A repository with no genesis is not hub-enabled and stays open,
     // which is what every repository that predates this was.
-    const denied = await Effect.runPromise(
+    const guarded = await Effect.runPromise(
       Auth.guard(request).pipe(Effect.provide(Layer.merge(this.#live(repo), this.#nonces()))),
     );
-    if (denied !== null) return denied;
+    if (guarded.denied !== null) return guarded.denied;
+    // Who the requester is travels with the rest of the request: the policy
+    // boundary inside a push needs it, and authenticating twice would spend
+    // the nonce the first attempt already consumed.
+    this.#requester = Auth.requester(guarded.authenticated);
 
     if (route === "conformance") return this.#conformance(repo);
     if (route === "registry-conformance") return this.#registryConformance();

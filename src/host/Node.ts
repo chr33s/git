@@ -169,6 +169,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     repo: string,
     request: Request,
     deliver: (response: Response) => Promise<void>,
+    requester: Layer.Layer<Auth.Requester>,
   ): Promise<void> => {
     const state = stateFor(repo);
     state.active += 1;
@@ -208,7 +209,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           Effect.catch((error) =>
             Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
           ),
-          Effect.provide(state.layer),
+          Effect.provide(Layer.merge(state.layer, requester)),
         ),
       );
       return matched ?? (await state.api(request));
@@ -307,8 +308,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           await pipeline(Readable.fromWeb(response.body as WebReadableStream), outgoing);
         }
       };
-      if (denied !== null) await deliver(denied);
-      else await dispatch(repo, request, deliver);
+      if (denied.denied !== null) await deliver(denied.denied);
+      else await dispatch(repo, request, deliver, Auth.requester(denied.authenticated));
     })().catch((cause: unknown) => {
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end(String(cause));

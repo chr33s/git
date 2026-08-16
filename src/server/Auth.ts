@@ -545,20 +545,62 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
   } as const;
 });
 
+/** The projection a repository with no genesis presents: nothing is known. */
+const EMPTY: Projection = {
+  // SAFETY: a repository with no genesis has no identity; this value is never
+  // compared against a real one, because `authenticate` returns before any
+  // membership check when the genesis is absent.
+  repoId: "" as RepoId,
+  head: null,
+  members: new Map(),
+  former: new Map(),
+  revoked: new Map(),
+  roots: [],
+  threshold: 0,
+  checkpoint: null,
+  rejected: [],
+};
+
+/**
+ * Who is making the request being handled.
+ *
+ * A service rather than an argument threaded through every handler: the guard
+ * runs at the host's edge and the policy boundary runs deep inside a push, and
+ * the two would otherwise have to agree about a parameter on everything in
+ * between. Provided per request by whichever host authenticated it.
+ */
+export class Requester extends Context.Service<Requester, Authenticated>()("server/Requester") {}
+
+/** Anonymous, for the paths that never authenticated anybody. */
+export const anonymous: Authenticated = {
+  principal: null,
+  signer: null,
+  capabilities: [],
+  projection: EMPTY,
+};
+
+export const requester = (authenticated: Authenticated): Layer.Layer<Requester> =>
+  Layer.succeed(Requester)(authenticated);
+
 /**
  * The guard both HTTP surfaces call.
  *
- * `null` means proceed, exactly as before, so the hosts keep the shape they
- * had — the change is what the answer is derived from, not how it is asked.
+ * Returns the refusal *or* who the requester turned out to be, because the
+ * second is what the rest of the request needs: a push is judged against the
+ * pusher, and re-deriving that later would mean authenticating twice — which,
+ * with single-use nonces, means failing the second time.
  */
 export const guard = Effect.fn("Auth.guard")(function* (request: Request) {
   const outcome = yield* authenticate({ request, capability: requiredCapability(request) });
-  if (outcome.ok) return null;
+  if (outcome.ok) return { denied: null, authenticated: outcome.authenticated };
 
-  return new Response(outcome.reason, {
-    status: outcome.status,
-    headers: outcome.status === 401 && "nonce" in outcome ? challenge(outcome.nonce) : {},
-  });
+  return {
+    denied: new Response(outcome.reason, {
+      status: outcome.status,
+      headers: outcome.status === 401 && "nonce" in outcome ? challenge(outcome.nonce) : {},
+    }),
+    authenticated: anonymous,
+  };
 });
 
 const operationOf = (request: Request): string => {
@@ -584,22 +626,6 @@ const anonymousReadAllowed = (projection: Projection): boolean => {
     if (member.capabilities.includes("repo.read")) return false;
   }
   return true;
-};
-
-/** The projection a repository with no genesis presents: nothing is known. */
-const EMPTY: Projection = {
-  // SAFETY: a repository with no genesis has no identity; this value is never
-  // compared against a real one, because `authenticate` returns before any
-  // membership check when the genesis is absent.
-  repoId: "" as RepoId,
-  head: null,
-  members: new Map(),
-  former: new Map(),
-  revoked: new Map(),
-  roots: [],
-  threshold: 0,
-  checkpoint: null,
-  rejected: [],
 };
 
 export type AuthError = Invalid;

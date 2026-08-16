@@ -26,6 +26,7 @@ import { type GitError, Invalid, PackCorrupt, type StorageFailure } from "../git
 import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
+import * as Policy from "./Policy.ts";
 import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
 const decoder = new TextDecoder();
@@ -747,7 +748,29 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       }
     }
 
-    const results = yield* repository.receive(updates, { atomic }).pipe(
+    // Every mutable ref update converges here. The guard has already said who
+    // the requester is; this is where what they may do meets what the branch
+    // requires, and the compare-and-swap that carries the verdict is applied
+    // with it rather than after it.
+    const judged = yield* Policy.gate(updates, atomic);
+    if (atomic && judged.refused.length > 0) {
+      return respond(allFailed(judged.refused[0]!.reason), "ok");
+    }
+    // Non-atomic: the refusals ride back in the same report as the `ok`s, so a
+    // client is told which refs the policy declined and why, rather than
+    // seeing them silently missing from the answer.
+    for (const entry of judged.refused) {
+      const command = updates.find((update) => update.name === entry.ref);
+      refused.push({
+        ref: entry.ref,
+        from: command?.expected ?? null,
+        to: command?.value ?? null,
+        ok: false,
+        reason: entry.reason,
+      });
+    }
+
+    const results = yield* repository.receive(judged.updates, { atomic }).pipe(
       Effect.catchTags({
         HookRejected: (error) => Effect.succeed(allFailed(error.message)),
         Invalid: (error) => Effect.succeed(allFailed(error.reason)),

@@ -134,12 +134,12 @@ describe("Auth", () => {
   describe("a repository with no genesis", () => {
     it("serves anonymously, because it is an ordinary git repository", async () => {
       const denied = await scenario(guard(request("r/git-upload-pack", { method: "POST" })));
-      assert.equal(denied, null);
+      assert.equal(denied.denied, null);
     });
 
     it("serves a push anonymously too — nothing has claimed it", async () => {
       const denied = await scenario(guard(request("r/git-receive-pack", { method: "POST" })));
-      assert.equal(denied, null);
+      assert.equal(denied.denied, null);
     });
   });
 
@@ -159,7 +159,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome, null);
+      assert.equal(outcome.denied, null);
     });
 
     it("refuses one scoped below what the request needs", async () => {
@@ -178,7 +178,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome?.status, 403);
+      assert.equal(outcome.denied?.status, 403);
     });
 
     it("cannot carry more than its issuer holds", async () => {
@@ -198,7 +198,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome?.status, 403);
+      assert.equal(outcome.denied?.status, 403);
     });
 
     it("does not verify at another repository", async () => {
@@ -217,7 +217,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome?.status, 401);
+      assert.equal(outcome.denied?.status, 401);
     });
 
     it("expires", async () => {
@@ -275,7 +275,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome?.status, 403, "revoking the issuer must revoke what they minted");
+      assert.equal(outcome.denied?.status, 403, "revoking the issuer must revoke what they minted");
     });
   });
 
@@ -287,7 +287,7 @@ describe("Auth", () => {
           return yield* guard(request("r/git-upload-pack", { method: "POST" }));
         }),
       );
-      assert.equal(outcome?.status, 401);
+      assert.equal(outcome.denied?.status, 401);
     });
 
     it("is allowed when no grant restricts reading", async () => {
@@ -297,7 +297,7 @@ describe("Auth", () => {
           return yield* guard(request("r/git-upload-pack", { method: "POST" }));
         }),
       );
-      assert.equal(outcome, null, "a repository nobody restricted is a public repository");
+      assert.equal(outcome.denied, null, "a repository nobody restricted is a public repository");
     });
 
     it("is never allowed to push", async () => {
@@ -307,7 +307,7 @@ describe("Auth", () => {
           return yield* guard(request("r/git-receive-pack", { method: "POST" }));
         }),
       );
-      assert.equal(outcome?.status, 401);
+      assert.equal(outcome.denied?.status, 401);
     });
 
     it("carries a nonce, so a native client can sign its retry", async () => {
@@ -317,7 +317,7 @@ describe("Auth", () => {
           return yield* guard(request("r/git-upload-pack", { method: "POST" }));
         }),
       );
-      assert.match(outcome?.headers.get("www-authenticate") ?? "", /nonce="/);
+      assert.match(outcome.denied?.headers.get("www-authenticate") ?? "", /nonce="/);
     });
   });
 
@@ -341,7 +341,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome, null);
+      assert.equal(outcome.denied, null);
     });
 
     it("refuses the same envelope twice", async () => {
@@ -363,7 +363,7 @@ describe("Auth", () => {
           return yield* guard(request("r/git-receive-pack", { method: "POST", headers }));
         }),
       );
-      assert.equal(outcome?.status, 401, "a nonce is single use");
+      assert.equal(outcome.denied?.status, 401, "a nonce is single use");
     });
 
     it("refuses an envelope signed for another operation", async () => {
@@ -386,7 +386,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome?.status, 401);
+      assert.equal(outcome.denied?.status, 401);
     });
 
     it("refuses an expired envelope", async () => {
@@ -408,7 +408,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome?.status, 401);
+      assert.equal(outcome.denied?.status, 401);
     });
 
     it("refuses a nonce the server never issued", async () => {
@@ -429,7 +429,7 @@ describe("Auth", () => {
           );
         }),
       );
-      assert.equal(outcome?.status, 401);
+      assert.equal(outcome.denied?.status, 401);
     });
   });
 
