@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
+import { enableHubUnder, grantMemberUnder } from "../testing/Hub.ts";
 import { serve, type Server } from "./Node.ts";
 
 let root: string;
@@ -84,5 +85,40 @@ describe("the per-repository gate", () => {
     const swept = await post(`${base}/gc`, {});
     assert.equal(swept.status, 200);
     assert.deepEqual(swept.body.removed, [orphan.body.oid]);
+  });
+});
+
+/**
+ * The router is built once per repository and the requester arrives with each
+ * call. That is only safe if the second caller is judged as themselves, so
+ * this is the test that would fail if the requester were ever baked back into
+ * the layer graph the router is built from.
+ */
+describe("a memoised router", () => {
+  it("judges every request as whoever made it, not as the first caller", async () => {
+    const repo = "requesters";
+    const base = `${server.url}/${repo}`;
+
+    const reader = await enableHubUnder(root, repo, ["repo.read"]);
+    const writer = await grantMemberUnder(root, repo, reader.root, reader.repoId, [
+      "repo.read",
+      "source.push",
+    ]);
+
+    const write = (credential: string) =>
+      fetch(`${base}/blob`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${credential}` },
+        body: JSON.stringify({ content: "hello\n" }),
+      });
+
+    // The writer goes first, so the router is built and memoised as them.
+    assert.equal((await write(writer.credential)).status, 200);
+
+    // The reader must still be refused through that same router…
+    assert.equal((await write(reader.credential)).status, 403);
+
+    // …and the writer must not have been demoted by the reader's turn.
+    assert.equal((await write(writer.credential)).status, 200);
   });
 });

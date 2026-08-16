@@ -11,7 +11,7 @@
  * `RefStore.apply`'s check-then-write, and instances are isolated by name.
  */
 import { DurableObject } from "cloudflare:workers";
-import { Effect, Layer } from "effect";
+import { Context, Effect, Layer } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
 import { registryContract } from "../artifacts/Registry.contract.ts";
@@ -52,7 +52,18 @@ export class GitRepo extends DurableObject<TestEnv> {
   #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
   #nonceStore: Layer.Layer<Auth.Nonces> | null = null;
-  /** The requester of the request being handled; the DO serializes them. */
+  /**
+   * The JSON API's router, built once per instance.
+   *
+   * The requester is deliberately *not* in the graph it is built from: it
+   * arrives as a per-request context instead. A router rebuilt per request
+   * reconstructs the whole handler tree and opens a `Scope` this class never
+   * closes, and one with the requester baked in would answer every later
+   * request as whoever made the first.
+   */
+  #api:
+    | ((request: Request, requester: Context.Context<Auth.Requester>) => Promise<Response>)
+    | null = null;
 
   /** The registry on this instance's own SQLite, beside the refs. */
   #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
@@ -242,18 +253,14 @@ export class GitRepo extends DurableObject<TestEnv> {
     // `gc` is the request that deletes objects a body may still be reading.
     if (collects(request)) await settledWithin(this.#delivering);
 
-    // Rebuilt per request rather than memoised: the requester is part of the
-    // layer the handlers resolve, and a handler built once would answer every
-    // later request as whoever made the first one.
-    const handler = HttpRouter.toWebHandler(
+    this.#api ??= HttpRouter.toWebHandler(
       Api.layer(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
         Layer.provideMerge(this.#registry(repo)),
-        Layer.provideMerge(requester),
       ),
       { disableLogger: true },
     ).handler;
-    return this.#track(await handler(request));
+    return this.#track(await this.#api(request, Auth.requesterContext(guarded.authenticated)));
   }
 
   /**

@@ -332,6 +332,53 @@ describe("trust projection", () => {
       assert.equal(outcome.ok, false);
     });
 
+    it("refuses an event whose trust head is a commit outside the trust log", async () => {
+      // The sharper version of the test above: an oid this replica genuinely
+      // holds, but that is not a trust record — the tip of `main`, say. An
+      // ancestry walk from it reaches no revocation, so without a membership
+      // check it reads exactly like an event that predates one, and naming a
+      // branch tip becomes a way out of every forward-only revocation.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          const bytes = new TextEncoder().encode("a review pinned to the wrong history");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "left",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+
+          const tree = yield* repository.writeTree([]);
+          const source = yield* repository.commit({
+            branch: "refs/heads/main",
+            tree,
+            message: "ordinary work\n",
+            author: Record.identityAt(new Date()),
+          });
+
+          return yield* Verify.authorize({
+            projection: yield* projectionOf(where),
+            bytes,
+            signatures: [signature],
+            capability: "hub.review",
+            made: { at: new Date(), trustHead: source },
+          });
+        }),
+      );
+
+      assert.equal(outcome.ok, false);
+    });
+
     it("reaches backwards when the key was compromised", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {

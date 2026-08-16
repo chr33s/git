@@ -380,6 +380,16 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
     readonly repack?: boolean;
     /** Milliseconds; `0` collects everything only the reflog still names. */
     readonly reflogGrace?: number;
+    /**
+     * Objects a ref may name and still not protect.
+     *
+     * Redaction's other half. A tombstoned payload blob is still referenced by
+     * the tree of the commit that carried it — that structure has to survive,
+     * or every later event's hash breaks — so reachability alone would protect
+     * the content forever. Excluding it here is what lets a repack drop the
+     * pack copy, which is the only way a packed object is ever removed.
+     */
+    readonly exclude?: ReadonlySet<Oid>;
   },
 ) {
   const { objects, packs, refs } = stores;
@@ -442,6 +452,7 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   const walked = yield* reachable(objects, roots, {
     ignoreMissing: true,
     classify: willRepack,
+    skip: options?.exclude,
   });
   const keep = walked.seen;
 

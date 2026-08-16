@@ -16,7 +16,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
-import { Config, Effect, Layer, Predicate } from "effect";
+import { Config, Context, Effect, Layer, Predicate } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
@@ -64,7 +64,12 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   interface RepoState {
     readonly layer: Layer.Layer<Repository>;
     readonly lfs: Layer.Layer<Lfs.LfsStore>;
-    readonly api: (request: Request, requester: Layer.Layer<Auth.Requester>) => Promise<Response>;
+    readonly api: (
+      request: Request,
+      requester: Context.Context<Auth.Requester>,
+    ) => Promise<Response>;
+    /** Closes the router's scope — the layers it built are finalized here. */
+    readonly disposeApi: () => Promise<void>;
     /** The input-gate stand-in: requests to one repo run strictly in order. */
     gate: Promise<unknown>;
     /**
@@ -107,6 +112,10 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     for (const [name, state] of repos) {
       if (state.active > 0 || state.delivering.size > 0) continue;
       repos.delete(name);
+      // The router holds a `Scope`: the layers it built — stores, hooks, the
+      // webhook registry — have finalizers, and dropping the entry without
+      // running them leaks a file handle per evicted repository.
+      void state.disposeApi();
       if (repos.size <= REPO_CACHE) return;
     }
   };
@@ -138,23 +147,23 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       Layer.provide(stores(path.join(options.root, repo))),
     );
 
+    // Built once per repository, not once per request. The requester stays
+    // *out* of the graph and arrives as a per-request context instead, which
+    // is what `toWebHandler`'s second argument is for: a router built per
+    // call rebuilds the whole API handler tree and opens a `Scope` nobody
+    // ever closes, and one built with the requester baked in would answer
+    // every later request as whoever made the first.
+    const router = HttpRouter.toWebHandler(
+      Api.layer(remotes).pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
+      { disableLogger: true },
+    );
+
     const state: RepoState = {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
-      // Rebuilt per request, deliberately: the requester is part of the layer
-      // these handlers resolve, so a memoised one would answer every later
-      // request as whoever made the first. The cost is building the router
-      // graph per JSON call, which is the price of the boundary knowing who
-      // is asking.
-      api: (request: Request, requester: Layer.Layer<Auth.Requester>) =>
-        HttpRouter.toWebHandler(
-          Api.layer(remotes).pipe(
-            Layer.provideMerge(layer),
-            Layer.provideMerge(subscribers),
-            Layer.provideMerge(requester),
-          ),
-          { disableLogger: true },
-        ).handler(request),
+      api: (request: Request, requester: Context.Context<Auth.Requester>) =>
+        router.handler(request, requester),
+      disposeApi: router.dispose,
       gate: Promise.resolve(),
       delivering: new Set(),
       active: 0,
@@ -179,10 +188,16 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     repo: string,
     request: Request,
     deliver: (response: Response) => Promise<void>,
-    requester: Layer.Layer<Auth.Requester>,
+    authenticated: Auth.Authenticated,
   ): Promise<void> => {
     const state = stateFor(repo);
     state.active += 1;
+
+    // Two shapes of the same fact. The protocol and bulk paths build their own
+    // effect per request and take a layer; the API router is built once and
+    // takes a context per call, which is what keeps it memoisable.
+    const requester = Auth.requester(authenticated);
+    const asked = Auth.requesterContext(authenticated);
 
     // Outside the gate, deliberately: a collection waits on bodies that finish
     // at their clients' pace, and waiting for them with the gate held would
@@ -222,7 +237,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           Effect.provide(Layer.merge(state.layer, requester)),
         ),
       );
-      return matched ?? (await state.api(request, requester));
+      return matched ?? (await state.api(request, asked));
     };
 
     const answered = state.gate.then(answer, answer);
@@ -328,7 +343,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         }
       };
       if (denied.denied !== null) await deliver(denied.denied);
-      else await dispatch(repo, request, deliver, Auth.requester(denied.authenticated));
+      else await dispatch(repo, request, deliver, denied.authenticated);
     })().catch((cause: unknown) => {
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end(String(cause));

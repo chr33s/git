@@ -288,6 +288,10 @@ export const checkCompleted = Effect.fn("hub.PullRequest.checkCompleted")(functi
  *
  * The commit, the tree and the event's place in the chain all stay. Content
  * goes; structure does not, because every later event's hash depends on it.
+ *
+ * "Dropped" is immediate for a loose object and takes until the next repack
+ * for a packed one — a pack cannot give up one object without being rewritten.
+ * `Redaction.excluded()` is the other half, and `gc` is where it lands.
  */
 export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   readonly repo: RepoId;
@@ -321,6 +325,13 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   );
 
   // The blob, by the name its own tree entry gives it.
+  //
+  // This drops the loose copy only. A packed object cannot be removed without
+  // rewriting its pack, so the rest of the removal happens in `gc`, which
+  // takes `Redaction.excluded()` and so declines to protect what a tombstone
+  // covers. Doing the repack here would turn one redaction into rewriting a
+  // gigabyte, and doing nothing here would leave the bytes loose until the
+  // next collection — the loose copy is the one that can go now, so it goes.
   const info = yield* repository.readCommit(target.commit);
   const entry = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
   if (entry !== null) yield* repository.deleteObject(entry.oid);

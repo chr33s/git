@@ -27,7 +27,7 @@
  */
 import { Effect, Option, Schema } from "effect";
 
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid, RefUpdate } from "../git/Store.ts";
@@ -369,53 +369,6 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     shortfall ?? refused(input.ref, `${input.ref} may only be moved by an approved pull request`)
   );
 });
-
-/**
- * Judge a batch, then apply what passed under the values it was judged against.
- *
- * All or nothing when `atomic` is set, which is what receive-pack's own
- * capability means. The compare-and-swap is not optional: a Durable Object
- * serializes these anyway, and the node and filesystem backends do not, so the
- * guarantee has to come from the update rather than from the host.
- */
-export const apply = Effect.fn("Policy.apply")(function* (input: {
-  readonly updates: ReadonlyArray<RefUpdate>;
-  readonly principal: Principal;
-  readonly genesis: Genesis | null;
-  readonly trust: TrustProjection | null;
-  readonly rules: Rules;
-  readonly atomic?: boolean;
-}) {
-  const repository = yield* Repository;
-
-  const decisions: Decision[] = [];
-  for (const update of input.updates) {
-    decisions.push(
-      yield* evaluate({
-        update,
-        principal: input.principal,
-        genesis: input.genesis,
-        trust: input.trust,
-        rules: input.rules,
-      }),
-    );
-  }
-
-  const refusals = decisions.filter((decision) => !decision.ok);
-  if (input.atomic === true && refusals.length > 0) {
-    return { applied: [], refused: refusals };
-  }
-
-  const allowed = decisions.flatMap((decision) => (decision.ok ? [decision.allowed] : []));
-  const results = yield* repository.receive(
-    allowed.map((entry) => ({ ...entry.update, expected: entry.expected })),
-    { atomic: input.atomic ?? false },
-  );
-
-  return { applied: results, refused: refusals };
-});
-
-export type PolicyError = Invalid | ObjectNotFound | StorageFailure;
 
 /**
  * May this requester write this ref at all?

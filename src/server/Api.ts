@@ -30,6 +30,7 @@ import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { type Strategy as MergeStrategy } from "../git/Merge.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
+import * as Redaction from "../hub/Redaction.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import * as Policy from "./Policy.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
@@ -1065,6 +1066,7 @@ type GcRequest = {
   dryRun?: boolean;
   repack?: boolean;
   reflogGrace?: number;
+  exclude?: ReadonlySet<Oid>;
 };
 
 type PushRequest = {
@@ -1539,6 +1541,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         if (payload.reflog_grace_ms !== undefined) {
           request.reflogGrace = Math.max(0, payload.reflog_grace_ms);
         }
+        // Redaction's other half: a tombstoned payload is still named by its
+        // own event's tree, so it survives reachability unless excluded here.
+        request.exclude = yield* Redaction.excluded().pipe(
+          Effect.catchTag("StorageFailure", Effect.die),
+        );
         const report = yield* repository
           .gc(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));

@@ -75,8 +75,16 @@ export const requiredCapability = (request: Request): string => {
   // alone would lock a reader out of cloning any repository that uses LFS. The
   // upload it hands back is a separate PUT, and that one is charged as a write.
   if (last === "batch" && url.pathname.includes("/info/lfs/")) return "repo.read";
+  // POST is not the same thing as "writes". These four take a body because
+  // their inputs do not fit in a URL, and they change nothing — charging them
+  // a write locks a reader out of `diff` and `grep`, and makes an otherwise
+  // public repository refuse them anonymously.
+  if (last !== undefined && READ_ONLY_POSTS.has(last)) return "repo.read";
   return request.method === "GET" || request.method === "HEAD" ? "repo.read" : "source.push";
 };
+
+/** POST endpoints that read and never write. */
+const READ_ONLY_POSTS = new Set(["diff", "grep", "bisect", "fsck", "history", "log"]);
 
 // -- nonces ---------------------------------------------------------------------
 
@@ -698,6 +706,18 @@ export const anonymous: Authenticated = {
 
 export const requester = (authenticated: Authenticated): Layer.Layer<Requester> =>
   Layer.succeed(Requester)(authenticated);
+
+/**
+ * The same value as a per-request context rather than a layer.
+ *
+ * A layer has to be part of the graph a router is built from, which means one
+ * router per request — and the router carries the whole API's handler tree and
+ * a `Scope` nobody closes. `HttpRouter.toWebHandler` takes a context per call
+ * for exactly this: the router is built once, and who is asking arrives with
+ * the request instead of with the graph.
+ */
+export const requesterContext = (authenticated: Authenticated): Context.Context<Requester> =>
+  Context.make(Requester, authenticated);
 
 /**
  * The guard both HTTP surfaces call.

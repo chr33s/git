@@ -275,14 +275,44 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
 });
 
 /**
- * Every commit an entry can reach, itself included.
+ * Whether a commit is part of this replica's trust log.
  *
- * The trust-facing name for `Dag.ancestry`, which is what makes revocation
- * ordering deterministic instead of wall-clock-dependent: "had the author
- * already seen this revocation?" is answered by ancestry, which every replica
- * computes the same way, rather than by comparing timestamps anybody can write.
+ * Asked before an event's self-declared trust head is believed. Ancestry alone
+ * cannot answer it: a walk from a fabricated oid, or from the tip of `main`,
+ * reaches no trust record and so matches no revocation — which looks exactly
+ * like an event that genuinely predates one. Naming any oid at all would
+ * otherwise be a way out of every forward-only revocation.
  */
-export const ancestry = Dag.ancestry;
+export const contains = Effect.fn("trust.Log.contains")(function* (commit: Oid) {
+  const repository = yield* Repository;
+
+  const head = yield* repository.resolve(LOG_REF);
+  if (head === null) return false;
+
+  const genesis = yield* repository.resolve(GENESIS_REF);
+  const reachable = yield* Dag.reachable(head, genesis, (oid) => isTrustCommit(oid));
+  return reachable.has(commit);
+});
+
+/**
+ * Every trust record an entry can reach, itself included.
+ *
+ * What makes revocation ordering deterministic instead of wall-clock-dependent:
+ * "had the author already seen this revocation?" is answered by ancestry, which
+ * every replica computes the same way, rather than by comparing timestamps
+ * anybody can write.
+ *
+ * Bounded by the genesis and by whether each commit is a trust record, for the
+ * same reason `entries` is: an unbounded walk from an attacker-supplied oid
+ * reads the repository's entire source history on every authorization check.
+ */
+export const ancestry = Effect.fn("trust.Log.ancestry")(function* (from: Oid) {
+  const repository = yield* Repository;
+
+  const genesis = yield* repository.resolve(GENESIS_REF);
+  const reachable = yield* Dag.reachable(from, genesis, (oid) => isTrustCommit(oid));
+  return new Set(reachable.keys());
+});
 
 export const RecordName = Schema.Literal(RECORD);
 

@@ -13,7 +13,7 @@
  */
 import * as Alchemy from "alchemy/Cloudflare";
 import type * as Http from "alchemy/Http";
-import { Effect, Layer } from "effect";
+import { Context, Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
@@ -150,18 +150,33 @@ export default Repo.make(
 
       const awaitDelivery = (repo: string) => settledWithin(delivering.get(repo) ?? nothing);
 
-      // Not memoised: the requester is part of the layer these handlers
-      // resolve, and one built for the first caller would answer as them for
-      // everybody after.
-      const api = (repo: string, requester: Layer.Layer<Auth.Requester>) =>
-        HttpRouter.toWebHandler(
+      /**
+       * The JSON API's router, one per repository.
+       *
+       * Memoised for the same reason `live` is, and possible for the same
+       * reason: the requester is kept *out* of the graph and arrives as a
+       * per-request context instead. Rebuilding it per request reconstructs
+       * the whole handler tree and opens a `Scope` nothing closes; baking the
+       * requester in would answer every later request as the first caller.
+       */
+      const routers = new Map<
+        string,
+        (request: Request, requester: Context.Context<Auth.Requester>) => Promise<Response>
+      >();
+
+      const api = (repo: string) => {
+        const existing = routers.get(repo);
+        if (existing !== undefined) return existing;
+        const built = HttpRouter.toWebHandler(
           Api.layer(remotes(repo)).pipe(
             Layer.provideMerge(live(repo)),
             Layer.provideMerge(subscribers(repo)),
-            Layer.provideMerge(requester),
           ),
           { disableLogger: true },
         ).handler;
+        routers.set(repo, built);
+        return built;
+      };
 
       /**
        * Challenge nonces for this instance.
@@ -194,8 +209,7 @@ export default Repo.make(
             })),
           );
           if (guarded.denied !== null) return guarded.denied;
-          const requester = Auth.requester(guarded.authenticated);
-          return yield* route_(request, repo, route, matched, requester);
+          return yield* route_(request, repo, route, matched, guarded.authenticated);
         });
 
       const route_ = (
@@ -203,9 +217,12 @@ export default Repo.make(
         repo: string,
         route: string,
         matched: { readonly rest: string },
-        requester: Layer.Layer<Auth.Requester>,
+        authenticated: Auth.Authenticated,
       ): Effect.Effect<Response> =>
         Effect.suspend(() => {
+          // Two shapes of the same fact: the protocol paths build an effect
+          // per request and take a layer, the memoised router takes a context.
+          const requester = Auth.requester(authenticated);
           // LFS shares the `info/` prefix with the advertisement, so it is
           // tried first; its bodies are the large ones.
           if (route === "info" && matched.rest.includes("/lfs/")) {
@@ -263,7 +280,7 @@ export default Repo.make(
 
           return Effect.promise(async () => {
             if (collects(request)) await awaitDelivery(repo);
-            return track(repo, await api(repo, requester)(request));
+            return track(repo, await api(repo)(request, Auth.requesterContext(authenticated)));
           });
         });
 

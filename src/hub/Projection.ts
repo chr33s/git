@@ -194,9 +194,6 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     const payload = entry.payload;
 
     // A redacted event: the commit and its place in the chain survive, the
-    // content does not. Recorded so the projection can say that something was
-    // removed here rather than leaving a silent gap.
-    // A redacted event: the commit and its place in the chain survive, the
     // content does not. It contributes nothing further — with no payload
     // there is no thread or review to build — and, importantly, it blanks
     // nothing else. The id in its commit message is unsigned, so treating it

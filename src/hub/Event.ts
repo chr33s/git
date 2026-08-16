@@ -598,7 +598,10 @@ export const baseOf = Effect.fn("hub.Event.baseOf")(function* (pr: string) {
     if (info === null) return null;
 
     const first: Oid | undefined = info.parents[0];
-    if (first === undefined) break;
+    // Bounded like `entries`: a hub ref whose first parent is a source commit
+    // would otherwise walk the repository's whole history, once per pull
+    // request, on every protected-branch push.
+    if (first === undefined || !(yield* isHubCommit(first))) break;
     commit = first;
   }
   if (commit === null) return null;

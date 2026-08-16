@@ -8,7 +8,7 @@ import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import type { Oid, RefUpdate } from "../git/Store.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
@@ -16,7 +16,7 @@ import * as Log from "../trust/Log.ts";
 import { type Member, project as projectTrust } from "../trust/Projection.ts";
 import * as Auth from "./Auth.ts";
 import * as Policy from "./Policy.ts";
-import { apply, evaluate, OPEN, type Principal, type Rules } from "./Policy.ts";
+import { evaluate, OPEN, type Principal, type Rules } from "./Policy.ts";
 
 /** A projection standing in for one nothing in these checks reads. */
 const EMPTY_PROJECTION = {
@@ -106,6 +106,26 @@ const history = Effect.fn("test.history")(function* (branch: string) {
   });
   return { first, second };
 });
+
+/**
+ * The receive-pack path, as a request from one principal.
+ *
+ * `gate` reads the requester, the genesis and the rules from the repository
+ * itself, so the only thing a test supplies is who is asking. `null` is the
+ * anonymous caller — a plain git repository's only kind.
+ */
+const gateAs = (where: World | null, updates: ReadonlyArray<RefUpdate>, atomic = true) =>
+  Policy.gate(updates, atomic).pipe(
+    Effect.provide(
+      Auth.requester({
+        principal: where?.principal.member ?? null,
+        signer: null,
+        capabilities: where?.principal.capabilities ?? [],
+        projection: EMPTY_PROJECTION,
+        envelope: null,
+      }),
+    ),
+  );
 
 const judge = (where: World, update: { name: string; value: Oid | null }, rules: Rules = OPEN) =>
   Effect.flatMap(trustOf(where), (trust) =>
@@ -700,25 +720,18 @@ describe("Policy", () => {
           const repository = yield* Repository;
           const where = yield* world(["source.push"]);
           const { second } = yield* history("refs/heads/topic");
-          const trust = yield* trustOf(where);
 
-          const result = yield* apply({
-            updates: [
-              { name: "refs/heads/ok", value: second },
-              { name: "refs/meta/trust/genesis", value: second },
-            ],
-            principal: where.principal,
-            genesis: where.genesis,
-            trust,
-            rules: OPEN,
-            atomic: true,
-          });
-          return { result, landed: yield* repository.resolve("refs/heads/ok") };
+          const gated = yield* gateAs(where, [
+            { name: "refs/heads/ok", value: second },
+            { name: "refs/meta/trust/genesis", value: second },
+          ]);
+          yield* repository.receive(gated.updates);
+          return { gated, landed: yield* repository.resolve("refs/heads/ok") };
         }),
       );
 
-      assert.equal(outcome.result.applied.length, 0);
-      assert.equal(outcome.result.refused.length, 1);
+      assert.equal(outcome.gated.updates.length, 0);
+      assert.equal(outcome.gated.refused.length, 1);
       assert.equal(outcome.landed, null, "an atomic batch applies all or nothing");
     });
 
@@ -727,18 +740,13 @@ describe("Policy", () => {
         Effect.gen(function* () {
           const repository = yield* Repository;
           const { second } = yield* history("refs/heads/topic");
-          const result = yield* apply({
-            updates: [{ name: "refs/heads/other", value: second }],
-            principal: { member: null, capabilities: [] },
-            genesis: null,
-            trust: null,
-            rules: OPEN,
-          });
-          return { result, landed: yield* repository.resolve("refs/heads/other") };
+          const gated = yield* gateAs(null, [{ name: "refs/heads/other", value: second }]);
+          yield* repository.receive(gated.updates);
+          return { gated, landed: yield* repository.resolve("refs/heads/other") };
         }),
       );
 
-      assert.equal(outcome.result.refused.length, 0);
+      assert.equal(outcome.gated.refused.length, 0);
       assert.equal(outcome.landed !== null, true, "a plain git repository stays servable");
     });
   });

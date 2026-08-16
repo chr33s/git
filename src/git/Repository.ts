@@ -382,6 +382,13 @@ export class Repository extends Context.Service<
        * milliseconds. `0` collects those too — what purging a secret needs.
        */
       readonly reflogGrace?: number;
+      /**
+       * Objects that a ref may name and still not protect — the payload blobs
+       * a redaction tombstone covers. Reachability would otherwise keep them
+       * forever, because the tree that names them has to survive for the
+       * hash chain to hold.
+       */
+      readonly exclude?: ReadonlySet<Oid>;
     }) => Effect.Effect<GcReportType, ObjectNotFound | StorageFailure | Invalid>;
 
     /**

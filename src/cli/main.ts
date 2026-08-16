@@ -40,6 +40,7 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
+import * as Redaction from "../hub/Redaction.ts";
 import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
 import { mintDelegation } from "../server/Auth.ts";
@@ -533,7 +534,11 @@ const gc = Command.make(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const report = yield* repository.gc({ dryRun, repack });
+        // A tombstoned payload is still named by its own event's tree, so
+        // reachability protects it unless it is excluded here. Without this,
+        // `hub redact` never removes anything a pack already holds.
+        const exclude = yield* Redaction.excluded();
+        const report = yield* repository.gc({ dryRun, repack, exclude });
         yield* Console.log(
           `${dryRun ? "would remove" : "removed"} ${report.removed.length} of ${report.scanned} object(s), ${report.reachable} reachable`,
         );
