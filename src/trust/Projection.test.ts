@@ -293,6 +293,45 @@ describe("trust projection", () => {
       assert.equal(outcome.ok, false);
     });
 
+    it("refuses an event whose trust head this replica cannot resolve", async () => {
+      // Writing junk into the field must not be a way out of a revocation
+      // that writing `null` does not give you: an oid nobody holds walks zero
+      // commits and would otherwise look exactly like an event that predates
+      // the revocation.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          const bytes = new TextEncoder().encode("a review with an invented history");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "left",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+
+          return yield* Verify.authorize({
+            projection: yield* projectionOf(where),
+            bytes,
+            signatures: [signature],
+            capability: "hub.review",
+            // SAFETY: forty lowercase hex characters, and deliberately not a
+            // commit this repository holds.
+            made: { at: new Date(), trustHead: "f".repeat(40) as never },
+          });
+        }),
+      );
+
+      assert.equal(outcome.ok, false);
+    });
+
     it("reaches backwards when the key was compromised", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {

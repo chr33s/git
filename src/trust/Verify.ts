@@ -24,6 +24,7 @@ import { Effect } from "effect";
 
 import { type Fingerprint, fingerprint, NAMESPACE, verify } from "../crypto/SshSignature.ts";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { permits } from "./Certificate.ts";
 import * as Log from "./Log.ts";
@@ -104,8 +105,18 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // than leaving it null.
   if (made.trustHead === null) return true;
 
+  // The head has to be a commit this replica actually holds. `Dag.ancestry`
+  // marks its starting point seen before reading it, so asking the resulting
+  // set proves nothing — a fabricated oid would walk zero commits, match
+  // nothing, and look exactly like an event that predates the revocation.
+  const repository = yield* Repository;
+  const known = yield* repository.readCommit(made.trustHead).pipe(
+    Effect.as(true),
+    Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+  );
+  if (!known) return true;
+
   const seen = yield* Log.ancestry(made.trustHead);
-  if (!seen.has(made.trustHead)) return true;
   return seen.has(revocation.commit);
 });
 

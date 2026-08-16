@@ -205,7 +205,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // Also ahead of the API: a bulk commit body is arbitrarily large and is
       // consumed as a stream, so nothing that would buffer it may see it first.
       const bulk = await Effect.runPromise(
-        CommitPack.handle(request).pipe(Effect.provide(state.layer)),
+        CommitPack.handle(request).pipe(Effect.provide(Layer.merge(state.layer, requester))),
       );
       if (bulk !== null) return bulk;
 

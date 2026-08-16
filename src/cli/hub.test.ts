@@ -16,7 +16,8 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
 import { formatPublicKey } from "../crypto/SshSignature.ts";
-import { writeKeyPair } from "../testing/Hub.ts";
+import { serve } from "../host/Node.ts";
+import { enableHubUnder, writeKeyPair } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "bin.ts");
@@ -166,6 +167,44 @@ describe("cli hub", () => {
       "project",
     ]);
     assert.match(minted, /^hub1\./m, "a delegated credential is what stock git presents");
+  });
+
+  it("lets a member bulk-commit through a host that guards the repository", async () => {
+    // `commit-pack` writes a ref, so it crosses the policy boundary — which
+    // means the host has to hand it the requester. When it does not, this
+    // returns 400 "authentication required" for a fully authorized member.
+    const serverRoot = path.join(root, "server");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "bulk"]);
+    const { credential } = await enableHubUnder(serverRoot, "bulk", ["repo.read", "source.push"]);
+
+    const server = await serve({ root: serverRoot });
+    try {
+      const body = [
+        JSON.stringify({
+          type: "commit",
+          branch: "main",
+          message: "bulk",
+          author: { name: "A", email: "a@example.com" },
+        }),
+        JSON.stringify({ type: "file", path: "a.txt" }),
+        JSON.stringify({ type: "chunk", data: btoa("hello\n") }),
+        JSON.stringify({ type: "end" }),
+        JSON.stringify({ type: "done" }),
+      ].join("\n");
+
+      const response = await fetch(`${server.url}/bulk/commit-pack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-ndjson",
+          authorization: `Bearer ${credential}`,
+        },
+        body,
+      });
+      assert.equal(response.status, 200, await response.text());
+    } finally {
+      await server.close();
+    }
   });
 
   describe("the client's view of a remote", () => {

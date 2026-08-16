@@ -225,7 +225,9 @@ export default Repo.make(
               Effect.map(
                 (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
               ),
-              Effect.provide(live(repo)),
+              // With the requester: `commit-pack` writes a ref and so crosses
+              // the policy boundary, which has to know who is asking.
+              Effect.provide(Layer.merge(live(repo), requester)),
               Effect.map((response) => track(repo, response)),
             );
           }
