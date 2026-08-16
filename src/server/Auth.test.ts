@@ -33,7 +33,7 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | Nonces>) =>
             Layer.provide(GitRepository.hooksNoop),
             Layer.provideMerge(stores),
           ),
-          noncesInMemory,
+          noncesInMemory(),
         ),
       ),
     ),
@@ -72,6 +72,35 @@ const basic = (credential: string) => ({
 });
 
 describe("Auth", () => {
+  describe("the nonce store", () => {
+    it("remembers a nonce across separate provides", async () => {
+      // The bug this guards: `Layer.sync` is a *description*, so every
+      // `Effect.provide` built a fresh map — the nonce a challenge issued was
+      // unknown by the time the signed retry arrived, and native
+      // authentication could never succeed on any host.
+      const layer = noncesInMemory();
+      const issued = await Effect.runPromise(
+        Effect.flatMap(Nonces, (store) => store.issue(300)).pipe(Effect.provide(layer)),
+      );
+      const consumed = await Effect.runPromise(
+        Effect.flatMap(Nonces, (store) => store.consume(issued)).pipe(Effect.provide(layer)),
+      );
+      assert.equal(consumed, true);
+    });
+
+    it("spends a nonce exactly once", async () => {
+      const layer = noncesInMemory();
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* Nonces;
+          const nonce = yield* store.issue(300);
+          return { first: yield* store.consume(nonce), second: yield* store.consume(nonce) };
+        }).pipe(Effect.provide(layer)),
+      );
+      assert.deepEqual(outcome, { first: true, second: false });
+    });
+  });
+
   describe("what an operation costs", () => {
     it("charges a fetch a read and a push a push", () => {
       assert.equal(

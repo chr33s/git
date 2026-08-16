@@ -76,7 +76,7 @@ export class GitRepo extends DurableObject<TestEnv> {
    * failure worth persisting through.
    */
   #nonces(): Layer.Layer<Auth.Nonces> {
-    this.#nonceStore ??= Auth.noncesInMemory;
+    this.#nonceStore ??= Auth.noncesInMemory();
     return this.#nonceStore;
   }
 

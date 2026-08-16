@@ -100,7 +100,16 @@ export class Nonces extends Context.Service<
   }
 >()("server/Nonces") {}
 
-export const noncesInMemory: Layer.Layer<Nonces> = Layer.sync(Nonces, () => {
+/**
+ * One nonce store, as a value.
+ *
+ * `Layer.sync` would be a *description* of how to build one, and every
+ * `Effect.provide` would run it again — a fresh `Map` per request, so the
+ * nonce a challenge issued is unknown by the time the signed retry arrives and
+ * native authentication can never succeed. The store has to outlive the
+ * provide, so it is constructed here and handed over by `Layer.succeed`.
+ */
+export const nonceStore = (): Nonces["Service"] => {
   const issued = new Map<string, number>();
 
   const prune = (now: number) => {
@@ -126,7 +135,19 @@ export const noncesInMemory: Layer.Layer<Nonces> = Layer.sync(Nonces, () => {
         return true;
       }),
   });
-});
+};
+
+/**
+ * A store and the layer carrying it.
+ *
+ * A function returning a Layer, which normally is redundant — a Layer is
+ * already lazy — and here is the point: each call makes a *distinct* store, so
+ * a host gets one for its lifetime rather than sharing one with every other
+ * host in the isolate. `Layer.succeed` over a value built here is what makes
+ * the store outlive the provide; `Layer.sync` would rebuild it per request and
+ * no challenge could ever be answered.
+ */
+export const noncesInMemory = (): Layer.Layer<Nonces> => Layer.succeed(Nonces)(nonceStore());
 
 // -- payloads --------------------------------------------------------------------
 
@@ -546,6 +567,22 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     at: now,
   });
   if (!authorized.ok) {
+    // A repository anonymous readers may clone must not become *less*
+    // readable because a credential was presented: `git` sends one on every
+    // request once it has any, and refusing here would break a clone that
+    // works without it.
+    if (input.capability === "repo.read" && anonymousReadAllowed(projection)) {
+      return {
+        ok: true,
+        authenticated: {
+          principal: null,
+          signer: identified.signer,
+          capabilities: ["repo.read"],
+          projection,
+          envelope: null,
+        },
+      } as const;
+    }
     return { ok: false, status: 403, reason: authorized.reason } as const;
   }
 

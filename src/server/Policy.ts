@@ -46,7 +46,13 @@ import * as Auth from "./Auth.ts";
  * break every existing push.
  */
 export interface Rules {
-  /** Branch names, or patterns with a trailing `*`. */
+  /**
+   * Full ref names, or prefixes with a trailing `*`.
+   *
+   * `refs/heads/main`, not `main`: the value is compared against the ref being
+   * written, and a bare branch name would match nothing while looking exactly
+   * like it protected something.
+   */
   readonly protected: ReadonlyArray<string>;
   readonly requiredApprovals: number;
   readonly requiredChecks: ReadonlyArray<string>;
@@ -111,18 +117,24 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
   const commit = yield* repository.resolve(RULES_REF);
   if (commit === null) return OPEN;
 
-  const loaded = yield* Effect.gen(function* () {
-    const info = yield* repository.readCommit(commit);
-    const entry = yield* repository.findPath(info.tree, RULES_PATH);
-    if (entry === null) return null;
+  const info = yield* repository.readCommit(commit);
+  const entry = yield* repository.findPath(info.tree, RULES_PATH);
+  if (entry === null) return OPEN;
 
-    const bytes = yield* repository.readBlob(entry.oid);
-    const json = yield* Effect.try({
-      try: () => JSON.parse(decoder.decode(bytes)),
-      catch: () => new Invalid({ field: "policy", reason: "policy is not valid JSON" }),
-    });
-    return yield* decodeRules(json);
-  }).pipe(Effect.orElseSucceed(() => null));
+  // A policy file that will not parse leaves the repository's stated rules in
+  // force by failing, not by quietly reverting to `OPEN`. Reading a *failure*
+  // as "no protection" would turn branch protection off at the moment storage
+  // was least trustworthy — the opposite of what the gates above do.
+  const bytes = yield* repository.readBlob(entry.oid);
+  const json = yield* Effect.try({
+    try: () => JSON.parse(decoder.decode(bytes)),
+    catch: () => new Invalid({ field: "policy", reason: "policy is not valid JSON" }),
+  });
+  const loaded = yield* decodeRules(json).pipe(
+    Effect.mapError(
+      (issue) => new Invalid({ field: "policy", reason: `malformed policy: ${issue.message}` }),
+    ),
+  );
 
   return loaded === null
     ? OPEN

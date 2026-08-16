@@ -90,7 +90,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
    * inside the signed bytes — so a nonce cannot be moved between repositories
    * even though the pool is common.
    */
-  const nonces = Auth.noncesInMemory;
+  const nonces = Auth.noncesInMemory();
 
   /**
    * How many repositories keep a built layer.
@@ -304,7 +304,16 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // that nothing here should start refusing to serve. There is no server
       // secret to configure any more, so there is nothing to leave off.
       const denied = await Effect.runPromise(
-        Auth.guard(request).pipe(Effect.provide(Layer.merge(stateFor(repo).layer, nonces))),
+        Auth.guard(request).pipe(
+          Effect.provide(Layer.merge(stateFor(repo).layer, nonces)),
+          // A repository whose identity cannot be read is not a repository
+          // with no members: it is one nobody can be checked against, and the
+          // honest answer is that the service is unavailable.
+          Effect.orElseSucceed(() => ({
+            denied: new Response("authentication unavailable", { status: 503 }),
+            authenticated: Auth.anonymous,
+          })),
+        ),
       );
       const deliver = async (response: Response) => {
         outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));

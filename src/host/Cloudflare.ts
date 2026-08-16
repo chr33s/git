@@ -22,6 +22,7 @@ import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
+import * as Auth from "../server/Auth.ts";
 import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
@@ -72,7 +73,6 @@ export default Repo.make(
        * That correspondence is why a repository maps onto a DO at all.
        */
       const layers = new Map<string, Layer.Layer<Repository>>();
-      const handlers = new Map<string, (request: Request) => Promise<Response>>();
 
       /**
        * The subscriber registry on this instance's own SQLite, beside the
@@ -150,30 +150,64 @@ export default Repo.make(
 
       const awaitDelivery = (repo: string) => settledWithin(delivering.get(repo) ?? nothing);
 
-      const api = (repo: string) => {
-        const existing = handlers.get(repo);
-        if (existing !== undefined) return existing;
-        const built = HttpRouter.toWebHandler(
+      // Not memoised: the requester is part of the layer these handlers
+      // resolve, and one built for the first caller would answer as them for
+      // everybody after.
+      const api = (repo: string, requester: Layer.Layer<Auth.Requester>) =>
+        HttpRouter.toWebHandler(
           Api.layer(remotes(repo)).pipe(
             Layer.provideMerge(live(repo)),
             Layer.provideMerge(subscribers(repo)),
+            Layer.provideMerge(requester),
           ),
           { disableLogger: true },
         ).handler;
-        handlers.set(repo, built);
-        return built;
-      };
+
+      /**
+       * Challenge nonces for this instance.
+       *
+       * Built once, here: a layer rebuilt per request would hand out a nonce
+       * from one map and look for it in another, so no native client could
+       * ever complete a challenge.
+       */
+      const nonces = Auth.noncesInMemory();
 
       /** The routing, over the platform request the bridge was handed. */
       const serve = (request: Request): Effect.Effect<Response> =>
-        Effect.suspend(() => {
+        Effect.gen(function* () {
           const matched = routeOf(new URL(request.url).pathname);
           if (matched === null) {
-            return Effect.succeed(Response.json({ error: "Invalid" }, { status: 400 }));
+            return Response.json({ error: "Invalid" }, { status: 400 });
           }
           const { repo, route } = matched;
           request = normalize(request, matched);
 
+          // Auth runs here because this is where the trust state is: the
+          // guard reads the repository's own genesis and membership log. The
+          // Worker in front of this is a router and holds no secret — there is
+          // nothing for it to authenticate with.
+          const guarded = yield* Auth.guard(request).pipe(
+            Effect.provide(Layer.merge(live(repo), nonces)),
+            Effect.catch(() =>
+              Effect.succeed({
+                denied: new Response("authentication unavailable", { status: 503 }),
+                authenticated: Auth.anonymous,
+              }),
+            ),
+          );
+          if (guarded.denied !== null) return guarded.denied;
+          const requester = Auth.requester(guarded.authenticated);
+          return yield* route_(request, repo, route, matched, requester);
+        });
+
+      const route_ = (
+        request: Request,
+        repo: string,
+        route: string,
+        matched: { readonly rest: string },
+        requester: Layer.Layer<Auth.Requester>,
+      ): Effect.Effect<Response> =>
+        Effect.suspend(() => {
           // LFS shares the `info/` prefix with the advertisement, so it is
           // tried first; its bodies are the large ones.
           if (route === "info" && matched.rest.includes("/lfs/")) {
@@ -221,7 +255,7 @@ export default Repo.make(
               Effect.catch((error: GitError) =>
                 Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
               ),
-              Effect.provide(live(repo)),
+              Effect.provide(Layer.merge(live(repo), requester)),
               // The pack is the body that outlives its handler.
               Effect.map((response) => track(repo, response)),
             );
@@ -229,7 +263,7 @@ export default Repo.make(
 
           return Effect.promise(async () => {
             if (collects(request)) await awaitDelivery(repo);
-            return track(repo, await api(repo)(request));
+            return track(repo, await api(repo, requester)(request));
           });
         });
 
