@@ -26,6 +26,7 @@
 import { Effect, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
+import * as Dag from "../git/Dag.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -210,56 +211,12 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
   const head = yield* repository.resolve(LOG_REF);
   if (head === null) return [];
 
+  // The genesis is the chain's anchor, not a record: bounding the walk there
+  // is what stops it reading the whole source history if anything ever points
+  // the log at a branch.
   const genesis = yield* repository.resolve(GENESIS_REF);
-
-  // Reachable set, stopping at the genesis: the genesis is the chain's anchor,
-  // not a record, and walking past it would read the whole source history if
-  // anything ever pointed the log at a branch.
-  const parents = new Map<Oid, ReadonlyArray<Oid>>();
-  const pending: Oid[] = [head];
-  while (pending.length > 0) {
-    const oid = pending.pop()!;
-    if (parents.has(oid) || oid === genesis) continue;
-    const commit = yield* repository.readCommit(oid);
-    parents.set(oid, commit.parents);
-    for (const parent of commit.parents) {
-      if (parent !== genesis && !parents.has(parent)) pending.push(parent);
-    }
-  }
-
-  // Kahn's algorithm over the reachable set, ties broken by oid.
-  const remaining = new Map<Oid, number>();
-  const children = new Map<Oid, Oid[]>();
-  for (const [oid, ancestors] of parents) {
-    const inside = ancestors.filter((parent) => parents.has(parent));
-    remaining.set(oid, inside.length);
-    for (const parent of inside) {
-      const list = children.get(parent) ?? [];
-      list.push(oid);
-      children.set(parent, list);
-    }
-  }
-
-  const ready = [...remaining]
-    .filter(([, count]) => count === 0)
-    .map(([oid]) => oid)
-    .sort();
-  const ordered: Oid[] = [];
-  while (ready.length > 0) {
-    const oid = ready.shift()!;
-    ordered.push(oid);
-    for (const child of children.get(oid) ?? []) {
-      const count = remaining.get(child)! - 1;
-      remaining.set(child, count);
-      if (count === 0) {
-        // Insert in sorted position so the order stays deterministic rather
-        // than depending on which parent happened to finish last.
-        const at = ready.findIndex((candidate) => candidate > child);
-        if (at === -1) ready.push(child);
-        else ready.splice(at, 0, child);
-      }
-    }
-  }
+  const parents = yield* Dag.reachable(head, genesis);
+  const ordered = Dag.topological(parents);
 
   const records: Entry[] = [];
   for (const oid of ordered) {
@@ -283,31 +240,12 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
 /**
  * Every commit an entry can reach, itself included.
  *
- * This is what makes revocation ordering deterministic instead of
- * wall-clock-dependent: "had the author already seen this revocation?" is
- * answered by ancestry, which every replica computes the same way, rather than
- * by comparing timestamps that anybody can write.
+ * The trust-facing name for `Dag.ancestry`, which is what makes revocation
+ * ordering deterministic instead of wall-clock-dependent: "had the author
+ * already seen this revocation?" is answered by ancestry, which every replica
+ * computes the same way, rather than by comparing timestamps anybody can write.
  */
-export const ancestry = Effect.fn("trust.Log.ancestry")(function* (from: Oid) {
-  const repository = yield* Repository;
-
-  const seen = new Set<Oid>();
-  const pending: Oid[] = [from];
-  while (pending.length > 0) {
-    const oid = pending.pop()!;
-    if (seen.has(oid)) continue;
-    seen.add(oid);
-
-    const commit = yield* repository
-      .readCommit(oid)
-      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-    // A history this replica has not fetched yet is not an error here: the
-    // caller is asking what we can see, and quarantine is what handles the rest.
-    if (commit === null) continue;
-    for (const parent of commit.parents) pending.push(parent);
-  }
-  return seen;
-});
+export const ancestry = Dag.ancestry;
 
 export const RecordName = Schema.Literal(RECORD);
 
