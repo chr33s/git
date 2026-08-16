@@ -29,6 +29,7 @@ import { Effect } from "effect";
 import { remote } from "../client/Client.ts";
 import type { Sql } from "../git/Sql.ts";
 import { serve, type Server } from "../host/Node.ts";
+import { enableHubUnder } from "../testing/Hub.ts";
 import { hasGit } from "../testing/Git.ts";
 import { file as remotesFile } from "./Remotes.node.ts";
 import * as Remotes from "./Remotes.ts";
@@ -56,7 +57,14 @@ const author = {
   offset: 0,
 };
 
-const TOKEN = "a-stored-credential";
+/**
+ * The credential the guarded server accepts.
+ *
+ * Assigned once the repository behind that server has a genesis and a member:
+ * there is no server-side secret to invent one from any more, so the
+ * credential has to come from a key that repository actually trusts.
+ */
+let TOKEN = "";
 
 let root: string;
 let server: Server;
@@ -66,10 +74,12 @@ let guarded: Server;
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "server-remotes-"));
   server = await serve({ root: path.join(root, "open") });
-  guarded = await serve({
-    root: path.join(root, "guarded"),
-    verify: (_repo, credential) => Promise.resolve(credential === TOKEN ? "write" : null),
-  });
+  guarded = await serve({ root: path.join(root, "guarded") });
+  const member = await enableHubUnder(path.join(root, "guarded"), "received", [
+    "repo.read",
+    "source.push",
+  ]);
+  TOKEN = member.credential;
 });
 
 afterAll(async () => {
@@ -365,9 +375,11 @@ describe("Remotes, over HTTP", () => {
 
       const behind = yield* remote(guarded.url, { token: TOKEN });
       const refs = yield* behind.repo.refs({ params: { repo: "received" } });
-      assert.deepEqual(
-        refs.refs.map((ref) => ref.name),
-        ["refs/heads/main"],
+      // The guarded repository has trust refs of its own, so the branch that
+      // arrived is named rather than counted.
+      assert.ok(
+        refs.refs.some((ref) => ref.name === "refs/heads/main"),
+        `expected the pushed branch among ${refs.refs.map((ref) => ref.name).join(", ")}`,
       );
     }).pipe(Effect.scoped),
   );

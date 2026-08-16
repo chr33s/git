@@ -41,13 +41,6 @@ export interface ServeOptions {
   /** Defaults to an ephemeral port; the return value carries the real one. */
   readonly port?: number;
   readonly hostname?: string;
-  /**
-   * When present, every request passes `server/Auth.ts`'s guard with this
-   * verifier — `Auth.hmacVerify` for stateless tokens, or the Artifacts
-   * provider's `Tokens.verify` for revocable ones. Absent means open, which
-   * is what local development wants.
-   */
-  readonly verify?: (repo: string, credential: string | null) => Promise<Auth.Scope | null>;
 }
 
 export interface Server {
@@ -88,6 +81,16 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     active: number;
   }
   const repos = new Map<string, RepoState>();
+
+  /**
+   * Challenge nonces, one store for the process.
+   *
+   * Shared across repositories rather than one store each: a nonce is a
+   * one-shot value, and the envelope that carries it names the repository
+   * inside the signed bytes — so a nonce cannot be moved between repositories
+   * even though the pool is common.
+   */
+  const nonces = Auth.noncesInMemory;
 
   /**
    * How many repositories keep a built layer.
@@ -287,13 +290,13 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       }
       const request = new Request(url, init);
 
-      const verify = options.verify;
-      const denied =
-        verify === undefined
-          ? null
-          : await Effect.runPromise(
-              Auth.guard(request, (credential) => Effect.promise(() => verify(repo, credential))),
-            );
+      // Whether a repository is guarded is the repository's own answer: one
+      // with a genesis has members, and one without is a plain git repository
+      // that nothing here should start refusing to serve. There is no server
+      // secret to configure any more, so there is nothing to leave off.
+      const denied = await Effect.runPromise(
+        Auth.guard(request).pipe(Effect.provide(Layer.merge(stateFor(repo).layer, nonces))),
+      );
       const deliver = async (response: Response) => {
         outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
         if (response.body === null) {

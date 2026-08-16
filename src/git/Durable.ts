@@ -42,8 +42,6 @@ import { storeContract } from "./Store.contract.ts";
  */
 interface TestEnv {
   readonly ENABLE_CONFORMANCE?: string;
-  /** When set, every request must carry an `Auth.hmacMint`-issued token. */
-  readonly GIT_AUTH_SECRET?: string;
   readonly GIT_OBJECTS: R2Bucket;
   readonly GIT_REPO: DurableObjectNamespace<GitRepo>;
 }
@@ -54,6 +52,7 @@ export class GitRepo extends DurableObject<TestEnv> {
 
   #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
+  #nonceStore: Layer.Layer<Auth.Nonces> | null = null;
 
   /** The registry on this instance's own SQLite, beside the refs. */
   #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
@@ -65,6 +64,20 @@ export class GitRepo extends DurableObject<TestEnv> {
   #remoteRegistry(repo: string): Layer.Layer<Remotes.Remotes> {
     this.#remotes ??= Remotes.sql(this.ctx.storage.sql, repo);
     return this.#remotes;
+  }
+
+  /**
+   * Challenge nonces for this instance.
+   *
+   * In memory, and per Durable Object, which is the right scope: one instance
+   * is one repository, and a nonce is only meaningful against the repository
+   * that issued it. An evicted instance forgets them, and a client whose nonce
+   * is no longer recognised is told to ask for another — a retry, not a
+   * failure worth persisting through.
+   */
+  #nonces(): Layer.Layer<Auth.Nonces> {
+    this.#nonceStore ??= Auth.noncesInMemory;
+    return this.#nonceStore;
   }
 
   /** Built once per instance: the DO is the unit of isolation, not the request. */
@@ -141,15 +154,14 @@ export class GitRepo extends DurableObject<TestEnv> {
     const { repo, route } = matched;
     request = normalize(request, matched);
 
-    // Stateless auth, on when the secret binding exists: nothing to store,
-    // nothing to look up, and a token minted for one repo verifies nowhere else.
-    const secret = this.env.GIT_AUTH_SECRET;
-    if (secret !== undefined && secret.length > 0) {
-      const denied = await Effect.runPromise(
-        Auth.guard(request, (credential) => Auth.hmacVerify(secret, repo, credential)),
-      );
-      if (denied !== null) return denied;
-    }
+    // Auth runs here rather than at the edge because this is where the trust
+    // state is: the guard reads the repository's own genesis and membership
+    // log. A repository with no genesis is not hub-enabled and stays open,
+    // which is what every repository that predates this was.
+    const denied = await Effect.runPromise(
+      Auth.guard(request).pipe(Effect.provide(Layer.merge(this.#live(repo), this.#nonces()))),
+    );
+    if (denied !== null) return denied;
 
     if (route === "conformance") return this.#conformance(repo);
     if (route === "registry-conformance") return this.#registryConformance();

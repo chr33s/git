@@ -16,7 +16,7 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { serve } from "../host/Node.ts";
-import { hmacMint, hmacVerify } from "../server/Auth.ts";
+import { enableHubUnder } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "main.ts");
@@ -82,25 +82,36 @@ describe("cli", () => {
     }
   });
 
-  it("mints verifiable tokens, secret from flag or environment", async () => {
-    const fromFlag = (await cli(["token", "repo-a", "--secret", "s3cret", "-s", "write"])).trim();
-    assert.equal(await Effect.runPromise(hmacVerify("s3cret", "repo-a", fromFlag)), "write");
-
-    const fromEnv = (await cli(["token", "repo-a"], { GIT_AUTH_SECRET: "s3cret" })).trim();
-    assert.equal(await Effect.runPromise(hmacVerify("s3cret", "repo-a", fromEnv)), "read");
+  it("says what to do when asked for a credential on a repository with no genesis", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-credential-"));
+    try {
+      await seed(path.join(root, "plain"), "unclaimed");
+      const failed = await cli([
+        "credential",
+        "--root",
+        root,
+        "--key",
+        "/nonexistent/key",
+        "plain",
+      ]).then(
+        () => null,
+        (error: { stderr?: string; stdout?: string }) => error,
+      );
+      assert.ok(failed !== null, "a missing key must fail rather than mint something");
+      assert.match(`${failed.stderr ?? ""}${failed.stdout ?? ""}`, /cannot read/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
-  it("clones over smart HTTP, with and without a token", async () => {
+  it("clones over smart HTTP, with and without a credential", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-clone-"));
     const serverRoot = path.join(root, "server");
-    const secret = "clone-secret";
-    const server = await serve({
-      root: serverRoot,
-      verify: (repo, credential) => Effect.runPromise(hmacVerify(secret, repo, credential)),
-    });
+    const server = await serve({ root: serverRoot });
     try {
       await seed(path.join(serverRoot, "origin"), "published");
-      const token = await Effect.runPromise(hmacMint(secret, "origin", "read", 300));
+      // Granting `repo.read` to somebody is what makes the repository private.
+      const { credential: token } = await enableHubUnder(serverRoot, "origin", ["repo.read"]);
 
       const denied = await cli(["clone", "--root", root, `${server.url}/origin`, "denied"]).then(
         () => null,
@@ -139,9 +150,9 @@ describe("cli", () => {
 
     let child: ChildProcess | null = null;
     try {
-      // `--open` on purpose: with no secret the command refuses to start, so
-      // an unauthenticated server has to be asked for by name.
-      child = spawn("node", [entry, "serve", "--root", root, "--port", "0", "--open"], {
+      // No auth flags: whether a repository is guarded is the repository's
+      // own answer now, so `serve` has nothing to be told about it.
+      child = spawn("node", [entry, "serve", "--root", root, "--port", "0"], {
         stdio: ["ignore", "pipe", "pipe"],
       });
       const url = await new Promise<string>((resolve, reject) => {
@@ -170,22 +181,39 @@ describe("cli", () => {
     }
   });
 
-  it("refuses to serve unauthenticated unless asked to", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-serve-closed-"));
+  it("serves a repository with a genesis only to its members", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-serve-guarded-"));
+
+    let child: ChildProcess | null = null;
     try {
-      // No `--secret` and no `--open`: an open server is a thing to ask for,
-      // not a thing to arrive at by leaving a flag off. The message has to name
-      // both ways forward, or the refusal is just an obstacle.
-      const refused = await cli(["serve", "--root", root, "--port", "0"]).then(
-        () => null,
-        (error: { stderr?: string; stdout?: string }) => error,
-      );
-      assert.ok(refused !== null, "serve without --secret or --open must fail");
-      const said = `${refused.stderr ?? ""}${refused.stdout ?? ""}`;
-      assert.match(said, /refusing to serve/);
-      assert.match(said, /--secret/);
-      assert.match(said, /--open/);
+      await seed(path.join(root, "guarded"), "members only");
+      // The same server, and one repository under it that has claimed itself.
+      // Nothing about `serve` changed — the genesis is what guards it.
+      const { credential } = await enableHubUnder(root, "guarded", ["repo.read"]);
+
+      child = spawn("node", [entry, "serve", "--root", root, "--port", "0"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const url = await new Promise<string>((resolve, reject) => {
+        let buffered = "";
+        child!.stdout!.on("data", (chunk: Buffer) => {
+          buffered += chunk.toString();
+          const match = buffered.match(/server on (http:\/\/[^,]+),/);
+          if (match) resolve(match[1]!);
+        });
+        child!.on("exit", (code) => reject(new Error(`serve exited early: ${code}`)));
+        setTimeout(() => reject(new Error(`serve never announced: ${buffered}`)), 15_000);
+      });
+
+      const anonymous = await fetch(`${url}/guarded/refs`);
+      assert.equal(anonymous.status, 401);
+
+      const member = await fetch(`${url}/guarded/refs`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      assert.equal(member.status, 200);
     } finally {
+      child?.kill();
       await fs.rm(root, { recursive: true, force: true });
     }
   });

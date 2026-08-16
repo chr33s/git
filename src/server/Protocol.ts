@@ -25,6 +25,7 @@ import { Effect, Stream } from "effect";
 import { type GitError, Invalid, PackCorrupt, type StorageFailure } from "../git/Error.ts";
 import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
+import * as Refspec from "../git/Refspec.ts";
 import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
 const decoder = new TextDecoder();
@@ -166,7 +167,17 @@ export const advertise = (
       const target = detached ? head : refs.find(([name]) => name === head)?.[1];
       if (target !== undefined) lines.push(`${target} HEAD`);
     }
-    for (const [name, oid] of refs) lines.push(`${oid} ${name}`);
+    // Hub and trust refs are left out of the v0 advertisement. A repository
+    // with a year of review history has more hub refs than branches, and a
+    // stock `git clone` would pay for all of them on every fetch to get
+    // something it cannot read. Clients that want them ask by name — the
+    // refspec is what carries the request, and `want` still serves the oids.
+    // The genesis stays visible: it is one commit, and it is what lets any
+    // client compute the RepoID and check it against what it trusts.
+    for (const [name, oid] of refs) {
+      if (Refspec.hiddenFromAdvertisement(name)) continue;
+      lines.push(`${oid} ${name}`);
+    }
 
     const parts: Uint8Array[] = [pkt(`# service=${service}\n`), FLUSH];
     if (lines.length === 0) {

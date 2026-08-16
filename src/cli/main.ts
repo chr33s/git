@@ -9,8 +9,8 @@
  *   chr33s-git init my-repo                      # bare repository under --root
  *   chr33s-git refs my-repo · log my-repo        # inspect it
  *   chr33s-git clone http://host/repo my-copy    # bare clone over smart HTTP
- *   chr33s-git serve --port 8080 --secret s3…    # the node host; --open to skip auth
- *   chr33s-git token my-repo --secret s3… -s write
+ *   chr33s-git serve --port 8080                 # the node host
+ *   chr33s-git credential my-repo --key ~/.ssh/id_ed25519
  *
  * The failure channel reaches `main`, so exit codes come from the error
  * type: a bad ref is a diagnostic and exit 1, an interrupt is 130, an
@@ -27,7 +27,7 @@ import { pipeline } from "node:stream/promises";
 // reaches.
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Config, Console, Effect, Predicate, Stream } from "effect";
+import { Console, Effect, Predicate, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { fetchRepository } from "../client/Fetch.ts";
@@ -42,12 +42,14 @@ import { Repository } from "../git/Repository.ts";
 import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
-import { hmacMint, hmacVerify } from "../server/Auth.ts";
+import { mintDelegation } from "../server/Auth.ts";
+import { readGenesis } from "../trust/Genesis.ts";
 import * as replay from "./replay.ts";
 import {
   cliSignature,
   mustResolve,
   refNameOf,
+  readPrivateKey,
   repoArgument,
   resolveRev,
   rootFlag,
@@ -158,26 +160,53 @@ const clone = Command.make(
     }),
 );
 
-const token = Command.make(
-  "token",
+/**
+ * A short-lived credential stock `git` can present.
+ *
+ * This is the replacement for `token`, and the difference is where the
+ * authority comes from: the old command needed the *server's* secret, so
+ * anyone who could mint a token could mint anyone's token. This one is signed
+ * by the holder's own SSH key and verifies against the repository's membership
+ * graph, so it can never carry more than the person running it already had.
+ */
+const credential = Command.make(
+  "credential",
   {
-    secret: Flag.string("secret").pipe(
-      Flag.withDescription("The server's GIT_AUTH_SECRET"),
-      Flag.withFallbackConfig(Config.string("GIT_AUTH_SECRET")),
-    ),
-    scope: Flag.choice("scope", ["read", "write"]).pipe(
-      Flag.withDefault("read"),
-      Flag.withAlias("s"),
+    root: rootFlag,
+    key: Flag.string("key").pipe(Flag.withDescription("Path to the SSH private key to sign with")),
+    capability: Flag.string("capability").pipe(
+      Flag.withDefault("repo.read"),
+      Flag.withDescription("Capability to scope the credential to (repeatable as a,b)"),
+      Flag.withAlias("c"),
     ),
     ttl: Flag.integer("ttl").pipe(
       Flag.withDefault(3600),
-      Flag.withDescription("Seconds until the token expires"),
+      Flag.withDescription("Seconds until the credential expires"),
     ),
     repo: repoArgument,
   },
-  ({ repo, scope, secret, ttl }) =>
+  ({ capability, key, repo, root, ttl }) =>
     Effect.gen(function* () {
-      const minted = yield* hmacMint(secret, repo, scope, ttl);
+      const signer = yield* readPrivateKey(key);
+      const minted = yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          const stored = yield* readGenesis();
+          if (stored === null) {
+            return yield* new Invalid({
+              field: "repo",
+              reason: `${repo} is not hub-enabled; run \`hub init\` first`,
+            });
+          }
+          return yield* mintDelegation({
+            key: signer,
+            repo: stored.genesis.repoId,
+            capabilities: capability.split(",").map((value) => value.trim()),
+            ttlSeconds: ttl,
+          });
+        }),
+      );
       yield* Console.log(minted);
     }),
 );
@@ -188,54 +217,21 @@ const serveCommand = Command.make(
     root: rootFlag,
     port: Flag.integer("port").pipe(Flag.withDefault(8080), Flag.withAlias("p")),
     hostname: Flag.string("hostname").pipe(Flag.withDefault("127.0.0.1")),
-    secret: Flag.string("secret").pipe(
-      Flag.withDefault(""),
-      Flag.withDescription("Require hmac tokens signed with this secret"),
-    ),
-    open: Flag.boolean("open").pipe(
-      Flag.withDescription("Serve without authentication — anyone who can reach the port can push"),
-    ),
   },
-  ({ hostname, open, port, root, secret }) => {
-    // Built out here, not inside the generator: `serve` wants a promise-
-    // returning callback, and running an Effect inside an Effect would
-    // discard the surrounding services.
-    const verify =
-      secret === ""
-        ? {}
-        : {
-            verify: (repo: string, credential: string | null) =>
-              Effect.runPromise(hmacVerify(secret, repo, credential)),
-          };
-
-    return Effect.gen(function* () {
-      // Unauthenticated is something to ask for, not something to arrive at.
-      // An open server hands read *and* write over every repository under the
-      // root to anyone who can reach the port — which is a fine thing to want
-      // on a laptop and a bad thing to get by leaving a flag off.
-      if (secret === "" && !open) {
-        return yield* new Invalid({
-          field: "serve",
-          reason:
-            `refusing to serve ${root}/ unauthenticated: pass --secret <secret> to require ` +
-            "tokens, or --open to serve it to anyone who can reach the port",
-        });
-      }
-
-      const server = yield* Effect.promise(() => serve({ root, port, hostname, ...verify }));
-      if (secret === "") {
-        yield* Console.error(
-          `warning: --open, so anyone who can reach ${server.url} can read and push to ` +
-            `every repository under ${root}/`,
-        );
-      }
-      yield* Console.log(
-        `git smart-HTTP server on ${server.url}, repositories under ${root}/` +
-          (secret === "" ? " (open access)" : " (token required)"),
+  ({ hostname, port, root }) =>
+    Effect.gen(function* () {
+      // There is no `--secret` any more, and no `--open` either, because
+      // neither is the server's decision to make. A repository with a genesis
+      // is guarded by its own membership; one without is a plain git
+      // repository, and serving it openly is what it has always meant.
+      const server = yield* Effect.promise(() => serve({ root, port, hostname }));
+      yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
+      yield* Console.error(
+        "repositories with no genesis are served to anyone who can reach the port; " +
+          "run `chr33s-git hub init <repo>` to require membership",
       );
       return yield* Effect.never;
-    });
-  },
+    }),
 );
 
 const branch = Command.make(
@@ -749,7 +745,7 @@ const git = Command.make("chr33s-git").pipe(
       Command.withDescription("Check out a branch, replacing index and work tree"),
     ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
-    token.pipe(Command.withDescription("Mint or verify a scoped access token")),
+    credential.pipe(Command.withDescription("Mint a short-lived credential stock git can present")),
   ]),
 );
 

@@ -1,107 +1,458 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 
-import { credentialOf, guard, hmacMint, hmacVerify, requiredScope } from "./Auth.ts";
+import { fingerprint, formatPublicKey, generate } from "../crypto/SshSignature.ts";
+import { stores } from "../git/Memory.ts";
+import * as GitRepository from "../git/Repository.ts";
+import { Repository } from "../git/Repository.ts";
+import * as Certificate from "../trust/Certificate.ts";
+import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
+import * as Log from "../trust/Log.ts";
+import {
+  authenticate,
+  credentialOf,
+  guard,
+  MAX_DELEGATION_SECONDS,
+  mintDelegation,
+  Nonces,
+  noncesInMemory,
+  openDelegation,
+  requiredCapability,
+  signEnvelope,
+} from "./Auth.ts";
 
-const run = Effect.runPromise;
+const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | Nonces>) =>
+  Effect.runPromise(
+    effect.pipe(
+      Effect.provide(
+        Layer.merge(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(stores),
+          ),
+          noncesInMemory,
+        ),
+      ),
+    ),
+  );
+
+const request = (url: string, init?: RequestInit) => new Request(`http://host/${url}`, init);
+
+/** A repository with a genesis and one member holding `capabilities`. */
+const hub = Effect.fn("test.hub")(function* (capabilities: ReadonlyArray<string>) {
+  const root = yield* generate("root@example.com");
+  const member = yield* generate("member@example.com");
+  const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+  yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+
+  yield* Log.issue(
+    yield* Certificate.grant({
+      repo: genesis.repoId,
+      publicKey: formatPublicKey(member.publicKey),
+      capabilities,
+      id: Log.newId(),
+    }),
+    [root],
+  );
+  return { genesis, root, member };
+});
+
+const basic = (credential: string) => ({
+  authorization: `Basic ${btoa(`x:${credential}`)}`,
+});
 
 describe("Auth", () => {
-  describe("requiredScope", () => {
-    const cases: Array<[string, string, "read" | "write"]> = [
-      ["GET", "http://x/r/info/refs?service=git-upload-pack", "read"],
-      ["GET", "http://x/r/info/refs?service=git-receive-pack", "write"],
-      ["POST", "http://x/r/git-upload-pack", "read"],
-      ["POST", "http://x/r/git-receive-pack", "write"],
-      ["GET", "http://x/r/refs", "read"],
-      ["POST", "http://x/r/commit", "write"],
-    ];
-    for (const [method, url, expected] of cases) {
-      it(`${method} ${new URL(url).pathname} needs ${expected}`, () => {
-        assert.equal(requiredScope(new Request(url, { method })), expected);
-      });
-    }
-  });
-
-  describe("credentialOf", () => {
-    const withHeader = (value: string) =>
-      new Request("http://x/r", { headers: { authorization: value } });
-
-    it("takes the Basic password — how git sends a token", () => {
-      assert.equal(credentialOf(withHeader(`Basic ${btoa("alice:tok123")}`)), "tok123");
-    });
-    it("falls back to the Basic username when the password is empty", () => {
-      assert.equal(credentialOf(withHeader(`Basic ${btoa("tok123:")}`)), "tok123");
-    });
-    it("accepts Bearer", () => {
-      assert.equal(credentialOf(withHeader("Bearer tok123")), "tok123");
-    });
-    it("is null without a header", () => {
-      assert.equal(credentialOf(new Request("http://x/r")), null);
-    });
-  });
-
-  describe("hmac tokens", () => {
-    const secret = "test-secret";
-
-    it("round-trips, bound to the repo", async () => {
-      const token = await run(hmacMint(secret, "alpha", "read", 60));
-      assert.match(token, /^git1\.read\./);
-      assert.equal(await run(hmacVerify(secret, "alpha", token)), "read");
-      // The same token means nothing at another repository.
-      assert.equal(await run(hmacVerify(secret, "beta", token)), null);
-    });
-
-    it("rejects scope escalation by editing the token", async () => {
-      const token = await run(hmacMint(secret, "alpha", "read", 60));
-      const forged = token.replace(".read.", ".write.");
-      assert.equal(await run(hmacVerify(secret, "alpha", forged)), null);
-    });
-
-    it("rejects expiry, tampering, and the wrong secret", async () => {
-      const expired = await run(hmacMint(secret, "alpha", "write", -1));
-      assert.equal(await run(hmacVerify(secret, "alpha", expired)), null);
-
-      const token = await run(hmacMint(secret, "alpha", "write", 60));
-      const flipped = token.slice(0, -1) + (token.endsWith("0") ? "1" : "0");
-      assert.equal(await run(hmacVerify(secret, "alpha", flipped)), null);
-      assert.equal(await run(hmacVerify("other-secret", "alpha", token)), null);
-      assert.equal(await run(hmacVerify(secret, "alpha", "garbage")), null);
-      assert.equal(await run(hmacVerify(secret, "alpha", null)), null);
-    });
-  });
-
-  describe("guard", () => {
-    const secret = "guard-secret";
-    const request = (url: string, method: string, token?: string) =>
-      new Request(url, {
-        method,
-        headers: token === undefined ? {} : { authorization: `Bearer ${token}` },
-      });
-    const verify = (credential: string | null) => hmacVerify(secret, "r", credential);
-
-    it("401s an anonymous request, with the challenge git needs", async () => {
-      const denied = await run(guard(request("http://x/r/refs", "GET"), verify));
-      assert.equal(denied?.status, 401);
-      assert.equal(denied?.headers.get("www-authenticate"), 'Basic realm="git"');
-    });
-
-    it("403s a read token on a write route", async () => {
-      const read = await run(hmacMint(secret, "r", "read", 60));
-      const denied = await run(guard(request("http://x/r/git-receive-pack", "POST", read), verify));
-      assert.equal(denied?.status, 403);
-    });
-
-    it("passes read on read and write on everything", async () => {
-      const read = await run(hmacMint(secret, "r", "read", 60));
-      const write = await run(hmacMint(secret, "r", "write", 60));
-      assert.equal(await run(guard(request("http://x/r/refs", "GET", read), verify)), null);
+  describe("what an operation costs", () => {
+    it("charges a fetch a read and a push a push", () => {
       assert.equal(
-        await run(guard(request("http://x/r/git-receive-pack", "POST", write), verify)),
-        null,
+        requiredCapability(request("r/git-upload-pack", { method: "POST" })),
+        "repo.read",
       );
-      assert.equal(await run(guard(request("http://x/r/refs", "GET", write), verify)), null);
+      assert.equal(
+        requiredCapability(request("r/git-receive-pack", { method: "POST" })),
+        "source.push",
+      );
     });
+
+    it("charges the receive-pack advertisement from the advertisement on", () => {
+      assert.equal(
+        requiredCapability(request("r/info/refs?service=git-receive-pack")),
+        "source.push",
+        "a client that cannot push should not learn the ref layout through the push endpoint",
+      );
+    });
+
+    it("charges the LFS batch endpoint a read, POST or not", () => {
+      // A reader must be able to clone a repository that uses LFS; the upload
+      // it may negotiate is a separate PUT, charged separately.
+      assert.equal(
+        requiredCapability(request("r/info/lfs/objects/batch", { method: "POST" })),
+        "repo.read",
+      );
+      assert.equal(
+        requiredCapability(request("r/info/lfs/objects/abc", { method: "PUT" })),
+        "source.push",
+      );
+    });
+  });
+
+  describe("reading the credential off a request", () => {
+    it("takes a Basic password, which is how git sends one", () => {
+      const presented = credentialOf(request("r", { headers: basic("hub1.x.y") }));
+      assert.equal(presented.kind, "delegated");
+      assert.equal(presented.kind === "delegated" ? presented.credential : "", "hub1.x.y");
+    });
+
+    it("takes a Basic username when the password is empty", () => {
+      // `http://<credential>@host/repo` arrives this way, and missing it is
+      // how you get a server where curl works and `git clone` does not.
+      const presented = credentialOf(
+        request("r", { headers: { authorization: `Basic ${btoa("hub1.x.y:")}` } }),
+      );
+      assert.equal(presented.kind === "delegated" ? presented.credential : "", "hub1.x.y");
+    });
+
+    it("takes a Bearer token", () => {
+      const presented = credentialOf(request("r", { headers: { authorization: "Bearer abc" } }));
+      assert.equal(presented.kind === "delegated" ? presented.credential : "", "abc");
+    });
+
+    it("takes the native scheme as a payload and a signature", () => {
+      const presented = credentialOf(
+        request("r", { headers: { authorization: "Hub-SSH-v1 cGF5.c2ln" } }),
+      );
+      assert.equal(presented.kind, "native");
+    });
+
+    it("reports nothing when there is no header", () => {
+      assert.equal(credentialOf(request("r")).kind, "none");
+    });
+  });
+
+  describe("a repository with no genesis", () => {
+    it("serves anonymously, because it is an ordinary git repository", async () => {
+      const denied = await scenario(guard(request("r/git-upload-pack", { method: "POST" })));
+      assert.equal(denied, null);
+    });
+
+    it("serves a push anonymously too — nothing has claimed it", async () => {
+      const denied = await scenario(guard(request("r/git-receive-pack", { method: "POST" })));
+      assert.equal(denied, null);
+    });
+  });
+
+  describe("delegated credentials", () => {
+    it("lets a member present one for what they hold", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push"]);
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["source.push"],
+            ttlSeconds: 300,
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
+          );
+        }),
+      );
+      assert.equal(outcome, null);
+    });
+
+    it("refuses one scoped below what the request needs", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push", "repo.read"]);
+          // The member could push; this credential says it is only for reading.
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["repo.read"],
+            ttlSeconds: 300,
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
+          );
+        }),
+      );
+      assert.equal(outcome?.status, 403);
+    });
+
+    it("cannot carry more than its issuer holds", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["repo.read"]);
+          // Asking for a capability the issuer never had: the credential is
+          // well-formed and signed, and it still authorizes nothing extra.
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["source.push"],
+            ttlSeconds: 300,
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
+          );
+        }),
+      );
+      assert.equal(outcome?.status, 403);
+    });
+
+    it("does not verify at another repository", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { member } = yield* hub(["source.push"]);
+          const elsewhere = yield* create([formatPublicKey(member.publicKey)], 1);
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: elsewhere.repoId,
+            capabilities: ["source.push"],
+            ttlSeconds: 300,
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
+          );
+        }),
+      );
+      assert.equal(outcome?.status, 401);
+    });
+
+    it("expires", async () => {
+      const opened = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["repo.read"]);
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["repo.read"],
+            ttlSeconds: 60,
+          });
+          return yield* openDelegation(credential, genesis.repoId, new Date(Date.now() + 120_000));
+        }),
+      );
+      assert.equal(opened, null);
+    });
+
+    it("refuses a lifetime longer than the cap", async () => {
+      const failure = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["repo.read"]);
+          return yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["repo.read"],
+            ttlSeconds: MAX_DELEGATION_SECONDS + 1,
+          }).pipe(Effect.flip);
+        }),
+      );
+      assert.match(failure.reason, /between 1 and/);
+    });
+
+    it("stops working when its issuer is revoked", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member, root } = yield* hub(["source.push"]);
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["source.push"],
+            ttlSeconds: 300,
+          });
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: genesis.repoId,
+              subject: yield* fingerprint(member.publicKey),
+              reason: "left",
+              id: Log.newId(),
+            }),
+            [root],
+          );
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
+          );
+        }),
+      );
+      assert.equal(outcome?.status, 403, "revoking the issuer must revoke what they minted");
+    });
+  });
+
+  describe("anonymous access", () => {
+    it("is refused once somebody has been granted repo.read", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          yield* hub(["repo.read"]);
+          return yield* guard(request("r/git-upload-pack", { method: "POST" }));
+        }),
+      );
+      assert.equal(outcome?.status, 401);
+    });
+
+    it("is allowed when no grant restricts reading", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          yield* hub(["source.push"]);
+          return yield* guard(request("r/git-upload-pack", { method: "POST" }));
+        }),
+      );
+      assert.equal(outcome, null, "a repository nobody restricted is a public repository");
+    });
+
+    it("is never allowed to push", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          yield* hub(["source.push"]);
+          return yield* guard(request("r/git-receive-pack", { method: "POST" }));
+        }),
+      );
+      assert.equal(outcome?.status, 401);
+    });
+
+    it("carries a nonce, so a native client can sign its retry", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          yield* hub(["repo.read"]);
+          return yield* guard(request("r/git-upload-pack", { method: "POST" }));
+        }),
+      );
+      assert.match(outcome?.headers.get("www-authenticate") ?? "", /nonce="/);
+    });
+  });
+
+  describe("native envelopes", () => {
+    it("authenticates a signed request", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push"]);
+          const nonces = yield* Nonces;
+          const header = yield* signEnvelope(member, {
+            type: "auth.request",
+            version: 1,
+            repo: genesis.repoId,
+            operation: "git-receive-pack",
+            commands: [{ ref: "refs/heads/main", from: null, to: "a".repeat(40) }],
+            nonce: yield* nonces.issue(300),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: { authorization: header } }),
+          );
+        }),
+      );
+      assert.equal(outcome, null);
+    });
+
+    it("refuses the same envelope twice", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push"]);
+          const nonces = yield* Nonces;
+          const header = yield* signEnvelope(member, {
+            type: "auth.request",
+            version: 1,
+            repo: genesis.repoId,
+            operation: "git-receive-pack",
+            commands: [],
+            nonce: yield* nonces.issue(300),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+          const headers = { authorization: header };
+          yield* guard(request("r/git-receive-pack", { method: "POST", headers }));
+          return yield* guard(request("r/git-receive-pack", { method: "POST", headers }));
+        }),
+      );
+      assert.equal(outcome?.status, 401, "a nonce is single use");
+    });
+
+    it("refuses an envelope signed for another operation", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push"]);
+          const nonces = yield* Nonces;
+          // Signed for a fetch, presented at a push.
+          const header = yield* signEnvelope(member, {
+            type: "auth.request",
+            version: 1,
+            repo: genesis.repoId,
+            operation: "git-upload-pack",
+            commands: [],
+            nonce: yield* nonces.issue(300),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: { authorization: header } }),
+          );
+        }),
+      );
+      assert.equal(outcome?.status, 401);
+    });
+
+    it("refuses an expired envelope", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push"]);
+          const nonces = yield* Nonces;
+          const header = yield* signEnvelope(member, {
+            type: "auth.request",
+            version: 1,
+            repo: genesis.repoId,
+            operation: "git-receive-pack",
+            commands: [],
+            nonce: yield* nonces.issue(300),
+            expiresAt: new Date(Date.now() - 1000).toISOString(),
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: { authorization: header } }),
+          );
+        }),
+      );
+      assert.equal(outcome?.status, 401);
+    });
+
+    it("refuses a nonce the server never issued", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push"]);
+          const header = yield* signEnvelope(member, {
+            type: "auth.request",
+            version: 1,
+            repo: genesis.repoId,
+            operation: "git-receive-pack",
+            commands: [],
+            nonce: "not-a-nonce-this-server-issued",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: { authorization: header } }),
+          );
+        }),
+      );
+      assert.equal(outcome?.status, 401);
+    });
+  });
+
+  it("reports who the request is, not merely that it may proceed", async () => {
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const { genesis, member } = yield* hub(["source.push"]);
+        const credential = yield* mintDelegation({
+          key: member,
+          repo: genesis.repoId,
+          capabilities: ["source.push"],
+          ttlSeconds: 300,
+        });
+        return yield* authenticate({
+          request: request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
+          capability: "source.push",
+        });
+      }),
+    );
+
+    assert.equal(outcome.ok, true);
+    // The policy boundary needs the principal; recovering it with a second
+    // lookup is how authentication and authorization come apart.
+    assert.notEqual(outcome.ok === true ? outcome.authenticated.principal : null, null);
   });
 });
