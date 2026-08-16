@@ -132,11 +132,7 @@ Conceptual genesis document:
 {
   "version": 1,
   "objectFormat": "sha1",
-  "rootKeys": [
-    "ssh-ed25519 AAAA... alice",
-    "ssh-ed25519 AAAA... bob",
-    "ssh-ed25519 AAAA... carol"
-  ],
+  "rootKeys": ["ssh-ed25519 AAAA... alice", "ssh-ed25519 AAAA... bob", "ssh-ed25519 AAAA... carol"],
   "threshold": 2
 }
 ```
@@ -338,7 +334,7 @@ A single-user repository MAY explicitly use:
 
 ### Quorum loss is unrecoverable — by design
 
-If enough root keys are lost that the threshold can no longer be met, **repository authority can never change again**. There is deliberately no recovery backdoor: any recovery path weaker than the quorum *is* the security model.
+If enough root keys are lost that the threshold can no longer be met, **repository authority can never change again**. There is deliberately no recovery backdoor: any recovery path weaker than the quorum _is_ the security model.
 
 Consequences that MUST be communicated at initialization:
 
@@ -377,12 +373,7 @@ Conceptually:
   "repo": "SHA256:bJd3cN8...",
   "subject": "SHA256:bob-key-fingerprint...",
   "publicKey": "ssh-ed25519 AAAA...",
-  "capabilities": [
-    "source.push",
-    "hub.comment",
-    "hub.review",
-    "hub.approve"
-  ],
+  "capabilities": ["source.push", "hub.comment", "hub.review", "hub.approve"],
   "issuedAt": "2026-08-16T00:00:00Z",
   "expiresAt": "2027-08-16T00:00:00Z",
   "delegation": []
@@ -424,7 +415,7 @@ The wire/event formats MUST be versioned so additional signature schemes can be 
 
 ## 9. Membership storage: the trust log
 
-Membership and authority records are Git-native immutable records — but they are **not** stored as independent, unordered refs. A bag of `grants/<id>` and `revocations/<id>` refs synchronized by set union has a fatal property: *omission is invisible*. A replica that withholds one revocation ref presents a trust state in which the revoked key is still authorized, and no verifier can tell the set is incomplete.
+Membership and authority records are Git-native immutable records — but they are **not** stored as independent, unordered refs. A bag of `grants/<id>` and `revocations/<id>` refs synchronized by set union has a fatal property: _omission is invisible_. A replica that withholds one revocation ref presents a trust state in which the revoked key is still authorized, and no verifier can tell the set is incomplete.
 
 Instead, trust state is a **hash-linked log**:
 
@@ -465,7 +456,7 @@ Verifiers MAY require a checkpoint newer than a configured maximum age before au
 
 ### Stated limitation
 
-Even with the log, **freshness is best-effort**: a malicious replica can serve a consistent-but-old view up to the checkpoint-age bound. This is an inherent property of any offline-verifiable system and the spec says so rather than pretending otherwise. What the log removes is *silent, unbounded* omission.
+Even with the log, **freshness is best-effort**: a malicious replica can serve a consistent-but-old view up to the checkpoint-age bound. This is an inherent property of any offline-verifiable system and the spec says so rather than pretending otherwise. What the log removes is _silent, unbounded_ omission.
 
 These objects replicate with the repository. A host database MUST NOT be the source of truth for membership.
 
@@ -636,9 +627,7 @@ Example conceptual payload:
 {
   "repo": "SHA256:bJd3cN8...",
   "operation": "git-receive-pack",
-  "commands": [
-    ["refs/heads/main", "sha1:0123...", "sha1:89ab..."]
-  ],
+  "commands": [["refs/heads/main", "sha1:0123...", "sha1:89ab..."]],
   "nonce": "...",
   "expiresAt": "..."
 }
@@ -1023,7 +1012,7 @@ refs/hub/pr/<id>
 Example API:
 
 ```ts
-Hub.project(prId)
+Hub.project(prId);
 ```
 
 Projection ignores join commits, orders events causally, applies the §16 tiebreak for concurrency, and drops events invalidated by compromise revocations (§10) or redaction tombstones (§21).
@@ -1148,7 +1137,7 @@ refs/hub/*          → refs/hub/*
 refs/meta/trust/*   → refs/meta/trust/*
 ```
 
-The pack/object-transfer layer should not care whether an OID was reached through a source branch, review, PR event, or trust event. (`checkRefAddress` in `src/git/Store.ts` already accepts any `refs/**` name; the generalization work is in ref *selection* — the client fetch path currently hard-codes heads/tags.)
+The pack/object-transfer layer should not care whether an OID was reached through a source branch, review, PR event, or trust event. (`checkRefAddress` in `src/git/Store.ts` already accepts any `refs/**` name; the generalization work is in ref _selection_ — the client fetch path currently hard-codes heads/tags.)
 
 ---
 
@@ -1160,13 +1149,13 @@ Conceptually:
 
 ```ts
 interface Remote {
-  readonly name: string
-  readonly url: string
+  readonly name: string;
+  readonly url: string;
 
   readonly sync?: {
-    readonly mode: "manual" | "fetch" | "push" | "mirror"
-    readonly refs: ReadonlyArray<string>
-  }
+    readonly mode: "manual" | "fetch" | "push" | "mirror";
+    readonly refs: ReadonlyArray<string>;
+  };
 }
 ```
 
@@ -1407,20 +1396,20 @@ When taken up, the work comprises:
 ### Hash abstraction
 
 ```ts
-type ObjectFormat = "sha1" | "sha256"
+type ObjectFormat = "sha1" | "sha256";
 
 interface HashFormat {
-  readonly name: ObjectFormat
-  readonly rawSize: number   // sha1: 20, sha256: 32
-  readonly hexSize: number   // sha1: 40, sha256: 64
-  readonly digest: (bytes: Uint8Array) => Effect<Uint8Array>
-  readonly hasher: () => StreamingHasher
+  readonly name: ObjectFormat;
+  readonly rawSize: number; // sha1: 20, sha256: 32
+  readonly hexSize: number; // sha1: 40, sha256: 64
+  readonly digest: (bytes: Uint8Array) => Effect<Uint8Array>;
+  readonly hasher: () => StreamingHasher;
 }
 
 interface StreamingHasher {
-  update(bytes: Uint8Array): this
-  digest(): Uint8Array
-  digestHex(): string
+  update(bytes: Uint8Array): this;
+  digest(): Uint8Array;
+  digestHex(): string;
 }
 ```
 
