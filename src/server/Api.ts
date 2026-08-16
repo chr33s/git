@@ -1674,7 +1674,12 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
       Effect.gen(function* () {
         const target = yield* remoteFor(payload);
         // A fetch writes this repository's tracking refs, so it is a write.
+        // Both namespaces it can reach, not only the tracking one: `Sync`
+        // rewrites `refs/heads/*` into `refs/remotes/<name>/*` and leaves tag
+        // names exactly as the remote spelled them, so gating tracking alone
+        // let `refs/tags/*` in past the policy boundary.
         yield* gateWrite(`refs/remotes/${target.name}/*`);
+        yield* gateWrite("refs/tags/*");
         // `fetchFrom` declares both options as possibly-undefined and treats an
         // absent value and an undefined one the same way.
         const fetched = yield* fetchFrom({
@@ -1719,6 +1724,9 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
         // makes and has to meet the same rules — a protected branch is not
         // less protected because the commits arrived over a remote.
         yield* gateWrite(refNameOf(payload.branch));
+        // And the fetch underneath it, which writes tracking refs and tags.
+        yield* gateWrite(`refs/remotes/${target.name}/*`);
+        yield* gateWrite("refs/tags/*");
         // `pull` declares `depth` as possibly-undefined and treats an absent
         // value and an undefined one the same way.
         return yield* pull({ target, branch: payload.branch, depth: payload.depth });

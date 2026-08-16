@@ -230,7 +230,9 @@ const serveCommand = Command.make(
       yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
       yield* Console.error(
         "repositories with no genesis are served to anyone who can reach the port; " +
-          "run `chr33s-git hub init <repo>` to require membership",
+          "run `chr33s-git hub init <repo> --key <key>` to require membership. " +
+          "A repository whose members hold no read capability is still public: " +
+          "membership restricts, so restricting nothing restricts nobody",
       );
       return yield* Effect.never;
     }),

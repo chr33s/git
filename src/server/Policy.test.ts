@@ -673,6 +673,35 @@ describe("Policy", () => {
       assert.match(refusal ?? "", /hub init/);
     });
 
+    it("refuses the tag namespace a fetch writes, when it is protected", async () => {
+      // The `fetch` and `pull` verbs write two namespaces: tracking refs, and
+      // tags — `Sync` rewrites `refs/heads/*` into `refs/remotes/<name>/*` and
+      // leaves tag names exactly as the remote spelled them. Gating tracking
+      // alone let every `refs/tags/*` write past the policy boundary.
+      const refusal = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "policy.write"]);
+          const repository = yield* Repository;
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({ ...OPEN, protected: ["refs/tags/*"], requirePullRequest: true }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "policy\n",
+            author,
+          });
+          yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+
+          return yield* gateWriteAs(where, "refs/tags/*");
+        }),
+      );
+      assert.match(refusal ?? "", /protected/);
+    });
+
     it("refuses a hub ref, which is appended to and never written", async () => {
       const refusal = await scenario(
         Effect.gen(function* () {

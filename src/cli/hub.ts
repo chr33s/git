@@ -16,7 +16,7 @@ import * as readline from "node:readline/promises";
 import { Console, Effect, Layer } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import { formatPublicKey, isFingerprint } from "../crypto/SshSignature.ts";
+import { type Fingerprint, formatPublicKey, isFingerprint } from "../crypto/SshSignature.ts";
 import { fetchRepository, lsRemote } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
@@ -24,9 +24,11 @@ import * as GitRepository from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { ObjectStore, RefStore } from "../git/Store.ts";
 import * as Certificate from "../trust/Certificate.ts";
+import type { Oid } from "../git/Store.ts";
 import {
   create,
   GENESIS_REF,
+  type Genesis,
   load,
   readGenesis,
   RECORD as GENESIS_RECORD,
@@ -59,8 +61,18 @@ const localRepository = (directory: string) =>
     Layer.provideMerge(stores(directory)),
   );
 
+/**
+ * The keys to sign with, repeatable.
+ *
+ * Repeatable because a repository whose threshold is more than one needs more
+ * than one signature on every authority record, and a single-key flag made
+ * those repositories impossible to administer: the record would be written,
+ * refused by the fold for want of a quorum, and sit in an append-only log
+ * forever with nothing to show for it.
+ */
 const keyFlag = Flag.string("key").pipe(
-  Flag.withDescription("Path to the SSH private key to sign with"),
+  Flag.withDescription("Path to an SSH private key to sign with (repeat for a quorum)"),
+  Flag.atLeast(1),
 );
 
 const init = Command.make(
@@ -80,27 +92,59 @@ const init = Command.make(
   },
   ({ also, key, repo, root, threshold }) =>
     Effect.gen(function* () {
-      const signer = yield* readPrivateKey(key);
+      const signers = yield* Effect.forEach(key, readPrivateKey);
       const extra = also === "" ? [] : also.split(",").map((value) => value.trim());
-      // The private key carries its own public half, so there is no need to
-      // go looking for a `.pub` beside it — and no failure when there is none.
+      // The private keys carry their own public halves, so there is no need to
+      // go looking for a `.pub` beside them — and no failure when there is none.
       const lines = [
-        formatPublicKey(signer.publicKey),
+        ...signers.map((signer) => formatPublicKey(signer.publicKey)),
         ...(yield* Effect.forEach(extra, readPublicKey)),
       ];
 
       const genesis = yield* create(lines, threshold);
-      yield* withRepo(
+      const seeded = yield* withRepo(
         root,
         repo,
         Effect.gen(function* () {
-          yield* writeGenesis(genesis, [yield* signGenesis(genesis, signer)]);
+          yield* writeGenesis(
+            genesis,
+            yield* Effect.forEach(signers, (signer) => signGenesis(genesis, signer)),
+          );
+
+          // A genesis alone makes a repository nobody can use. Root authority
+          // is the power to *change* membership, not membership itself, so
+          // without this first grant every push — the root holder's included —
+          // is refused for a key that is not a member, while reads stay open
+          // because a repository with no members reads as one with no policy.
+          //
+          // Only for a one-of-one repository, and that restraint is the point.
+          // `repo.admin` carries `member.invite`, so handing it to one key of
+          // a two-of-two quorum would let that key grant anything on its own
+          // — turning the quorum the operator asked for into a formality that
+          // survives only on root changes. Where the choice actually costs
+          // something, they make it themselves.
+          if (threshold !== 1) return null;
+
+          const payload = yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: lines[0]!,
+            capabilities: ["repo.admin"],
+            id: Log.newId(),
+          });
+          const commit = yield* Log.issue(payload, signers);
+          return (yield* confirmMember(genesis, commit, payload.subject)).fingerprint;
         }),
       );
 
       yield* Console.log(`Repository identity for ${repo}:`);
       yield* Console.log(`  ${genesis.repoId}`);
       yield* Console.log(`  ${lines.length} root key(s), threshold ${threshold}`);
+      yield* seeded === null
+        ? Console.log(
+            `  no member yet: run \`hub grant\` with ${threshold} of these keys, ` +
+              "so the quorum you asked for is the quorum that administers this repository",
+          )
+        : Console.log(`  ${seeded} holds repo.admin`);
     }),
 );
 
@@ -124,10 +168,10 @@ const grant = Command.make(
   },
   ({ capability, expires, key, repo, root, subject }) =>
     Effect.gen(function* () {
-      const signer = yield* readPrivateKey(key);
+      const signers = yield* Effect.forEach(key, readPrivateKey);
       const publicKey = yield* readPublicKey(subject);
 
-      const printed = yield* withRepo(
+      const granted = yield* withRepo(
         root,
         repo,
         Effect.gen(function* () {
@@ -139,12 +183,12 @@ const grant = Command.make(
             expiresAt: expires === 0 ? null : new Date(Date.now() + expires * 1000),
             id: Log.newId(),
           });
-          yield* Log.issue(payload, [signer]);
-          return payload.subject;
+          const commit = yield* Log.issue(payload, signers);
+          return yield* confirmMember(stored.genesis, commit, payload.subject);
         }),
       );
 
-      yield* Console.log(`Granted ${capability} to ${printed}`);
+      yield* Console.log(`Granted ${granted.capabilities.join(",")} to ${granted.fingerprint}`);
     }),
 );
 
@@ -163,7 +207,7 @@ const revoke = Command.make(
   },
   ({ key, reason, repo, root, subject }) =>
     Effect.gen(function* () {
-      const signer = yield* readPrivateKey(key);
+      const signers = yield* Effect.forEach(key, readPrivateKey);
       yield* withRepo(
         root,
         repo,
@@ -175,15 +219,16 @@ const revoke = Command.make(
               reason: `'${subject}' is not a key fingerprint; \`hub members\` lists them`,
             });
           }
-          yield* Log.issue(
+          const commit = yield* Log.issue(
             Certificate.revoke({
               repo: stored.genesis.repoId,
               subject,
               reason,
               id: Log.newId(),
             }),
-            [signer],
+            signers,
           );
+          return yield* confirmRevoked(stored.genesis, commit, subject);
         }),
       );
       yield* Console.log(`Revoked ${subject} (${reason})`);
@@ -218,6 +263,70 @@ const members = Command.make("members", { root: rootFlag, repo: repoArgument }, 
     }),
   ),
 );
+
+/**
+ * Whether the record just written actually counts.
+ *
+ * The trust log is append-only and its fold skips what it cannot authorize, so
+ * `Log.issue` succeeding means the bytes were stored — not that anything
+ * changed. A capability the fold does not recognise, a signer without the
+ * authority to grant it, a quorum short by one: each of these left the CLI
+ * printing "Granted" over a repository whose membership was untouched, and the
+ * operator learned about it the next time somebody could not push.
+ *
+ * So the projection is rebuilt and asked about this exact commit. A rejection
+ * is reported as the failure it is, which is also a non-zero exit for whatever
+ * script ran the command.
+ */
+const confirm = Effect.fn("hub.confirm")(function* (genesis: Genesis, commit: Oid) {
+  const projection = yield* project(genesis);
+
+  const refused = projection.rejected.find((entry) => entry.commit === commit);
+  if (refused !== undefined) {
+    return yield* new Invalid({ field: "trust", reason: refused.reason });
+  }
+  return projection;
+});
+
+/**
+ * The same check, for a grant, reported as the membership it was supposed to
+ * produce.
+ *
+ * Asked by subject rather than by commit because that is the question the
+ * operator has: not "was my record accepted" but "can this person push now?"
+ */
+const confirmMember = Effect.fn("hub.confirmMember")(function* (
+  genesis: Genesis,
+  commit: Oid,
+  subject: string,
+) {
+  const projection = yield* confirm(genesis, commit);
+  // SAFETY: `Certificate.grant` derives `subject` from the key it was handed,
+  // which is exactly what a `Fingerprint` names.
+  const member = projection.members.get(subject as Fingerprint);
+  if (member === undefined) {
+    return yield* new Invalid({
+      field: "trust",
+      reason: `the grant to ${subject} did not take effect`,
+    });
+  }
+  return member;
+});
+
+/** And for a revocation, which has to have reached the subject to have worked. */
+const confirmRevoked = Effect.fn("hub.confirmRevoked")(function* (
+  genesis: Genesis,
+  commit: Oid,
+  subject: Fingerprint,
+) {
+  const projection = yield* confirm(genesis, commit);
+  if (!projection.revoked.has(subject)) {
+    return yield* new Invalid({
+      field: "trust",
+      reason: `${subject} is still authorized; the revocation did not take effect`,
+    });
+  }
+});
 
 const mustBeEnabled = Effect.fn("hub.mustBeEnabled")(function* (repo: string) {
   const stored = yield* readGenesis();

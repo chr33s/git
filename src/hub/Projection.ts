@@ -164,8 +164,18 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   trust: TrustProjection,
   pr: string,
 ) {
-  const { events, parents } = yield* Event.entries(pr);
-  const rejected: Rejected[] = [];
+  const { events, parents, conflicts } = yield* Event.entries(pr);
+
+  // Two commits claiming one event id is an integrity conflict — a forgery or
+  // a corrupt replica — and `entries` drops the later one to keep one
+  // duplicate from refusing every projection. Dropped silently, it would be
+  // invisible to every consumer, so it arrives here as a rejection: the same
+  // channel `hub members` and the API already surface, and the only place an
+  // operator would think to look.
+  const rejected: Rejected[] = conflicts.map((conflict) => ({
+    commit: conflict.commits[1],
+    reason: `event ${conflict.id} is also claimed by ${conflict.commits[0]}`,
+  }));
 
   // Ancestry over the *whole* DAG, join commits and all. Building it from the
   // payload-carrying events alone would cut every chain at the join where two

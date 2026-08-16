@@ -142,6 +142,128 @@ describe("cli hub", () => {
     assert.match(failed ?? "", /not a key fingerprint/);
   });
 
+  it("leaves the root key able to push, not merely able to grant", async () => {
+    // The regression: `hub init` wrote a genesis and stopped. Root authority
+    // is the power to change membership, not membership itself, so the
+    // repository came out with zero members — every push refused, the root
+    // holder's included, while reads stayed open because a repository that
+    // has restricted nothing has restricted nobody.
+    await cli(["init", "--root", root, "project"]);
+    await writeKeyPair(path.join(root, "id_root"), "root@example.com");
+
+    const initialised = await cli([
+      "hub",
+      "init",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_root"),
+      "project",
+    ]);
+    assert.match(initialised, /holds repo\.admin/);
+
+    const listed = await cli(["hub", "members", "--root", root, "project"]);
+    assert.match(listed, /repo\.admin/);
+    assert.ok(!listed.includes("ignored:"), `no record should be refused: ${listed}`);
+  });
+
+  it("fails rather than reporting success for a capability the fold refuses", async () => {
+    // The regression: `Log.issue` storing the bytes was read as the grant
+    // taking effect. A typo in a capability name left the CLI printing
+    // "Granted", a rejected record in an append-only log, and a repository
+    // whose membership was untouched.
+    await cli(["init", "--root", root, "project"]);
+    await writeKeyPair(path.join(root, "id_root"), "root@example.com");
+    await writeKeyPair(path.join(root, "id_member"), "dev@example.com");
+    await cli(["hub", "init", "--root", root, "--key", path.join(root, "id_root"), "project"]);
+
+    const failed = await cli([
+      "hub",
+      "grant",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_root"),
+      "--subject",
+      path.join(root, "id_member.pub"),
+      "--capability",
+      "source.pus",
+      "project",
+    ]).then(
+      () => null,
+      (error: { stderr?: string; stdout?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
+    );
+
+    assert.notEqual(failed, null, "a refused grant must not exit 0 saying it worked");
+    assert.match(failed ?? "", /source\.pus/);
+  });
+
+  it("administers a repository whose threshold needs two signatures", async () => {
+    // A single `--key` made a quorum repository impossible to administer:
+    // every record was written, refused for want of a quorum, and left in the
+    // log with nothing to show for it.
+    await cli(["init", "--root", root, "quorum"]);
+    await writeKeyPair(path.join(root, "id_a"), "a@example.com");
+    await writeKeyPair(path.join(root, "id_b"), "b@example.com");
+    await writeKeyPair(path.join(root, "id_member"), "dev@example.com");
+
+    const initialised = await cli([
+      "hub",
+      "init",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_a"),
+      "--key",
+      path.join(root, "id_b"),
+      "--threshold",
+      "2",
+      "quorum",
+    ]);
+    assert.match(initialised, /2 root key\(s\), threshold 2/);
+    // No seeded admin here, deliberately: `repo.admin` carries `member.invite`,
+    // so handing it to one key of a two-of-two quorum would let that key grant
+    // anything alone — the quorum reduced to a formality on root changes.
+    assert.match(initialised, /no member yet/);
+
+    const granted = await cli([
+      "hub",
+      "grant",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_a"),
+      "--key",
+      path.join(root, "id_b"),
+      "--subject",
+      path.join(root, "id_member.pub"),
+      "--capability",
+      "source.push",
+      "quorum",
+    ]);
+    assert.match(granted, /Granted source\.push to SHA256:/);
+
+    // And one signature alone is still not enough: nothing in this repository
+    // ever held `member.invite` on its own.
+    const short = await cli([
+      "hub",
+      "grant",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_a"),
+      "--subject",
+      path.join(root, "id_member.pub"),
+      "--capability",
+      "hub.review",
+      "quorum",
+    ]).then(
+      () => null,
+      (error: { stderr?: string; stdout?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
+    );
+    assert.notEqual(short, null, "one of two signatures must not pass as a quorum");
+  });
+
   it("says what to do when a repository has no genesis yet", async () => {
     await cli(["init", "--root", root, "plain"]);
     const failed = await cli(["hub", "members", "--root", root, "plain"]).then(

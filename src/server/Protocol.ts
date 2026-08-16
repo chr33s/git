@@ -487,6 +487,12 @@ const lsRefs = (request: V2Request): Effect.Effect<Response, GitError, Repositor
 
     for (const [name, oid] of refs) {
       if (!matches(name)) continue;
+      // v2's advertisement, and so subject to the same hiding as v0's. This
+      // path is reached only from `POST /git-upload-pack`, which is the half
+      // that hides — receive-pack still needs to see hub refs to name what it
+      // is replacing. Modern git negotiates v2 by default, so omitting this
+      // meant the hiding never took effect for any real client.
+      if (Refspec.hiddenFromAdvertisement(name)) continue;
       let line = `${oid} ${name}`;
       if (peel && name.startsWith("refs/tags/")) {
         const peeled = yield* repository.readTag(oid).pipe(

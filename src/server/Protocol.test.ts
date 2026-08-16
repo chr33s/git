@@ -521,3 +521,69 @@ describe("receive-pack", () => {
     }
   });
 });
+
+/**
+ * What each advertisement is allowed to name.
+ *
+ * v0's `info/refs` hid the hub and trust namespaces; v2's `ls-refs` — which is
+ * the advertisement modern git actually asks for — did not, so the hiding had
+ * no effect on any real client.
+ */
+describe("advertisement hiding", () => {
+  const lsRefs = (): Request =>
+    new Request("http://host/repo/git-upload-pack", {
+      method: "POST",
+      headers: { "git-protocol": "version=2" },
+      body: body([pkt("command=ls-refs"), DELIM, FLUSH]),
+    });
+
+  const withHubRefs = Effect.fn("test.withHubRefs")(function* () {
+    const repository = yield* Repository;
+    const commit = yield* repository.commit({
+      branch: "main",
+      tree: EMPTY_TREE_OID,
+      message: "one",
+      author: alice,
+    });
+    yield* repository.setRef({ name: "refs/meta/trust/log", to: commit });
+    yield* repository.setRef({ name: "refs/meta/trust/genesis", to: commit });
+    yield* repository.setRef({ name: "refs/hub/pr/1", to: commit });
+    return commit;
+  });
+
+  it("hides hub and trust refs from a v2 ls-refs, keeping the genesis", async () => {
+    const named = await scenario(
+      Effect.gen(function* () {
+        yield* withHubRefs();
+        const response = yield* Protocol.uploadPack(lsRefs());
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return linesOf(bytes).lines;
+      }),
+    );
+
+    const refs = named.map((line) => line.split(" ")[1] ?? "");
+    assert.ok(refs.includes("refs/heads/main"), named.join("\n"));
+    // The identity stays: it is what lets any client compute the RepoID and
+    // check it against what they trust, and hiding it would make verification
+    // need permission.
+    assert.ok(refs.includes("refs/meta/trust/genesis"), named.join("\n"));
+    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${named.join("\n")}`);
+    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${named.join("\n")}`);
+  });
+
+  it("still shows them to a pusher, who has to know what it is replacing", async () => {
+    // receive-pack's old-oid is how a stale push is caught, so hiding these
+    // from the push advertisement would make every hub ref writable exactly
+    // once and then never again.
+    const text = await scenario(
+      Effect.gen(function* () {
+        yield* withHubRefs();
+        const response = yield* Protocol.advertise("git-receive-pack");
+        return decoder.decode(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())));
+      }),
+    );
+
+    assert.ok(text.includes("refs/meta/trust/log"), text);
+    assert.ok(text.includes("refs/hub/pr/1"), text);
+  });
+});

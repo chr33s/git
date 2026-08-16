@@ -553,7 +553,8 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
 /** One event id claimed by two different commits. */
 export interface Conflict {
   readonly id: string;
-  readonly commits: ReadonlyArray<Oid>;
+  /** The commit that claimed the id first, and the one that claimed it again. */
+  readonly commits: readonly [Oid, Oid];
 }
 
 /**
