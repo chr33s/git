@@ -188,12 +188,10 @@ export default Repo.make(
           // nothing for it to authenticate with.
           const guarded = yield* Auth.guard(request).pipe(
             Effect.provide(Layer.merge(live(repo), nonces)),
-            Effect.catch(() =>
-              Effect.succeed({
-                denied: new Response("authentication unavailable", { status: 503 }),
-                authenticated: Auth.anonymous,
-              }),
-            ),
+            Effect.orElseSucceed(() => ({
+              denied: new Response("authentication unavailable", { status: 503 }),
+              authenticated: Auth.anonymous,
+            })),
           );
           if (guarded.denied !== null) return guarded.denied;
           const requester = Auth.requester(guarded.authenticated);
