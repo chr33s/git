@@ -107,9 +107,12 @@ export const encodeRules = (rules: Rules): Uint8Array =>
  *
  * A repository that has said nothing is `OPEN`, which is what every repository
  * predating this was — turning on protection nobody configured would break
- * pushes that have always worked. Rules that will not parse are also `OPEN`
- * rather than a failure: a policy file with a typo must not be a repository
- * nobody can read.
+ * pushes that have always worked.
+ *
+ * A policy file that *exists* and will not parse is a failure, not `OPEN`.
+ * Reading a broken rules file as "no rules" would let anybody turn branch
+ * protection off by corrupting it, which is the opposite of what a rules file
+ * is for. Callers fail closed on that failure.
  */
 export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
   const repository = yield* Repository;
@@ -136,15 +139,13 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     ),
   );
 
-  return loaded === null
-    ? OPEN
-    : {
-        protected: loaded.protected,
-        requiredApprovals: loaded.requiredApprovals,
-        requiredChecks: loaded.requiredChecks,
-        requireResolvedThreads: loaded.requireResolvedThreads,
-        requirePullRequest: loaded.requirePullRequest,
-      };
+  return {
+    protected: loaded.protected,
+    requiredApprovals: loaded.requiredApprovals,
+    requiredChecks: loaded.requiredChecks,
+    requireResolvedThreads: loaded.requireResolvedThreads,
+    requirePullRequest: loaded.requirePullRequest,
+  };
 });
 
 export interface Allowed {

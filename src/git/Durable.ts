@@ -163,7 +163,15 @@ export class GitRepo extends DurableObject<TestEnv> {
     // log. A repository with no genesis is not hub-enabled and stays open,
     // which is what every repository that predates this was.
     const guarded = await Effect.runPromise(
-      Auth.guard(request).pipe(Effect.provide(Layer.merge(this.#live(repo), this.#nonces()))),
+      Auth.guard(request).pipe(
+        Effect.provide(Layer.merge(this.#live(repo), this.#nonces())),
+        // As the other two hosts do: a repository whose identity cannot be
+        // read is unavailable, not open, and not an exception out of `fetch`.
+        Effect.orElseSucceed(() => ({
+          denied: new Response("authentication unavailable", { status: 503 }),
+          authenticated: Auth.anonymous,
+        })),
+      ),
     );
     if (guarded.denied !== null) return guarded.denied;
     // Who the requester is travels with the rest of the request as an

@@ -245,8 +245,24 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
     // Join commits carry nothing; they are structure, not statements.
     if (!carries) continue;
 
-    const record = yield* Record.read(oid, RECORD);
-    const payload = yield* Certificate.decode(record.payload);
+    // A record this version cannot read is skipped, exactly as one that fails
+    // its authority check is. Propagating here would be permanent: the log is
+    // append-only, so a single malformed record pushed by any member would
+    // fail every projection, and with it every request, with no way to rewind
+    // the ref.
+    const record = yield* Record.read(oid, RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    if (record === null) continue;
+
+    const payload = yield* Certificate.decode(record.payload).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    if (payload === null) continue;
+
     records.push({
       commit: oid,
       parents: parents.get(oid) ?? [],

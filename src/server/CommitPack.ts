@@ -38,6 +38,7 @@ import type { Invalid, ObjectNotFound, RefConflict, StorageFailure } from "../gi
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
+import * as Policy from "./Policy.ts";
 
 /**
  * What one record, and one file, may hold.
@@ -373,6 +374,15 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
   // A truncated upload is otherwise indistinguishable from a complete one, and
   // committing half a push is the one outcome worth refusing outright.
   if (!state.closed) return yield* bad("the body ended before 'done'");
+
+  // The same boundary a push crosses. This endpoint takes a ref name from its
+  // caller and moves it, which is every rule the boundary exists for — branch
+  // protection, genesis immutability, hub append-only, `policy.write` — and
+  // reaching `commit` directly went around all of them.
+  const refusal = yield* Policy.gateWrite(
+    header.branch.startsWith("refs/") ? header.branch : `refs/heads/${header.branch}`,
+  ).pipe(Effect.orElseSucceed(() => "the repository's policy could not be evaluated"));
+  if (refusal !== null) return yield* bad(refusal);
 
   const oid = yield* rejected(
     repository.commit({

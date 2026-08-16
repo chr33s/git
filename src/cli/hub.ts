@@ -242,10 +242,10 @@ const mustBeEnabled = Effect.fn("hub.mustBeEnabled")(function* (repo: string) {
  * fast-forward of it, and reading locally would then report the identity that
  * has changed as the identity that was expected.
  */
-const presented = Effect.fn("hub.presented")(function* (url: string) {
+const presented = Effect.fn("hub.presented")(function* (url: string, token: string | undefined) {
   const target = { objects: yield* ObjectStore, refs: yield* RefStore };
 
-  const advertised = yield* lsRemote(url);
+  const advertised = yield* lsRemote(url, { token });
   const genesis = advertised.find((ref) => ref.name === GENESIS_REF);
   if (genesis === undefined) {
     return yield* new Invalid({
@@ -259,6 +259,7 @@ const presented = Effect.fn("hub.presented")(function* (url: string) {
   yield* fetchRepository({
     url,
     stores: target,
+    token,
     refspecs: [{ force: true, source: GENESIS_REF, destination: PRESENTED_REF }],
   });
 
@@ -291,14 +292,21 @@ const enable = Command.make(
       Flag.withDefault("origin"),
       Flag.withDescription("Local repository directory to fetch into"),
     ),
+    token: Flag.string("token").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("Credential for a repository that requires one"),
+    ),
     url: Argument.string("url"),
   },
-  ({ name, root, url, yes }) =>
+  ({ name, root, token, url, yes }) =>
     Effect.gen(function* () {
       const key = yield* canonicalUrl(url);
       const directory = `${root}/${name}`;
 
-      const identity = yield* presented(url).pipe(Effect.provide(localRepository(directory)));
+      const credential = token === "" ? undefined : token;
+      const identity = yield* presented(url, credential).pipe(
+        Effect.provide(localRepository(directory)),
+      );
       const decision = yield* decide(key, identity);
 
       if (decision.kind === "changed") {
@@ -325,7 +333,12 @@ const enable = Command.make(
         const target = { objects: yield* ObjectStore, refs: yield* RefStore };
         const all: string[] = [];
         for (const spec of Refspec.HUB_FETCH) {
-          const result = yield* fetchRepository({ url, stores: target, refspecs: [spec] });
+          const result = yield* fetchRepository({
+            url,
+            stores: target,
+            token: credential,
+            refspecs: [spec],
+          });
           all.push(...result.refs.map((update) => update.name));
         }
         return all;

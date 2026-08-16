@@ -18,6 +18,7 @@ import { Repository } from "../git/Repository.ts";
 import * as Certificate from "./Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "./Genesis.ts";
 import * as Log from "./Log.ts";
+import * as Record from "./Record.ts";
 import { project, type Projection } from "./Projection.ts";
 import * as Verify from "./Verify.ts";
 
@@ -585,6 +586,41 @@ describe("trust projection", () => {
       );
 
       assert.equal(state.projection.members.get(state.bob), undefined);
+    });
+
+    it("survives a record it cannot read at all", async () => {
+      // The log is append-only, so a record that failed the walk rather than
+      // being skipped would fail every projection — and therefore every
+      // request — permanently, with no way to rewind the ref. Any member with
+      // `source.push` could do it.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+
+          // A commit under the log ref carrying an `entry.json` that is not a
+          // trust payload at all.
+          const repository = yield* Repository;
+          const head = yield* repository.resolve(Log.LOG_REF);
+          const junk = yield* Record.write({
+            name: Log.RECORD,
+            payload: new TextEncoder().encode("{ not a payload }\n"),
+            signatures: [],
+            parents: head === null ? [] : [head],
+            message: "junk\n",
+          });
+          yield* repository.setRef({ name: Log.LOG_REF, to: junk, expected: head });
+
+          return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+        }),
+      );
+
+      assert.notEqual(
+        state.projection.members.get(state.bob),
+        undefined,
+        "one unreadable record must not take the membership with it",
+      );
     });
 
     it("keeps folding after an unauthorized record", async () => {

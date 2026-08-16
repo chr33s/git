@@ -193,6 +193,14 @@ const decodeDelegation = Schema.decodeUnknownEffect(Delegation);
  */
 export const MAX_DELEGATION_SECONDS = 86_400;
 
+/**
+ * How far apart two machines' clocks may be before this refuses to care.
+ *
+ * Only ever widens the lifetime *ceiling*, never the expiry itself: an expired
+ * credential is expired.
+ */
+const CLOCK_SKEW_SECONDS = 300;
+
 const encodePayload = <A>(ordered: A): Uint8Array =>
   encoder.encode(`${JSON.stringify(ordered, null, 2)}\n`);
 
@@ -369,7 +377,11 @@ export const openDelegation = Effect.fn("Auth.openDelegation")(function* (
   // Enforced on the verifying side as well as the minting side. The holder
   // signs these themselves, so a cap only this server's `mintDelegation`
   // applied would be a cap anybody could opt out of by writing their own.
-  if (expiry - now.getTime() > MAX_DELEGATION_SECONDS * 1000) return null;
+  //
+  // The skew allowance is what stops a credential minted at exactly the
+  // documented maximum from being refused by a server whose clock is a second
+  // behind the minter's — a rejection nobody could diagnose from either side.
+  if (expiry - now.getTime() > (MAX_DELEGATION_SECONDS + CLOCK_SKEW_SECONDS) * 1000) return null;
 
   const key = yield* verify(decoder.decode(armored), bytes, NAMESPACE).pipe(
     Effect.catchTag("Invalid", () => Effect.succeed(null)),

@@ -146,6 +146,13 @@ const lsRefsV2 = (
         },
         body: lines,
       });
+      // A server that does not implement v2 answers 400/404/501 and has no
+      // hub state to offer. Anything else — 5xx, a dropped connection — is a
+      // failure the caller has to see, or a replication run reports success
+      // having fetched nothing, revocations included.
+      if (response.status === 400 || response.status === 404 || response.status === 501) {
+        return [];
+      }
       if (!response.ok) throw new Error(`ls-refs returned ${response.status}`);
       if (response.body === null) return [];
 
@@ -530,14 +537,11 @@ export const fetchRepository = (options: {
     const hidden = specs
       .map((spec) => spec.source.replace(/\*$/, ""))
       .filter((prefix) => Refspec.hiddenFromAdvertisement(`${prefix}x`));
-    const extra =
-      hidden.length === 0
-        ? []
-        : yield* lsRefsV2(url, hidden, token).pipe(
-            // A remote that does not speak v2 is not a broken remote: it is one
-            // with no hub state to offer, and the fetch continues without it.
-            Effect.orElseSucceed(() => []),
-          );
+    // Not swallowed: `lsRefsV2` already answers with an empty list for a
+    // remote that has no v2 to offer, so a *failure* here is a real one and
+    // reporting success without it would be reporting a replication that did
+    // not happen.
+    const extra = hidden.length === 0 ? [] : yield* lsRefsV2(url, hidden, token);
 
     const seen = new Set(advertised.refs.map((ref) => ref.name));
     const available = [...advertised.refs, ...extra.filter((ref) => !seen.has(ref.name))];
