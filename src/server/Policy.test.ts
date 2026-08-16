@@ -14,7 +14,24 @@ import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
 import { type Member, project as projectTrust } from "../trust/Projection.ts";
+import * as Auth from "./Auth.ts";
+import * as Policy from "./Policy.ts";
 import { apply, evaluate, OPEN, type Principal, type Rules } from "./Policy.ts";
+
+/** A projection standing in for one nothing in these checks reads. */
+const EMPTY_PROJECTION = {
+  // SAFETY: `gateWrite` reads only the requester's member and capabilities;
+  // this value is never compared against a real repository identity.
+  repoId: "" as never,
+  head: null,
+  members: new Map(),
+  former: new Map(),
+  revoked: new Map(),
+  roots: [],
+  threshold: 0,
+  checkpoint: null,
+  rejected: [],
+};
 
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
   Effect.runPromise(
@@ -497,6 +514,73 @@ describe("Policy", () => {
         }),
       );
       assert.equal(decision.ok, true);
+    });
+  });
+
+  describe("writing a ref whose value is not known yet", () => {
+    /** The JSON verbs that compute the new value while doing the work. */
+    const gateWriteAs = (where: World, ref: string) =>
+      Policy.gateWrite(ref).pipe(
+        Effect.provide(
+          Auth.requester({
+            principal: where.principal.member,
+            signer: null,
+            capabilities: where.principal.capabilities,
+            projection: EMPTY_PROJECTION,
+            envelope: null,
+          }),
+        ),
+      );
+
+    it("lets a member write an ordinary branch", async () => {
+      // The regression this guards: gating without providing the requester
+      // refused *every* caller, admins included.
+      const refusal = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          return yield* gateWriteAs(where, "refs/heads/topic");
+        }),
+      );
+      assert.equal(refusal, null);
+    });
+
+    it("refuses a protected branch, which only a pull request may move", async () => {
+      const refusal = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "policy.write"]);
+          const repository = yield* Repository;
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({
+              ...OPEN,
+              protected: ["refs/heads/main"],
+              requirePullRequest: true,
+            }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "policy\n",
+            author,
+          });
+          yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+
+          return yield* gateWriteAs(where, "refs/heads/main");
+        }),
+      );
+      assert.match(refusal ?? "", /approved pull request/);
+    });
+
+    it("refuses a hub ref, which is appended to and never written", async () => {
+      const refusal = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          return yield* gateWriteAs(where, "refs/hub/pr/anything");
+        }),
+      );
+      assert.match(refusal ?? "", /appended to/);
     });
   });
 

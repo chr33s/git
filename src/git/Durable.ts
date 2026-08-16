@@ -48,7 +48,6 @@ interface TestEnv {
 
 export class GitRepo extends DurableObject<TestEnv> {
   #layer: Layer.Layer<Repository> | null = null;
-  #api: ((request: Request) => Promise<Response>) | null = null;
 
   #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
@@ -230,14 +229,18 @@ export class GitRepo extends DurableObject<TestEnv> {
     // `gc` is the request that deletes objects a body may still be reading.
     if (collects(request)) await settledWithin(this.#delivering);
 
-    this.#api ??= HttpRouter.toWebHandler(
+    // Rebuilt per request rather than memoised: the requester is part of the
+    // layer the handlers resolve, and a handler built once would answer every
+    // later request as whoever made the first one.
+    const handler = HttpRouter.toWebHandler(
       Api.layer(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
         Layer.provideMerge(this.#registry(repo)),
+        Layer.provideMerge(this.#requester ?? Auth.requester(Auth.anonymous)),
       ),
       { disableLogger: true },
     ).handler;
-    return this.#track(await this.#api(request));
+    return this.#track(await handler(request));
   }
 
   /**

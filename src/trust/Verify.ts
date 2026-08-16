@@ -88,9 +88,13 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // A live request is held to the current state: revoked is revoked.
   if (made === null) return true;
 
-  if (revocation.compromisedFrom !== null) {
-    return made.at.getTime() >= revocation.compromisedFrom.getTime();
-  }
+  // A compromise reaches everything the key signed, without consulting the
+  // event's own `issuedAt`. That field is written by whoever holds the key,
+  // and under a compromise that is the attacker — so comparing against it
+  // would let them backdate their way out of the one revocation class meant
+  // to reach backwards. `compromisedFrom` stays on the record as the
+  // operator's account of when it began; it is not a verification input.
+  if (revocation.compromisedFrom !== null) return true;
 
   // Forward-only. An event that records no trust head cannot show it predates
   // the revocation, so it does not get the benefit of the doubt.

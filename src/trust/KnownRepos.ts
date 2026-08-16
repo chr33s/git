@@ -179,7 +179,14 @@ export const canonicalUrl = (url: string): Effect.Effect<string, Invalid> =>
   Effect.try({
     try: () => {
       const value = new URL(url);
-      const path = value.pathname.replace(/\.git$/, "").replace(/\/+$/, "");
+      // Slashes first, then `.git`, then slashes again: stripping `.git`
+      // first leaves `…/repo.git/` untouched, which would pin the same
+      // repository under two keys and re-prompt as a first sighting instead
+      // of warning that its identity had changed.
+      const path = value.pathname
+        .replace(/\/+$/, "")
+        .replace(/\.git$/, "")
+        .replace(/\/+$/, "");
       return `${value.protocol}//${value.host}${path}`;
     },
     catch: () => new Invalid({ field: "url", reason: `not a URL: '${url}'` }),

@@ -188,6 +188,44 @@ describe("Replication", () => {
     assert.equal(outcome.now, outcome.theirs);
   });
 
+  it("does not repoint the trust log when some other hub ref diverges", async () => {
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        // A genesis and a trust log, so there is a membership state to lose.
+        yield* world();
+        const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+        // An append-only hub ref that is not a pull request. Sending it down
+        // the trust-log path would land a hub commit on the membership log and
+        // wipe the projection every capability check reads.
+        const first = yield* repository.commit({
+          branch: "refs/hub/index",
+          tree: EMPTY_TREE_OID,
+          message: "ours",
+          author,
+        });
+        const second = yield* repository.commit({
+          branch: "refs/heads/scratch",
+          tree: EMPTY_TREE_OID,
+          message: "theirs",
+          author,
+        });
+
+        yield* reconcile("refs/hub/index", second);
+        return {
+          trustHead,
+          trustNow: yield* repository.resolve(Log.LOG_REF),
+          joined: yield* repository.resolve("refs/hub/index"),
+          first,
+        };
+      }),
+    );
+
+    assert.equal(outcome.trustNow, outcome.trustHead, "the trust log must not have moved");
+    assert.notEqual(outcome.joined, outcome.first, "the diverged ref should have been joined");
+  });
+
   it("joins the trust log when two replicas both granted membership", async () => {
     const outcome = await scenario(
       Effect.gen(function* () {

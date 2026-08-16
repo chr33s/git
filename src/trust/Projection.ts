@@ -114,8 +114,25 @@ const rootQuorum = (
   return met >= threshold;
 };
 
+/** Every signer who may invite members — all of them, not the first found. */
+const inviters = (
+  members: ReadonlyMap<Fingerprint, Member>,
+  revoked: ReadonlyMap<Fingerprint, Revocation>,
+  signers: ReadonlySet<Fingerprint>,
+): ReadonlyArray<Fingerprint> => {
+  const found: Fingerprint[] = [];
+  for (const signer of signers) {
+    if (revoked.has(signer)) continue;
+    const member = members.get(signer);
+    if (member !== undefined && Certificate.permits(member.capabilities, "member.invite")) {
+      found.push(signer);
+    }
+  }
+  return found;
+};
+
 /**
- * Whether a signer holds a capability *within the fold*.
+ * Whether any signer holds a capability *within the fold*.
  *
  * Deliberately ignores expiry: the fold has no clock, and a projection whose
  * contents depended on when it was built could not be compared between two
@@ -185,16 +202,20 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     }
 
     if (payload.type === "trust.grant") {
-      const issuer = quorum ? null : holds(members, revoked, signers, "member.invite");
-      if (!quorum && issuer === null) {
+      // Every signer who may invite, not merely the first one found: a record
+      // co-signed by an inviter and an admin must not be accepted or refused
+      // on the order the signatures happen to be in.
+      const issuers = quorum ? [] : inviters(members, revoked, signers);
+      if (!quorum && issuers.length === 0) {
         rejected.push({ commit: entry.commit, reason: "issuer may not invite members" });
         continue;
       }
       // Nobody may grant what they do not hold. Without this, one member with
       // `member.invite` could mint themselves an admin by granting it to a key
-      // they also control.
-      if (!quorum && issuer !== null) {
-        const held = members.get(issuer)?.capabilities ?? [];
+      // they also control. Held capabilities are pooled across the signers,
+      // because they all signed the same record.
+      if (!quorum) {
+        const held = issuers.flatMap((issuer) => members.get(issuer)?.capabilities ?? []);
         const excess = payload.capabilities.filter(
           (capability) => !Certificate.permits(held, capability),
         );

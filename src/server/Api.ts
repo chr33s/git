@@ -155,14 +155,37 @@ const FileWire = Schema.Struct({
  * only the protocol enforces is a rule with a way around it. Refusals come
  * back as `Invalid`, which this surface already renders with its reason.
  */
+/**
+ * The pre-check for verbs that compute the ref's new value while doing the
+ * work. `gateOne` is for the ones handed a value up front.
+ */
+/** A branch name as a ref, for the payloads that accept either spelling. */
+const refNameOf = (value: string): string =>
+  value.startsWith("refs/") ? value : `refs/heads/${value}`;
+
+const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string) {
+  // Fail closed: a policy that cannot be evaluated refuses the write rather
+  // than allowing it. The alternative is a repository whose protection turns
+  // itself off the moment its own trust state cannot be read.
+  const refusal = yield* Policy.gateWrite(ref).pipe(
+    Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+  );
+  if (refusal !== null) return yield* new Invalid({ field: "ref", reason: refusal });
+});
+
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
+  // Fail closed, for the reason `gateWrite` gives.
   const judged = yield* Policy.gate([update], true).pipe(
-    // A repository this surface cannot read is not a refusal to report to the
-    // caller — it is the same defect every other handler here dies on.
-    Effect.catchTags({
-      ObjectNotFound: Effect.die,
-      StorageFailure: Effect.die,
-    }),
+    Effect.orElseSucceed(() => ({
+      updates: [],
+      refused: [
+        {
+          ok: false as const,
+          ref: update.name,
+          reason: "the repository's policy could not be evaluated",
+        },
+      ],
+    })),
   );
   const refusal = judged.refused.at(0);
   if (refusal !== undefined) {
@@ -1051,6 +1074,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const branch = payload.branch ?? "main";
+        yield* gateWrite(branch.startsWith("refs/") ? branch : `refs/heads/${branch}`);
 
         const built = yield* treeFor(repository, branch, payload).pipe(
           Effect.catchTag("StorageFailure", Effect.die),
@@ -1155,6 +1179,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("branch", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        yield* gateWrite(`refs/heads/${payload.name}`);
         const oid = yield* repository
           .branch(payload)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
@@ -1164,6 +1189,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("tagCreate", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        yield* gateWrite(`refs/tags/${payload.name}`);
         const request: TagRequest = { name: payload.name, target: payload.target };
         if (payload.message !== undefined) request.message = payload.message;
         if (payload.tagger !== undefined) request.tagger = signatureFrom(payload.tagger);
@@ -1258,23 +1284,30 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         if (payload.strategy !== undefined) request.strategy = payload.strategy;
         if (payload.into !== undefined) request.into = payload.into;
         if (payload.no_fast_forward !== undefined) request.noFastForward = payload.no_fast_forward;
+        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into));
         const outcome = yield* repository
           .merge(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return outcome;
       }),
     )
-    .handle("cherry-pick", ({ payload }) => {
-      const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
-      if (payload.author !== undefined) request.author = signatureFrom(payload.author);
-      if (payload.into !== undefined) request.into = payload.into;
-      return cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
-    })
-    .handle("rebase", ({ payload }) => {
-      const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
-      if (payload.into !== undefined) request.into = payload.into;
-      return rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
-    })
+    .handle("cherry-pick", ({ payload }) =>
+      Effect.gen(function* () {
+        const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
+        if (payload.author !== undefined) request.author = signatureFrom(payload.author);
+        if (payload.into !== undefined) request.into = payload.into;
+        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into));
+        return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
+      }),
+    )
+    .handle("rebase", ({ payload }) =>
+      Effect.gen(function* () {
+        const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
+        if (payload.into !== undefined) request.into = payload.into;
+        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into));
+        return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
+      }),
+    )
     .handle("diff", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;

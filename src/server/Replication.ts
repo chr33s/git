@@ -132,9 +132,13 @@ export const reconcile = Effect.fn("Replication.reconcile")(function* (ref: stri
     return { ref, ours, theirs, joined: null } satisfies Divergence;
   }
 
+  // Which ref this is decides where the join goes. Sending anything that is
+  // merely append-only down the trust-log path would repoint the membership
+  // log at whatever had diverged — `refs/hub/index`, a nested
+  // `refs/hub/pr/a/b` — and wipe the projection every capability check reads.
   const pr = Event.prOf(ref);
   const joined =
-    pr === null ? yield* joinTrust([ours, theirs]) : yield* Event.join(pr, [ours, theirs]);
+    pr !== null ? yield* Event.join(pr, [ours, theirs]) : yield* joinInto(ref, [ours, theirs]);
 
   return { ref, ours, theirs, joined } satisfies Divergence;
 });
@@ -146,11 +150,21 @@ const ancestorOf = Effect.fn("Replication.ancestorOf")(function* (ancestor: Oid,
     .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)));
 });
 
-/** A join on the trust log, which owns its own ref rather than a PR's. */
-const joinTrust = Effect.fn("Replication.joinTrust")(function* (heads: ReadonlyArray<Oid>) {
+/**
+ * A join on a ref that is not a pull request's — the trust log, or any other
+ * append-only ref a future version adds.
+ *
+ * The commit shape is the trust log's, because a join is the same object
+ * everywhere: a commit with both heads as parents and nothing in its tree.
+ * What differs is only which ref it lands on, so that is the argument.
+ */
+const joinInto = Effect.fn("Replication.joinInto")(function* (
+  ref: string,
+  heads: ReadonlyArray<Oid>,
+) {
   const repository = yield* Repository;
   const commit = yield* Log.join(heads);
-  yield* repository.setRef({ name: Log.LOG_REF, to: commit, expected: heads[0] ?? null });
+  yield* repository.setRef({ name: ref, to: commit, expected: heads[0] ?? null });
   return commit;
 });
 

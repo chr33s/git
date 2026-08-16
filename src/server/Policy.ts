@@ -385,6 +385,38 @@ export const apply = Effect.fn("Policy.apply")(function* (input: {
 export type PolicyError = Invalid | ObjectNotFound | StorageFailure;
 
 /**
+ * May this requester write this ref at all?
+ *
+ * For the JSON verbs that produce a ref's new value as part of doing the work
+ * — commit, branch, tag, merge, cherry-pick, rebase — the resulting oid is not
+ * known until afterwards, so the full `gate` cannot be asked first. What can be
+ * asked, and is enough, is whether the ref is writable by this requester at
+ * all: a protected branch is not, because the only thing that may move one is
+ * an approved pull request, and none of these verbs is that.
+ */
+export const gateWrite = Effect.fn("Policy.gateWrite")(function* (ref: string) {
+  const stored = yield* readGenesis().pipe(Effect.orElseSucceed(() => null));
+  if (stored === null) return null;
+
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  const who = Option.getOrElse(requester, () => Auth.anonymous);
+  const principal = { member: who.principal, capabilities: who.capabilities };
+
+  if (principal.member === null) return "authentication required to write refs";
+  if (!may(principal, "source.push")) return "pushing needs source.push";
+  if (ref === Refspec.TRUST_GENESIS) return "the genesis is written once and never moves";
+  if (Refspec.isAppendOnly(ref)) return `${ref} may only be appended to by the hub`;
+  if (ref === RULES_REF && !may(principal, "policy.write")) {
+    return `writing ${RULES_REF} needs policy.write`;
+  }
+
+  const rules = yield* rulesOf();
+  return isProtected(rules, ref)
+    ? `${ref} is protected and may only be moved by an approved pull request`
+    : null;
+});
+
+/**
  * Whether a signed envelope authorized this exact ref command.
  *
  * A request with no envelope is not refused here — a delegated credential

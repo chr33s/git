@@ -64,7 +64,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   interface RepoState {
     readonly layer: Layer.Layer<Repository>;
     readonly lfs: Layer.Layer<Lfs.LfsStore>;
-    readonly api: (request: Request) => Promise<Response>;
+    readonly api: (request: Request, requester: Layer.Layer<Auth.Requester>) => Promise<Response>;
     /** The input-gate stand-in: requests to one repo run strictly in order. */
     gate: Promise<unknown>;
     /**
@@ -141,10 +141,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     const state: RepoState = {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
-      api: HttpRouter.toWebHandler(
-        Api.layer(remotes).pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
-        { disableLogger: true },
-      ).handler,
+      // Built once, called per request with that request's requester: the
+      // policy boundary inside `reset` and friends has to know who is asking,
+      // and a handler memoised with one requester would answer for everybody.
+      api: (request: Request, requester: Layer.Layer<Auth.Requester>) =>
+        HttpRouter.toWebHandler(
+          Api.layer(remotes).pipe(
+            Layer.provideMerge(layer),
+            Layer.provideMerge(subscribers),
+            Layer.provideMerge(requester),
+          ),
+          { disableLogger: true },
+        ).handler(request),
       gate: Promise.resolve(),
       delivering: new Set(),
       active: 0,
@@ -212,7 +220,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           Effect.provide(Layer.merge(state.layer, requester)),
         ),
       );
-      return matched ?? (await state.api(request));
+      return matched ?? (await state.api(request, requester));
     };
 
     const answered = state.gate.then(answer, answer);

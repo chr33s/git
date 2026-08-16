@@ -462,13 +462,14 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(refOf(pr));
-  if (head === null) return { events: emptyEvents, parents: emptyParents };
+  if (head === null) return { events: emptyEvents, parents: emptyParents, conflicts: [] };
 
   const parents = yield* Dag.reachable(head);
   const ordered = Dag.topological(parents);
 
   const events: Entry[] = [];
   const seen = new Map<string, Oid>();
+  const conflicts: Conflict[] = [];
   for (const oid of ordered) {
     // Joins carry nothing: they are how two histories became one.
     if (!(yield* Record.carries(oid, RECORD))) continue;
@@ -510,12 +511,15 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
       continue;
     }
 
+    // Two commits claiming one event id is an integrity conflict, and it is
+    // reported as a *rejected event* rather than as a failed walk. Failing
+    // here would let one forged duplicate refuse every protected-branch push
+    // in the repository, which is a denial of service anybody who can write a
+    // hub ref could perform.
     const previous = seen.get(payload.id);
     if (previous !== undefined && previous !== oid) {
-      return yield* new Invalid({
-        field: "event",
-        reason: `event ${payload.id} appears as both ${previous} and ${oid}`,
-      });
+      conflicts.push({ id: payload.id, commits: [previous, oid] });
+      continue;
     }
     seen.set(payload.id, oid);
 
@@ -532,8 +536,14 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   // ancestry from the payload-carrying events alone would find its chains cut
   // at every join — which is exactly where two concurrent histories meet, and
   // exactly where knowing which event descends from which matters.
-  return { events, parents };
+  return { events, parents, conflicts };
 });
+
+/** One event id claimed by two different commits. */
+export interface Conflict {
+  readonly id: string;
+  readonly commits: ReadonlyArray<Oid>;
+}
 
 const emptyParents: Dag.Parents = new Map();
 const emptyEvents: ReadonlyArray<Entry> = [];
