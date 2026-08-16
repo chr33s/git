@@ -90,7 +90,12 @@ export const map = (spec: Refspec, ref: string): string | null => {
 
   const middle = ref.slice(prefix.length, ref.length - suffix.length);
   if (middle === "") return null;
-  return spec.destination.replace("*", middle);
+  // A replacer function, not a replacement string: `String.replace` expands
+  // `$&`, `` $` ``, `$'` and `$$` inside the second argument, and the second
+  // argument here is part of a ref name the remote chose. `refs/heads/x$`y`
+  // would otherwise map to a destination with the whole prefix spliced into
+  // the middle of it, and `refs/heads/a$&b` to one containing a `*`.
+  return spec.destination.replace("*", () => middle);
 };
 
 /** The first spec that covers this ref, and the name it maps to. */

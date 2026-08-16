@@ -121,6 +121,28 @@ describe("Auth", () => {
       );
     });
 
+    it("charges a read-only verb a read, and a DELETE that ends in one a write", () => {
+      assert.equal(requiredCapability(request("r/diff", { method: "POST" })), "repo.read");
+      assert.equal(requiredCapability(request("r/grep", { method: "POST" })), "repo.read");
+
+      // The last path segment is also a *resource name*. Matching on the word
+      // alone charged `DELETE /remotes/diff` and `DELETE /webhooks/grep`
+      // `repo.read`, and neither endpoint has a policy gate behind it — so a
+      // read-only credential could delete them.
+      assert.equal(
+        requiredCapability(request("r/remotes/diff", { method: "DELETE" })),
+        "source.push",
+      );
+      assert.equal(
+        requiredCapability(request("r/webhooks/grep", { method: "DELETE" })),
+        "source.push",
+      );
+      assert.equal(
+        requiredCapability(request("r/branches/fsck", { method: "DELETE" })),
+        "source.push",
+      );
+    });
+
     it("charges the LFS batch endpoint a read, POST or not", () => {
       // A reader must be able to clone a repository that uses LFS; the upload
       // it may negotiate is a separate PUT, charged separately.

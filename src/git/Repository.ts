@@ -159,6 +159,15 @@ export class Repository extends Context.Service<
   {
     readonly refs: Effect.Effect<ReadonlyArray<readonly [string, Oid]>, StorageFailure>;
     readonly resolve: (name: string) => Effect.Effect<Oid | null, StorageFailure>;
+    /**
+     * What the ref itself holds, without following a symbolic one.
+     *
+     * The pairing `setRef`'s and `receive`'s `expected` is checked against:
+     * comparing a compare-and-swap against the *resolved* value of a symbolic
+     * ref names an oid the store will never agree with, so every such write
+     * would fail as a conflict against a value nobody wrote.
+     */
+    readonly readRef: (name: string) => Effect.Effect<Oid | null, StorageFailure>;
     readonly head: Effect.Effect<string, StorageFailure>;
     /** Point HEAD at a ref — what a checkout does last. */
     readonly setHead: (ref: string) => Effect.Effect<void, StorageFailure | Invalid>;
@@ -1217,6 +1226,7 @@ export const layer = Layer.effect(
     return Repository.of({
       refs: refs.list("refs/"),
       resolve: refs.resolve,
+      readRef: refs.read,
       head: refs.head,
       setHead: refs.setHead,
 

@@ -665,8 +665,14 @@ describe("hub projection", () => {
       assert.equal(redactedEntry?.summary?.type, "comment.created", "what it was survives");
     });
 
-    it("refuses a redaction from a member without hub.redact", async () => {
-      const state = await scenario(
+    it("refuses a redaction from a member without hub.redact, and keeps the content", async () => {
+      // Writing the tombstone and deleting the payload are two different
+      // authorities. Treating the first as implying the second let anybody who
+      // could write a hub ref blank another member's words: the projection
+      // refused their tombstone, so nothing was marked redacted — but the blob
+      // was already gone, and the event had become unreadable and stopped
+      // counting. The removal now happens only once it is known to count.
+      const outcome = await scenario(
         Effect.gen(function* () {
           const where = yield* world();
           const { pr } = yield* opened(where);
@@ -679,21 +685,24 @@ describe("hub projection", () => {
           const { events } = yield* Event.entries(pr);
           const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
 
-          yield* PullRequest.redact({
+          const failure = yield* PullRequest.redact({
             repo: where.genesis.repoId,
             pr,
             target,
             reason: "no",
             key: where.author,
-          });
-          return yield* projectionOf(where, pr);
+          }).pipe(Effect.flip);
+
+          return { failure, state: yield* projectionOf(where, pr) };
         }),
       );
 
-      // The tombstone was written but carries no authority, so the content
-      // stays — the blob is deleted either way, which is why the projection
-      // has to treat an unauthorized tombstone as the removal it physically is.
-      assert.match(state.rejected.at(-1)?.reason ?? "", /hub\.redact/);
+      assert.equal(outcome.failure._tag, "Invalid");
+      assert.match(outcome.failure.reason, /hub\.redact/);
+      assert.match(outcome.state.rejected.at(-1)?.reason ?? "", /hub\.redact/);
+      assert.equal(outcome.state.redacted.size, 0);
+      // The words the tombstone had no authority to remove are still there.
+      assert.equal(outcome.state.threads[0]?.comments[0]?.body, "ordinary");
     });
 
     it("will not redact a tombstone", async () => {

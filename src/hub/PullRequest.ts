@@ -19,9 +19,11 @@ import type { PrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
-import type { RepoId } from "../trust/Genesis.ts";
+import { readGenesis, type RepoId } from "../trust/Genesis.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import * as Event from "./Event.ts";
+import { project } from "./Projection.ts";
 
 /**
  * What every operation needs to know about where it is being made.
@@ -324,6 +326,29 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
     input.key,
   );
 
+  // Nothing is deleted until the tombstone is known to count.
+  //
+  // Writing the event and deleting the blob are two different authorities, and
+  // treating the first as implying the second meant a signer holding only
+  // `hub.comment` could blank another member's approval: the projection
+  // refused their tombstone, so `redacted` stayed empty and `Redaction.blobs`
+  // never listed it — but the payload was already gone, and the approval had
+  // become an unreadable event that stopped counting toward a merge. So the
+  // projection is rebuilt and asked, and a refused tombstone is reported as
+  // the failure it is rather than performed anyway.
+  const stored = yield* readGenesis();
+  if (stored === null) {
+    return yield* new Invalid({ field: "repo", reason: "this repository has no genesis" });
+  }
+  const state = yield* project(stored.genesis, yield* projectTrust(stored.genesis), input.pr);
+  if (!state.redacted.has(input.target)) {
+    const refused = state.rejected.find((entry) => entry.commit === commit);
+    return yield* new Invalid({
+      field: "target",
+      reason: refused?.reason ?? `the tombstone over ${input.target} did not take effect`,
+    });
+  }
+
   // The blob, by the name its own tree entry gives it.
   //
   // This drops the loose copy only. A packed object cannot be removed without
@@ -332,9 +357,15 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   // covers. Doing the repack here would turn one redaction into rewriting a
   // gigabyte, and doing nothing here would leave the bytes loose until the
   // next collection — the loose copy is the one that can go now, so it goes.
-  const info = yield* repository.readCommit(target.commit);
-  const entry = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
-  if (entry !== null) yield* repository.deleteObject(entry.oid);
+  //
+  // Every commit carrying the id, not merely the first: a duplicate claim is
+  // refused by the projection but its blob is just as readable.
+  for (const entry of events) {
+    if (entry.payload?.id !== input.target) continue;
+    const info = yield* repository.readCommit(entry.commit);
+    const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
+    if (path !== null) yield* repository.deleteObject(path.oid);
+  }
 
   return commit;
 });

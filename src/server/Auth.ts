@@ -75,16 +75,30 @@ export const requiredCapability = (request: Request): string => {
   // alone would lock a reader out of cloning any repository that uses LFS. The
   // upload it hands back is a separate PUT, and that one is charged as a write.
   if (last === "batch" && url.pathname.includes("/info/lfs/")) return "repo.read";
-  // POST is not the same thing as "writes". These four take a body because
-  // their inputs do not fit in a URL, and they change nothing — charging them
-  // a write locks a reader out of `diff` and `grep`, and makes an otherwise
+  // POST is not the same thing as "writes". These take a body because their
+  // inputs do not fit in a URL, and they change nothing — charging them a
+  // write locks a reader out of `diff` and `grep`, and makes an otherwise
   // public repository refuse them anonymously.
-  if (last !== undefined && READ_ONLY_POSTS.has(last)) return "repo.read";
+  //
+  // The method is checked as well as the name, and that is not belt-and-braces:
+  // a URL's last segment is also a *resource name*, so `DELETE /remotes/log`
+  // and `DELETE /webhooks/log` end in one of these words while being deletions.
+  // Matching on the word alone charged them `repo.read`, and neither endpoint
+  // has a policy gate behind it to catch what got through.
+  if (request.method === "POST" && last !== undefined && READ_ONLY_POSTS.has(last)) {
+    return "repo.read";
+  }
   return request.method === "GET" || request.method === "HEAD" ? "repo.read" : "source.push";
 };
 
-/** POST endpoints that read and never write. */
-const READ_ONLY_POSTS = new Set(["diff", "grep", "bisect", "fsck", "history", "log"]);
+/**
+ * POST endpoints that read and never write.
+ *
+ * `history` and `log` are GET endpoints and so are not here: the last line
+ * already charges a GET `repo.read`, and naming them would only widen the set
+ * of words a future DELETE route could collide with.
+ */
+const READ_ONLY_POSTS = new Set(["diff", "grep", "bisect", "fsck"]);
 
 // -- nonces ---------------------------------------------------------------------
 

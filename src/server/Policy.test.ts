@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
@@ -6,6 +9,7 @@ import { Effect, Layer } from "effect";
 import { formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
+import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid, RefUpdate } from "../git/Store.ts";
@@ -702,6 +706,61 @@ describe("Policy", () => {
       assert.match(refusal ?? "", /protected/);
     });
 
+    it("refuses a namespace write against a rule narrower than the namespace", async () => {
+      // `refs/tags/*` is what a fetch asks about: it writes every tag the
+      // remote has and does not know their names until the negotiation is
+      // over. Compared as a literal name it matched a rule protecting
+      // `refs/tags/*` and missed one protecting `refs/tags/v*` — so the
+      // narrower rule was the one with the hole in it.
+      const refusal = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "policy.write"]);
+          const repository = yield* Repository;
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({ ...OPEN, protected: ["refs/tags/v*"], requirePullRequest: true }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "policy\n",
+            author,
+          });
+          yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+
+          return yield* gateWriteAs(where, "refs/tags/*");
+        }),
+      );
+      assert.match(refusal ?? "", /protected/);
+    });
+
+    it("lets a namespace write through when no rule reaches into it", async () => {
+      const refusal = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "policy.write"]);
+          const repository = yield* Repository;
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({ ...OPEN, protected: ["refs/heads/main"] }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "policy\n",
+            author,
+          });
+          yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+
+          return yield* gateWriteAs(where, "refs/tags/*");
+        }),
+      );
+      assert.equal(refusal, null);
+    });
+
     it("refuses a hub ref, which is appended to and never written", async () => {
       const refusal = await scenario(
         Effect.gen(function* () {
@@ -714,6 +773,57 @@ describe("Policy", () => {
   });
 
   describe("applying", () => {
+    it("compares against the ref's own value, not what a symref resolves to", async () => {
+      // `RefStore.apply` checks `expected` against the ref's stored value, and
+      // a symbolic ref stores no oid. Taking the compare-and-swap from the
+      // *resolved* value named a commit the store would never agree with, so
+      // every gated write to a symbolic ref failed as a conflict against a
+      // value nobody had written there.
+      //
+      // On disk rather than in memory, because that is where a symbolic ref
+      // under `refs/` can exist at all: git writes `refs/remotes/origin/HEAD`
+      // as one in every repository it clones, and nothing in this codebase has
+      // a way to create one.
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "policy-symref-"));
+      try {
+        const onDisk = GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(nodeStores(root)),
+        );
+
+        const outcome = await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const where = yield* world(["source.push"]);
+            const { second } = yield* history("refs/heads/topic");
+
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(root, "refs/remotes/origin"), { recursive: true });
+              await fs.writeFile(
+                path.join(root, "refs/remotes/origin/HEAD"),
+                "ref: refs/heads/topic\n",
+              );
+            });
+
+            const gated = yield* gateAs(where, [
+              { name: "refs/remotes/origin/HEAD", value: second },
+            ]);
+            const results = yield* repository.receive(gated.updates);
+            return { gated, ok: results.at(0)?.ok, reason: results.at(0)?.reason };
+          }).pipe(Effect.provide(onDisk)),
+        );
+
+        assert.deepEqual(outcome.gated.refused, []);
+        assert.equal(
+          outcome.ok,
+          true,
+          `the compare-and-swap must match what the store checks: ${outcome.reason ?? ""}`,
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
     it("applies under the value it judged, so a moved ref loses", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {

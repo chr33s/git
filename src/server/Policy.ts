@@ -160,10 +160,29 @@ export type Decision =
 
 const refused = (ref: string, reason: string): Decision => ({ ok: false, ref, reason });
 
-const isProtected = (rules: Rules, ref: string): boolean =>
-  rules.protected.some((pattern) =>
-    pattern.endsWith("*") ? ref.startsWith(pattern.slice(0, -1)) : ref === pattern,
-  );
+/**
+ * Whether a rule covers this ref — or, for a caller naming a namespace,
+ * anything in it.
+ *
+ * `gateWrite` is asked about `refs/tags/*` by the verbs that write a whole
+ * namespace at once: a fetch writes every tag the remote has, and it does not
+ * know their names until the negotiation is over. Compared as a literal name,
+ * `refs/tags/*` matched a rule protecting `refs/tags/*` and missed one
+ * protecting `refs/tags/v*`, so the narrower rule was the one with the hole in
+ * it. Two patterns that overlap *anywhere* are treated as a match, which is the
+ * conservative reading and the only one a namespace-wide write can be held to.
+ */
+const isProtected = (rules: Rules, ref: string): boolean => {
+  const asked = ref.endsWith("*") ? ref.slice(0, -1) : null;
+  return rules.protected.some((pattern) => {
+    if (!pattern.endsWith("*")) return asked === null ? ref === pattern : pattern.startsWith(asked);
+    const prefix = pattern.slice(0, -1);
+    return asked === null
+      ? ref.startsWith(prefix)
+      : // Both are prefixes: they overlap when either contains the other.
+        prefix.startsWith(asked) || asked.startsWith(prefix);
+  });
+};
 
 export interface Principal {
   /** `null` for an anonymous request, which may never write. */
@@ -191,6 +210,13 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   const repository = yield* Repository;
   const { update } = input;
   const current = yield* repository.resolve(update.name);
+  // Two readings of "what the ref is now", and they differ for a symbolic ref.
+  // Reachability wants the commit it resolves to; the compare-and-swap wants
+  // exactly what the store will compare against, which is the ref's own value
+  // — `null` for a symref. Using the resolved oid as `expected` made every
+  // gated write to a symbolic ref fail as a conflict against a value that was
+  // never written there.
+  const stored = yield* repository.readRef(update.name);
 
   // Identity is not a thing a push may edit. This is checked before anything
   // about membership, because a repository whose genesis can move has no
@@ -211,7 +237,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
         "a repository's identity is established by `hub init`, not by a push",
       );
     }
-    return yield* namespaceRules(update, current);
+    return yield* namespaceRules(update, current, stored);
   }
 
   if (input.principal.member === null) {
@@ -238,7 +264,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     return refused(update.name, `writing ${RULES_REF} needs policy.write`);
   }
 
-  const namespace = yield* namespaceRules(update, current);
+  const namespace = yield* namespaceRules(update, current, stored);
   if (!namespace.ok) return namespace;
 
   if (!isProtected(input.rules, update.name)) return namespace;
@@ -267,6 +293,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
 const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   update: RefUpdate,
   current: Oid | null,
+  stored: Oid | null,
 ) {
   // The client's own old-oid wins when it declared one. A push that names the
   // value it believes the ref holds is asserting something, and replacing that
@@ -274,7 +301,7 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   // which is the check receive-pack's old-oid exists to perform. Where the
   // client said nothing, the value read at decision time is the guarantee,
   // so the approvals counted a moment ago cannot be applied to a moved head.
-  const expected = update.expected === undefined ? current : update.expected;
+  const expected = update.expected === undefined ? stored : update.expected;
   const allowed: Decision = { ok: true, allowed: { update, expected } };
   if (!Refspec.isAppendOnly(update.name)) return allowed;
 
