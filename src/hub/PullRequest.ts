@@ -21,7 +21,6 @@ import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import type { RepoId } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
-import * as Record from "../trust/Record.ts";
 import * as Event from "./Event.ts";
 
 /**
@@ -330,5 +329,3 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
 });
 
 export type PullRequestError = Invalid | ObjectNotFound | StorageFailure;
-
-export { Record };
