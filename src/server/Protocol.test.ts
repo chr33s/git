@@ -529,6 +529,48 @@ describe("receive-pack", () => {
  * the advertisement modern git actually asks for — did not, so the hiding had
  * no effect on any real client.
  */
+describe("the push report", () => {
+  it("says one thing per ref, and nothing about a ref it never submitted", async () => {
+    // `allFailed` mapped over the client's whole command list, while `refused`
+    // already held an `ng` for every ref the policy gate declined — so a
+    // failure after the gate emitted two `ng` lines for one ref, and a status
+    // line for a ref the store was never asked about.
+    const text = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const commit = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+
+        yield* repository.setRef({ name: "refs/heads/topic", to: commit });
+
+        // Deletions, so there is no pack body to go wrong: one ordinary branch
+        // and one ref the namespace rules refuse outright.
+        const response = yield* Protocol.receivePack(
+          push([
+            `${commit} ${ZERO} refs/heads/topic\n`,
+            `${commit} ${ZERO} refs/meta/trust/genesis\n`,
+          ]),
+        );
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return linesOf(bytes).lines;
+      }),
+    );
+
+    const named = text.filter((line) => /^(ok|ng) refs\//.test(line));
+    const genesis = named.filter((line) => line.includes("refs/meta/trust/genesis"));
+    assert.equal(genesis.length, 1, `one line per ref: ${named.join(" | ")}`);
+    assert.ok(genesis[0]?.startsWith("ng "), `the genesis must be refused: ${named.join(" | ")}`);
+    assert.ok(
+      named.some((line) => line.startsWith("ok refs/heads/topic")),
+      `the other ref must still land: ${named.join(" | ")}`,
+    );
+  });
+});
+
 describe("advertisement hiding", () => {
   const lsRefs = (prefixes: ReadonlyArray<string> = []): Request =>
     new Request("http://host/repo/git-upload-pack", {

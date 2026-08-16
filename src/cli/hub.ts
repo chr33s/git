@@ -30,8 +30,10 @@ import {
   GENESIS_REF,
   type Genesis,
   load,
+  quorumMet,
   readGenesis,
   RECORD as GENESIS_RECORD,
+  rootSigners,
   signGenesis,
   writeGenesis,
 } from "../trust/Genesis.ts";
@@ -100,6 +102,18 @@ const init = Command.make(
         ...signers.map((signer) => formatPublicKey(signer.publicKey)),
         ...(yield* Effect.forEach(extra, readPublicKey)),
       ];
+
+      // A genesis is written once and never moves again, so a threshold its own
+      // signers cannot meet produces a repository nobody can ever administer —
+      // `readGenesis` refuses it, every request 503s, and there is no way back
+      // because the ref cannot be rewritten. Refused here, before anything is
+      // written, rather than discovered afterwards.
+      if (signers.length < threshold) {
+        return yield* new Invalid({
+          field: "threshold",
+          reason: `threshold ${threshold} needs ${threshold} signing key(s); pass --key that many times`,
+        });
+      }
 
       const genesis = yield* create(lines, threshold);
       const seeded = yield* withRepo(
@@ -373,7 +387,22 @@ const presented = Effect.fn("hub.presented")(function* (url: string, token: stri
   });
 
   const record = yield* Record.read(genesis.oid, GENESIS_RECORD);
-  return (yield* load(record.payload)).repoId;
+  const loaded = yield* load(record.payload);
+
+  // The same quorum check `readGenesis` makes, because this is the same
+  // question asked one step earlier — and it is the step that matters most.
+  // Trusting on first use is where an identity is *adopted*, so pinning one
+  // whose own roots never signed it would record the attacker's document as
+  // this URL's identity and only fail later, opaquely, on the first clone.
+  const signers = yield* rootSigners(loaded, record.signatures);
+  if (!quorumMet(loaded, signers)) {
+    return yield* new Invalid({
+      field: "url",
+      reason: `${url} presents a genesis with ${signers.length} root signature(s) and a threshold of ${loaded.document.threshold}`,
+    });
+  }
+
+  return loaded.repoId;
 });
 
 /** Where a remote's genesis lands while it is still only a claim. */

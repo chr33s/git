@@ -198,3 +198,32 @@ export const writeKeyPair = async (location: string, comment: string): Promise<P
   await fs.writeFile(`${location}.pub`, `${formatPublicKey(key.publicKey)}\n`);
   return key;
 };
+
+/**
+ * A genesis whose signatures fall short of its own threshold.
+ *
+ * Only test code can produce one: `hub init` refuses an unmeetable threshold,
+ * and it has to, because a genesis is written once and never moves. What this
+ * stands in for is a *remote* serving such a document — the thing a client
+ * meeting a repository for the first time has to refuse.
+ */
+export const shortOfQuorum = (directory: string): Promise<void> =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const first = yield* generate("first@example.com");
+      const second = yield* generate("second@example.com");
+      const genesis = yield* create(
+        [formatPublicKey(first.publicKey), formatPublicKey(second.publicKey)],
+        2,
+      );
+      yield* writeGenesis(genesis, [yield* signGenesis(genesis, first)]);
+    }).pipe(
+      Effect.asVoid,
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provide(stores(directory)),
+        ),
+      ),
+    ),
+  );

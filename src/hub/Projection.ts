@@ -188,21 +188,30 @@ const byEventId = <A extends { readonly id: string }>(
 const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
 
 /**
- * Whether one trust-log commit is at least as new as another.
+ * "Is this trust-log commit at least as new as that one?", memoised per fold.
  *
- * `null` — an event that recorded no trust head — reaches nothing, which is
- * the same conservative reading `Verify.reaches` gives it: an author who
- * cannot show what they had seen is treated as having seen everything, and
- * here that means they cannot be behind their own ancestors either.
+ * `Log.ancestry` walks the log — a `readCommit` and a `findPath` per commit —
+ * and the monotonicity check below asks about the same few heads over and over,
+ * once per ancestor per event, on the write path. The answers are a pure
+ * function of the log, which does not move while a projection is being built,
+ * so one walk per distinct head is all that is ever needed.
  */
-const reachesTrust = Effect.fn("hub.Projection.reachesTrust")(function* (
-  head: Oid | null,
-  target: Oid,
-) {
-  if (head === null) return true;
-  if (head === target) return true;
-  return (yield* Log.ancestry(head)).has(target);
-});
+const trustReach = () => {
+  const walked = new Map<Oid, ReadonlySet<Oid>>();
+
+  /**
+   * `null` — an event that recorded no trust head — reaches everything, which
+   * is the same conservative reading `Verify.reaches` gives it: an author who
+   * cannot show what they had seen is treated as having seen everything, and
+   * here that means they cannot be behind their own ancestors either.
+   */
+  return Effect.fnUntraced(function* (head: Oid | null, target: Oid) {
+    if (head === null || head === target) return true;
+    const seen = walked.get(head) ?? (yield* Log.ancestry(head));
+    walked.set(head, seen);
+    return seen.has(target);
+  });
+};
 
 /**
  * Fold one pull request.
@@ -261,6 +270,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
 
   /** The trust head each accepted event named, for the monotonicity check. */
   const heads = new Map<Oid, Oid>();
+  const reachesTrust = trustReach();
 
   /**
    * The newest trust head any accepted ancestor of this commit named.

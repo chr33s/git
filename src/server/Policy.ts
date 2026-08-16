@@ -226,9 +226,20 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   readonly genesis: Genesis | null;
   readonly trust: TrustProjection | null;
   readonly rules: Rules;
+  /**
+   * Pull-request bases already looked up, shared across one batch of updates.
+   *
+   * A push moving several protected branches otherwise re-walks every pull
+   * request's first-parent chain once per ref. The map is the caller's, so
+   * nothing survives the request that built it.
+   */
+  readonly bases?: Event.BaseCache;
 }) {
   const repository = yield* Repository;
   const { update } = input;
+  // A batch of one when the caller did not bring a map, which is what every
+  // direct caller outside `gate` is.
+  const bases = input.bases ?? new Map<string, string | null>();
   const current = yield* repository.resolve(update.name);
   // Two readings of "what the ref is now", and they differ for a symbolic ref.
   // Reachability wants the commit it resolves to; the compare-and-swap wants
@@ -299,6 +310,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     genesis: input.genesis,
     trust: input.trust,
     rules: input.rules,
+    bases,
   });
   return gate ?? namespace;
 });
@@ -356,6 +368,8 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   readonly genesis: Genesis;
   readonly trust: TrustProjection;
   readonly rules: Rules;
+  /** Shared across one batch; see `Event.BaseCache`. */
+  readonly bases: Event.BaseCache;
 }) {
   const { rules } = input;
   const needsReview =
@@ -369,11 +383,13 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   let shortfall: Decision | null = null;
 
   for (const id of yield* Event.pullRequests()) {
-    // The base is in the opening event, and reading that is a blob read; the
-    // full fold is a DAG walk plus a signature verification per event. Most
-    // pull requests in a repository are for another branch, so they are ruled
-    // out before any of that happens.
-    if ((yield* Event.baseOf(id)) !== input.ref) continue;
+    // The base is in the opening event, so finding it walks the pull request's
+    // first-parent chain and reads one blob; the full fold on top of that is a
+    // DAG walk plus a signature verification per event. Most pull requests in
+    // a repository are for another branch, so they are ruled out before any of
+    // that happens — and the walk is answered from `bases` for every ref after
+    // the first in one batch, since a pull request's base never moves.
+    if ((yield* Event.baseOf(id, input.bases)) !== input.ref) continue;
 
     const pullRequest = yield* projectPr(input.genesis, input.trust, id);
     if (pullRequest.base !== input.ref || pullRequest.head === null) continue;
@@ -560,6 +576,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
   }
 
   const decisions: Decision[] = [];
+  const bases: Event.BaseCache = new Map();
   for (const update of updates) {
     // A native client signed an envelope naming the refs it was moving and
     // where to. Checking it here rather than in the guard is not a weakening:
@@ -579,6 +596,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
         genesis: stored?.genesis ?? null,
         trust,
         rules,
+        bases,
       }),
     );
   }

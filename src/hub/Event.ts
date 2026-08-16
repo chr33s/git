@@ -31,6 +31,7 @@ import { Effect, Schema } from "effect";
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import type { CommitInfo } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { checkCapability } from "../trust/Certificate.ts";
@@ -575,24 +576,48 @@ const emptyEvents: ReadonlyArray<Entry> = [];
  * `null` when it cannot be determined, which the caller reads as "not this
  * branch" rather than guessing.
  */
-export const baseOf = Effect.fn("hub.Event.baseOf")(function* (pr: string) {
+export const baseOf = Effect.fn("hub.Event.baseOf")(function* (pr: string, cache?: BaseCache) {
   const repository = yield* Repository;
 
-  let commit = yield* repository.resolve(refOf(pr));
-  while (commit !== null) {
-    const info = yield* repository
-      .readCommit(commit)
-      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-    if (info === null) return null;
+  const head = yield* repository.resolve(refOf(pr));
+  if (head === null) return null;
 
+  const cached = cache?.get(pr);
+  if (cached !== undefined) return cached;
+
+  // One `readCommit` per step, not three. `isHubCommit` reads the commit and
+  // then its tree, and this loop had already read the commit — so bounding the
+  // walk cost two extra object reads per event, on a path that runs once per
+  // pull request per protected-branch push.
+  const readOrNull = (oid: Oid): Effect.Effect<CommitInfo | null, StorageFailure, Repository> =>
+    repository.readCommit(oid).pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+
+  let commit = head;
+  const opening = yield* readOrNull(commit);
+  if (opening === null) return remember(cache, pr, null);
+  let info: CommitInfo = opening;
+
+  for (;;) {
     const first: Oid | undefined = info.parents[0];
+    if (first === undefined) break;
+
+    const parent: CommitInfo | null = yield* readOrNull(first);
     // Bounded like `entries`: a hub ref whose first parent is a source commit
     // would otherwise walk the repository's whole history, once per pull
-    // request, on every protected-branch push.
-    if (first === undefined || !(yield* isHubCommit(first))) break;
+    // request, on every protected-branch push. An event carries `event.json`;
+    // a join carries an empty tree.
+    if (parent === null) break;
+    const carries = (yield* repository.findPath(parent.tree, `${RECORD}.json`)) !== null;
+    if (
+      !carries &&
+      (yield* repository.readTree(parent.tree).pipe(Effect.orElseSucceed(() => null)))?.length !== 0
+    ) {
+      break;
+    }
+
     commit = first;
+    info = parent;
   }
-  if (commit === null) return null;
 
   const record = yield* Record.read(commit, RECORD).pipe(
     Effect.catchTags({
@@ -600,11 +625,29 @@ export const baseOf = Effect.fn("hub.Event.baseOf")(function* (pr: string) {
       Invalid: () => Effect.succeed(null),
     }),
   );
-  if (record === null) return null;
+  if (record === null) return remember(cache, pr, null);
 
   const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-  return payload !== null && payload.type === "pr.opened" ? payload.base : null;
+  return remember(
+    cache,
+    pr,
+    payload !== null && payload.type === "pr.opened" ? payload.base : null,
+  );
 });
+
+const remember = (cache: BaseCache | undefined, pr: string, base: string | null) => {
+  cache?.set(pr, base);
+  return base;
+};
+
+/**
+ * Answers for `baseOf`, shared across one batch of ref updates.
+ *
+ * A pull request's base is written once, in its opening event, and a hub ref
+ * only grows — so within a single push the answer cannot change. The caller
+ * owns the map so that nothing outlives the request that built it.
+ */
+export type BaseCache = Map<string, string | null>;
 
 /** Every pull request this repository holds events for. */
 export const pullRequests = Effect.fn("hub.Event.pullRequests")(function* () {

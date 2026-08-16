@@ -719,8 +719,20 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         headers: headers("application/x-git-receive-pack-result"),
       });
     };
-    const allFailed = (reason: string): ReadonlyArray<ReceiveResult> =>
-      updates.map((update) => ({
+    /**
+     * One `ng` per ref, for a failure that took the whole push down.
+     *
+     * Takes the commands it is reporting on rather than reading `updates`,
+     * because after the policy gate those two lists differ: `refused` already
+     * carries an `ng` for every ref the gate declined, so reporting the client's
+     * full list again emitted two `ng` lines for the same ref — and a status
+     * line for a ref that was never submitted to the store at all.
+     */
+    const allFailed = (
+      commands: ReadonlyArray<RefUpdate>,
+      reason: string,
+    ): ReadonlyArray<ReceiveResult> =>
+      commands.map((update) => ({
         ref: update.name,
         from: update.expected ?? null,
         to: null,
@@ -732,7 +744,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // applying the rest would be exactly what the capability promises not to.
     if (refused.length > 0 && (atomic || updates.length === 0)) {
       yield* drain;
-      return respond(allFailed("atomic push refused: funny refname"), "ok");
+      return respond(allFailed(updates, "atomic push refused: funny refname"), "ok");
     }
 
     // A refused command may have had a pack behind it even when every command
@@ -756,7 +768,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         // The unpacker stopped part-way, so the rest of the pack is still
         // arriving; the report only reaches the client if it is read first.
         yield* drain;
-        return respond(allFailed("unpacker error"), reason);
+        return respond(allFailed(updates, "unpacker error"), reason);
       }
 
       // No full connectivity check, but never point a ref at an object this
@@ -764,7 +776,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       for (const update of updates) {
         if (update.value !== null && !(yield* repository.contains(update.value))) {
           yield* drain;
-          return respond(allFailed("missing necessary objects"), "ok");
+          return respond(allFailed(updates, "missing necessary objects"), "ok");
         }
       }
     }
@@ -775,7 +787,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // with it rather than after it.
     const judged = yield* Policy.gate(updates, atomic);
     if (atomic && judged.refused.length > 0) {
-      return respond(allFailed(judged.refused[0]!.reason), "ok");
+      return respond(allFailed(judged.updates, judged.refused[0]!.reason), "ok");
     }
     // Non-atomic: the refusals ride back in the same report as the `ok`s, so a
     // client is told which refs the policy declined and why, rather than
@@ -793,8 +805,8 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
 
     const results = yield* repository.receive(judged.updates, { atomic }).pipe(
       Effect.catchTags({
-        HookRejected: (error) => Effect.succeed(allFailed(error.message)),
-        Invalid: (error) => Effect.succeed(allFailed(error.reason)),
+        HookRejected: (error) => Effect.succeed(allFailed(judged.updates, error.message)),
+        Invalid: (error) => Effect.succeed(allFailed(judged.updates, error.reason)),
         // No `StorageFailure` catch: the stores report a ref they could not
         // write as an unapplied result carrying its own reason, which comes
         // through as `ng <ref> cannot lock ref` below. What is left here is a
