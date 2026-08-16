@@ -484,8 +484,15 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
     // it, so the read fails where every other event's succeeds. That is the
     // one absence this walk expects, and it is what a tombstone looks like
     // from here.
+    // `ObjectNotFound` is a redaction; `Invalid` is a malformed signature
+    // blob. Both are one unreadable event, and neither may take down the
+    // projection — which would fail `Policy.gate` and with it every
+    // protected-branch push in the repository.
     const record = yield* Record.read(oid, RECORD).pipe(
-      Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
     );
     if (record === null) {
       events.push({

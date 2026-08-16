@@ -173,24 +173,32 @@ const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string) {
   if (refusal !== null) return yield* new Invalid({ field: "ref", reason: refusal });
 });
 
+/**
+ * Judge one ref change and hand back the update to apply.
+ *
+ * The returned update carries the value the decision was made against, so the
+ * write goes out under exactly that condition — deciding on one state and
+ * writing against another is the race this boundary exists to close.
+ *
+ * `bindEnvelope: false`: an envelope describes a *push's* ref commands, and
+ * this is not that conversation. Holding a JSON verb to commands it never
+ * claimed would read silence as a denial.
+ */
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
   // Fail closed, for the reason `gateWrite` gives.
-  const judged = yield* Policy.gate([update], true).pipe(
-    Effect.orElseSucceed(() => ({
-      updates: [],
-      refused: [
-        {
-          ok: false as const,
-          ref: update.name,
-          reason: "the repository's policy could not be evaluated",
-        },
-      ],
-    })),
-  );
+  const judged = yield* Policy.gate([update], true, false).pipe(Effect.orElseSucceed(() => null));
+  if (judged === null) {
+    return yield* new Invalid({
+      field: "ref",
+      reason: "the repository's policy could not be evaluated",
+    });
+  }
+
   const refusal = judged.refused.at(0);
   if (refusal !== undefined) {
     return yield* new Invalid({ field: "ref", reason: refusal.reason });
   }
+  return judged.updates.at(0) ?? update;
 });
 
 const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArray<FileChange> =>
@@ -1256,16 +1264,29 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // ref to an arbitrary value, which is every rule that boundary
         // exists for — genesis immutability, hub append-only, protected
         // branches — and reaching `setRef` directly skipped all of them.
-        const target = yield* repository
-          .resolve(payload.to)
-          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        // A raw oid is a legal target here — `setRef` takes one — and not
+        // every ref store resolves one, so it is recognised before asking.
+        const target = isOid(payload.to)
+          ? payload.to
+          : yield* repository
+              .resolve(payload.to)
+              .pipe(Effect.catchTag("StorageFailure", Effect.die));
         if (target === null) {
           return yield* new Invalid({ field: "to", reason: `unknown revision '${payload.to}'` });
         }
-        yield* gateOne({ name: payload.ref, value: target, expected: payload.expected });
+
+        // The judged update carries the value the decision was made against,
+        // and it is that value the write is applied under: deciding on one
+        // state and writing against another is the race the boundary exists
+        // to close.
+        const judged = yield* gateOne({
+          name: payload.ref,
+          value: target,
+          expected: payload.expected,
+        });
 
         const request: SetRefRequest = { name: payload.ref, to: payload.to };
-        if (payload.expected !== undefined) request.expected = payload.expected;
+        if (judged.expected !== undefined) request.expected = judged.expected;
         const moved = yield* repository
           .setRef(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));

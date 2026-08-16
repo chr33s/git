@@ -141,9 +141,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     const state: RepoState = {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
-      // Built once, called per request with that request's requester: the
-      // policy boundary inside `reset` and friends has to know who is asking,
-      // and a handler memoised with one requester would answer for everybody.
+      // Rebuilt per request, deliberately: the requester is part of the layer
+      // these handlers resolve, so a memoised one would answer every later
+      // request as whoever made the first. The cost is building the router
+      // graph per JSON call, which is the price of the boundary knowing who
+      // is asking.
       api: (request: Request, requester: Layer.Layer<Auth.Requester>) =>
         HttpRouter.toWebHandler(
           Api.layer(remotes).pipe(

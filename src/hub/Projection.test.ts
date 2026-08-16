@@ -211,6 +211,34 @@ describe("hub projection", () => {
       assert.equal(state.reviews.length, 2, "both statements are still on the record");
     });
 
+    it("lets a later rejection withdraw the same author's approval", async () => {
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          // "Request changes" after approving has to block the merge, or the
+          // reviewer's latest word counts for nothing.
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "reject",
+            body: "actually, no",
+            key: where.reviewer,
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+      assert.equal(approvals(state).length, 0);
+    });
+
     it("does not count a dismissed approval", async () => {
       const state = await scenario(
         Effect.gen(function* () {

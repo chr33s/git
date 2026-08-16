@@ -205,6 +205,27 @@ export const join = Effect.fn("trust.Log.join")(function* (heads: ReadonlyArray<
  * a repository has, and the alternative — a projection that streams — buys
  * nothing until a repository has more grants than commits.
  */
+/**
+ * Whether a commit belongs to the trust log.
+ *
+ * The genesis bounds the chain where it is supposed to end; this bounds one
+ * that is not. A log head reaching into the source history would otherwise
+ * make every authorization check walk the whole repository — the same trap
+ * `hub/Event.ts` guards against.
+ */
+const isTrustCommit = Effect.fn("trust.Log.isTrustCommit")(function* (commit: Oid) {
+  const repository = yield* Repository;
+  const info = yield* repository
+    .readCommit(commit)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  if (info === null) return false;
+  if ((yield* repository.findPath(info.tree, `${RECORD}.json`)) !== null) return true;
+  // A join carries an empty tree; anything else is not part of this history.
+  return (
+    (yield* repository.readTree(info.tree).pipe(Effect.orElseSucceed(() => null)))?.length === 0
+  );
+});
+
 export const entries = Effect.fn("trust.Log.entries")(function* () {
   const repository = yield* Repository;
 
@@ -215,7 +236,7 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
   // is what stops it reading the whole source history if anything ever points
   // the log at a branch.
   const genesis = yield* repository.resolve(GENESIS_REF);
-  const parents = yield* Dag.reachable(head, genesis);
+  const parents = yield* Dag.reachable(head, genesis, (commit) => isTrustCommit(commit));
   const ordered = Dag.topological(parents);
 
   const records: Entry[] = [];

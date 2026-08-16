@@ -552,12 +552,27 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
         });
 
   if (identified === null) {
-    return {
-      ok: false,
-      status: 401,
-      reason: "credential did not verify",
-      nonce: yield* nonces.issue(300),
-    } as const;
+    // A repository anonymous readers may clone stays readable even when the
+    // credential presented is nonsense: `git` sends whatever a credential
+    // helper has for the host, and refusing here would break clones for
+    // people whose only mistake was having an unrelated entry.
+    return input.capability === "repo.read" && anonymousReadAllowed(projection)
+      ? ({
+          ok: true,
+          authenticated: {
+            principal: null,
+            signer: null,
+            capabilities: ["repo.read"],
+            projection,
+            envelope: null,
+          },
+        } as const)
+      : ({
+          ok: false,
+          status: 401,
+          reason: "credential did not verify",
+          nonce: yield* nonces.issue(300),
+        } as const);
   }
 
   const authorized = yield* Verify.authorizeKey({

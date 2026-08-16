@@ -479,6 +479,15 @@ const refusedCommand = (ref: string, reason: string) => ({ ok: false, ref, reaso
 export const gate = Effect.fn("Policy.gate")(function* (
   updates: ReadonlyArray<RefUpdate>,
   atomic: boolean,
+  /**
+   * Whether to hold the updates to a signed envelope's ref commands.
+   *
+   * True for receive-pack, which is the conversation an envelope describes.
+   * False for the JSON verbs: a client authenticated with an envelope for a
+   * push has not made a claim about `reset`, and refusing it for saying
+   * nothing would be reading silence as a denial.
+   */
+  bindEnvelope = true,
 ) {
   // A failure to read identity is not "this repository has none": treating it
   // that way would drop every rule below at the moment storage was least
@@ -495,7 +504,9 @@ export const gate = Effect.fn("Policy.gate")(function* (
     // where to. Checking it here rather than in the guard is not a weakening:
     // the guard runs before the push body exists, so this is the first moment
     // the commands are knowable at all — and the last before they are applied.
-    const covered = coveredByEnvelope(who.envelope, update);
+    const covered = bindEnvelope
+      ? coveredByEnvelope(who.envelope, update)
+      : ({ ok: true } as const);
     if (!covered.ok) {
       decisions.push(covered);
       continue;

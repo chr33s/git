@@ -409,15 +409,17 @@ export const project = Effect.fn("hub.Projection.project")(function* (
  * to exclude them.
  */
 export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
-  // One per approver, not one per event. Counting events would let a single
-  // member satisfy "two approvals required" by submitting two of them.
-  const byAuthor = new Map<Fingerprint, Review>();
+  // One per approver, not one per event — counting events would let a single
+  // member satisfy "two approvals required" alone — and it is each author's
+  // *latest* word that counts, so a later "request changes" withdraws their
+  // earlier approval rather than sitting beside it.
+  const latest = new Map<Fingerprint, Review>();
   for (const review of pullRequest.reviews) {
-    if (review.decision !== "approve" || review.stale || review.dismissed) continue;
-    const existing = byAuthor.get(review.author);
-    if (existing === undefined || existing.at < review.at) byAuthor.set(review.author, review);
+    if (review.stale || review.dismissed) continue;
+    const existing = latest.get(review.author);
+    if (existing === undefined || existing.at <= review.at) latest.set(review.author, review);
   }
-  return [...byAuthor.values()];
+  return [...latest.values()].filter((review) => review.decision === "approve");
 };
 
 /** Whether every named check has succeeded against the current head. */
