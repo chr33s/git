@@ -350,6 +350,56 @@ describe("Policy", () => {
       assert.match(decision.ok === false ? decision.reason : "", /0 approvals/);
     });
 
+    it("does not let a merged pull request unlock the branch forever", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world([
+            "source.push",
+            "hub.create-pr",
+            "hub.review",
+            "hub.approve",
+            "hub.merge",
+          ]);
+          const { second } = yield* history("refs/heads/main");
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "landed",
+            base: "refs/heads/main",
+            head: second,
+            key: where.dev,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: second,
+            decision: "approve",
+            key: where.dev,
+          });
+          yield* PullRequest.merged({
+            repo: where.genesis.repoId,
+            pr,
+            head: second,
+            mergeCommit: second,
+            key: where.dev,
+          });
+
+          // A later commit descends from the merged revision, and every commit
+          // ever made after a merge does. If descent were enough, one merged
+          // pull request would authorize direct pushes to the branch forever.
+          const later = yield* repository.commit({
+            branch: "refs/heads/main",
+            tree: EMPTY_TREE_OID,
+            message: "sneaked in",
+            author,
+          });
+          return yield* judge(where, { name: "refs/heads/main", value: later }, guarded);
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /approved pull request/);
+    });
+
     it("refuses when a required check has not passed", async () => {
       const decision = await scenario(
         Effect.gen(function* () {
@@ -420,6 +470,33 @@ describe("Policy", () => {
       );
       assert.equal(decision.ok, false);
       assert.match(decision.ok === false ? decision.reason : "", /unresolved/);
+    });
+  });
+
+  describe("the rules themselves", () => {
+    it("refuses to let a pusher rewrite the branch rules", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const { second } = yield* history("refs/heads/topic");
+          // Without this, anybody who may push may also publish an `OPEN`
+          // policy and then push wherever they like.
+          return yield* judge(where, { name: "refs/meta/policy", value: second });
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /policy\.write/);
+    });
+
+    it("allows the holder of policy.write", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "policy.write"]);
+          const { second } = yield* history("refs/heads/topic");
+          return yield* judge(where, { name: "refs/meta/policy", value: second });
+        }),
+      );
+      assert.equal(decision.ok, true);
     });
   });
 

@@ -31,7 +31,8 @@ import { forPath as pathHistory } from "../git/History.ts";
 import { type Strategy as MergeStrategy } from "../git/Merge.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
-import { isOid, type Oid } from "../git/Store.ts";
+import * as Policy from "./Policy.ts";
+import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 import { fetchFrom, pull, remoteFor } from "./Sync.ts";
@@ -145,6 +146,28 @@ const FileWire = Schema.Struct({
   content: Schema.NullOr(Schema.String),
   encoding: Schema.optional(Encoding),
   mode: Schema.optional(Schema.String),
+});
+
+/**
+ * One ref change, judged the way a push would be.
+ *
+ * The JSON API is a second door into the same repository, and a rule that
+ * only the protocol enforces is a rule with a way around it. Refusals come
+ * back as `Invalid`, which this surface already renders with its reason.
+ */
+const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
+  const judged = yield* Policy.gate([update], true).pipe(
+    // A repository this surface cannot read is not a refusal to report to the
+    // caller — it is the same defect every other handler here dies on.
+    Effect.catchTags({
+      ObjectNotFound: Effect.die,
+      StorageFailure: Effect.die,
+    }),
+  );
+  const refusal = judged.refused.at(0);
+  if (refusal !== undefined) {
+    return yield* new Invalid({ field: "ref", reason: refusal.reason });
+  }
 });
 
 const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArray<FileChange> =>
@@ -1171,6 +1194,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("tagRemove", ({ params }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        yield* gateOne({ name: `refs/tags/${params.name}`, value: null });
         const deleted = yield* repository
           .deleteTag(params.name)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
@@ -1192,6 +1216,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("branchRemove", ({ params }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        yield* gateOne({ name: `refs/heads/${params.name}`, value: null });
         const deleted = yield* repository
           .deleteRef(`refs/heads/${params.name}`)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
@@ -1201,6 +1226,18 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("reset", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        // Through the policy boundary, not around it. This endpoint moves a
+        // ref to an arbitrary value, which is every rule that boundary
+        // exists for — genesis immutability, hub append-only, protected
+        // branches — and reaching `setRef` directly skipped all of them.
+        const target = yield* repository
+          .resolve(payload.to)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        if (target === null) {
+          return yield* new Invalid({ field: "to", reason: `unknown revision '${payload.to}'` });
+        }
+        yield* gateOne({ name: payload.ref, value: target, expected: payload.expected });
+
         const request: SetRefRequest = { name: payload.ref, to: payload.to };
         if (payload.expected !== undefined) request.expected = payload.expected;
         const moved = yield* repository

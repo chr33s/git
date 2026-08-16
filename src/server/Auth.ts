@@ -45,6 +45,7 @@ import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import { readGenesis, type RepoId } from "../trust/Genesis.ts";
 import { type Member, project, type Projection } from "../trust/Projection.ts";
+import { permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
 
 const encoder = new TextEncoder();
@@ -344,6 +345,10 @@ export const openDelegation = Effect.fn("Auth.openDelegation")(function* (
   if (delegation.repo !== repo) return null;
   const expiry = Date.parse(delegation.expiresAt);
   if (Number.isNaN(expiry) || expiry <= now.getTime()) return null;
+  // Enforced on the verifying side as well as the minting side. The holder
+  // signs these themselves, so a cap only this server's `mintDelegation`
+  // applied would be a cap anybody could opt out of by writing their own.
+  if (expiry - now.getTime() > MAX_DELEGATION_SECONDS * 1000) return null;
 
   const key = yield* verify(decoder.decode(armored), bytes, NAMESPACE).pipe(
     Effect.catchTag("Invalid", () => Effect.succeed(null)),
@@ -423,6 +428,16 @@ export interface Authenticated {
   /** What this request may do — narrowed by a delegated credential's scope. */
   readonly capabilities: ReadonlyArray<string>;
   readonly projection: Projection;
+  /**
+   * The envelope a native client signed, when it signed one.
+   *
+   * Kept because the commands inside it are the point: the guard cannot check
+   * them — the push body has not been read yet — so the promise that a
+   * signature covers *these refs moving to these oids* is only kept if the
+   * policy boundary holds the push to them later. `null` for a delegated
+   * credential, which makes no claim about particular refs.
+   */
+  readonly envelope: Envelope | null;
 }
 
 export type Outcome =
@@ -461,7 +476,13 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     // Not hub-enabled: no identity, no membership, nothing to check against.
     return {
       ok: true,
-      authenticated: { principal: null, signer: null, capabilities: [], projection: EMPTY },
+      authenticated: {
+        principal: null,
+        signer: null,
+        capabilities: [],
+        projection: EMPTY,
+        envelope: null,
+      },
     } as const;
   }
 
@@ -476,7 +497,13 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     return input.capability === "repo.read" && anonymousReadAllowed(projection)
       ? ({
           ok: true,
-          authenticated: { principal: null, signer: null, capabilities: ["repo.read"], projection },
+          authenticated: {
+            principal: null,
+            signer: null,
+            capabilities: ["repo.read"],
+            projection,
+            envelope: null,
+          },
         } as const)
       : ({
           ok: false,
@@ -526,7 +553,9 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
         )
       : authorized.principal.capabilities;
 
-  if ("delegation" in identified && !scoped.some((held) => held === input.capability)) {
+  // `permits`, not an exact match: a credential scoped `repo.admin` covers
+  // `repo.read`, and `hub.check:*` covers `hub.check:test`.
+  if ("delegation" in identified && !permits(scoped, input.capability)) {
     return {
       ok: false,
       status: 403,
@@ -541,6 +570,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
       signer: identified.signer,
       capabilities: scoped,
       projection,
+      envelope: "envelope" in identified ? identified.envelope : null,
     },
   } as const;
 });
@@ -577,6 +607,7 @@ export const anonymous: Authenticated = {
   signer: null,
   capabilities: [],
   projection: EMPTY,
+  envelope: null,
 };
 
 export const requester = (authenticated: Authenticated): Layer.Layer<Requester> =>
@@ -611,7 +642,7 @@ const operationOf = (request: Request): string => {
 };
 
 const permitsCapability = (member: Member, capability: string): boolean =>
-  member.capabilities.includes(capability) || member.capabilities.includes("repo.admin");
+  permits(member.capabilities, capability);
 
 /**
  * Whether anonymous readers may clone.
@@ -623,7 +654,10 @@ const permitsCapability = (member: Member, capability: string): boolean =>
  */
 const anonymousReadAllowed = (projection: Projection): boolean => {
   for (const member of projection.members.values()) {
-    if (member.capabilities.includes("repo.read")) return false;
+    // `permits`, not `includes`: `repo.admin` carries `repo.read`, and a
+    // repository whose members are all admins had restricted reading just as
+    // surely as one that granted `repo.read` by name.
+    if (permitsCapability(member, "repo.read")) return false;
   }
   return true;
 };

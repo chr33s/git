@@ -3,7 +3,7 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { fingerprint, formatPublicKey, generate } from "../crypto/SshSignature.ts";
+import { fingerprint, formatPublicKey, generate, NAMESPACE, sign } from "../crypto/SshSignature.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -13,6 +13,7 @@ import * as Log from "../trust/Log.ts";
 import {
   authenticate,
   credentialOf,
+  encodeDelegation,
   guard,
   MAX_DELEGATION_SECONDS,
   mintDelegation,
@@ -58,6 +59,13 @@ const hub = Effect.fn("test.hub")(function* (capabilities: ReadonlyArray<string>
   );
   return { genesis, root, member };
 });
+
+/** The encoding a delegated credential travels in. */
+const base64url = (bytes: Uint8Array): string => {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
 
 const basic = (credential: string) => ({
   authorization: `Basic ${btoa(`x:${credential}`)}`,
@@ -201,6 +209,51 @@ describe("Auth", () => {
       assert.equal(outcome.denied?.status, 403);
     });
 
+    it("honours capability implication rather than an exact string match", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["repo.admin"]);
+          // Scoped `repo.admin`, used for a request that costs `repo.read`:
+          // admin carries read, and a literal comparison would refuse it.
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["repo.admin"],
+            ttlSeconds: 300,
+          });
+          return yield* guard(
+            request("r/git-upload-pack", { method: "POST", headers: basic(credential) }),
+          );
+        }),
+      );
+      assert.equal(outcome.denied, null);
+    });
+
+    it("refuses a credential whose lifetime exceeds the cap, however it was made", async () => {
+      const opened = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["repo.read"]);
+          // Signed by hand with a ten-year expiry: the holder signs these
+          // themselves, so a cap only `mintDelegation` applied is one anybody
+          // could opt out of.
+          const delegation = {
+            type: "auth.delegate",
+            version: 1,
+            repo: genesis.repoId,
+            capabilities: ["repo.read"],
+            expiresAt: new Date(Date.now() + 10 * 365 * 86_400_000).toISOString(),
+            nonce: crypto.randomUUID(),
+          } as const;
+          const bytes = encodeDelegation(delegation);
+          const armored = yield* sign(member, bytes, NAMESPACE);
+          const forged = `hub1.${base64url(bytes)}.${base64url(new TextEncoder().encode(armored))}`;
+
+          return yield* openDelegation(forged, genesis.repoId, new Date());
+        }),
+      );
+      assert.equal(opened, null);
+    });
+
     it("does not verify at another repository", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {
@@ -284,6 +337,18 @@ describe("Auth", () => {
       const outcome = await scenario(
         Effect.gen(function* () {
           yield* hub(["repo.read"]);
+          return yield* guard(request("r/git-upload-pack", { method: "POST" }));
+        }),
+      );
+      assert.equal(outcome.denied?.status, 401);
+    });
+
+    it("is refused when the only members hold repo.admin", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          // `repo.admin` carries `repo.read`, so this repository has
+          // restricted reading just as surely as one that granted it by name.
+          yield* hub(["repo.admin"]);
           return yield* guard(request("r/git-upload-pack", { method: "POST" }));
         }),
       );

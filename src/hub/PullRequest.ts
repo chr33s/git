@@ -299,7 +299,7 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
 }) {
   const repository = yield* Repository;
 
-  const events = yield* Event.entries(input.pr);
+  const { events } = yield* Event.entries(input.pr);
   const target = events.find((entry) => entry.payload?.id === input.target);
   if (target === undefined) {
     return yield* new Invalid({

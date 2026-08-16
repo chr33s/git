@@ -462,7 +462,7 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(refOf(pr));
-  if (head === null) return [];
+  if (head === null) return { events: emptyEvents, parents: emptyParents };
 
   const parents = yield* Dag.reachable(head);
   const ordered = Dag.topological(parents);
@@ -494,7 +494,21 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
       continue;
     }
 
-    const payload = yield* decode(record.payload);
+    // An event this version cannot read is one event, not a broken pull
+    // request: failing here would take out the projection, and with it every
+    // protected-branch push in the repository.
+    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    if (payload === null) {
+      events.push({
+        commit: oid,
+        parents: parents.get(oid) ?? [],
+        payload: null,
+        summary,
+        bytes: record.payload,
+        signatures: record.signatures,
+      });
+      continue;
+    }
 
     const previous = seen.get(payload.id);
     if (previous !== undefined && previous !== oid) {
@@ -514,8 +528,15 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
       signatures: record.signatures,
     });
   }
-  return events;
+  // The whole DAG rides along, join commits included. A projection computing
+  // ancestry from the payload-carrying events alone would find its chains cut
+  // at every join — which is exactly where two concurrent histories meet, and
+  // exactly where knowing which event descends from which matters.
+  return { events, parents };
 });
+
+const emptyParents: Dag.Parents = new Map();
+const emptyEvents: ReadonlyArray<Entry> = [];
 
 /** Every pull request this repository holds events for. */
 export const pullRequests = Effect.fn("hub.Event.pullRequests")(function* () {

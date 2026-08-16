@@ -193,7 +193,7 @@ describe("hub projection", () => {
             decision: "approve",
             key: where.reviewer,
           });
-          const events = yield* Event.entries(pr);
+          const { events } = yield* Event.entries(pr);
           const review = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
 
           yield* PullRequest.dismissReview({
@@ -248,7 +248,7 @@ describe("hub projection", () => {
             line: 184,
             key: where.reviewer,
           });
-          const events = yield* Event.entries(pr);
+          const { events } = yield* Event.entries(pr);
           const thread = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
 
           yield* PullRequest.reply({
@@ -286,7 +286,7 @@ describe("hub projection", () => {
             body: "still wrong",
             key: where.reviewer,
           });
-          const events = yield* Event.entries(pr);
+          const { events } = yield* Event.entries(pr);
           const thread = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
 
           yield* PullRequest.resolve({ repo: where.genesis.repoId, pr, thread, key: where.author });
@@ -480,7 +480,7 @@ describe("hub projection", () => {
             body: "here is a password: hunter2",
             key: where.author,
           });
-          const events = yield* Event.entries(pr);
+          const { events } = yield* Event.entries(pr);
           const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
 
           const before = yield* projectionOf(where, pr);
@@ -492,7 +492,7 @@ describe("hub projection", () => {
             key: where.reviewer,
           });
           const after = yield* projectionOf(where, pr);
-          const walked = yield* Event.entries(pr);
+          const { events: walked } = yield* Event.entries(pr);
 
           return { before, after, walked, commit };
         }),
@@ -523,7 +523,7 @@ describe("hub projection", () => {
             body: "ordinary",
             key: where.author,
           });
-          const events = yield* Event.entries(pr);
+          const { events } = yield* Event.entries(pr);
           const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
 
           yield* PullRequest.redact({
@@ -554,7 +554,7 @@ describe("hub projection", () => {
             body: "x",
             key: where.author,
           });
-          const events = yield* Event.entries(pr);
+          const { events } = yield* Event.entries(pr);
           const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
 
           const tombstone = yield* PullRequest.redact({
@@ -564,7 +564,7 @@ describe("hub projection", () => {
             reason: "first",
             key: where.reviewer,
           });
-          const after = yield* Event.entries(pr);
+          const { events: after } = yield* Event.entries(pr);
           const second = after.find((entry) => entry.commit === tombstone)?.payload?.id ?? "";
 
           return yield* PullRequest.redact({

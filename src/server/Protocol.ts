@@ -176,7 +176,11 @@ export const advertise = (
     // The genesis stays visible: it is one commit, and it is what lets any
     // client compute the RepoID and check it against what it trusts.
     for (const [name, oid] of refs) {
-      if (Refspec.hiddenFromAdvertisement(name)) continue;
+      // Only from the fetch advertisement. A client pushing has to know what
+      // it is replacing — receive-pack's old-oid is how a stale push is
+      // caught — so hiding these here would make every hub ref writable
+      // exactly once and then never again.
+      if (service === "git-upload-pack" && Refspec.hiddenFromAdvertisement(name)) continue;
       lines.push(`${oid} ${name}`);
     }
 

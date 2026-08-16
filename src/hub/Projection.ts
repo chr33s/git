@@ -164,12 +164,14 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   trust: TrustProjection,
   pr: string,
 ) {
-  const events = yield* Event.entries(pr);
+  const { events, parents } = yield* Event.entries(pr);
   const rejected: Rejected[] = [];
 
-  const ordered = events.map((entry) => entry.commit);
-  const parents = new Map(events.map((entry) => [entry.commit, entry.parents] as const));
-  const ancestors = ancestorSets(parents, ordered);
+  // Ancestry over the *whole* DAG, join commits and all. Building it from the
+  // payload-carrying events alone would cut every chain at the join where two
+  // concurrent histories met, and `supersedes` would fall back to comparing
+  // ids for events that are genuinely ordered.
+  const ancestors = ancestorSets(parents, Dag.topological(parents));
 
   let title = "";
   let description = "";

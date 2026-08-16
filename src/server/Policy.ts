@@ -209,6 +209,13 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     return refused(update.name, "pushing needs source.push");
   }
 
+  // The ref that decides what the rules are cannot be governed by them: any
+  // `source.push` holder could otherwise rewrite the branch protection they
+  // are subject to. `policy.write` exists for exactly this ref.
+  if (update.name === RULES_REF && !may(input.principal, "policy.write")) {
+    return refused(update.name, `writing ${RULES_REF} needs policy.write`);
+  }
+
   const namespace = yield* namespaceRules(update, current);
   if (!namespace.ok) return namespace;
 
@@ -289,13 +296,27 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     rules.requireResolvedThreads;
   if (!needsReview) return null;
 
+  const repository = yield* Repository;
+
   for (const id of yield* Event.pullRequests()) {
     const pullRequest = yield* projectPr(input.genesis, input.trust, id);
     if (pullRequest.base !== input.ref || pullRequest.head === null) continue;
-    // The revision being pushed has to be the one that was reviewed, or a
-    // merge that keeps it: anything else is a different change wearing an
-    // approved pull request's name.
-    if (!(yield* contains(pullRequest.head, input.to))) continue;
+    // A closed or already-merged pull request authorizes nothing further.
+    // "Descends from an approved head" is not enough on its own: every commit
+    // made after a merge descends from it, so one merged pull request would
+    // otherwise unlock direct pushes to the branch forever.
+    if (pullRequest.state !== "open") continue;
+
+    // The tip has to *be* the reviewed revision, or a merge that takes it as
+    // a parent — the commit a merge of this pull request would produce.
+    // Anything further along is a different change wearing its name.
+    const arriving =
+      input.to === pullRequest.head ||
+      (yield* repository.readCommit(input.to).pipe(
+        Effect.map((commit) => commit.parents.includes(pullRequest.head!)),
+        Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+      ));
+    if (!arriving) continue;
 
     if (approvals(pullRequest).length < rules.requiredApprovals) {
       return refused(
@@ -364,6 +385,34 @@ export const apply = Effect.fn("Policy.apply")(function* (input: {
 export type PolicyError = Invalid | ObjectNotFound | StorageFailure;
 
 /**
+ * Whether a signed envelope authorized this exact ref command.
+ *
+ * A request with no envelope is not refused here — a delegated credential
+ * makes no claim about particular refs, and its containment is its scope and
+ * its lifetime. What is refused is an envelope that named *other* refs: a
+ * signature over "move topic" must not move main.
+ */
+const coveredByEnvelope = (
+  envelope: Auth.Envelope | null,
+  update: RefUpdate,
+):
+  | { readonly ok: true }
+  | { readonly ok: false; readonly ref: string; readonly reason: string } => {
+  if (envelope === null) return { ok: true };
+
+  const signed = envelope.commands.find((entry) => entry.ref === update.name);
+  if (signed === undefined) {
+    return refusedCommand(update.name, "the signed request did not name this ref");
+  }
+  if ((signed.to ?? null) !== (update.value ?? null)) {
+    return refusedCommand(update.name, "the signed request named a different revision");
+  }
+  return { ok: true };
+};
+
+const refusedCommand = (ref: string, reason: string) => ({ ok: false, ref, reason }) as const;
+
+/**
  * The receive-pack entry point: judge a batch against everything the
  * repository currently knows.
  *
@@ -383,15 +432,25 @@ export const gate = Effect.fn("Policy.gate")(function* (
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);
 
+  const rules = yield* rulesOf();
   const decisions: Decision[] = [];
   for (const update of updates) {
+    // A native client signed an envelope naming the refs it was moving and
+    // where to. Checking it here rather than in the guard is not a weakening:
+    // the guard runs before the push body exists, so this is the first moment
+    // the commands are knowable at all — and the last before they are applied.
+    const covered = coveredByEnvelope(who.envelope, update);
+    if (!covered.ok) {
+      decisions.push(covered);
+      continue;
+    }
     decisions.push(
       yield* evaluate({
         update,
         principal: { member: who.principal, capabilities: who.capabilities },
         genesis: stored?.genesis ?? null,
         trust,
-        rules: yield* rulesOf(),
+        rules,
       }),
     );
   }

@@ -17,14 +17,22 @@ import { Console, Effect, Layer } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { formatPublicKey, isFingerprint } from "../crypto/SshSignature.ts";
-import { fetchRepository } from "../client/Fetch.ts";
+import { fetchRepository, lsRemote } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { ObjectStore, RefStore } from "../git/Store.ts";
 import * as Certificate from "../trust/Certificate.ts";
-import { create, GENESIS_REF, readGenesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
+import {
+  create,
+  GENESIS_REF,
+  load,
+  readGenesis,
+  RECORD as GENESIS_RECORD,
+  signGenesis,
+  writeGenesis,
+} from "../trust/Genesis.ts";
 import {
   canonicalUrl,
   decide,
@@ -34,6 +42,7 @@ import {
 } from "../trust/KnownRepos.ts";
 import { layer as knownRepos } from "../trust/KnownRepos.node.ts";
 import * as Log from "../trust/Log.ts";
+import * as Record from "../trust/Record.ts";
 import { project } from "../trust/Projection.ts";
 import { readPrivateKey, readPublicKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
@@ -223,24 +232,42 @@ const mustBeEnabled = Effect.fn("hub.mustBeEnabled")(function* (repo: string) {
 
 // -- the client's view ------------------------------------------------------
 
-/** The identity a remote presents, without trusting it yet. */
+/**
+ * The identity a remote presents, without trusting it yet.
+ *
+ * The genesis is read from the commit the *remote* advertised, not from
+ * whatever this directory happens to hold. Those differ in exactly the case
+ * this function exists to catch: a local clone made earlier still has the old
+ * genesis, the fetch refuses to move that ref because the new one is not a
+ * fast-forward of it, and reading locally would then report the identity that
+ * has changed as the identity that was expected.
+ */
 const presented = Effect.fn("hub.presented")(function* (url: string) {
   const target = { objects: yield* ObjectStore, refs: yield* RefStore };
-  yield* fetchRepository({
-    url,
-    stores: target,
-    refspecs: [{ force: false, source: GENESIS_REF, destination: GENESIS_REF }],
-  });
 
-  const stored = yield* readGenesis();
-  if (stored === null) {
+  const advertised = yield* lsRemote(url);
+  const genesis = advertised.find((ref) => ref.name === GENESIS_REF);
+  if (genesis === undefined) {
     return yield* new Invalid({
       field: "url",
       reason: `${url} is not hub-enabled: it has no genesis`,
     });
   }
-  return stored.genesis.repoId;
+
+  // Fetched into a name of our own, so the remote's genesis is a *value* here
+  // rather than a claim about this repository's identity.
+  yield* fetchRepository({
+    url,
+    stores: target,
+    refspecs: [{ force: true, source: GENESIS_REF, destination: PRESENTED_REF }],
+  });
+
+  const record = yield* Record.read(genesis.oid, GENESIS_RECORD);
+  return (yield* load(record.payload)).repoId;
 });
+
+/** Where a remote's genesis lands while it is still only a claim. */
+const PRESENTED_REF = "refs/meta/presented/genesis";
 
 const ask = (question: string): Effect.Effect<boolean> =>
   Effect.promise(async () => {
