@@ -96,11 +96,16 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // operator's account of when it began; it is not a verification input.
   if (revocation.compromisedFrom !== null) return true;
 
-  // Forward-only. An event that records no trust head cannot show it predates
-  // the revocation, so it does not get the benefit of the doubt.
+  // Forward-only. An event that cannot *show* it predates the revocation does
+  // not get the benefit of the doubt — and that covers a trust head this
+  // replica cannot resolve as well as one that was never recorded. Ancestry
+  // treats an unknown commit as unreachable, so without this check writing
+  // junk into the field would opt out of revocation entirely, which is worse
+  // than leaving it null.
   if (made.trustHead === null) return true;
 
   const seen = yield* Log.ancestry(made.trustHead);
+  if (!seen.has(made.trustHead)) return true;
   return seen.has(revocation.commit);
 });
 

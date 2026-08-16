@@ -112,8 +112,24 @@ export class Nonces extends Context.Service<
 export const nonceStore = (): Nonces["Service"] => {
   const issued = new Map<string, number>();
 
+  /**
+   * How many unspent nonces to keep.
+   *
+   * Every 401 issues one, and 401s are what unauthenticated traffic produces
+   * — so without a ceiling the map grows for the whole expiry window on
+   * nothing but noise, inside a Durable Object with 128 MiB. Evicting the
+   * oldest costs a client its challenge, which is a retry.
+   */
+  const CAPACITY = 4096;
+
   const prune = (now: number) => {
     for (const [nonce, expiry] of issued) if (expiry <= now) issued.delete(nonce);
+    // Insertion-ordered, so the front of the map is the oldest.
+    while (issued.size > CAPACITY) {
+      const oldest = issued.keys().next();
+      if (oldest.done === true) break;
+      issued.delete(oldest.value);
+    }
   };
 
   return Nonces.of({
@@ -723,10 +739,18 @@ const permitsCapability = (member: Member, capability: string): boolean =>
  * nothing.
  */
 const anonymousReadAllowed = (projection: Projection): boolean => {
+  // `former` as well as `members`: revocation moves a member out of the one
+  // and into the other, so looking only at current members would make a
+  // private repository world-readable the moment its last reader was revoked
+  // — the exact opposite of what revoking them was for.
+  //
+  // `permits`, not `includes`: `repo.admin` carries `repo.read`, and a
+  // repository whose members are all admins had restricted reading just as
+  // surely as one that granted `repo.read` by name.
   for (const member of projection.members.values()) {
-    // `permits`, not `includes`: `repo.admin` carries `repo.read`, and a
-    // repository whose members are all admins had restricted reading just as
-    // surely as one that granted `repo.read` by name.
+    if (permitsCapability(member, "repo.read")) return false;
+  }
+  for (const member of projection.former.values()) {
     if (permitsCapability(member, "repo.read")) return false;
   }
   return true;

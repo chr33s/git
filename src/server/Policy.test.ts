@@ -519,13 +519,13 @@ describe("Policy", () => {
 
   describe("writing a ref whose value is not known yet", () => {
     /** The JSON verbs that compute the new value while doing the work. */
-    const gateWriteAs = (where: World, ref: string) =>
+    const gateWriteAs = (where: World | null, ref: string) =>
       Policy.gateWrite(ref).pipe(
         Effect.provide(
           Auth.requester({
-            principal: where.principal.member,
+            principal: where?.principal.member ?? null,
             signer: null,
-            capabilities: where.principal.capabilities,
+            capabilities: where?.principal.capabilities ?? [],
             projection: EMPTY_PROJECTION,
             envelope: null,
           }),
@@ -571,6 +571,13 @@ describe("Policy", () => {
         }),
       );
       assert.match(refusal ?? "", /approved pull request/);
+    });
+
+    it("refuses to establish an identity over the API", async () => {
+      // A repository with no genesis must not acquire one this way: whoever
+      // asked first would own somebody else's repository.
+      const refusal = await scenario(gateWriteAs(null, "refs/meta/trust/genesis"));
+      assert.match(refusal ?? "", /hub init/);
     });
 
     it("refuses a hub ref, which is appended to and never written", async () => {

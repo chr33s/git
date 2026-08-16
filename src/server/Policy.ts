@@ -321,6 +321,12 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   const repository = yield* Repository;
 
   for (const id of yield* Event.pullRequests()) {
+    // The base is in the opening event, and reading that is a blob read; the
+    // full fold is a DAG walk plus a signature verification per event. Most
+    // pull requests in a repository are for another branch, so they are ruled
+    // out before any of that happens.
+    if ((yield* Event.baseOf(id)) !== input.ref) continue;
+
     const pullRequest = yield* projectPr(input.genesis, input.trust, id);
     if (pullRequest.base !== input.ref || pullRequest.head === null) continue;
     // A closed or already-merged pull request authorizes nothing further.
@@ -417,6 +423,15 @@ export type PolicyError = Invalid | ObjectNotFound | StorageFailure;
  * an approved pull request, and none of these verbs is that.
  */
 export const gateWrite = Effect.fn("Policy.gateWrite")(function* (ref: string) {
+  // These hold whether or not the repository has an identity, because they are
+  // what the namespaces mean rather than what a member may do. In particular a
+  // repository with no genesis must not acquire one through an API call, or
+  // whoever asked first would own somebody else's repository.
+  if (ref.startsWith("refs/meta/trust/")) {
+    return "a repository's identity is established by `hub init`, not over the API";
+  }
+  if (Refspec.isAppendOnly(ref)) return `${ref} may only be appended to by the hub`;
+
   const stored = yield* readGenesis();
   if (stored === null) return null;
 
@@ -426,8 +441,6 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (ref: string) {
 
   if (principal.member === null) return "authentication required to write refs";
   if (!may(principal, "source.push")) return "pushing needs source.push";
-  if (ref === Refspec.TRUST_GENESIS) return "the genesis is written once and never moves";
-  if (Refspec.isAppendOnly(ref)) return `${ref} may only be appended to by the hub`;
   if (ref === RULES_REF && !may(principal, "policy.write")) {
     return `writing ${RULES_REF} needs policy.write`;
   }

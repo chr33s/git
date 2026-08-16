@@ -1285,7 +1285,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           expected: payload.expected,
         });
 
-        const request: SetRefRequest = { name: payload.ref, to: payload.to };
+        // The *resolved* oid, not the name it was resolved from: handing
+        // `setRef` the name would resolve it a second time, and a source ref
+        // that moved in between would land a value the policy never saw.
+        const request: SetRefRequest = { name: payload.ref, to: target };
         if (judged.expected !== undefined) request.expected = judged.expected;
         const moved = yield* repository
           .setRef(request)

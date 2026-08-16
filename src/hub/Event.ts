@@ -577,6 +577,44 @@ const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
 const emptyParents: Dag.Parents = new Map();
 const emptyEvents: ReadonlyArray<Entry> = [];
 
+/**
+ * The branch a pull request proposes to change, without folding it.
+ *
+ * The opening event is the root of the DAG, so this is one commit walk and one
+ * blob read — cheap enough to run over every pull request in a repository,
+ * which is the point: the full projection is not.
+ *
+ * `null` when it cannot be determined, which the caller reads as "not this
+ * branch" rather than guessing.
+ */
+export const baseOf = Effect.fn("hub.Event.baseOf")(function* (pr: string) {
+  const repository = yield* Repository;
+
+  let commit = yield* repository.resolve(refOf(pr));
+  while (commit !== null) {
+    const info = yield* repository
+      .readCommit(commit)
+      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+    if (info === null) return null;
+
+    const first: Oid | undefined = info.parents[0];
+    if (first === undefined) break;
+    commit = first;
+  }
+  if (commit === null) return null;
+
+  const record = yield* Record.read(commit, RECORD).pipe(
+    Effect.catchTags({
+      ObjectNotFound: () => Effect.succeed(null),
+      Invalid: () => Effect.succeed(null),
+    }),
+  );
+  if (record === null) return null;
+
+  const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+  return payload !== null && payload.type === "pr.opened" ? payload.base : null;
+});
+
 /** Every pull request this repository holds events for. */
 export const pullRequests = Effect.fn("hub.Event.pullRequests")(function* () {
   const repository = yield* Repository;
