@@ -51,6 +51,22 @@ describe("Refspec", () => {
     assert.equal(Refspec.resolve(specs, "refs/nope/x"), null);
   });
 
+  it("replicates the branch rules alongside the trust they are enforced with", () => {
+    // A replica holding the membership but not the rules answers `OPEN` to
+    // every question `Policy.rulesOf` asks, so a mirror sharing the same trust
+    // graph would let through exactly the pushes the origin protects.
+    assert.notEqual(
+      Refspec.resolve(Refspec.HUB_FETCH, "refs/meta/policy"),
+      null,
+      "the policy ref must be in the hub refspecs",
+    );
+    assert.notEqual(Refspec.resolve(Refspec.HUB_FETCH, Refspec.TRUST_LOG), null);
+    assert.notEqual(Refspec.resolve(Refspec.HUB_FETCH, "refs/hub/pr/1"), null);
+    // And it is hidden from a plain advertisement, so naming it is the only
+    // way it ever arrives.
+    assert.equal(Refspec.hiddenFromAdvertisement("refs/meta/policy"), true);
+  });
+
   it("knows which namespaces only grow, and which are withheld from a clone", () => {
     assert.equal(Refspec.isAppendOnly("refs/hub/pr/1"), true);
     assert.equal(Refspec.isAppendOnly(Refspec.TRUST_LOG), true);

@@ -66,11 +66,18 @@ export const pull = Effect.fn("Replication.pull")(function* (input: {
   const fetched: string[] = [];
   const rejected: Array<{ readonly name: string; readonly oid: Oid }> = [];
 
+  // Trust *and* the branch rules, in that order and before anything else: a
+  // replica holding the membership but not the rules answers `OPEN` to every
+  // question the policy boundary asks, so it would let through exactly the
+  // pushes the origin protects.
   const trust = yield* fetchRepository({
     url: input.url,
     stores: input.stores,
     token: input.token,
-    refspecs: [{ force: false, source: "refs/meta/trust/*", destination: "refs/meta/trust/*" }],
+    refspecs: [
+      { force: false, source: "refs/meta/trust/*", destination: "refs/meta/trust/*" },
+      { force: false, source: "refs/meta/policy", destination: "refs/meta/policy" },
+    ],
   });
   fetched.push(...trust.refs.map((update) => update.name));
   rejected.push(...trust.rejected);

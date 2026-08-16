@@ -256,6 +256,45 @@ describe("Genesis", () => {
       assert.equal(await scenario(readGenesis()), null);
     });
 
+    it("refuses a genesis whose roots never signed it", async () => {
+      // A `RepoID` says what a document hashes to; it does not say the roots
+      // agreed to it. Left unchecked, a replica serving a genesis nobody's
+      // roots signed was believed by every path that reads one — a client that
+      // had pinned the identity would catch it, one meeting the repository for
+      // the first time would not.
+      const failure = await scenario(
+        Effect.gen(function* () {
+          const roots = yield* keys(2);
+          const genesis = yield* create(linesOf(roots), 2);
+          // One of the two the threshold asks for.
+          yield* writeGenesis(genesis, [yield* signGenesis(genesis, roots[0]!)]);
+          return yield* readGenesis().pipe(Effect.flip);
+        }),
+      );
+
+      assert.equal(failure._tag, "Invalid");
+      assert.match(failure.reason, /threshold is 2/);
+    });
+
+    it("ignores a signature from a key that is not a root", async () => {
+      // It proves something true about a key nobody asked about, and treating
+      // it as an error would let anyone break a genesis by appending their own.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const roots = yield* keys(1);
+          const stranger = yield* keys(1);
+          const genesis = yield* create(linesOf(roots), 1);
+          yield* writeGenesis(genesis, [
+            yield* signGenesis(genesis, stranger[0]!),
+            yield* signGenesis(genesis, roots[0]!),
+          ]);
+          return yield* readGenesis();
+        }),
+      );
+
+      assert.notEqual(outcome, null);
+    });
+
     it("refuses to replace an identity a repository already has", async () => {
       const failure = await scenario(
         Effect.gen(function* () {

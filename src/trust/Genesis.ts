@@ -345,5 +345,20 @@ export const readGenesis = Effect.fn("Genesis.read")(function* () {
 
   const record = yield* Record.read(commit, RECORD);
   const genesis = yield* load(record.payload);
+
+  // The signatures are checked here, once, rather than left to whichever
+  // caller remembers. A `RepoID` says what the document hashes to; it does not
+  // say the roots ever agreed to it, and a replica serving a genesis nobody's
+  // roots signed would otherwise be believed by every path that reads one. A
+  // client that pinned the identity would catch it; one meeting the repository
+  // for the first time would not.
+  const signers = yield* rootSigners(genesis, record.signatures);
+  if (!quorumMet(genesis, signers)) {
+    return yield* new Invalid({
+      field: "genesis",
+      reason: `this repository's genesis carries ${signers.length} root signature(s), and its threshold is ${genesis.document.threshold}`,
+    });
+  }
+
   return { genesis, signatures: record.signatures, commit };
 });

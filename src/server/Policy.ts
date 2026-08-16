@@ -36,6 +36,7 @@ import { type Member, project, type Projection as TrustProjection } from "../tru
 import * as Event from "../hub/Event.ts";
 import { approvals, checksPassed, project as projectPr } from "../hub/Projection.ts";
 import { permits } from "../trust/Certificate.ts";
+import * as Verify from "../trust/Verify.ts";
 import * as Auth from "./Auth.ts";
 
 /**
@@ -59,6 +60,20 @@ export interface Rules {
   readonly requireResolvedThreads: boolean;
   /** Whether a protected branch may only move through a pull request. */
   readonly requirePullRequest: boolean;
+  /**
+   * How stale a membership view may be before writes are refused, in seconds.
+   *
+   * A hash-linked log makes withholding visible but not impossible: a replica
+   * can serve a consistent view that simply stops short of a revocation, and
+   * nothing in the log itself says so. A checkpoint is a signed statement that
+   * somebody with authority had seen a given frontier at a given time, so
+   * requiring a recent one bounds how far behind a served view may be.
+   *
+   * `0` is unbounded, and is the default: a repository that has never
+   * checkpointed would otherwise refuse every push the moment this shipped,
+   * and a bound nobody asked for is a bound that breaks working repositories.
+   */
+  readonly maxTrustAgeSeconds: number;
 }
 
 export const OPEN: Rules = {
@@ -67,6 +82,7 @@ export const OPEN: Rules = {
   requiredChecks: [],
   requireResolvedThreads: false,
   requirePullRequest: false,
+  maxTrustAgeSeconds: 0,
 };
 
 /** Where a repository keeps its branch rules, if it has any. */
@@ -80,6 +96,8 @@ const RulesDocument = Schema.Struct({
   requiredChecks: Schema.Array(Schema.String),
   requireResolvedThreads: Schema.Boolean,
   requirePullRequest: Schema.Boolean,
+  /** Optional, so a rules file written before this existed still decodes. */
+  maxTrustAgeSeconds: Schema.optional(Schema.Int),
 });
 
 const decodeRules = Schema.decodeUnknownEffect(RulesDocument);
@@ -96,6 +114,7 @@ export const encodeRules = (rules: Rules): Uint8Array =>
         requiredChecks: rules.requiredChecks,
         requireResolvedThreads: rules.requireResolvedThreads,
         requirePullRequest: rules.requirePullRequest,
+        maxTrustAgeSeconds: rules.maxTrustAgeSeconds,
       },
       null,
       2,
@@ -145,6 +164,7 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     requiredChecks: loaded.requiredChecks,
     requireResolvedThreads: loaded.requireResolvedThreads,
     requirePullRequest: loaded.requirePullRequest,
+    maxTrustAgeSeconds: loaded.maxTrustAgeSeconds ?? 0,
   };
 });
 
@@ -520,6 +540,25 @@ export const gate = Effect.fn("Policy.gate")(function* (
         : yield* project(stored.genesis);
 
   const rules = yield* rulesOf();
+
+  // How stale a view may be, checked once for the batch rather than per ref.
+  // This is the bound on the one failure a hash-linked log cannot rule out by
+  // itself: a replica serving a consistent history that stops short of a
+  // revocation. Off unless a repository asks for it, because a bound nobody
+  // configured would refuse every push on a repository that never checkpoints.
+  const stale =
+    trust === null || rules.maxTrustAgeSeconds <= 0
+      ? null
+      : Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
+  if (stale !== null && !stale.ok) {
+    return {
+      updates: [],
+      refused: updates.map(
+        (update) => ({ ok: false, ref: update.name, reason: stale.reason }) as const,
+      ),
+    };
+  }
+
   const decisions: Decision[] = [];
   for (const update of updates) {
     // A native client signed an envelope naming the refs it was moving and

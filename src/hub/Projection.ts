@@ -28,6 +28,7 @@ import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
 import type { Genesis } from "../trust/Genesis.ts";
 import type { Projection as TrustProjection } from "../trust/Projection.ts";
+import * as Log from "../trust/Log.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Event from "./Event.ts";
 
@@ -145,6 +146,39 @@ const ancestorSets = (
 };
 
 /**
+ * An entry's key: its author and the id they chose.
+ *
+ * Composite because an id alone is chosen by whoever writes the event, so a
+ * map keyed by it is a map any author can overwrite another author's entry in.
+ * The `\0` cannot occur in a fingerprint or a UUID, so the two halves cannot
+ * be made to run together.
+ */
+const keyOf = (signer: Fingerprint, id: string): string => `${signer}\u0000${id}`;
+
+/**
+ * The one entry an event id names, or nothing when it names none or several.
+ *
+ * Cross-references — a reply's thread, a dismissal's review, a tombstone's
+ * target — are written as bare ids, because the author of the reference knows
+ * the id and not who will have claimed it. Where two authors claim one id the
+ * reference answers to neither: guessing would let a second claimant capture
+ * the first one's replies, which is the eviction this keying exists to stop,
+ * wearing another shape.
+ */
+const byEventId = <A extends { readonly id: string }>(
+  entries: ReadonlyMap<string, A>,
+  id: string,
+): { readonly key: string; readonly value: A } | "ambiguous" | null => {
+  let found: { readonly key: string; readonly value: A } | null = null;
+  for (const [key, value] of entries) {
+    if (value.id !== id) continue;
+    if (found !== null) return "ambiguous";
+    found = { key, value };
+  }
+  return found;
+};
+
+/**
  * The trust head an event recorded, as an oid.
  *
  * SAFETY: a trust head is a commit oid, and a value that is not one simply
@@ -152,6 +186,23 @@ const ancestorSets = (
  * rather than as an error, so a malformed one denies rather than throws.
  */
 const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
+
+/**
+ * Whether one trust-log commit is at least as new as another.
+ *
+ * `null` — an event that recorded no trust head — reaches nothing, which is
+ * the same conservative reading `Verify.reaches` gives it: an author who
+ * cannot show what they had seen is treated as having seen everything, and
+ * here that means they cannot be behind their own ancestors either.
+ */
+const reachesTrust = Effect.fn("hub.Projection.reachesTrust")(function* (
+  head: Oid | null,
+  target: Oid,
+) {
+  if (head === null) return true;
+  if (head === target) return true;
+  return (yield* Log.ancestry(head)).has(target);
+});
 
 /**
  * Fold one pull request.
@@ -208,6 +259,26 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   const checks = new Map<string, Check>();
   const redacted = new Set<string>();
 
+  /** The trust head each accepted event named, for the monotonicity check. */
+  const heads = new Map<Oid, Oid>();
+
+  /**
+   * The newest trust head any accepted ancestor of this commit named.
+   *
+   * "Newest" among a set that is itself a chain: the trust log is append-only,
+   * so of any two of its commits one reaches the other, and the one reaching
+   * the rest is the one an event must be at least as new as.
+   */
+  const trustFloor = Effect.fnUntraced(function* (commit: Oid) {
+    let floor: Oid | null = null;
+    for (const ancestor of ancestors.get(commit) ?? []) {
+      const named = heads.get(ancestor);
+      if (named === undefined || named === floor) continue;
+      if (floor === null || (yield* reachesTrust(named, floor))) floor = named;
+    }
+    return floor;
+  });
+
   for (const entry of events) {
     const payload = entry.payload;
 
@@ -233,29 +304,61 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       continue;
     }
 
+    // The trust head an event names is written by its own signer, and a
+    // forward-only revocation is judged by whether that head already reached
+    // it. Left unconstrained, a revoked member could name any pre-revocation
+    // commit and have their capabilities recovered from `former`, which is the
+    // revocation not applying at all. What they cannot do is rewrite the
+    // events they are building on: the pull request's history is hash-linked,
+    // so an event whose own ancestors were written against a *later* trust
+    // head is claiming to have seen less than the conversation it is joining.
+    const declared = trustHeadOf(payload.trustHead);
+    const floor = yield* trustFloor(entry.commit);
+    if (floor !== null && !(yield* reachesTrust(declared, floor))) {
+      rejected.push({
+        commit: entry.commit,
+        reason: `trust head ${payload.trustHead ?? "(none)"} predates ${floor}, which an earlier event in this pull request already named`,
+      });
+      continue;
+    }
+
     const authorized = yield* Verify.authorize({
       projection: trust,
       bytes: entry.bytes,
       signatures: entry.signatures,
       capability: Event.capabilityFor(payload),
-      made: { at: new Date(payload.issuedAt), trustHead: trustHeadOf(payload.trustHead) },
+      made: { at: new Date(payload.issuedAt), trustHead: declared },
     });
     if (!authorized.ok) {
       rejected.push({ commit: entry.commit, reason: authorized.reason });
       continue;
     }
 
-    const previous = claimed.get(payload.id);
+    // Recorded only once the event counts, so a rejected one cannot raise the
+    // floor for everything after it.
+    if (declared !== null) heads.set(entry.commit, declared);
+
+    const signer = authorized.principal.fingerprint;
+
+    // The claim is per *author*, not per id, and that is the whole defence.
+    // An id is chosen by whoever writes the event, so a global claim let the
+    // first commit in topological order — a tie broken by the bare oid, which
+    // anybody able to write a hub ref can grind — evict a stranger's event
+    // that happened to share it. Scoped to the signer, a duplicate can only
+    // ever displace its own author's earlier event, which is a mistake rather
+    // than an attack, and every collection below is keyed the same way so that
+    // no author can overwrite another's entry either.
+    const mine = keyOf(signer, payload.id);
+    const previous = claimed.get(mine);
     if (previous !== undefined) {
       rejected.push({
         commit: entry.commit,
-        reason: `event ${payload.id} is already claimed by ${previous}`,
+        reason: `${signer} already used event id ${payload.id} in ${previous}`,
       });
       continue;
     }
-    claimed.set(payload.id, entry.commit);
+    claimed.set(mine, entry.commit);
 
-    const signer = authorized.principal.fingerprint;
     const issued = new Date(payload.issuedAt);
     if (issued > at) at = issued;
 
@@ -305,7 +408,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       case "review.submitted": {
         const head = Event.unqualify(payload.head);
         if (head === null) break;
-        reviews.set(payload.id, {
+        reviews.set(mine, {
           id: payload.id,
           author: signer,
           head,
@@ -323,7 +426,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         break;
 
       case "comment.created":
-        threads.set(payload.id, {
+        threads.set(mine, {
           id: payload.id,
           path: payload.path,
           side: payload.side,
@@ -337,17 +440,23 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         break;
 
       case "comment.replied": {
-        const thread = threads.get(payload.thread);
+        const found = byEventId(threads, payload.thread);
         // A reply to a thread that does not exist is not a thread: dropping it
-        // is what keeps a projection from inventing one out of a typo.
-        if (thread === undefined) {
-          rejected.push({ commit: entry.commit, reason: `no thread ${payload.thread}` });
+        // is what keeps a projection from inventing one out of a typo. And a
+        // reference that two threads answer to is a reference to neither —
+        // guessing would let a second claimant capture the first one's replies.
+        if (found === null || found === "ambiguous") {
+          rejected.push({
+            commit: entry.commit,
+            reason:
+              found === null ? `no thread ${payload.thread}` : `ambiguous thread ${payload.thread}`,
+          });
           break;
         }
-        threads.set(payload.thread, {
-          ...thread,
+        threads.set(found.key, {
+          ...found.value,
           comments: [
-            ...thread.comments,
+            ...found.value.comments,
             { id: payload.id, author: signer, body: payload.body, at: issued, redacted: false },
           ],
         });
@@ -356,10 +465,10 @@ export const project = Effect.fn("hub.Projection.project")(function* (
 
       case "comment.resolved":
       case "comment.reopened": {
-        const thread = threads.get(payload.thread);
-        if (thread === undefined) break;
-        threads.set(payload.thread, {
-          ...thread,
+        const found = byEventId(threads, payload.thread);
+        if (found === null || found === "ambiguous") break;
+        threads.set(found.key, {
+          ...found.value,
           resolved: payload.type === "comment.resolved",
         });
         break;

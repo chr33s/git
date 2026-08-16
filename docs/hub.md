@@ -454,6 +454,10 @@ A `trust.checkpoint` event is signed by a principal holding `repo.admin` (or a r
 
 Verifiers MAY require a checkpoint newer than a configured maximum age before authorizing high-value operations (merges to protected branches, trust changes). This bounds how stale a split view can be.
 
+The bound is configured per repository, in the branch-rules document at `refs/meta/policy`, as `maxTrustAgeSeconds`. `0` — the default, and what a rules file written without the field means — is unbounded: a repository that has never checkpointed must keep working, so the bound is something an operator turns on rather than something that arrives with an upgrade. Any positive value refuses every ref update while the newest checkpoint is older than it, including the case of no checkpoint at all.
+
+`refs/meta/policy` replicates with the trust log and for the same reason. A replica that holds the membership but not the rules answers "unprotected" to every question the policy boundary asks, so a mirror sharing one trust graph would let through exactly the pushes its origin refuses.
+
 ### Stated limitation
 
 Even with the log, **freshness is best-effort**: a malicious replica can serve a consistent-but-old view up to the checkpoint-age bound. This is an inherent property of any offline-verifiable system and the spec says so rather than pretending otherwise. What the log removes is _silent, unbounded_ omission.

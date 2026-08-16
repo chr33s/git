@@ -614,6 +614,79 @@ describe("Policy", () => {
     });
   });
 
+  describe("how stale a membership view may be", () => {
+    /** Publish rules with a checkpoint age bound. */
+    const withMaxAge = Effect.fn("test.withMaxAge")(function* (seconds: number) {
+      const repository = yield* Repository;
+      const blob = yield* repository.writeBlob(
+        Policy.encodeRules({ ...OPEN, maxTrustAgeSeconds: seconds }),
+      );
+      const tree = yield* repository.writeTree([
+        { mode: "100644", name: "policy.json", oid: blob },
+      ]);
+      const commit = yield* repository.commitTree({
+        tree,
+        parents: [],
+        message: "policy\n",
+        author,
+      });
+      yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+    });
+
+    it("refuses a write when the repository has never checkpointed", async () => {
+      // A hash-linked log makes withholding visible but not impossible: a
+      // replica can serve a consistent view that simply stops short of a
+      // revocation. A checkpoint is the signed statement that bounds it, and
+      // this rule is what makes the bound mean anything.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const { second } = yield* history("refs/heads/topic");
+          yield* withMaxAge(3600);
+          return yield* gateAs(where, [{ name: "refs/heads/topic", value: second }]);
+        }),
+      );
+
+      assert.equal(outcome.updates.length, 0);
+      assert.match(outcome.refused.at(0)?.reason ?? "", /checkpoint/);
+    });
+
+    it("allows it once a recent checkpoint exists", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const { second } = yield* history("refs/heads/topic");
+          yield* Log.issue(
+            Certificate.checkpoint({
+              repo: where.genesis.repoId,
+              frontier: [],
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+          yield* withMaxAge(3600);
+          return yield* gateAs(where, [{ name: "refs/heads/topic", value: second }]);
+        }),
+      );
+
+      assert.deepEqual(outcome.refused, []);
+      assert.equal(outcome.updates.length, 1);
+    });
+
+    it("leaves a repository that set no bound alone", async () => {
+      // The default, and it has to stay the default: a bound nobody configured
+      // would refuse every push on every repository that has never checkpointed.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const { second } = yield* history("refs/heads/topic");
+          return yield* gateAs(where, [{ name: "refs/heads/topic", value: second }]);
+        }),
+      );
+      assert.deepEqual(outcome.refused, []);
+    });
+  });
+
   describe("writing a ref whose value is not known yet", () => {
     /** The JSON verbs that compute the new value while doing the work. */
     const gateWriteAs = (where: World | null, ref: string) =>

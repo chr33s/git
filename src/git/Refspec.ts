@@ -121,9 +121,18 @@ export const DEFAULT_FETCH: ReadonlyArray<Refspec> = [
   { force: false, source: "refs/tags/*", destination: "refs/tags/*" },
 ];
 
-/** The hub's namespaces, fetched under the names they already have. */
+/**
+ * The hub's namespaces, fetched under the names they already have.
+ *
+ * `refs/meta/policy` is here beside the trust log because a replica that has
+ * the membership but not the branch rules answers `OPEN` to every question
+ * `Policy.rulesOf` asks — so a mirror sharing the same trust graph would let
+ * through exactly the pushes the origin protects. Rules that do not replicate
+ * are rules with a second host they do not apply on.
+ */
 export const HUB_FETCH: ReadonlyArray<Refspec> = [
   { force: false, source: "refs/meta/trust/*", destination: "refs/meta/trust/*" },
+  { force: false, source: "refs/meta/policy", destination: "refs/meta/policy" },
   { force: false, source: "refs/hub/*", destination: "refs/hub/*" },
 ];
 

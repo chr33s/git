@@ -4,6 +4,7 @@ import { describe, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 
 import {
+  fingerprint,
   formatPublicKey,
   generate,
   NAMESPACE,
@@ -533,6 +534,103 @@ describe("hub projection", () => {
     });
   });
 
+  describe("an event's declared trust head", () => {
+    it("may not predate one an earlier event in the same pull request named", async () => {
+      // The trust head is written by the signer, and a forward-only revocation
+      // is judged by whether that head already reached it. Unconstrained, a
+      // revoked member could name any pre-revocation commit and have their old
+      // capabilities recovered from `former`. What they cannot do is rewrite
+      // the events they are building on: an event whose own ancestors were
+      // written against a later head is claiming to have seen less than the
+      // conversation it is joining.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          // The head as the opening event saw it, before anything else moved.
+          const early = yield* repository.resolve(Log.LOG_REF);
+
+          // The log moves on, and the reviewer is revoked.
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "left",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+          // …and a second event that honestly names the new head, so the
+          // conversation has visibly moved past the revocation.
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "still here",
+            key: where.author,
+          });
+
+          // The revoked reviewer backdates: an approval naming the head from
+          // before their own revocation, appended after the comment.
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "review.submitted",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: early,
+            head: Event.qualify(REVISION),
+            decision: "approve",
+            body: "backdated",
+          });
+          const forged = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [yield* sign(where.reviewer, bytes, NAMESPACE)],
+            parents: [head!],
+            message: "review.submitted backdated\n",
+          });
+          yield* repository.setRef({ name: ref, to: forged, expected: head });
+
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.reviews.length, 0, "a backdated approval must not count");
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /predates/);
+    });
+
+    it("may match what an earlier event named, which is the honest case", async () => {
+      // Two events written against the same head is what an ordinary
+      // conversation looks like; the rule bounds going *backwards*, not
+      // standing still.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            body: "fine",
+            key: where.reviewer,
+          });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.reviews.length, 1);
+      assert.deepEqual(outcome.rejected, []);
+    });
+  });
+
   describe("a forged duplicate event id", () => {
     it("cannot displace the authorized event that claimed it", async () => {
       // The attack: `Event.entries` used to resolve duplicate ids before any
@@ -618,6 +716,80 @@ describe("hub projection", () => {
       assert.equal(outcome.state.reviews[0]?.decision, "approve");
       // And the forgery is refused on its own merits, by name.
       assert.match(outcome.state.rejected.map((entry) => entry.reason).join(" "), /hub\.approve/);
+    });
+  });
+
+  describe("an id claimed by two authors", () => {
+    it("cannot evict a stranger's event, whatever the commit order", async () => {
+      // Scoping the claim to the id alone only stopped an impostor whose own
+      // event type needed a capability they lacked. A member holding
+      // `hub.comment` could re-use an approval's id in a `comment.created` —
+      // authorized on its own terms — grind the oid below the approval's, and
+      // have the genuine approval rejected as the duplicate.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const ref = Event.refOf(pr);
+          const root = yield* repository.resolve(ref);
+
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            body: "looks right",
+            key: where.reviewer,
+          });
+          const approval = yield* repository.resolve(ref);
+          const { events } = yield* Event.entries(pr);
+          const id = events.find((entry) => entry.commit === approval)?.payload?.id ?? "";
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          // The author holds `hub.comment`, so this event is authorized — it
+          // simply is not the reviewer's, and must not be able to displace it.
+          let forged: Oid | null = null;
+          for (let attempt = 0; attempt < 64 && forged === null; attempt++) {
+            const bytes = Event.encode({
+              version: 1,
+              type: "comment.created",
+              repo: where.genesis.repoId,
+              pr,
+              id,
+              issuedAt: new Date(1_700_000_000_000 + attempt * 1000).toISOString(),
+              trustHead,
+              body: "mine now",
+              head: null,
+              path: null,
+              side: null,
+              line: null,
+              contextHash: null,
+            });
+            const candidate = yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [root!],
+              message: `comment.created ${id}\n`,
+            });
+            if (candidate < approval!) forged = candidate;
+          }
+
+          const joined = yield* Event.join(pr, [approval!, forged!]);
+          yield* repository.setRef({ name: ref, to: joined });
+
+          const trust = yield* projectTrust(where.genesis);
+          return { forged, state: yield* project(where.genesis, trust, pr) };
+        }),
+      );
+
+      assert.notEqual(outcome.forged, null, "the grind must find a lower oid to be a real test");
+      assert.equal(outcome.state.reviews.length, 1, "the approval must survive");
+      assert.equal(outcome.state.reviews[0]?.decision, "approve");
+      // Both events stand: sharing an id is not by itself a reason to drop one.
+      assert.equal(outcome.state.threads.length, 1);
+      assert.deepEqual(outcome.state.rejected, []);
     });
   });
 
