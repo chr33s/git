@@ -356,6 +356,15 @@ describe("Api", () => {
 
         const removed = yield* client.repo.tagRemove({ params: { repo: "r", name: "latest" } });
         assert.equal(removed.deleted, true);
+
+        // Deleting through `receive` rather than `deleteTag` is what carries
+        // the compare-and-swap the policy boundary judged; "there was nothing
+        // there" still has to read as `false` rather than as a refusal.
+        const again = yield* client.repo.tagRemove({ params: { repo: "r", name: "latest" } });
+        assert.equal(again.deleted, false);
+
+        const absent = yield* client.repo.branchRemove({ params: { repo: "r", name: "nope" } });
+        assert.equal(absent.deleted, false);
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );

@@ -487,12 +487,23 @@ const lsRefs = (request: V2Request): Effect.Effect<Response, GitError, Repositor
 
     for (const [name, oid] of refs) {
       if (!matches(name)) continue;
-      // v2's advertisement, and so subject to the same hiding as v0's. This
-      // path is reached only from `POST /git-upload-pack`, which is the half
-      // that hides — receive-pack still needs to see hub refs to name what it
-      // is replacing. Modern git negotiates v2 by default, so omitting this
-      // meant the hiding never took effect for any real client.
-      if (Refspec.hiddenFromAdvertisement(name)) continue;
+      // v2's advertisement, and so subject to the same hiding as v0's — with
+      // the exception v2 is able to express and v0 is not. Hiding is about
+      // sparing a stock clone an event per comment, not about withholding
+      // state: a client that *names* the namespace is asking for it, and this
+      // is the only way it can ever be fetched, since v0 withholds it too.
+      //
+      // The prefix has to name a hidden namespace itself, not merely overlap
+      // one. `ref-prefix refs/` is what "everything" looks like, and answering
+      // it with hub state would be the default this exists to avoid.
+      if (
+        Refspec.hiddenFromAdvertisement(name) &&
+        !prefixes.some(
+          (prefix) => name.startsWith(prefix) && Refspec.hiddenFromAdvertisement(prefix),
+        )
+      ) {
+        continue;
+      }
       let line = `${oid} ${name}`;
       if (peel && name.startsWith("refs/tags/")) {
         const peeled = yield* repository.readTag(oid).pipe(

@@ -3,12 +3,19 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
+import {
+  formatPublicKey,
+  generate,
+  NAMESPACE,
+  type PrivateKey,
+  sign,
+} from "../crypto/SshSignature.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Certificate from "../trust/Certificate.ts";
+import * as Record from "../trust/Record.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
@@ -523,6 +530,94 @@ describe("hub projection", () => {
       );
       assert.equal(state.state, "open");
       assert.match(state.rejected.at(-1)?.reason ?? "", /hub\.merge/);
+    });
+  });
+
+  describe("a forged duplicate event id", () => {
+    it("cannot displace the authorized event that claimed it", async () => {
+      // The attack: `Event.entries` used to resolve duplicate ids before any
+      // signature was checked, so the winner was decided by commit order —
+      // whose tie-break is the oid, which anybody able to write a hub ref can
+      // grind. A member holding only `hub.comment` re-used the approval's id,
+      // sorted first, and the real approval was diverted into the conflict
+      // list — taking the merge's required approval with it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const ref = Event.refOf(pr);
+          const root = yield* repository.resolve(ref);
+
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            body: "looks right",
+            key: where.reviewer,
+          });
+          const approval = yield* repository.resolve(ref);
+          const { events } = yield* Event.entries(pr);
+          const id = events.find((entry) => entry.commit === approval)?.payload?.id ?? "";
+
+          // Mallory holds `hub.comment` and nothing else. She re-uses the
+          // approval's id and grinds the timestamp until her commit sorts
+          // below it, which is what puts her first in topological order.
+          const mallory = yield* generate("mallory@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(mallory.publicKey),
+              capabilities: ["hub.comment"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          // Written straight into the object store as a child of the root,
+          // rather than through `Event.issue`: an attacker crafts commits, and
+          // the ref only has to end up naming one of them.
+          let forged: Oid | null = null;
+          for (let attempt = 0; attempt < 64 && forged === null; attempt++) {
+            const bytes = Event.encode({
+              version: 1,
+              type: "review.submitted",
+              repo: where.genesis.repoId,
+              pr,
+              id,
+              issuedAt: new Date(1_700_000_000_000 + attempt * 1000).toISOString(),
+              trustHead,
+              head: Event.qualify(REVISION),
+              decision: "approve",
+              body: "not mine to give",
+            });
+            const candidate = yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(mallory, bytes, NAMESPACE)],
+              parents: [root!],
+              message: `review.submitted ${id}\n`,
+            });
+            if (candidate < approval!) forged = candidate;
+          }
+
+          // Both sides in one history, as a replica that fetched them would
+          // have. The join is where the two claims meet.
+          const joined = yield* Event.join(pr, [approval!, forged!]);
+          yield* repository.setRef({ name: ref, to: joined });
+
+          const trust = yield* projectTrust(where.genesis);
+          return { state: yield* project(where.genesis, trust, pr), forged, approval };
+        }),
+      );
+
+      assert.notEqual(outcome.forged, null, "the grind must find a lower oid to be a real test");
+      assert.equal(outcome.state.reviews.length, 1, "the authorized approval must survive");
+      assert.equal(outcome.state.reviews[0]?.decision, "approve");
+      // And the forgery is refused on its own merits, by name.
+      assert.match(outcome.state.rejected.map((entry) => entry.reason).join(" "), /hub\.approve/);
     });
   });
 

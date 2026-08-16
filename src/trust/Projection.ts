@@ -231,6 +231,26 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // SAFETY: `Certificate.validate` has checked that `subject` is the
       // fingerprint of `publicKey`, which is what a `Fingerprint` names.
       const subject = payload.subject as Fingerprint;
+
+      // A grant over a revocation re-instates — rotating a key back in is an
+      // ordinary thing to do, and requiring a new fingerprint for it would
+      // mean a compromised-then-recovered key could never be used again. But
+      // it takes the authority that *made* the revocation, not merely the
+      // authority to add members: `member.invite` clearing a revocation made
+      // `revoke` undoable by anybody who could `grant`, retroactive compromise
+      // revocations included, and left nothing in `revoked` to say so.
+      if (
+        revoked.has(subject) &&
+        !quorum &&
+        holds(members, revoked, signers, "member.revoke") === null
+      ) {
+        rejected.push({
+          commit: entry.commit,
+          reason: `issuer may not re-instate ${subject}; that needs member.revoke`,
+        });
+        continue;
+      }
+
       members.set(subject, {
         fingerprint: subject,
         publicKey: payload.publicKey,
@@ -239,10 +259,11 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
         expiresAt: payload.expiresAt === null ? null : new Date(payload.expiresAt),
         grant: entry.commit,
       });
-      // A grant after a revocation re-instates: rotating a key back in is an
-      // ordinary thing to do, and requiring a new fingerprint for it would
-      // mean a compromised-then-recovered key could never be used again.
       revoked.delete(subject);
+      // `former` is what a forward-only revocation is judged against, and this
+      // key is a current member again: leaving a stale entry there would let a
+      // later revocation be measured against capabilities they no longer hold.
+      former.delete(subject);
       continue;
     }
 

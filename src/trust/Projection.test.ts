@@ -222,6 +222,74 @@ describe("trust projection", () => {
       assert.match(outcome.ok === false ? outcome.reason : "", /revoked/);
     });
 
+    it("refuses a re-instatement from an issuer who could not have revoked", async () => {
+      // `member.invite` is the authority to *add* members. Letting a grant
+      // clear a revocation made `revoke` undoable by anybody who could
+      // `grant` — a retroactive `compromised` revocation included — and left
+      // nothing in `revoked` to show it had happened.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const inviter = yield* generate("inviter@example.com");
+          const bob = yield* generate("bob@example.com");
+
+          // Everything the re-grant below needs *except* `member.revoke`, so
+          // the refusal can only be about the re-instatement.
+          yield* grantTo(where, inviter, ["member.invite", "source.push"], where.roots.slice(0, 2));
+          yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+
+          // The inviter re-grants the revoked key. They may invite; they may
+          // not undo somebody else's revocation.
+          yield* grantTo(where, bob, ["source.push"], [inviter]);
+
+          return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+        }),
+      );
+
+      assert.equal(outcome.projection.members.has(outcome.bob), false);
+      assert.equal(outcome.projection.revoked.has(outcome.bob), true, "the revocation must stand");
+      assert.match(outcome.projection.rejected.at(-1)?.reason ?? "", /member\.revoke/);
+    });
+
+    it("allows one from an issuer who holds member.revoke", async () => {
+      // Rotating a key back in is an ordinary thing to do, and requiring a new
+      // fingerprint for it would mean a compromised-then-recovered key could
+      // never be used again.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+
+          yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "rotated",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+          yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+
+          return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+        }),
+      );
+
+      assert.equal(outcome.projection.members.has(outcome.bob), true);
+      assert.equal(outcome.projection.revoked.has(outcome.bob), false);
+      assert.equal(outcome.projection.former.has(outcome.bob), false, "no stale former entry");
+    });
+
     it("leaves an event made before the revocation was visible valid", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {

@@ -453,16 +453,16 @@ const summaryOf = Effect.fn("hub.Event.summaryOf")(function* (commit: Oid) {
 /**
  * Every event in a pull request, oldest first, parents before children.
  *
- * Reports an integrity conflict rather than merging one: two events claiming
- * the same id with different content is not a merge to resolve, it is a
- * statement somebody has forged or a replica has corrupted, and quietly
- * picking one would hide it.
+ * Every payload-carrying commit, duplicates included. Two events claiming one
+ * id is not a merge to resolve — it is a forgery or a corrupt replica — but
+ * deciding *which* of them is the impostor needs the trust state this walk
+ * does not have, so both are handed on and `hub/Projection.ts` rules on them.
  */
 export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(refOf(pr));
-  if (head === null) return { events: emptyEvents, parents: emptyParents, conflicts: [] };
+  if (head === null) return { events: emptyEvents, parents: emptyParents };
 
   // Bounded to the hub's own commits. A pull request's history is written
   // here and nowhere else, so a commit with a parent from the source history
@@ -472,8 +472,6 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   const ordered = Dag.topological(parents);
 
   const events: Entry[] = [];
-  const seen = new Map<string, Oid>();
-  const conflicts: Conflict[] = [];
   for (const oid of ordered) {
     // Joins carry nothing: they are how two histories became one.
     if (!(yield* Record.carries(oid, RECORD))) continue;
@@ -522,18 +520,14 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
       continue;
     }
 
-    // Two commits claiming one event id is an integrity conflict, and it is
-    // reported as a *rejected event* rather than as a failed walk. Failing
-    // here would let one forged duplicate refuse every protected-branch push
-    // in the repository, which is a denial of service anybody who can write a
-    // hub ref could perform.
-    const previous = seen.get(payload.id);
-    if (previous !== undefined && previous !== oid) {
-      conflicts.push({ id: payload.id, commits: [previous, oid] });
-      continue;
-    }
-    seen.set(payload.id, oid);
-
+    // Duplicate ids are *not* resolved here, deliberately. This walk has no
+    // trust state, so the only tie-break available to it is commit order —
+    // which breaks ties by oid, which anybody who can write a hub ref can
+    // grind. Resolving here let a member holding only `hub.comment` forge an
+    // event re-using an approval's id, sort it first, and divert the real,
+    // authorized approval into the conflict list. `hub/Projection.ts` decides
+    // it instead, after the signature and capability have been checked, so the
+    // first *authorized* claim is the one that stands.
     events.push({
       commit: oid,
       parents: parents.get(oid) ?? [],
@@ -547,15 +541,8 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   // ancestry from the payload-carrying events alone would find its chains cut
   // at every join — which is exactly where two concurrent histories meet, and
   // exactly where knowing which event descends from which matters.
-  return { events, parents, conflicts };
+  return { events, parents };
 });
-
-/** One event id claimed by two different commits. */
-export interface Conflict {
-  readonly id: string;
-  /** The commit that claimed the id first, and the one that claimed it again. */
-  readonly commits: readonly [Oid, Oid];
-}
 
 /**
  * Whether a commit belongs to a pull request's history.

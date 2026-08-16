@@ -530,11 +530,23 @@ describe("receive-pack", () => {
  * no effect on any real client.
  */
 describe("advertisement hiding", () => {
-  const lsRefs = (): Request =>
+  const lsRefs = (prefixes: ReadonlyArray<string> = []): Request =>
     new Request("http://host/repo/git-upload-pack", {
       method: "POST",
       headers: { "git-protocol": "version=2" },
-      body: body([pkt("command=ls-refs"), DELIM, FLUSH]),
+      body: body([
+        pkt("command=ls-refs"),
+        DELIM,
+        ...prefixes.map((prefix) => pkt(`ref-prefix ${prefix}\n`)),
+        FLUSH,
+      ]),
+    });
+
+  const namedBy = (request: Request) =>
+    Effect.gen(function* () {
+      const response = yield* Protocol.uploadPack(request);
+      const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+      return linesOf(bytes).lines.map((line) => line.split(" ")[1] ?? "");
     });
 
   const withHubRefs = Effect.fn("test.withHubRefs")(function* () {
@@ -551,24 +563,49 @@ describe("advertisement hiding", () => {
     return commit;
   });
 
-  it("hides hub and trust refs from a v2 ls-refs, keeping the genesis", async () => {
-    const named = await scenario(
+  it("hides hub and trust refs from a v2 ls-refs that asked for everything", async () => {
+    const refs = await scenario(
       Effect.gen(function* () {
         yield* withHubRefs();
-        const response = yield* Protocol.uploadPack(lsRefs());
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return linesOf(bytes).lines;
+        return yield* namedBy(lsRefs());
       }),
     );
 
-    const refs = named.map((line) => line.split(" ")[1] ?? "");
-    assert.ok(refs.includes("refs/heads/main"), named.join("\n"));
+    assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
     // The identity stays: it is what lets any client compute the RepoID and
     // check it against what they trust, and hiding it would make verification
     // need permission.
-    assert.ok(refs.includes("refs/meta/trust/genesis"), named.join("\n"));
-    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${named.join("\n")}`);
-    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${named.join("\n")}`);
+    assert.ok(refs.includes("refs/meta/trust/genesis"), refs.join("\n"));
+    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
+    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
+  });
+
+  it("hides them from `ref-prefix refs/`, which is what everything looks like", async () => {
+    const refs = await scenario(
+      Effect.gen(function* () {
+        yield* withHubRefs();
+        return yield* namedBy(lsRefs(["refs/"]));
+      }),
+    );
+    assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
+    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
+  });
+
+  it("answers a client that names the namespace, which is the only way to fetch it", async () => {
+    // Hiding is about sparing a stock clone an event per comment, not about
+    // withholding state. v0 hides these too, so a `ref-prefix` that names the
+    // namespace is the *only* way a replica can ever learn these oids — and
+    // without it `hub enable` and `Replication.pull` reported success having
+    // fetched no grants and no revocations.
+    const refs = await scenario(
+      Effect.gen(function* () {
+        yield* withHubRefs();
+        return yield* namedBy(lsRefs(["refs/meta/trust/", "refs/hub/"]));
+      }),
+    );
+
+    assert.ok(refs.includes("refs/meta/trust/log"), refs.join("\n"));
+    assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
   });
 
   it("still shows them to a pusher, who has to know what it is replacing", async () => {

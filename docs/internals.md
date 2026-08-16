@@ -329,11 +329,18 @@ commit without holding more than one file in memory.
 
 ### Auth
 
-The deployed Worker always enforces scoped read/write tokens: `alchemy deploy`
-reads `GIT_AUTH_SECRET` from the environment, binds it as a secret, and fails
-the deploy if it is missing. The node host is open by default — pass
-`serve({ verify })` to enforce. `git` presents the token as
-`http://<token>@host/repo`.
+There is no server secret and no deploy binding to set. A repository's
+authority is its own: `refs/meta/trust/genesis` names the root keys,
+`refs/meta/trust/log` records every grant and revocation, and both hosts read
+the same membership state to decide what a request may do. A repository with no
+genesis is a plain git repository and is served as one.
+
+Clients present one of two things. A _delegated credential_ is a short-lived
+token the holder signs with their own SSH key and `git` carries as
+`http://<credential>@host/repo` — `chr33s-git credential` mints it, and it can
+never carry more than the person running it already had. A _signed envelope_ is
+the native path: the server issues a nonce, the client signs the operation and
+the refs it is moving, and the signature is checked against the same log.
 
 ## Deliberately not built
 

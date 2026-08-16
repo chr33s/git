@@ -164,18 +164,26 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   trust: TrustProjection,
   pr: string,
 ) {
-  const { events, parents, conflicts } = yield* Event.entries(pr);
+  const { events, parents } = yield* Event.entries(pr);
+  const rejected: Rejected[] = [];
 
-  // Two commits claiming one event id is an integrity conflict — a forgery or
-  // a corrupt replica — and `entries` drops the later one to keep one
-  // duplicate from refusing every projection. Dropped silently, it would be
-  // invisible to every consumer, so it arrives here as a rejection: the same
-  // channel `hub members` and the API already surface, and the only place an
-  // operator would think to look.
-  const rejected: Rejected[] = conflicts.map((conflict) => ({
-    commit: conflict.commits[1],
-    reason: `event ${conflict.id} is also claimed by ${conflict.commits[0]}`,
-  }));
+  /**
+   * Which commit holds each event id, once it has earned the claim.
+   *
+   * Two commits claiming one id is a forgery or a corrupt replica, and the
+   * question is which one to believe. Deciding it in `Event.entries` — before
+   * any signature was checked — meant deciding it by commit order, whose
+   * tie-break is the oid, which anybody who can write a hub ref can grind: a
+   * member holding only `hub.comment` could re-use an approval's id, sort
+   * first, and push the real approval out of the projection, taking a merge's
+   * required approval with it.
+   *
+   * So the claim is recorded below, after `validate` and `authorize` have both
+   * passed. An impostor without the capability the event type needs is refused
+   * on its own merits and never reaches the map, and a second claim from
+   * somebody who *does* hold it is refused as the duplicate it is.
+   */
+  const claimed = new Map<string, Oid>();
 
   // Ancestry over the *whole* DAG, join commits and all. Building it from the
   // payload-carrying events alone would cut every chain at the join where two
@@ -236,6 +244,16 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       rejected.push({ commit: entry.commit, reason: authorized.reason });
       continue;
     }
+
+    const previous = claimed.get(payload.id);
+    if (previous !== undefined) {
+      rejected.push({
+        commit: entry.commit,
+        reason: `event ${payload.id} is already claimed by ${previous}`,
+      });
+      continue;
+    }
+    claimed.set(payload.id, entry.commit);
 
     const signer = authorized.principal.fingerprint;
     const issued = new Date(payload.issuedAt);

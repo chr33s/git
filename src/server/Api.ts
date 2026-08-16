@@ -149,17 +149,6 @@ const FileWire = Schema.Struct({
   mode: Schema.optional(Schema.String),
 });
 
-/**
- * One ref change, judged the way a push would be.
- *
- * The JSON API is a second door into the same repository, and a rule that
- * only the protocol enforces is a rule with a way around it. Refusals come
- * back as `Invalid`, which this surface already renders with its reason.
- */
-/**
- * The pre-check for verbs that compute the ref's new value while doing the
- * work. `gateOne` is for the ones handed a value up front.
- */
 /** A branch name as a ref, for the payloads that accept either spelling. */
 const refNameOf = (value: string): string =>
   value.startsWith("refs/") ? value : `refs/heads/${value}`;
@@ -1230,11 +1219,23 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("tagRemove", ({ params }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        yield* gateOne({ name: `refs/tags/${params.name}`, value: null });
-        const deleted = yield* repository
-          .deleteTag(params.name)
-          .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        return { deleted };
+        // Applied under the value it was judged against, like every other
+        // gated write: `deleteTag` takes a name and nothing else, so a tag
+        // re-pointed between the decision and the delete would be removed at
+        // a value the policy boundary never saw. `receive` is the delete that
+        // carries a compare-and-swap.
+        const judged = yield* gateOne({ name: `refs/tags/${params.name}`, value: null });
+        const results = yield* repository
+          .receive([judged])
+          .pipe(Effect.catchTags({ StorageFailure: Effect.die, HookRejected: Effect.die }));
+        const outcome = results.at(0);
+        if (outcome !== undefined && !outcome.ok) {
+          return yield* new Invalid({
+            field: "name",
+            reason: outcome.reason ?? `refs/tags/${params.name} moved while it was being deleted`,
+          });
+        }
+        return { deleted: outcome?.from !== null };
       }),
     )
     .handle("fsck", () =>
@@ -1252,11 +1253,21 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("branchRemove", ({ params }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        yield* gateOne({ name: `refs/heads/${params.name}`, value: null });
-        const deleted = yield* repository
-          .deleteRef(`refs/heads/${params.name}`)
-          .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        return { deleted };
+        // Under the judged value, for the reason `tagRemove` gives: a branch
+        // that moved between the decision and the delete would otherwise lose
+        // a push the boundary never judged.
+        const judged = yield* gateOne({ name: `refs/heads/${params.name}`, value: null });
+        const results = yield* repository
+          .receive([judged])
+          .pipe(Effect.catchTags({ StorageFailure: Effect.die, HookRejected: Effect.die }));
+        const outcome = results.at(0);
+        if (outcome !== undefined && !outcome.ok) {
+          return yield* new Invalid({
+            field: "name",
+            reason: outcome.reason ?? `refs/heads/${params.name} moved while it was being deleted`,
+          });
+        }
+        return { deleted: outcome?.from !== null };
       }),
     )
     .handle("reset", ({ payload }) =>
