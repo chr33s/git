@@ -49,6 +49,21 @@ export interface PackSource {
   readonly read: (offset: number, length: number) => Promise<Uint8Array>;
 }
 
+/**
+ * How to inflate one object's bytes.
+ *
+ * A seam, because the portable decoder in `Inflate.ts` is the only one a
+ * browser can have and it is 52x slower than the platform's own: reading a
+ * packed repository spent a third of its CPU there. `Inflate.zlib.ts` is what
+ * node and workerd pass; nothing passed means the portable one, which is what
+ * the browser and the tests get.
+ *
+ * The contract is narrower than `Inflate.ts`'s: decode one zlib stream from
+ * the front of the source, and no promise about reporting where it ended.
+ * That is what lets a native decompressor satisfy it — see `Inflate.zlib.ts`.
+ */
+export type PackInflate = (source: ByteSource, limit?: number) => Promise<Uint8Array>;
+
 /** A pack in memory, for tests and for backends whose packs are small. */
 export const bufferSource = (bytes: Uint8Array): PackSource => ({
   size: bytes.length,
@@ -150,6 +165,7 @@ export const readAt = async (
   offset: number,
   resolveBase: (oid: Oid, depth: number) => Promise<RawObject | null>,
   depth = 0,
+  decode: PackInflate = inflate,
 ): Promise<RawObject> => {
   // A delta chain is bounded in every pack git produces; an unbounded one is
   // a cycle, and following it would hang rather than fail.
@@ -165,7 +181,7 @@ export const readAt = async (
     // does: for a full object the size is checked below, but a delta's
     // never was, so a stream that expands past every available byte had
     // nothing to stop it here.
-    data = await inflate(
+    data = await decode(
       windowed(source, offset + window.length, window.subarray(header.length)),
       header.size + 1,
     );
@@ -180,7 +196,7 @@ export const readAt = async (
     // out instead of failing as a corrupt pack.
     const base =
       header.baseOffset !== undefined
-        ? await readAt(source, header.baseOffset, resolveBase, depth + 1)
+        ? await readAt(source, header.baseOffset, resolveBase, depth + 1, decode)
         : await resolveBase(header.baseOid!, depth + 1);
     if (base === null) throw corrupt(`delta base ${header.baseOid} is nowhere`, offset);
 

@@ -13,6 +13,9 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
 import { gitIn, hasGit } from "../testing/Git.ts";
+import { deflateSync } from "node:zlib";
+import { type ByteSource, InflateError, inflate as portableInflate } from "./Inflate.ts";
+import { inflate as zlibInflate } from "./Inflate.zlib.ts";
 import { parsePackIndex } from "./PackIndex.ts";
 import { bufferSource, type PackSource, readAt } from "./PackFile.ts";
 import { Result } from "effect";
@@ -160,5 +163,99 @@ describe.skipIf(!hasGit)("PackFile", () => {
     await assert.rejects(() => readAt(source, packBytes.length + 1, noBases));
     // Into the trailer, which is a hash rather than an object header.
     await assert.rejects(() => readAt(source, packBytes.length - 10, noBases));
+  });
+
+  it("decodes every object identically on the platform's own zlib", async () => {
+    const parsed = parsePackIndex(indexBytes);
+    assert.ok(Result.isSuccess(parsed));
+    const source = bufferSource(packBytes);
+
+    // The seam only pays for itself if the two decoders are the same
+    // function: this pack has delta chains in it, so the comparison covers
+    // reconstructed objects as well as whole ones.
+    for (const entry of parsed.success) {
+      const portable = await readAt(source, entry.offset, noBases, 0, portableInflate);
+      const native = await readAt(source, entry.offset, noBases, 0, zlibInflate);
+      assert.equal(native.type, portable.type, `type of ${entry.oid}`);
+      assert.deepEqual(native.data, portable.data, `bytes of ${entry.oid}`);
+    }
+  });
+});
+
+/**
+ * The decoder itself, away from any pack.
+ *
+ * `readAt` never asks where a stream ended, which is what lets this one be
+ * native — but it does hand over a source that yields whatever size it likes,
+ * and the answers for "not yet" and "never" have to stay apart.
+ */
+describe("the zlib-backed pack inflate", () => {
+  /** A source that yields `size` bytes at a time, as a windowed pack does. */
+  const chunked = (bytes: Uint8Array, size: number): ByteSource => {
+    let at = 0;
+    const pending: Uint8Array[] = [];
+    return {
+      next: () => {
+        const held = pending.shift();
+        if (held !== undefined) return Promise.resolve(held);
+        if (at >= bytes.length) return Promise.resolve(null);
+        const chunk = bytes.subarray(at, at + size);
+        at += chunk.length;
+        return Promise.resolve(chunk);
+      },
+      pushBack: (rest) => {
+        if (rest.length > 0) pending.unshift(rest);
+      },
+    };
+  };
+
+  const payload = new TextEncoder().encode("pack payload ".repeat(4000));
+  const stream = new Uint8Array(deflateSync(payload));
+
+  it("reassembles a stream that spans many reads", async () => {
+    // 64 bytes at a time is nothing like the real 64 KiB window, which is the
+    // point: an object bigger than one read is the case that has to pull
+    // again, and the pulls grow rather than crawling one at a time.
+    assert.deepEqual(await zlibInflate(chunked(stream, 64)), payload);
+    assert.deepEqual(await zlibInflate(chunked(stream, 1)), payload);
+  });
+
+  it("ignores whatever follows the stream, as the next object does", async () => {
+    const trailing = new Uint8Array(stream.length + 5000);
+    trailing.set(stream, 0);
+    trailing.fill(0xaa, stream.length);
+    assert.deepEqual(await zlibInflate(chunked(trailing, 64)), payload);
+  });
+
+  it("tells a stream that has not arrived from one that never will", async () => {
+    // Truncated: zlib says the same thing it says for "read me more", so the
+    // difference has to come from the source running out.
+    await assert.rejects(
+      () => zlibInflate(chunked(stream.subarray(0, stream.length - 40), 64)),
+      InflateError,
+    );
+
+    const corrupt = Uint8Array.from(stream);
+    corrupt[20] = corrupt[20]! ^ 0xff;
+    await assert.rejects(() => zlibInflate(chunked(corrupt, 4096)), InflateError);
+
+    await assert.rejects(
+      () => zlibInflate(chunked(new Uint8Array([0x78, 0x01, 0x00]), 64)),
+      InflateError,
+    );
+  });
+
+  it("refuses to inflate past the caller's limit", async () => {
+    // The bound `readAt` puts on a delta, whose expanded size the header
+    // declares and nothing else checks.
+    await assert.rejects(() => zlibInflate(chunked(stream, 4096), 100), InflateError);
+    assert.deepEqual(await zlibInflate(chunked(stream, 4096), payload.length), payload);
+  });
+
+  it("agrees with the portable decoder", async () => {
+    assert.deepEqual(
+      await zlibInflate(chunked(stream, 97)),
+      await portableInflate(chunked(stream, 97)),
+    );
   });
 });

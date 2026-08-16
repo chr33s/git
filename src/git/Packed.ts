@@ -19,7 +19,7 @@
 import { Context, Effect, Layer, Stream } from "effect";
 
 import { ObjectNotFound, StorageFailure } from "./Error.ts";
-import { type PackSource, readAt } from "./PackFile.ts";
+import { type PackInflate, type PackSource, readAt } from "./PackFile.ts";
 import { findInPackIndex, parsePackIndex } from "./PackIndex.ts";
 import { ObjectStore, type Oid, type RawObject, tracedObjectStore } from "./Store.ts";
 
@@ -58,6 +58,18 @@ export class PackStore extends Context.Service<
       readonly index: Uint8Array;
     }) => Effect.Effect<void, StorageFailure>;
     readonly delete: (name: string) => Effect.Effect<void, StorageFailure>;
+    /**
+     * How this backend's packs are decompressed, if it knows better than the
+     * portable decoder.
+     *
+     * On the store rather than on each `PackSource` because a repack builds a
+     * pack in memory and verifies it before it is ever a handle, and that
+     * verification reads every object in it — see `Maintenance.ts`. A backend
+     * that leaves this unset gets `Inflate.ts`, which is correct everywhere
+     * and slow: it is a bit-at-a-time Huffman decoder, 52x `node:zlib` on
+     * this repository's own objects.
+     */
+    readonly inflate?: PackInflate;
   }
 >()("git/PackStore") {}
 
@@ -145,6 +157,7 @@ export const packed = (
                 ),
               ),
             depth,
+            packs.inflate,
           ),
         catch: failed("packs.read", located.handle.name),
       });

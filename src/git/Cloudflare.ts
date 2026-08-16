@@ -21,6 +21,7 @@ import { Effect, Layer, Option, Stream } from "effect";
 
 import { ObjectNotFound, StorageFailure } from "./Error.ts";
 import { hashObject } from "./Format.ts";
+import { inflate as nativeInflate } from "./Inflate.zlib.ts";
 import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
   checkHeadTarget,
@@ -170,6 +171,10 @@ export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] =>
   const prefix = `${repo}/pack/`;
 
   return {
+    // workerd carries `node:zlib` under `nodejs_compat`, which this Worker
+    // already needs for `server/Protocol.ts`. Reading a pack object at a
+    // bit at a time is not something to do on request time here either.
+    inflate: nativeInflate,
     list: Effect.tryPromise({
       try: async () => {
         const handles: PackHandle[] = [];

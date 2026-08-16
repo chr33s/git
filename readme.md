@@ -116,11 +116,13 @@ leaves a repository in, and the one that makes both tools read objects out of
 a pack rather than off the loose object path. Clone is a bare clone over local
 smart-HTTP from `chr33s-git serve`, so both clients answer to the same host.
 
-These were measured against a build that also deferred node's `fetch`
-initialization by rewriting `effect/Schema` at bundle time. That was dropped —
-it made the binary a different program from the one the tests run — so the
-current binary is about 19 ms and 7 MiB heavier on every row than the table
-says. `src/cli/sea.build.ts` records the reasoning.
+Two things have moved since these were taken. A build-time rewrite of
+`effect/Schema` that deferred node's `fetch` initialization was dropped — it
+made the binary a different program from the one the tests run — so the current
+binary is about 19 ms and 7 MiB heavier on every row; `src/cli/sea.build.ts`
+records why. And reading objects out of a pack now goes through the platform's
+own zlib rather than the portable decoder, which took roughly 60% off the clone
+row for both clients, since both clone from the same host.
 
 | action            | `git`   | `chr33s-git` | `git` peak RSS | `chr33s-git` peak RSS |
 | ----------------- | ------- | ------------ | -------------- | --------------------- |

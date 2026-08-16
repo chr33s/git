@@ -49,6 +49,7 @@ against. The alias is not a project convention; see
 | `src/git/PackFile.ts`        | random access into a pack at rest, via `PackIndex.ts`'s `.idx` codec |
 | `src/git/Packed.ts`          | `PackStore` port; decorates an `ObjectStore` with packed reads       |
 | `src/git/Inflate.ts`         | pull-based zlib inflate — exact stream boundaries, no `node:*`       |
+| `src/git/Inflate.zlib.ts`    | the same, on `node:zlib`, for reading packs at rest on node/workerd  |
 | `src/git/Diff.ts`            | unified diff, byte-identical to `git diff --no-index`                |
 | `src/git/Merge.ts`           | three-way merge, byte-identical to `git merge-file --diff3`          |
 | `src/git/Index.ts`           | git's own `DIRC` v2 index codec                                      |
@@ -189,6 +190,12 @@ No `node:*` in anything below `host/` or the `*.node.ts` files. Platform
 specifics live in per-platform modules — `Lfs.node.ts` / `Lfs.cloudflare.ts`,
 `Subscribers.node.ts`, `Work.node.ts`, `Remotes.node.ts` — following the same
 naming convention. `Inflate.ts` exists because `node:zlib` does not.
+
+It is also 52x slower than `node:zlib`, so `PackStore` carries an optional
+`inflate` and the two server backends pass `Inflate.zlib.ts`. Only reading a
+pack _at rest_ can take that shortcut: `Pack.ts` reads a pack off the wire,
+where objects are back to back and the decoder has to report where each stream
+ended, and it keeps the portable one everywhere. The browser keeps it for both.
 
 Alchemy's Cloudflare bindings return effects requiring `RuntimeContext`. Do not
 thread it through port signatures: the typechecker will drag it into the CLI

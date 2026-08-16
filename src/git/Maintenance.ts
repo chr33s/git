@@ -323,7 +323,7 @@ const repack = Effect.fn("Maintenance.repack")(function* (
     const unreadable = (cause: unknown) =>
       new StorageFailure({ operation: "repack verify", path: entry.oid, cause });
     const object = yield* Effect.tryPromise({
-      try: () => readAt(source, entry.offset, () => Promise.resolve(null)),
+      try: () => readAt(source, entry.offset, () => Promise.resolve(null), 0, packs.inflate),
       catch: unreadable,
     });
     const actual = yield* hashObject(object);

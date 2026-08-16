@@ -33,6 +33,7 @@ import {
   hashObject,
   parseReflogLine,
 } from "./Format.ts";
+import { inflate as nativeInflate } from "./Inflate.zlib.ts";
 import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
   checkHeadTarget,
@@ -1007,6 +1008,9 @@ export const filePacks = (root: string): PackStore["Service"] => {
 
   return {
     list: handlesIn([directory]),
+    // Node has zlib, and reading a pack is where a repository spends its
+    // time; `Inflate.ts` is the browser's decoder, not this one's.
+    inflate: nativeInflate,
 
     /**
      * The parent's packs, for reads only.
