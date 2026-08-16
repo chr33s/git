@@ -163,11 +163,11 @@ const FileWire = Schema.Struct({
 const refNameOf = (value: string): string =>
   value.startsWith("refs/") ? value : `refs/heads/${value}`;
 
-const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string) {
+const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = false) {
   // Fail closed: a policy that cannot be evaluated refuses the write rather
   // than allowing it. The alternative is a repository whose protection turns
   // itself off the moment its own trust state cannot be read.
-  const refusal = yield* Policy.gateWrite(ref).pipe(
+  const refusal = yield* Policy.gateWrite(ref, rewrites).pipe(
     Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
   );
   if (refusal !== null) return yield* new Invalid({ field: "ref", reason: refusal });
@@ -1320,7 +1320,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
         if (payload.author !== undefined) request.author = signatureFrom(payload.author);
         if (payload.into !== undefined) request.into = payload.into;
-        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into));
+        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into), true);
         return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
     )
@@ -1328,7 +1328,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
         if (payload.into !== undefined) request.into = payload.into;
-        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into));
+        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into), true);
         return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
     )

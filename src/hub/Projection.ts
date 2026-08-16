@@ -189,8 +189,6 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   const threads = new Map<string, Thread>();
   const checks = new Map<string, Check>();
   const redacted = new Set<string>();
-  /** Events whose payload blob is already gone, as opposed to merely tombstoned. */
-  const removed = new Set<string>();
 
   for (const entry of events) {
     const payload = entry.payload;
@@ -198,10 +196,14 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     // A redacted event: the commit and its place in the chain survive, the
     // content does not. Recorded so the projection can say that something was
     // removed here rather than leaving a silent gap.
-    if (payload === null) {
-      if (entry.summary !== null) removed.add(entry.summary.id);
-      continue;
-    }
+    // A redacted event: the commit and its place in the chain survive, the
+    // content does not. It contributes nothing further — with no payload
+    // there is no thread or review to build — and, importantly, it blanks
+    // nothing else. The id in its commit message is unsigned, so treating it
+    // as a tombstone would let anybody with `source.push` blank another
+    // member's review by pushing a junk event that names it. Redactions come
+    // from `event.redacted` payloads, which are signed and capability-checked.
+    if (payload === null) continue;
 
     const invalid = yield* Event.validate(payload, genesis.repoId).pipe(
       Effect.as(null),
@@ -363,7 +365,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   }
 
   const head = headSetter?.head ?? null;
-  const openingRedacted = openedBy !== null && (redacted.has(openedBy) || removed.has(openedBy));
+  const openingRedacted = openedBy !== null && redacted.has(openedBy);
 
   return {
     id: pr,
@@ -383,18 +385,16 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       // comments would leave a redacted review's prose, and a pull request's
       // title and description, readable on every replica that still holds the
       // blob — which is most of them, since the object is deleted locally.
-      body: redacted.has(review.id) || removed.has(review.id) ? "" : review.body,
+      body: redacted.has(review.id) ? "" : review.body,
     })),
     threads: [...threads.values()].map((thread) => ({
       ...thread,
       comments: thread.comments.map((comment) =>
-        redacted.has(comment.id) || removed.has(comment.id)
-          ? { ...comment, body: "", redacted: true }
-          : comment,
+        redacted.has(comment.id) ? { ...comment, body: "", redacted: true } : comment,
       ),
     })),
     checks: [...checks.values()],
-    redacted: new Set([...redacted, ...removed]),
+    redacted,
     rejected,
     at,
   } satisfies PullRequest;

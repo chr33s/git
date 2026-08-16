@@ -417,6 +417,79 @@ describe("Policy", () => {
       assert.match(decision.ok === false ? decision.reason : "", /approved pull request/);
     });
 
+    it("refuses a merge commit that merely names the approved revision", async () => {
+      // A merge's tree is unconstrained, so "has the approved head as a
+      // parent" says nothing at all about what is being landed.
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world(["source.push", "hub.create-pr", "hub.review", "hub.approve"]);
+          const { first, second } = yield* history("refs/heads/main");
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "please",
+            base: "refs/heads/main",
+            head: second,
+            key: where.dev,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: second,
+            decision: "approve",
+            key: where.dev,
+          });
+
+          // Any content at all, with the approved head hung off it as a parent.
+          const blob = yield* repository.writeBlob(new TextEncoder().encode("anything\n"));
+          const tree = yield* repository.writeTree([{ mode: "100644", name: "x.txt", oid: blob }]);
+          const wrapper = yield* repository.commitTree({
+            tree,
+            parents: [first, second],
+            message: "merge\n",
+            author,
+          });
+          return yield* judge(where, { name: "refs/heads/main", value: wrapper }, guarded);
+        }),
+      );
+      assert.equal(decision.ok, false);
+    });
+
+    it("is not blocked by an unapproved duplicate of the same proposal", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "hub.create-pr", "hub.review", "hub.approve"]);
+          const { second } = yield* history("refs/heads/main");
+
+          // Two pull requests for the same revision; only one is approved.
+          const approved = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "approved",
+            base: "refs/heads/main",
+            head: second,
+            key: where.dev,
+          });
+          yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "duplicate",
+            base: "refs/heads/main",
+            head: second,
+            key: where.dev,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr: approved.pr,
+            head: second,
+            decision: "approve",
+            key: where.dev,
+          });
+
+          return yield* judge(where, { name: "refs/heads/main", value: second }, guarded);
+        }),
+      );
+      assert.equal(decision.ok, true, "an unapproved duplicate must not block the approved one");
+    });
+
     it("refuses when a required check has not passed", async () => {
       const decision = await scenario(
         Effect.gen(function* () {

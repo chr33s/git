@@ -318,7 +318,8 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     rules.requireResolvedThreads;
   if (!needsReview) return null;
 
-  const repository = yield* Repository;
+  /** The nearest miss, reported only if nothing else satisfies the rules. */
+  let shortfall: Decision | null = null;
 
   for (const id of yield* Event.pullRequests()) {
     // The base is in the opening event, and reading that is a blob read; the
@@ -335,34 +336,38 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     // otherwise unlock direct pushes to the branch forever.
     if (pullRequest.state !== "open") continue;
 
-    // The tip has to *be* the reviewed revision, or a merge that takes it as
-    // a parent — the commit a merge of this pull request would produce.
-    // Anything further along is a different change wearing its name.
-    const arriving =
-      input.to === pullRequest.head ||
-      (yield* repository.readCommit(input.to).pipe(
-        Effect.map((commit) => commit.parents.includes(pullRequest.head!)),
-        Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
-      ));
-    if (!arriving) continue;
+    // The tip has to *be* the reviewed revision. A merge commit that merely
+    // names it as a parent proves nothing about content — a merge's tree is
+    // unconstrained, so anybody who may push could wrap whatever they liked
+    // around an approved head. Merging goes through the API's merge verb.
+    if (input.to !== pullRequest.head) continue;
 
+    // Why this one did not satisfy the rules, kept rather than returned. Two
+    // pull requests can propose the same revision, and refusing on the first
+    // that falls short would let an unapproved duplicate block the approved
+    // one purely by sorting first.
     if (approvals(pullRequest).length < rules.requiredApprovals) {
-      return refused(
+      shortfall ??= refused(
         input.ref,
         `${id} has ${approvals(pullRequest).length} approvals of its current revision, ` +
           `and ${rules.requiredApprovals} are required`,
       );
+      continue;
     }
     if (!checksPassed(pullRequest, rules.requiredChecks)) {
-      return refused(input.ref, `${id} has not passed ${rules.requiredChecks.join(", ")}`);
+      shortfall ??= refused(input.ref, `${id} has not passed ${rules.requiredChecks.join(", ")}`);
+      continue;
     }
     if (rules.requireResolvedThreads && pullRequest.threads.some((thread) => !thread.resolved)) {
-      return refused(input.ref, `${id} has unresolved review threads`);
+      shortfall ??= refused(input.ref, `${id} has unresolved review threads`);
+      continue;
     }
     return null;
   }
 
-  return refused(input.ref, `${input.ref} may only be moved by an approved pull request`);
+  return (
+    shortfall ?? refused(input.ref, `${input.ref} may only be moved by an approved pull request`)
+  );
 });
 
 /**
@@ -422,7 +427,17 @@ export type PolicyError = Invalid | ObjectNotFound | StorageFailure;
  * all: a protected branch is not, because the only thing that may move one is
  * an approved pull request, and none of these verbs is that.
  */
-export const gateWrite = Effect.fn("Policy.gateWrite")(function* (ref: string) {
+export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
+  ref: string,
+  /**
+   * Whether the verb may rewrite history.
+   *
+   * `rebase` and `cherry-pick` with `into` move a branch somewhere that need
+   * not contain what it held, which is a force push wearing another name — and
+   * the smart-HTTP door charges `source.force-push` for exactly that.
+   */
+  rewrites = false,
+) {
   // These hold whether or not the repository has an identity, because they are
   // what the namespaces mean rather than what a member may do. In particular a
   // repository with no genesis must not acquire one through an API call, or
@@ -441,6 +456,9 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (ref: string) {
 
   if (principal.member === null) return "authentication required to write refs";
   if (!may(principal, "source.push")) return "pushing needs source.push";
+  if (rewrites && !may(principal, "source.force-push")) {
+    return "rewriting a branch needs source.force-push";
+  }
   if (ref === RULES_REF && !may(principal, "policy.write")) {
     return `writing ${RULES_REF} needs policy.write`;
   }
@@ -507,9 +525,19 @@ export const gate = Effect.fn("Policy.gate")(function* (
   // that way would drop every rule below at the moment storage was least
   // trustworthy. `null` means the ref is genuinely absent.
   const stored = yield* readGenesis();
-  const trust = stored === null ? null : yield* project(stored.genesis);
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);
+
+  // The guard folded the log a moment ago to decide who this is, and the fold
+  // is an Ed25519 verification per signature per record. Reusing what it
+  // reached — when it is the same repository's — halves the cost of every
+  // write instead of paying it twice on the hot path.
+  const trust =
+    stored === null
+      ? null
+      : who.projection.repoId === stored.genesis.repoId
+        ? who.projection
+        : yield* project(stored.genesis);
 
   const rules = yield* rulesOf();
   const decisions: Decision[] = [];
