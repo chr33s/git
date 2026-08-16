@@ -9,11 +9,13 @@
  * `Store.contract.ts` and `testing/Git.ts`: it is shared test infrastructure
  * that test files import, not a `*.test.ts` file discovery should collect.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { Effect, Layer } from "effect";
 
 import { formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
+import { concatBytes } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { mintDelegation } from "../server/Auth.ts";
@@ -137,3 +139,62 @@ export const grantMemberUnder = (
   repoId: RepoId,
   capabilities: ReadonlyArray<string>,
 ): Promise<HubFixture> => grantMember(path.join(root, repo), signer, repoId, capabilities);
+
+/**
+ * An OpenSSH private key file, for suites that drive the CLI.
+ *
+ * The CLI reads keys from disk, as a user's `ssh-keygen`-made key would be,
+ * and this project deliberately has no private-key *writer* — the spec tells
+ * users to run `ssh-keygen`, and a second implementation of that format would
+ * be a second thing to keep correct. So the bytes are assembled here, in test
+ * code, where being wrong fails a test rather than a user.
+ */
+export const opensshPrivateKey = (key: PrivateKey, comment: string): string => {
+  const encoder = new TextEncoder();
+  const string = (payload: Uint8Array): Uint8Array => {
+    const out = new Uint8Array(4 + payload.length);
+    new DataView(out.buffer).setUint32(0, payload.length);
+    out.set(payload, 4);
+    return out;
+  };
+  const text = (value: string) => string(encoder.encode(value));
+  const uint32 = (value: number) => {
+    const out = new Uint8Array(4);
+    new DataView(out.buffer).setUint32(0, value);
+    return out;
+  };
+
+  const point = key.publicKey.point;
+  const check = uint32(0x01020304);
+  const unpadded = concatBytes([
+    check,
+    check,
+    text("ssh-ed25519"),
+    string(point),
+    string(concatBytes([key.seed, point])),
+    text(comment),
+  ]);
+  const padding: number[] = [];
+  for (let index = 1; (unpadded.length + padding.length) % 8 !== 0; index++) padding.push(index);
+
+  const body = concatBytes([
+    encoder.encode("openssh-key-v1\0"),
+    text("none"),
+    text("none"),
+    text(""),
+    uint32(1),
+    string(concatBytes([text("ssh-ed25519"), string(point)])),
+    string(concatBytes([unpadded, new Uint8Array(padding)])),
+  ]);
+
+  const base64 = Buffer.from(body).toString("base64");
+  return `-----BEGIN OPENSSH PRIVATE KEY-----\n${(base64.match(/.{1,70}/g) ?? []).join("\n")}\n-----END OPENSSH PRIVATE KEY-----\n`;
+};
+
+/** A keypair on disk, private and public halves, as `ssh-keygen` leaves them. */
+export const writeKeyPair = async (location: string, comment: string): Promise<PrivateKey> => {
+  const key = await Effect.runPromise(generate(comment));
+  await fs.writeFile(location, opensshPrivateKey(key, comment), { mode: 0o600 });
+  await fs.writeFile(`${location}.pub`, `${formatPublicKey(key.publicKey)}\n`);
+  return key;
+};

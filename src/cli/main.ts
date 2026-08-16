@@ -44,6 +44,7 @@ import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
 import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
+import { hubCommand } from "./hub.ts";
 import * as replay from "./replay.ts";
 import {
   cliSignature,
@@ -723,6 +724,7 @@ const git = Command.make("chr33s-git").pipe(
     fsck.pipe(Command.withDescription("Check every object and ref for damage")),
     gc.pipe(Command.withDescription("Drop unreachable objects, optionally repacking")),
     grep.pipe(Command.withDescription("Search a revision's file contents")),
+    hubCommand.pipe(Command.withDescription("Repository identity, membership and trust")),
     history.pipe(Command.withDescription("Commits that changed one path")),
     init.pipe(Command.withDescription("Create an empty bare repository")),
     log.pipe(Command.withDescription("Commit history, newest first")),
