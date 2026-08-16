@@ -1,3 +1,6 @@
+> [!NOTE]
+> [artifacts](https://github.com/chr33s/git/tree/artifacts) branch tracks effect@beta / alchemy@beta rewrite, (self hostable cloudflare Artifacts)
+
 > [!WARNING]  
 > Experimental: API is unstable and not production-ready.
 
@@ -106,31 +109,52 @@ script runs on.
 ## Benchmarks
 
 The single binary against `git` 2.43 on the same machine (Linux x86_64
-container, node 26.7.0). Mean of 5 runs after a warmup; peak RSS is the
-child's `ru_maxrss`. Work-tree and history actions run in a 200-commit,
-200-file repository; clone is a bare clone over local smart-HTTP from
-`chr33s-git serve`.
+container, node 26.7.0). Mean of 9 runs after a warmup; peak RSS is the
+child's own `ru_maxrss` via `wait4`. Work-tree and history actions run in a
+200-commit, 200-file repository, repacked — `git repack -ad`, the state `gc`
+leaves a repository in, and the one that makes both tools read objects out of
+a pack rather than off the loose object path. Clone is a bare clone over local
+smart-HTTP from `chr33s-git serve`, so both clients answer to the same host.
 
-| action            | `git`  | `chr33s-git` | `git` peak RSS | `chr33s-git` peak RSS |
-| ----------------- | ------ | ------------ | -------------- | --------------------- |
-| `--version`       | 1 ms   | 103 ms       | 12 MiB         | 99 MiB                |
-| `init`            | 3 ms   | 103 ms       | 12 MiB         | 99 MiB                |
-| `status`          | 2 ms   | 193 ms       | 12 MiB         | 114 MiB               |
-| `add` (one file)  | 2 ms   | 109 ms       | 13 MiB         | 102 MiB               |
-| `commit`          | 92 ms  | 116 ms       | 26 MiB         | 108 MiB               |
-| `log -n 20`       | 2 ms   | 113 ms       | 13 MiB         | 104 MiB               |
-| `clone` over HTTP | 578 ms | 1244 ms      | 20 MiB         | 191 MiB               |
+These were measured against a build that also deferred node's `fetch`
+initialization by rewriting `effect/Schema` at bundle time. That was dropped —
+it made the binary a different program from the one the tests run — so the
+current binary is about 19 ms and 7 MiB heavier on every row than the table
+says. `src/cli/sea.build.ts` records the reasoning.
 
-`git` wins every row, and the shape of the loss is fixed cost, not algorithm:
-~100 ms of every run is the runtime coming up — ~23 ms of that is node itself
-(a hello-world SEA binary's floor), the rest is effect's module
+| action            | `git`   | `chr33s-git` | `git` peak RSS | `chr33s-git` peak RSS |
+| ----------------- | ------- | ------------ | -------------- | --------------------- |
+| `--version`       | 2 ms    | 97 ms        | 12 MiB         | 64 MiB                |
+| `init`            | 3 ms    | 104 ms       | 12 MiB         | 65 MiB                |
+| `status`          | 3 ms    | 276 ms       | 12 MiB         | 81 MiB                |
+| `add` (one file)  | 3 ms    | 122 ms       | 12 MiB         | 69 MiB                |
+| `commit`          | 94 ms   | 123 ms       | 27 MiB         | 69 MiB                |
+| `log -n 20`       | 2 ms    | 149 ms       | 12 MiB         | 78 MiB                |
+| `clone` over HTTP | 6684 ms | 6628 ms      | 12 MiB         | 161 MiB               |
+
+`git` wins every local row, and the shape of the loss is fixed cost, not
+algorithm: ~97 ms of every run is the runtime coming up — 23 ms of that is
+node itself (a hello-world SEA binary's floor here), the rest is module
 initialization, with parse/compile already paid for by the V8 code cache the
-build embeds. ~95 MiB of the RSS is the node runtime the binary carries. The
-work on top of that floor is 6–90 ms per action (commit adds ~13 ms against
-git's 92 ms total). Clone, the one action that exercises negotiation, pack
-parsing and storage together, comes in at 2.2× git's wall clock and ~10× its
-memory. The binary itself is 143 MiB against git's ~4 MiB, for the same
-reason.
+build embeds. Peak RSS says more about the runtime the binary carries than about the
+CLI: a hello-world SEA measures 76 MiB on the same machine, more than `--version`
+here and within a few MiB of every row but `clone`, so read that column as
+node's allocator with a workload on top rather than as the cost of the work.
+The work on top of that floor is 7–180 ms per action (commit adds ~26 ms
+against git's 94 ms total). The binary itself is 143 MiB against git's ~4 MiB,
+for the same reason.
+
+Clone is the row where the comparison stops being about the client. Both
+clients clone from `chr33s-git serve`, and against a packed repository the
+host — reading every object out of the pack, resolving deltas, building the
+response — costs more than either client does, which is why the two land
+within 1% of each other. Read that row as a measurement of the host, not of
+`git` against `chr33s-git`.
+
+The obvious next knob does not work: `useSnapshot`, which serializes the heap
+after module initialization instead of only the compile cache, cannot build
+this CLI on node 26.7.0 at all — and where it does build, it starts slower
+than the code cache does. `src/cli/sea.build.ts` records why.
 
 What the binary buys instead of speed: one file with zero dependencies, and
 the same TypeScript the Worker, the node host and the browser client run — a

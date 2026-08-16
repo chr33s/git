@@ -70,7 +70,8 @@ against. The alias is not a project convention; see
 | `src/client/Fetch.ts`        | smart-HTTP fetch client: `lsRemote`, clone, incremental fetch        |
 | `src/client/Push.ts`         | smart-HTTP push client                                               |
 | `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`       |
-| `src/cli/main.ts`            | CLI: 29 commands, `npx chr33s-git`                                   |
+| `src/cli/bin.ts`             | `bin`: node's compile cache on, then `main.ts`                       |
+| `src/cli/main.ts`            | CLI: 29 commands, and the `run` both entries call                    |
 | `src/cli/sea.build.ts`       | `npm run build:sea` — the CLI as one node SEA binary (node 26+)      |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag       |
 | `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite            |

@@ -371,3 +371,59 @@ describe("cli", () => {
     }
   });
 });
+
+/**
+ * `bin` is not `main.ts` — it is a stub that turns node's compile cache on
+ * first, which only works if nothing has been compiled yet. A static import
+ * would look identical and cache nothing, so the test is that a cache appears.
+ */
+describe("the bin entry", () => {
+  const bin = path.join(import.meta.dirname, "bin.ts");
+
+  it("runs the CLI", async () => {
+    // Pointed at a temporary cache: the entry's whole job is to write one,
+    // and a test has no business filling the developer's real `~/.cache`.
+    const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "git-cc-"));
+    try {
+      // `NODE_COMPILE_CACHE` stripped as well as `XDG_CACHE_HOME` set: with
+      // it, the stub steps aside and node writes wherever the developer
+      // pointed it, which is not this temporary directory.
+      const { NODE_COMPILE_CACHE: _, ...clean } = process.env;
+      const { stdout } = await execFileAsync("node", [bin, "--version"], {
+        encoding: "utf8",
+        env: { ...clean, XDG_CACHE_HOME: temporary },
+      });
+      assert.match(stdout, /^chr33s-git v/);
+    } finally {
+      await fs.rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  it("fills a compile cache that main.ts alone does not", async () => {
+    const written = async (entry: string): Promise<number> => {
+      const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "git-cc-"));
+      try {
+        // No NODE_COMPILE_CACHE: node would enable the cache itself, and the
+        // stub would prove nothing. `XDG_CACHE_HOME` is where the stub puts
+        // it, deliberately not node's world-writable default.
+        const { NODE_COMPILE_CACHE: _, ...clean } = process.env;
+        await execFileAsync("node", [entry, "--version"], {
+          encoding: "utf8",
+          env: { ...clean, XDG_CACHE_HOME: temporary },
+        });
+        const cache = path.join(temporary, "chr33s-git");
+        const entries = await fs
+          .readdir(cache, { recursive: true, withFileTypes: true })
+          .catch(() => []);
+        return entries.filter((found) => found.isFile()).length;
+      } finally {
+        await fs.rm(temporary, { recursive: true, force: true });
+      }
+    };
+
+    assert.equal(await written(entry), 0, "main.ts is not supposed to cache anything");
+    // That anything was written, not how much: how V8's cache is packed into
+    // files is node's business and has changed between releases.
+    assert.ok((await written(bin)) > 0, "the bin entry cached nothing");
+  });
+});

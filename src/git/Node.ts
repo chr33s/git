@@ -18,7 +18,7 @@
  * is why the port can demand it of every backend instead of leaving it
  * optional.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { deflateSync, inflateSync } from "node:zlib";
@@ -66,20 +66,126 @@ const failure = (operation: string, target: string) => (cause: unknown) =>
  * object. A repository with no siblings — a bare path outside any root — sees
  * an empty directory listing and pays nothing.
  */
-const borrowersOf = (root: string): ReadonlyArray<string> => {
-  const recorded = readLines(path.join(root, "objects", "info", "borrowers"));
-  const mine = path.resolve(root, "objects");
+export const borrowersOf = (root: string): ReadonlyArray<string> => {
+  // Resolved before the dirname is taken: `path.dirname(".")` is `"."`, so a
+  // repository opened by a relative path — which is what `gc .` from inside
+  // one gives — would look for its siblings inside itself. The listing below
+  // survives that by finding nothing; the borrower check does not, because
+  // "not at that path" is exactly the answer that releases a fork's objects.
+  const siblingRoot = path.dirname(path.resolve(root));
+
+  /**
+   * The directory as the filesystem knows it, or as written when it cannot
+   * say.
+   *
+   * `alternates` is written by whoever made the fork — `git clone --shared`
+   * writes the path it was given — so the same object directory reaches here
+   * spelled through a symlink, through `..`, or through a mount point, and
+   * comparing the strings makes a live borrower look like one reading
+   * somewhere else. That is a miss in the sibling scan below and a release in
+   * `collected`, which is a `gc` that deletes what the fork reads.
+   */
+  const canonical = (target: string): string => {
+    try {
+      return realpathSync.native(target);
+    } catch {
+      return path.resolve(target);
+    }
+  };
+
+  const mine = canonical(path.join(root, "objects"));
+
+  /** There, and a directory. Anything else — including "could not look". */
+  const present = (target: string): boolean => {
+    try {
+      return statSync(target).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+
+  /** Whether a repository has an `alternates` file at all — `undefined` where the question could not be put. */
+  const borrows = (repository: string): boolean | undefined => {
+    try {
+      readFileSync(path.join(repository, "objects", "info", "alternates"));
+      return true;
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      return code === "ENOENT" ? false : undefined;
+    }
+  };
+
+  /**
+   * Whether a recorded borrower demonstrably does not borrow.
+   *
+   * Demonstrably, and nothing weaker: a line here is the only thing standing
+   * between `gc` and objects a fork reads through `alternates`, so it is
+   * released on evidence rather than on the absence of evidence. The evidence
+   * is a repository standing at the borrower's name with no `alternates` at
+   * all — reading through nobody, so through nobody transitively either. That
+   * is what a name reused by an unrelated repository looks like, and it is
+   * the whole of what this releases.
+   *
+   * Deliberately not "its alternates name somewhere else": git resolves them
+   * transitively, so somewhere else can still arrive here through a hop this
+   * would have to follow — and following it means trusting every read along
+   * the way, where an unreadable link in the chain reads as "does not borrow"
+   * and collects a live fork's objects.
+   *
+   * Nor is not being at `<siblings>/<name>` evidence. That is also what a
+   * borrower under another layout looks like, and what a mount that is not up
+   * yet looks like. The cost of keeping a line instead is a `gc` this
+   * repository refuses until the fork's own delete is retried, or until
+   * somebody removes the line — recoverable, which the other direction is not.
+   */
+  const collected = (name: string): boolean => {
+    if (name !== path.basename(name) || name === "." || name === "..") return false;
+    const at = path.join(siblingRoot, name);
+    // Bare and not, because `git clone --shared` — the case the recorded list
+    // exists alongside — makes a working tree with its git directory in
+    // `.git`, and asking only the bare spelling answers ENOENT for it.
+    const answers = [borrows(at), borrows(path.join(at, ".git"))];
+    if (answers.some((answer) => answer !== false)) return false;
+    // Neither spelling has one, so nothing is read through from there — but
+    // only where the repository itself is, so that a directory this cannot
+    // look at keeps its line too.
+    return present(at);
+  };
+
+  const recorded = readLines(path.join(root, "objects", "info", "borrowers")).filter(
+    (name) => !collected(name),
+  );
 
   const found = new Set(recorded);
+  const here = canonical(root);
   try {
-    const siblings = path.dirname(root);
+    const siblings = siblingRoot;
     for (const entry of readdirSync(siblings, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+      // A plain file is not a repository, and asking the filesystem again
+      // about one would be a syscall per entry for nothing.
+      if (entry.isFile()) continue;
       const candidate = path.join(siblings, entry.name);
-      if (path.resolve(candidate) === path.resolve(root)) continue;
-      if (alternatesOf(candidate).some((directory) => path.resolve(directory) === mine)) {
-        found.add(entry.name);
-      }
+      // Everything else is asked rather than assumed. `readdir` describes the
+      // entry, so a repository kept elsewhere and linked into place here — an
+      // ordinary way to put one on another disk — reads as "not a directory";
+      // and where the kernel did not fill in the type at all, which is what
+      // XFS without `ftype`, FUSE and some network mounts do, every entry
+      // reads as neither a directory nor a link. Skipping those is a scan
+      // that finds no borrowers at all, and a `gc` that deletes what they
+      // read.
+      if (!entry.isDirectory() && !present(candidate)) continue;
+      // Both spellings again: a `git clone --shared` working tree keeps its
+      // git directory in `.git`, and that is the borrower with nothing on the
+      // lender's side to record it.
+      const borrows = [candidate, path.join(candidate, ".git")].some((repository) =>
+        alternatesOf(repository).some((directory) => canonical(directory) === mine),
+      );
+      // Asked here rather than at the top of the loop, where it was a
+      // `realpath` for every entry in the namespace and this runs once per
+      // sibling on a delete. Only a repository that reads through this store
+      // can be this one under another spelling, and reaching this at all
+      // takes an `alternates` file naming its own objects.
+      if (borrows && canonical(candidate) !== here) found.add(entry.name);
     }
   } catch {
     // No parent directory to read, or no permission: the recorded list is
@@ -303,6 +409,505 @@ const rememberAlternates = (root: string): (() => ReadonlyArray<string>) => {
 };
 
 /**
+ * Open `.pack` descriptors, shared by every pack store in the process.
+ *
+ * A pack read is one `pread(2)`, but it used to be an `open`/`read`/`close`
+ * triple: reading 200 commits out of a packed repository opened the same file
+ * 399 times. Holding the descriptor instead costs one `open` for the whole
+ * walk — worth ~11% of `log -n 200`, and far more to a host answering a clone,
+ * which reads every object in the pack.
+ *
+ * The pool is capped because a host is long-lived and descriptors are not:
+ * one store per repository, each holding its packs open, is a file descriptor
+ * limit waiting to be hit. Past the cap the least recently used file is
+ * retired, and a later read re-opens it.
+ *
+ * Retiring waits for readers. A descriptor closed under an in-flight
+ * `read(2)` is an `EBADF` on a good day, and node makes the sloppier version
+ * fatal: a `FileHandle` collected without an explicit close throws
+ * `ERR_INVALID_STATE` and takes the process with it.
+ */
+const OPEN_PACKS = 64;
+
+interface OpenPack {
+  readonly key: string;
+  readonly file: Promise<fs.FileHandle>;
+  /** Which file this descriptor is on, to notice being handed a new one. */
+  readonly inode: Promise<{ readonly dev: number; readonly ino: number } | null>;
+  /** Reads in flight; a retired file closes when this reaches zero. */
+  readers: number;
+  retired: boolean;
+  /** Resolves once the descriptor is actually closed, not merely retired. */
+  readonly closed: Promise<void>;
+  readonly settle: () => void;
+}
+
+const openPacks = new Map<string, OpenPack>();
+
+/**
+ * Packs that have left the map but whose descriptor is not closed yet.
+ *
+ * "Retired" and "closed" are not the same moment, and callers who are about
+ * to unlink a file need the second one. Without this a pack the cap evicted a
+ * tick ago, or one another caller is already retiring, would answer
+ * `retirePack` instantly while its descriptor was still open — on Windows,
+ * the unlink that follows fails.
+ *
+ * A set of records rather than a map by path: the same pack can have an old
+ * descriptor closing while a new one is already pooled, and a caller that
+ * wants the file closable has to wait for every one of them.
+ */
+interface ClosingPack {
+  readonly key: string;
+  readonly closed: Promise<void>;
+}
+
+const closingPacks = new Set<ClosingPack>();
+
+/** Mark a retired pack as on its way out, until its descriptor settles. */
+const beginClosing = (open: OpenPack): void => {
+  const record: ClosingPack = { key: open.key, closed: open.closed };
+  closingPacks.add(record);
+  void open.closed.then(() => {
+    closingPacks.delete(record);
+    // A descriptor actually gone is a slot actually free — which is not the
+    // same moment as the entry leaving the map.
+    offerSlot();
+  });
+};
+
+/**
+ * Descriptors this process is holding, retired or not.
+ *
+ * The cap is on open files, and a retired pack is still an open file until
+ * its `close` lands. Counting only the map would let a burst admit new opens
+ * faster than the event loop retires old ones, which is the `EMFILE` the
+ * waiting below exists to prevent.
+ */
+const heldPacks = (): number => openPacks.size + closingPacks.size + reservedSlots;
+
+const closePack = async (open: OpenPack): Promise<void> => {
+  try {
+    await (await open.file).close();
+  } catch {
+    // A pack that cannot be closed is a pack that is already gone; the read
+    // that needs it will say so with a better message than this would.
+  } finally {
+    open.settle();
+  }
+};
+
+/**
+ * Retire least-recently-used files until the pool is down to `limit`.
+ *
+ * Only idle ones. Evicting a file with reads in flight sheds the map entry
+ * but not the descriptor, and the next read of that pack opens a second one —
+ * so a host with more hot packs than the cap would hold *more* descriptors
+ * than the cap, not fewer, and thrash back to an open per read. The map is
+ * allowed over its cap instead, by however many reads are in flight, which
+ * is what a `pread` apiece bounds to something small and short-lived.
+ */
+const retirePacks = (limit: number): void => {
+  for (const [key, open] of openPacks) {
+    if (openPacks.size <= limit) return;
+    if (open.readers > 0) continue;
+    openPacks.delete(key);
+    open.retired = true;
+    beginClosing(open);
+    void closePack(open);
+  }
+};
+
+/**
+ * Callers waiting for a descriptor to come free.
+ *
+ * Skipping busy entries is what keeps a read from being closed out from under
+ * — but on its own it turns the cap into a suggestion: a host answering a
+ * hundred repositories at once would open a hundred descriptors, which is how
+ * a process meets `EMFILE`. So a read that needs a new file when every slot is
+ * taken waits here instead, and the next read to finish wakes it. It cannot
+ * deadlock: waking depends only on reads that already hold their descriptor,
+ * and a read is one `pread` that opens nothing further.
+ */
+const packSlot: Array<() => void> = [];
+
+/**
+ * Slots handed to a waiter that has not woken up yet.
+ *
+ * Waking a waiter is a microtask; a read arriving in the meantime runs
+ * synchronously and would take the descriptor the waiter was just given, put
+ * the waiter back at the end of the queue, and — with reads arriving steadily
+ * — leave it there. Counting the handover as held is what makes the queue a
+ * queue rather than a suggestion.
+ */
+let reservedSlots = 0;
+
+/** Wake one waiter, once there is actually room for the file it wants. */
+const offerSlot = (): void => {
+  if (heldPacks() >= OPEN_PACKS) return;
+  const next = packSlot.shift();
+  if (next === undefined) return;
+  reservedSlots += 1;
+  next();
+};
+
+/**
+ * Wait for room for one more descriptor.
+ *
+ * Room for *one more*, not room to be at the cap: evicting down to the cap
+ * leaves a full pool, which is what the caller is already stuck behind.
+ */
+const freeSlot = async (): Promise<boolean> => {
+  retirePacks(OPEN_PACKS - 1);
+  if (heldPacks() < OPEN_PACKS) return false;
+  await new Promise<void>((resolve) => packSlot.push(resolve));
+  retirePacks(OPEN_PACKS - 1);
+  // The reservation stays with the caller — released where the descriptor it
+  // was reserved for is opened, not here. Dropping it on the way out would
+  // leave it free for the length of a microtask, which is all a read arriving
+  // synchronously needs to take it and put this caller back in the queue.
+  return true;
+};
+
+/**
+ * The pool's key for a pack.
+ *
+ * One file has several spellings. A store built on a relative root — which is
+ * what `--root .` gives the CLI — reaches its own packs relatively, while an
+ * alternate is resolved absolute before it is followed; a repository can be
+ * reached through a symlink; and on Windows or macOS the same path differs
+ * only in case. Keyed as they come, one pack takes two descriptors and, worse,
+ * a `delete` retires one spelling and unlinks under the other — which is the
+ * failure `retiringRemove` exists to prevent.
+ *
+ * `realpath.native` is what answers all three, and it is a syscall, so the
+ * answers are kept. The memo is a cache and nothing more: dropped wholesale
+ * once it outgrows the pool it serves.
+ */
+const canonicalPacks = new Map<string, string>();
+const canonicalDirectories = new Map<string, string>();
+
+/**
+ * A bounded memo, least recently used out.
+ *
+ * Clearing it wholesale would put a blocking `realpath` back on the read path
+ * for any working set larger than the bound — the opposite of what the pool
+ * is for — so the hot spellings stay and the cold ones go.
+ */
+const remember = (memo: Map<string, string>, key: string, value: string): string => {
+  // Deleted before it is set: `Map.set` on a key that is already there keeps
+  // its old position, which would make this queue by first insertion and
+  // evict the paths asked for most.
+  memo.delete(key);
+  if (memo.size >= OPEN_PACKS * 16) {
+    const oldest = memo.keys().next();
+    if (oldest.done !== true) memo.delete(oldest.value);
+  }
+  memo.set(key, value);
+  return value;
+};
+
+/** The memo's answer, refreshed as most recently used. */
+const recall = (memo: Map<string, string>, key: string): string | undefined => {
+  const known = memo.get(key);
+  if (known === undefined) return undefined;
+  memo.delete(key);
+  memo.set(key, known);
+  return known;
+};
+
+/**
+ * The best canonical spelling still obtainable for a path that is gone.
+ *
+ * What it resolved to while it was here, and failing that as much of the path
+ * as still resolves: the memo is bounded, and one listing of a large root is
+ * enough to evict an entry between the read that pooled a descriptor and the
+ * retire that should close it. The ancestors carrying the symlinks outlive
+ * the tail — it is the pack that was just unlinked — so walking up arrives at
+ * the same answer `realpath` would have given while it was there. `resolve`
+ * alone, which is where this used to stop, matches no pooled key under a
+ * symlinked or relative root, and a descriptor that matches nothing is one
+ * that never closes.
+ */
+const lastKnown = (memo: Map<string, string>, resolved: string): string => {
+  const known = recall(memo, resolved);
+  if (known !== undefined) return known;
+
+  const missing: string[] = [];
+  let head = resolved;
+  for (;;) {
+    const parent = path.dirname(head);
+    if (parent === head) return resolved;
+    missing.push(path.basename(head));
+    head = parent;
+    try {
+      return path.join(realpathSync.native(head), ...missing.slice().reverse());
+    } catch {
+      // Keep walking up.
+    }
+  }
+};
+
+const packKey = (packPath: string): string => {
+  const resolved = path.resolve(packPath);
+  try {
+    const canonical = realpathSync.native(resolved);
+    // Remembered for when it is gone, not consulted while it is here: a memo
+    // that answers first goes stale the moment anything is relinked, and a
+    // stale key matches no prefix and retires nothing.
+    remember(canonicalPacks, resolved, canonical);
+    return canonical;
+  } catch {
+    return lastKnown(canonicalPacks, resolved);
+  }
+};
+
+/**
+ * The pool's key prefix for everything under a directory.
+ *
+ * Canonical, exactly like the keys — a prefix built with `path.resolve` alone
+ * matches nothing at all under a symlinked or differently-cased root, which
+ * would silently turn every retire and every staleness check into a no-op.
+ *
+ * The answer is remembered because these are asked for after the directory is
+ * gone as much as before: retiring after an unlink is the supported order,
+ * and by then `realpath` has nothing left to resolve.
+ */
+const packPrefix = (directory: string): string => {
+  const resolved = path.resolve(directory);
+  try {
+    return remember(canonicalDirectories, resolved, realpathSync.native(resolved)) + path.sep;
+  } catch {
+    // Gone — and retiring after the unlink is the supported order, so this is
+    // the ordinary path rather than the exceptional one.
+    return lastKnown(canonicalDirectories, resolved) + path.sep;
+  }
+};
+
+/**
+ * Run `use` against a pack's descriptor, opening or reusing as needed.
+ *
+ * `key` is canonical already — `readHandles` resolves each pack once when it
+ * lists them, and a `realpath` per read is exactly the blocking syscall this
+ * pool exists to remove.
+ */
+const withPack = async <A>(key: string, use: (file: fs.FileHandle) => Promise<A>): Promise<A> => {
+  let open = openPacks.get(key);
+  let reserved = false;
+  // A reservation this caller already holds is not something to wait behind.
+  while (open === undefined && heldPacks() - (reserved ? 1 : 0) >= OPEN_PACKS) {
+    // Every slot taken and this pack is not one of them: wait for one rather
+    // than opening past the cap. Re-read afterwards — the pack may have been
+    // pooled by whoever we were waiting on.
+    reserved = (await freeSlot()) || reserved;
+    open = openPacks.get(key);
+  }
+
+  const opening = open === undefined;
+
+  if (open === undefined) {
+    const closed = Promise.withResolvers<void>();
+    const file = fs.open(key, "r");
+    const entry: OpenPack = {
+      key,
+      file,
+      inode: file
+        .then(async (handle) => {
+          const stat = await handle.stat();
+          return { dev: stat.dev, ino: stat.ino };
+        })
+        .catch(() => null),
+      readers: 0,
+      retired: false,
+      closed: closed.promise,
+      settle: closed.resolve,
+    };
+    // A failed open must not be remembered: a pack deleted between the
+    // listing and the read would otherwise replay that rejection to every
+    // later read of the same path, including after a repack writes it back.
+    void entry.file.catch(() => {
+      if (openPacks.get(key) === entry) openPacks.delete(key);
+    });
+    open = entry;
+    openPacks.set(key, entry);
+  } else {
+    // Re-insert to mark it most recently used: a Map iterates in insertion
+    // order, which is the whole LRU.
+    openPacks.delete(key);
+    openPacks.set(key, open);
+  }
+
+  // Claimed before the pool is asked to shrink: an entry with no readers yet
+  // is an entry the cap is free to evict and close, and this one is about to
+  // be read. That is only reachable when everything older is busy, which is
+  // exactly the case that made the pool worth having.
+  open.readers += 1;
+
+  if (reserved) {
+    // Spent on the descriptor just opened, or given back if this caller found
+    // the pack already pooled while it waited.
+    reservedSlots -= 1;
+    if (!opening) offerSlot();
+  }
+
+  try {
+    return await use(await open.file);
+  } finally {
+    open.readers -= 1;
+    if (open.retired && open.readers === 0) void closePack(open);
+    // Idle again: whatever this entry was holding, someone may be waiting for
+    // a slot the cap can now give them — and a waiter needs room for one
+    // more, not merely a pool trimmed back to full.
+    // Only for a waiter: admission already keeps the pool inside its cap, so
+    // trimming *to* the cap would never evict anything. Making room is the
+    // only trim that means something here.
+    if (packSlot.length > 0) retirePacks(OPEN_PACKS - 1);
+    offerSlot();
+  }
+};
+
+/**
+ * Retire one pack, for when the file itself is going away.
+ *
+ * A descriptor held against an unlinked file keeps its blocks allocated, so a
+ * `gc` that repacks a gigabyte would free nothing until the process exited.
+ *
+ * This waits for the descriptor to be closed, not merely marked: a read in
+ * flight defers the close, and callers use this to make the file closable
+ * before they unlink it — which on Windows is the difference between a
+ * removed pack and a failed `gc`.
+ */
+const retirePack = async (packPath: string): Promise<void> => {
+  const key = packKey(packPath);
+  // Descriptors already on their way out count, and there can be more than
+  // one: gone from the map is not gone from the process, and a pack the cap
+  // evicted can have been re-pooled since by a read that arrived after.
+  const settling = [...closingPacks]
+    .filter((record) => record.key === key)
+    .map((record) => record.closed);
+
+  const open = openPacks.get(key);
+  if (open !== undefined) {
+    openPacks.delete(key);
+    open.retired = true;
+    beginClosing(open);
+    settling.push(open.readers === 0 ? closePack(open) : open.closed);
+  }
+
+  await Promise.all(settling);
+};
+
+/**
+ * Retire every pack under a repository, for when the directory itself goes.
+ *
+ * `packs.delete` is the hook for a pack that is named; this is the one for a
+ * recursive `fs.rm`, which unlinks packs without naming any of them. Without
+ * it a dropped repository leaves the pool holding descriptors on files that
+ * no longer have a name, and their blocks with them, for as long as the host
+ * runs — the same leak `delete` avoids, arrived at from the other direction.
+ */
+/** Whether a pooled key names nothing on disk — `ENOENT` and nothing weaker. */
+const gone = (key: string): boolean => {
+  try {
+    statSync(key);
+    return false;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "ENOENT";
+  }
+};
+
+export const retirePacksUnder = async (root: string): Promise<void> => {
+  // Two prefixes because `objects` can be a symlink out of the tree — an old
+  // and still-supported way to put a repository's objects on another disk.
+  // Canonicalizing only the root would then match none of its packs, and the
+  // retire would quietly do nothing.
+  const prefixes = [packPrefix(root), packPrefix(path.join(root, "objects", "pack"))];
+  const keys = new Set([...openPacks.keys(), ...[...closingPacks].map((it) => it.key)]);
+  await Promise.all(
+    [...keys]
+      // Or a key whose file is not there any more, whatever it is called. The
+      // prefixes are reconstructed after the fact, and once the memo that
+      // remembers what a path resolved to has evicted its entry, a symlink
+      // removed on the way down cannot be resolved again — the prefix is then
+      // a spelling no pooled key has, and the descriptor on a deleted pack
+      // would be held for the life of the process. A key that no longer names
+      // a file cannot be wanted by a later read, and `retirePack` still waits
+      // for the readers it has.
+      .filter((key) => prefixes.some((prefix) => key.startsWith(prefix)) || gone(key))
+      .map((key) => retirePack(key)),
+  );
+};
+
+/**
+ * Remove something this process may be holding a pack open under.
+ *
+ * Three steps because two are not enough. The retire before makes the file
+ * closable, which POSIX does not need and Windows does — it will not unlink a
+ * file this process still has open. But a read in flight can re-pool the pack
+ * between that retire and the remove, so the remove can still fail there;
+ * hence the second attempt, and the retire after, which collects whatever was
+ * re-pooled in the window on either platform.
+ */
+const retiringRemove = async (
+  retire: () => Promise<void>,
+  remove: () => Promise<void>,
+): Promise<void> => {
+  await retire();
+  try {
+    await remove();
+  } catch {
+    await retire();
+    await remove();
+  } finally {
+    await retire();
+  }
+};
+
+/** `retiringRemove` for a whole repository, for callers outside this file. */
+export const retirePacksAndRemove = (root: string, remove: () => Promise<void>): Promise<void> =>
+  retiringRemove(() => retirePacksUnder(root), remove);
+
+/**
+ * Retire pooled packs in these directories that a fresh listing no longer
+ * names — the repack that happened somewhere else.
+ *
+ * `delete` covers a pack this process removes. Nothing covers `git repack -ad`
+ * in another process, or another `chr33s-git gc`, which is a supported thing
+ * to do to a repository this host is serving: the listing is re-read when the
+ * directory's mtime changes, but the pool would go on holding the old pack's
+ * descriptor, and the space the repack was asked to reclaim would never come
+ * back. The LRU is no answer — it only turns over when a new pack is opened,
+ * which a host with a handful of repositories never reaches.
+ */
+const retireVanished = async (
+  directories: ReadonlyArray<string>,
+  live: ReadonlyMap<string, { readonly dev: number; readonly ino: number }>,
+): Promise<void> => {
+  const prefixes = directories.map((directory) => packPrefix(directory));
+  const mine = [...openPacks.keys()].filter((key) =>
+    prefixes.some((prefix) => key.startsWith(prefix)),
+  );
+
+  const stale: string[] = [];
+  for (const key of mine) {
+    const current = live.get(key);
+    if (current === undefined) {
+      stale.push(key);
+      continue;
+    }
+    // Same name, different file. A pack restored from a backup, or moved into
+    // place by anything that is not this process, leaves the descriptor on an
+    // unlinked inode while the freshly read `.idx` describes the new one —
+    // offsets into the wrong bytes. Open-per-read could not get this wrong,
+    // so the pool has to check.
+    const inode = await openPacks.get(key)?.inode;
+    if (inode != null && (inode.dev !== current.dev || inode.ino !== current.ino)) stale.push(key);
+  }
+
+  await Promise.all(stale.map((key) => retirePack(key)));
+};
+
+/**
  * Packs on disk, in git's own `objects/pack` layout.
  *
  * A `.pack` is read through `read(2)` at an offset rather than loaded, which
@@ -361,32 +966,42 @@ export const filePacks = (root: string): PackStore["Service"] => {
       }
 
       const handles: PackHandle[] = [];
+      const live = new Map<string, { readonly dev: number; readonly ino: number }>();
       for (const { directory: packDirectory, name } of found) {
         const packPath = path.join(packDirectory, `${name}.pack`);
         // An `.idx` without its `.pack` is a half-finished write, not a
         // pack; skipping it beats failing every read in the repository.
+        // Counting it as live would also keep a descriptor on a pack that has
+        // already been unlinked out from under a leftover index.
         if (!existsSync(packPath)) continue;
 
         const index = new Uint8Array(await fs.readFile(path.join(packDirectory, `${name}.idx`)));
-        const size = (await fs.stat(packPath)).size;
+        const stat = await fs.stat(packPath);
+        const size = stat.size;
+        // Canonicalized once, here, and handed to every read of this pack:
+        // `realpath` is a blocking syscall and a listing is a far better
+        // place for it than the read path the pool exists to keep cheap.
+        const canonical = packKey(packPath);
+        live.set(canonical, { dev: stat.dev, ino: stat.ino });
         handles.push({
           name,
           index,
           source: {
             size,
-            read: async (offset, length) => {
-              const handle = await fs.open(packPath, "r");
-              try {
+            read: async (offset, length) =>
+              await withPack(canonical, async (file) => {
                 const buffer = Buffer.alloc(Math.max(0, Math.min(length, size - offset)));
-                await handle.read(buffer, 0, buffer.length, offset);
+                await file.read(buffer, 0, buffer.length, offset);
                 return new Uint8Array(buffer);
-              } finally {
-                await handle.close();
-              }
-            },
+              }),
           },
         });
       }
+      // This listing is the only moment the process learns that a pack it may
+      // be holding open is gone — a repack in another process leaves no other
+      // trace here.
+      await retireVanished(directories, live);
+
       return handles;
     })();
 
@@ -422,10 +1037,29 @@ export const filePacks = (root: string): PackStore["Service"] => {
     delete: (name) =>
       Effect.tryPromise({
         try: async () => {
-          // Index first: it is what makes the pack visible, so removing it
-          // first means a reader never sees an index whose pack is gone.
-          await fs.rm(path.join(directory, `${name}.idx`), { force: true });
-          await fs.rm(path.join(directory, `${name}.pack`), { force: true });
+          // The pack first, because of how each half fails. A listing is
+          // built from `.idx` names, so a `.pack` left behind by a removal
+          // that could not finish — Windows, a pack still open elsewhere — is
+          // a file nothing can name again, and its space never comes back:
+          // the whole pack, stranded. The other way round strands an `.idx`,
+          // which is the small half and the harmless one — every listing
+          // skips it, since this writer lands the pack first and an index
+          // without one indexes nothing.
+          //
+          // Neither is collected on its own. `gc` deletes the packs a repack
+          // supersedes, which it learns from `packs.list`, and a stray `.idx`
+          // is not in that list any more than a stray `.pack` is. What this
+          // ordering buys is which file is left, not that it is cleaned up.
+          const packPath = path.join(directory, `${name}.pack`);
+          await retiringRemove(
+            () => retirePack(packPath),
+            () => fs.rm(packPath, { force: true }),
+          );
+          // Forgiven, deliberately: with the pack gone this index names
+          // nothing, every listing skips it, and failing here would fail a
+          // `gc` that has already written its new pack — leaving the objects
+          // it superseded behind for the sake of a file that costs kilobytes.
+          await fs.rm(path.join(directory, `${name}.idx`), { force: true }).catch(() => undefined);
         },
         catch: failure("packs.delete", directory),
       }),
