@@ -181,6 +181,8 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   let mergeCommit: Oid | null = null;
   let at = new Date(0);
   let headSetter: { readonly commit: Oid; readonly id: string; readonly head: Oid } | null = null;
+  /** The `pr.opened` event, so a tombstone over it can blank what it said. */
+  let openedBy: string | null = null;
 
   const reviews = new Map<string, Review>();
   const dismissed = new Set<string>();
@@ -236,6 +238,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         description = payload.description;
         base = payload.base;
         author ??= signer;
+        openedBy = payload.id;
         const head = Event.unqualify(payload.head);
         if (
           head !== null &&
@@ -360,11 +363,12 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   }
 
   const head = headSetter?.head ?? null;
+  const openingRedacted = openedBy !== null && (redacted.has(openedBy) || removed.has(openedBy));
 
   return {
     id: pr,
-    title,
-    description,
+    title: openingRedacted ? "" : title,
+    description: openingRedacted ? "" : description,
     base,
     head,
     state,
@@ -375,6 +379,11 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       dismissed: dismissed.has(review.id),
       // Stale, not gone: the statement stays true about the revision it named.
       stale: head === null || review.head !== head,
+      // A tombstone removes content wherever the content is. Blanking only
+      // comments would leave a redacted review's prose, and a pull request's
+      // title and description, readable on every replica that still holds the
+      // blob — which is most of them, since the object is deleted locally.
+      body: redacted.has(review.id) || removed.has(review.id) ? "" : review.body,
     })),
     threads: [...threads.values()].map((thread) => ({
       ...thread,
@@ -399,10 +408,17 @@ export const project = Effect.fn("hub.Projection.project")(function* (
  * has been withdrawn. Both are excluded here so that no caller has to remember
  * to exclude them.
  */
-export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> =>
-  pullRequest.reviews.filter(
-    (review) => review.decision === "approve" && !review.stale && !review.dismissed,
-  );
+export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
+  // One per approver, not one per event. Counting events would let a single
+  // member satisfy "two approvals required" by submitting two of them.
+  const byAuthor = new Map<Fingerprint, Review>();
+  for (const review of pullRequest.reviews) {
+    if (review.decision !== "approve" || review.stale || review.dismissed) continue;
+    const existing = byAuthor.get(review.author);
+    if (existing === undefined || existing.at < review.at) byAuthor.set(review.author, review);
+  }
+  return [...byAuthor.values()];
+};
 
 /** Whether every named check has succeeded against the current head. */
 export const checksPassed = (

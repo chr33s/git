@@ -471,7 +471,13 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
 }) {
   const now = input.now ?? new Date();
 
-  const stored = yield* readGenesis().pipe(Effect.orElseSucceed(() => null));
+  // Not swallowed: `readGenesis` already answers `null` for a repository that
+  // has none, so a *failure* here means the repository's identity could not be
+  // read at all. Treating that as "no members" would open a private repository
+  // to anybody the moment its storage hiccuped.
+  const stored = yield* readGenesis().pipe(
+    Effect.catchTag("Invalid", (error) => Effect.fail(error)),
+  );
   if (stored === null) {
     // Not hub-enabled: no identity, no membership, nothing to check against.
     return {

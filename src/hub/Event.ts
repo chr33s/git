@@ -464,7 +464,11 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   const head = yield* repository.resolve(refOf(pr));
   if (head === null) return { events: emptyEvents, parents: emptyParents, conflicts: [] };
 
-  const parents = yield* Dag.reachable(head);
+  // Bounded to the hub's own commits. A pull request's history is written
+  // here and nowhere else, so a commit with a parent from the source history
+  // is not a longer event chain — it is an attempt to make every projection
+  // walk the whole repository, with a quadratic ancestor map on top.
+  const parents = yield* Dag.reachable(head, null, (commit) => isHubCommit(commit));
   const ordered = Dag.topological(parents);
 
   const events: Entry[] = [];
@@ -544,6 +548,24 @@ export interface Conflict {
   readonly id: string;
   readonly commits: ReadonlyArray<Oid>;
 }
+
+/**
+ * Whether a commit belongs to a pull request's history.
+ *
+ * An event carries `event.json`; a join carries an empty tree. Anything else
+ * is a commit from somewhere that is not the hub, and the walk stops there.
+ */
+const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
+  const repository = yield* Repository;
+  const info = yield* repository
+    .readCommit(commit)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  if (info === null) return false;
+  if ((yield* repository.findPath(info.tree, `${RECORD}.json`)) !== null) return true;
+  return (
+    (yield* repository.readTree(info.tree).pipe(Effect.orElseSucceed(() => null)))?.length === 0
+  );
+});
 
 const emptyParents: Dag.Parents = new Map();
 const emptyEvents: ReadonlyArray<Entry> = [];

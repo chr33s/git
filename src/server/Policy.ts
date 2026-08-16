@@ -187,8 +187,17 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   }
 
   // Not hub-enabled: no genesis, no members, and nothing here to enforce
-  // beyond what the namespaces themselves mean.
+  // beyond what the namespaces themselves mean — with one exception. A
+  // repository with no identity must not acquire one by push: whoever got
+  // there first would own it, and the owner would be locked out of their own
+  // repository by a stranger. Identity is established locally, by `hub init`.
   if (input.genesis === null || input.trust === null) {
+    if (update.name.startsWith("refs/meta/trust/")) {
+      return refused(
+        update.name,
+        "a repository's identity is established by `hub init`, not by a push",
+      );
+    }
     return yield* namespaceRules(update, current);
   }
 
@@ -395,7 +404,7 @@ export type PolicyError = Invalid | ObjectNotFound | StorageFailure;
  * an approved pull request, and none of these verbs is that.
  */
 export const gateWrite = Effect.fn("Policy.gateWrite")(function* (ref: string) {
-  const stored = yield* readGenesis().pipe(Effect.orElseSucceed(() => null));
+  const stored = yield* readGenesis();
   if (stored === null) return null;
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
@@ -459,7 +468,10 @@ export const gate = Effect.fn("Policy.gate")(function* (
   updates: ReadonlyArray<RefUpdate>,
   atomic: boolean,
 ) {
-  const stored = yield* readGenesis().pipe(Effect.orElseSucceed(() => null));
+  // A failure to read identity is not "this repository has none": treating it
+  // that way would drop every rule below at the moment storage was least
+  // trustworthy. `null` means the ref is genuinely absent.
+  const stored = yield* readGenesis();
   const trust = stored === null ? null : yield* project(stored.genesis);
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);

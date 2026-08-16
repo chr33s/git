@@ -136,8 +136,12 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
     const member = input.projection.members.get(signer) ?? input.projection.former.get(signer);
     if (member === undefined) continue;
 
-    const when = made?.at ?? new Date();
-    if (member.expiresAt !== null && member.expiresAt.getTime() <= when.getTime()) {
+    // Expiry is judged against the clock, never against `made.at`: that field
+    // is the signer's own `issuedAt`, and backdating it would revive an
+    // expired grant. The cost is that an expired member's past events stop
+    // counting, which is the conservative reading and the one an attacker
+    // cannot arrange.
+    if (member.expiresAt !== null && member.expiresAt.getTime() <= Date.now()) {
       closest = `${signer}'s membership expired on ${member.expiresAt.toISOString()}`;
       continue;
     }

@@ -1642,6 +1642,8 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     .handle("fetch", ({ payload }) =>
       Effect.gen(function* () {
         const target = yield* remoteFor(payload);
+        // A fetch writes this repository's tracking refs, so it is a write.
+        yield* gateWrite(`refs/remotes/${target.name}/*`);
         // `fetchFrom` declares both options as possibly-undefined and treats an
         // absent value and an undefined one the same way.
         const fetched = yield* fetchFrom({
@@ -1682,6 +1684,10 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     .handle("pull", ({ payload }) =>
       Effect.gen(function* () {
         const target = yield* remoteFor(payload);
+        // A pull moves a local branch, which is the same transition a push
+        // makes and has to meet the same rules — a protected branch is not
+        // less protected because the commits arrived over a remote.
+        yield* gateWrite(refNameOf(payload.branch));
         // `pull` declares `depth` as possibly-undefined and treats an absent
         // value and an undefined one the same way.
         return yield* pull({ target, branch: payload.branch, depth: payload.depth });

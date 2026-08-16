@@ -329,6 +329,14 @@ export const writeGenesis = Effect.fn("Genesis.write")(function* (
  * an ordinary answer — every stock git repository gives it, and the client
  * asks precisely to find out.
  */
+/**
+ * Read the genesis, distinguishing "there is none" from "we could not tell".
+ *
+ * `null` means the ref does not exist — an ordinary git repository, and an
+ * ordinary answer. Every other outcome is a failure, and callers must treat it
+ * as one: a storage fault read as "not hub-enabled" would serve a private
+ * repository to anybody, which is the worst possible way to fail.
+ */
 export const readGenesis = Effect.fn("Genesis.read")(function* () {
   const repository = yield* Repository;
 

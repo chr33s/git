@@ -53,7 +53,6 @@ export class GitRepo extends DurableObject<TestEnv> {
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
   #nonceStore: Layer.Layer<Auth.Nonces> | null = null;
   /** The requester of the request being handled; the DO serializes them. */
-  #requester: Layer.Layer<Auth.Requester> | null = null;
 
   /** The registry on this instance's own SQLite, beside the refs. */
   #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
@@ -137,15 +136,17 @@ export class GitRepo extends DurableObject<TestEnv> {
    * The only place a failure becomes a status code, and it does so from the
    * error's own `httpApiStatus` annotation rather than a mapping table.
    */
-  #respond(repo: string, effect: Effect.Effect<Response, GitError, Repository>): Promise<Response> {
+  #respond(
+    repo: string,
+    requester: Layer.Layer<Auth.Requester>,
+    effect: Effect.Effect<Response, GitError, Repository>,
+  ): Promise<Response> {
     return Effect.runPromise(
       effect.pipe(
         Effect.catch((error: GitError) =>
           Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
         ),
-        Effect.provide(
-          Layer.merge(this.#live(repo), this.#requester ?? Auth.requester(Auth.anonymous)),
-        ),
+        Effect.provide(Layer.merge(this.#live(repo), requester)),
         Effect.map((response) => this.#track(response)),
       ),
     );
@@ -165,10 +166,11 @@ export class GitRepo extends DurableObject<TestEnv> {
       Auth.guard(request).pipe(Effect.provide(Layer.merge(this.#live(repo), this.#nonces()))),
     );
     if (guarded.denied !== null) return guarded.denied;
-    // Who the requester is travels with the rest of the request: the policy
-    // boundary inside a push needs it, and authenticating twice would spend
-    // the nonce the first attempt already consumed.
-    this.#requester = Auth.requester(guarded.authenticated);
+    // Who the requester is travels with the rest of the request as an
+    // argument, not as instance state: the `await` before a collection reopens
+    // the input gate, so a field would be whatever the *last* request through
+    // the door set it to.
+    const requester = Auth.requester(guarded.authenticated);
 
     if (route === "conformance") return this.#conformance(repo);
     if (route === "registry-conformance") return this.#registryConformance();
@@ -191,6 +193,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     if (route === "commit-pack") {
       return this.#respond(
         repo,
+        requester,
         CommitPack.handle(request).pipe(
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
@@ -202,6 +205,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     if (route === "archive") {
       return this.#respond(
         repo,
+        requester,
         Archive.handle(request).pipe(
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
@@ -214,6 +218,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
       return this.#respond(
         repo,
+        requester,
         Protocol.handle(request).pipe(
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
@@ -236,7 +241,7 @@ export class GitRepo extends DurableObject<TestEnv> {
       Api.layer(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
         Layer.provideMerge(this.#registry(repo)),
-        Layer.provideMerge(this.#requester ?? Auth.requester(Auth.anonymous)),
+        Layer.provideMerge(requester),
       ),
       { disableLogger: true },
     ).handler;

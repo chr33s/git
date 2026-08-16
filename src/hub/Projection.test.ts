@@ -181,6 +181,36 @@ describe("hub projection", () => {
       assert.equal(state.reviews[0]?.head, REVISION);
     });
 
+    it("counts approvers, not approval events", async () => {
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          // The same reviewer, twice. Counting events would let one member
+          // satisfy a "two approvals required" rule on their own.
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            body: "still looks right",
+            key: where.reviewer,
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(approvals(state).length, 1);
+      assert.equal(state.reviews.length, 2, "both statements are still on the record");
+    });
+
     it("does not count a dismissed approval", async () => {
       const state = await scenario(
         Effect.gen(function* () {

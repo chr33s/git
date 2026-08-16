@@ -28,7 +28,19 @@ export type Parents = ReadonlyMap<Oid, ReadonlyArray<Oid>>;
  * source history: its first record's parent is the genesis commit, and
  * following that further would read every commit the repository has.
  */
-export const reachable = Effect.fn("Dag.reachable")(function* (head: Oid, boundary?: Oid | null) {
+export const reachable = Effect.fn("Dag.reachable")(function* (
+  head: Oid,
+  boundary?: Oid | null,
+  /**
+   * Whether a commit belongs to the history being walked.
+   *
+   * The other half of bounding. A named boundary commit stops a chain that
+   * ends where you expect; this stops one that does not — a hub event whose
+   * parent is a source commit, say, which would otherwise pull the entire
+   * repository into a walk meant to cover one pull request.
+   */
+  belongs?: (commit: Oid) => Effect.Effect<boolean, ObjectNotFound | StorageFailure, Repository>,
+) {
   const repository = yield* Repository;
 
   const parents = new Map<Oid, ReadonlyArray<Oid>>();
@@ -36,6 +48,7 @@ export const reachable = Effect.fn("Dag.reachable")(function* (head: Oid, bounda
   while (pending.length > 0) {
     const oid = pending.pop()!;
     if (parents.has(oid) || oid === boundary) continue;
+    if (belongs !== undefined && !(yield* belongs(oid))) continue;
 
     const commit = yield* repository.readCommit(oid);
     parents.set(oid, commit.parents);
