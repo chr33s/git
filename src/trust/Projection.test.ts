@@ -264,6 +264,84 @@ describe("trust projection", () => {
     assert.match(state.projection.rejected.at(-1)?.reason ?? "", /already been applied/);
   });
 
+  it("does not let an unauthorized record burn a legitimate record's id", async () => {
+    // Marking the id applied *before* the authority check let a forgery claim
+    // it, be refused, and take the genuine record down with it as a duplicate.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const bob = yield* generate("bob@example.com");
+        const mallory = yield* generate("mallory@example.com");
+        yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+
+        // Mallory signs a revocation she has no authority to make, using the
+        // id the real one is about to use.
+        const id = Log.newId();
+        yield* Log.issue(
+          Certificate.revoke({
+            repo: where.genesis.repoId,
+            subject: yield* print(bob),
+            reason: "left",
+            id,
+          }),
+          [mallory],
+        );
+        // And the real one follows, from the root quorum.
+        yield* Log.issue(
+          Certificate.revoke({
+            repo: where.genesis.repoId,
+            subject: yield* print(bob),
+            reason: "compromised",
+            id,
+          }),
+          where.roots.slice(0, 2),
+        );
+
+        return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+      }),
+    );
+
+    assert.equal(state.projection.members.get(state.bob), undefined, "the revocation must stand");
+    assert.notEqual(state.projection.revoked.get(state.bob), undefined);
+  });
+
+  it("keeps the newest checkpoint, not the last one folded", async () => {
+    // Fold order is topological with an oid tie-break, so two checkpoints made
+    // concurrently and then joined could leave the older one in force — and a
+    // repository with `maxTrustAgeSeconds` set would refuse every push against
+    // an attestation it already had a fresher replacement for.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const older = new Date(1_700_000_000_000);
+        const newer = new Date(1_800_000_000_000);
+
+        yield* Log.issue(
+          Certificate.checkpoint({
+            repo: where.genesis.repoId,
+            frontier: [],
+            id: Log.newId(),
+            at: newer,
+          }),
+          where.roots.slice(0, 2),
+        );
+        yield* Log.issue(
+          Certificate.checkpoint({
+            repo: where.genesis.repoId,
+            frontier: [],
+            id: Log.newId(),
+            at: older,
+          }),
+          where.roots.slice(0, 2),
+        );
+
+        return yield* projectionOf(where);
+      }),
+    );
+
+    assert.equal(outcome.checkpoint?.at.getTime(), 1_800_000_000_000);
+  });
+
   describe("revocation", () => {
     it("removes a member and keeps what they held", async () => {
       const state = await scenario(

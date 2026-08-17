@@ -1252,6 +1252,16 @@ pr.closed / pr.reopened / pr.updated / a second pr.opened   hub.merge
 review.dismissed (of a review one did not write)            hub.approve
 ```
 
+The author is the signer of the opening event, and which event opened a pull
+request is decided by descent rather than by walk order: every honest event
+descends from `pr.opened`, so a forged parentless one is an ancestor of nothing.
+Where two competing openings are structurally indistinguishable — a pull request
+with no other events — the opening is _contested_ and establishes no author at
+all, so every action in the table above needs its capability. That costs the
+honest author a shortcut and denies the forger the thing they were after: a
+contested pull request can still be reviewed, approved and settled by a
+`hub.merge` holder, so the protected branch behind it never freezes.
+
 `hub.create-pr` is the lowest-privileged hub capability, and settling or
 retargeting somebody else's approved pull request is not the same authority as
 opening one: a projection that treated it as such would let any hub writer close

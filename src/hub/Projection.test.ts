@@ -794,6 +794,80 @@ describe("hub projection", () => {
   });
 
   describe("an event folded before the opening one", () => {
+    it("cannot become the author by folding first", async () => {
+      // Which `pr.opened` opens a pull request is decided by descent, not by
+      // fold order: every honest event descends from the genuine opening, and
+      // a parentless forgery is an ancestor of nothing. Decided by fold order
+      // instead, an attacker could grind a low oid, become the author, and
+      // then close the pull request *as* the author — the freeze the author
+      // comparison exists to prevent.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+
+          const meddler = yield* generate("meddler@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(meddler.publicKey),
+              capabilities: ["hub.create-pr"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.opened",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead,
+            title: "mine now",
+            description: "",
+            base: "refs/heads/elsewhere",
+            head: Event.qualify(NEXT),
+          });
+          const forged = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [yield* sign(meddler, bytes, NAMESPACE)],
+            parents: [],
+            message: "pr.opened forged\n",
+          });
+
+          const joined = yield* Event.join(pr, [head!, forged]);
+          yield* repository.setRef({ name: ref, to: joined });
+
+          // The point of claiming authorship: closing the pull request, which
+          // freezes the protected branch behind it.
+          yield* PullRequest.close({ repo: where.genesis.repoId, pr, key: meddler });
+
+          const trust = yield* projectTrust(where.genesis);
+          return {
+            first: forged < head! ? "forged" : "opened",
+            state: yield* project(where.genesis, trust, pr),
+          };
+        }),
+      );
+
+      // Whichever of the two the fold reached first, the forgery buys nothing:
+      // a contested opening establishes no author, so closing still needs
+      // `hub.merge` and the branch behind the pull request stays reachable.
+      assert.equal(
+        outcome.state.state,
+        "open",
+        `the pull request must still be open (${outcome.first} folded first)`,
+      );
+      assert.match(outcome.state.rejected.at(-1)?.reason ?? "", /needs hub\.merge/);
+    });
+
     it("gets no authority from there being no author yet", async () => {
       // `Dag.topological` orders parentless commits by oid, so grinding a low
       // one folds it before the `pr.opened` that establishes the author — and

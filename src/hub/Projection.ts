@@ -160,6 +160,12 @@ const ancestorSets = (
   return sets;
 };
 
+/** Which event opened a pull request, and whether anything competes to be it. */
+interface Opening {
+  readonly commit: Oid | null;
+  readonly contested: boolean;
+}
+
 /**
  * An entry's key: its author and the id they chose.
  *
@@ -272,6 +278,58 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   // concurrent histories met, and `supersedes` would fall back to comparing
   // ids for events that are genuinely ordered.
   const ancestors = ancestorSets(parents, Dag.topological(parents));
+
+  /**
+   * The opening event, and whether anything is competing to be it.
+   *
+   * Every honest event in a pull request descends from its `pr.opened`: the
+   * ref starts there and each append parents on the current head, joins
+   * keeping both sides. A forgery cannot arrange that — it would have to be an
+   * ancestor of commits that already exist — so where the history has any
+   * depth at all, the genuine opening is the one the rest descends from.
+   *
+   * Where it has none, the two are structurally identical: a pull request
+   * whose only event is its opening, plus a parentless impostor and a join,
+   * offers nothing to tell them apart, and any deterministic tie-break is one
+   * an attacker can grind. So a contested opening does not establish an
+   * author at all, and every author-gated action then needs `hub.merge`. The
+   * attacker gains nothing — they still cannot close the pull request or free
+   * the branch behind it — and a `hub.merge` holder can still settle it.
+   */
+  const opening = (() => {
+    const candidates = events.flatMap((entry) =>
+      entry.payload?.type === "pr.opened" ? [entry.commit] : [],
+    );
+    if (candidates.length <= 1) {
+      return { commit: candidates[0] ?? null, contested: false } satisfies Opening;
+    }
+
+    const descendants = (commit: Oid) => {
+      let count = 0;
+      for (const oid of parents.keys()) {
+        if (ancestors.get(oid)?.has(commit) === true) count++;
+      }
+      return count;
+    };
+
+    let best = candidates[0]!;
+    let reach = descendants(best);
+    for (const commit of candidates.slice(1)) {
+      const count = descendants(commit);
+      if (count > reach || (count === reach && commit < best)) {
+        best = commit;
+        reach = count;
+      }
+    }
+
+    // A *legitimate* second opening — the author retargeting their own pull
+    // request — descends from the first. One that does not is a competing
+    // claim to have started it.
+    const contested = candidates.some(
+      (commit) => commit !== best && ancestors.get(commit)?.has(best) !== true,
+    );
+    return { commit: best, contested } satisfies Opening;
+  })();
 
   let title = "";
   let description = "";
@@ -432,11 +490,13 @@ export const project = Effect.fn("hub.Projection.project")(function* (
 
     switch (payload.type) {
       case "pr.opened": {
-        // A second `pr.opened` rewrites the title, description and base of a
-        // pull request somebody else may have opened, so it is held to the
-        // same rule as `pr.updated` below. The *first* one establishes the
-        // author and is what `author === null` means here.
-        if (author !== null && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
+        // The opening event establishes the author; any *other* `pr.opened`
+        // rewrites the title, description and base of a pull request somebody
+        // else opened, and is held to the same rule as `pr.updated` below.
+        // Which one opens it is decided by descent, above, and not by which
+        // one this loop happens to reach first.
+        const opens = entry.commit === opening.commit;
+        if (!opens && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
           rejected.push({
             commit: entry.commit,
             reason: "re-opening somebody else's pull request needs hub.merge",
@@ -447,7 +507,8 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         title = payload.title;
         description = payload.description;
         base = payload.base;
-        author ??= signer;
+        // Only an uncontested opening says who the author is; see above.
+        if (!opening.contested) author ??= signer;
         openedBy = mine;
         const head = Event.unqualify(payload.head);
         if (

@@ -233,11 +233,16 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     // expiry below is judged against.
     const claimedAt = new Date(payload.issuedAt);
 
+    // Asked here, recorded only where a record actually takes effect. Marking
+    // the id before the authority check let an unauthorized record *burn* a
+    // legitimate one's id: build a same-id record off the target's parent,
+    // grind its oid below the real one, push a join, and the forgery folds
+    // first, claims the id, is refused for want of authority — and the genuine
+    // revocation behind it is then discarded as a duplicate.
     if (applied.has(payload.id)) {
       rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
       continue;
     }
-    applied.add(payload.id);
 
     if (payload.type === "trust.root-change") {
       // Only the current roots may replace themselves. A member with
@@ -250,6 +255,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       const changed = yield* rootsOf(payload.rootKeys);
       roots = changed;
       threshold = payload.threshold;
+      applied.add(payload.id);
       continue;
     }
 
@@ -325,6 +331,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // key is a current member again: leaving a stale entry there would let a
       // later revocation be measured against capabilities they no longer hold.
       former.delete(subject);
+      applied.add(payload.id);
       continue;
     }
 
@@ -351,6 +358,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       const held = members.get(subject);
       if (held !== undefined) former.set(subject, held);
       members.delete(subject);
+      applied.add(payload.id);
       continue;
     }
 
@@ -358,11 +366,26 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       rejected.push({ commit: entry.commit, reason: "issuer may not checkpoint" });
       continue;
     }
-    checkpoint = {
+    applied.add(payload.id);
+
+    // The *newest*, not the last folded. Fold order is topological with an oid
+    // tie-break, so two checkpoints made concurrently on two replicas and then
+    // joined could leave the older one in force — and a repository that had
+    // set `maxTrustAgeSeconds` would then refuse every push against an
+    // attestation it already had a fresher replacement for. Ties go to the
+    // greater oid, so every replica still agrees.
+    const attested = {
       commit: entry.commit,
       at: new Date(payload.issuedAt),
       frontier: payload.frontier,
     };
+    if (
+      checkpoint === null ||
+      attested.at > checkpoint.at ||
+      (attested.at.getTime() === checkpoint.at.getTime() && attested.commit > checkpoint.commit)
+    ) {
+      checkpoint = attested;
+    }
   }
 
   return {
