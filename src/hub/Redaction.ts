@@ -62,8 +62,17 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
       // The blob by the name its own tree gives it. A tombstone whose target
       // has already been collected finds nothing, which is the state it was
       // asking for.
-      const info = yield* repository.readCommit(entry);
-      const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
+      const info = yield* repository
+        .readCommit(entry)
+        .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+      if (info === null) continue;
+      // The tree too. Refs are applied without a connectivity check, so a
+      // replica can hold a commit whose tree never arrived — and this is `gc`,
+      // which must not stop collecting a whole repository over one object it
+      // was going to be told to drop anyway.
+      const path = yield* repository
+        .findPath(info.tree, `${Event.RECORD}.json`)
+        .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
       if (path !== null) found.add(path.oid);
     }
   }
@@ -196,7 +205,12 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
         .readCommit(target)
         .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
       if (info === null) continue;
-      const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
+      // As above, and here it matters more: this set is what a *fetch* takes,
+      // so a failure is every deepening fetch of the repository failing over a
+      // tombstone whose target is exactly the object that did not arrive.
+      const path = yield* repository
+        .findPath(info.tree, `${Event.RECORD}.json`)
+        .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
       if (path !== null) found.add(path.oid);
     }
   }

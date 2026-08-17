@@ -470,6 +470,17 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   const oversized = yield* beyondCeiling(update.name, update.value);
   if (oversized !== null) return refused(update.name, oversized);
 
+  // A *new* pull request, on a namespace whose entries are never removed. The
+  // per-pull-request ceiling bounds one fold; this bounds how many folds a
+  // protected-branch push, a collection and a deepening fetch each have to
+  // make, which is otherwise chosen by anybody holding `hub.create-pr`.
+  if (current === null && Event.prOf(update.name) !== null) {
+    const held = (yield* Event.pullRequests()).length;
+    if (held >= (yield* Event.populationOf())) {
+      return refused(update.name, `this repository already holds ${held} pull requests`);
+    }
+  }
+
   if (current === null) return allowed;
   if (!(yield* contains(current, update.value))) {
     return refused(
@@ -596,7 +607,17 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   // a missing one is a push this cannot judge rather than one it may wave on.
   if (parents === null) return to;
   for (const [commit, of] of parents) {
-    if (of.length > 0 || commit === current) continue;
+    if (commit === current) continue;
+    // A root of *this* history, which is not the same as a commit with no
+    // parents at all. The walk is bounded to the namespace's own commits, so a
+    // parent outside it — a fabricated oid, or a commit from the source
+    // history — is not an edge this DAG has. Tested against the raw parent
+    // list, a graft that named any junk oid as its parent read as attached and
+    // slipped through: it then out-ranked the genuine opening on descent,
+    // supplied the base and the author, and the real `pr.opened` was refused
+    // as "re-opening somebody else's pull request" — freezing the protected
+    // branch behind an approved pull request the boundary could no longer see.
+    if (of.some((parent) => parent === current || parents.has(parent))) continue;
     if (yield* contains(commit, current)) continue;
     return commit;
   }

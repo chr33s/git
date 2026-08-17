@@ -59,6 +59,21 @@ export const RECORD = "event";
 export const MAX_EVENTS = 4096;
 
 /**
+ * How many pull requests one repository may hold.
+ *
+ * The per-pull-request ceiling bounds one fold; this bounds how many folds a
+ * single protected-branch push, collection or deepening fetch has to make.
+ * `refs/hub/pr/*` is append-only, so the list only ever grows and a closed
+ * pull request costs the same as an open one — which makes opening them the
+ * cheapest way for anybody holding `hub.create-pr` to make every later push
+ * slower for good.
+ *
+ * Set where a repository this size is already unusual rather than where it is
+ * merely large, because reaching it means no new pull request can be opened.
+ */
+export const MAX_PULL_REQUESTS = 65_536;
+
+/**
  * The ceiling in force, when a host wants a different one.
  *
  * A tuning number, not an authority: the default is what every caller gets,
@@ -74,6 +89,16 @@ export const ceiling = (events: number): Layer.Layer<Ceiling> => Layer.succeed(C
 /** The ceiling this fold is held to. */
 export const ceilingOf = Effect.fnUntraced(function* () {
   return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_EVENTS);
+});
+
+/** How many pull requests this repository may hold; see `MAX_PULL_REQUESTS`. */
+export class Population extends Context.Service<Population, number>()("hub/Event/Population") {}
+
+export const population = (pulls: number): Layer.Layer<Population> =>
+  Layer.succeed(Population)(pulls);
+
+export const populationOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(Population), () => MAX_PULL_REQUESTS);
 });
 
 /** Where a pull request's history lives. */

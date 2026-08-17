@@ -590,18 +590,40 @@ describe("hub redaction", () => {
           key: where.author,
         });
 
+        // The tombstone's own commit loses its tree, so the walk steps over
+        // it. Its *target* loses one too, so the two sets that read a target's
+        // tree — the one `gc` takes and the one a fetch takes — each meet an
+        // absence where they were looking for the payload's name.
         const head = yield* repository.resolve(Event.refOf(pr));
-        const info = yield* repository.readCommit(head!);
-        yield* objects.delete(info.tree);
+        const tombstone = yield* repository.readCommit(head!);
+        const { events } = yield* Event.entries(pr);
+        const named = events.find((entry) => entry.payload?.type === "event.redacted");
+        const targeted = Event.unqualify(
+          named?.payload?.type === "event.redacted" ? named.payload.targetCommit : "",
+        );
+        const aimed = yield* repository.readCommit(targeted!);
+
+        // The *target's* tree, not the tombstone's. A tombstone the walk can
+        // no longer read is a tombstone that never enters either set — so the
+        // case that reaches the tree read is the one where the statement
+        // survives and the thing it names does not, which is exactly what a
+        // ref applied ahead of its objects leaves behind.
+        //
+        // Deleted before either set is asked: both memos are keyed on ref
+        // state, which an absent object does not change, so a warm answer
+        // would be the old one rather than the one under test.
+        yield* objects.delete(aimed.tree);
 
         return {
+          aimed: aimed.tree !== tombstone.tree,
           strict: (yield* Redaction.excluded()).size,
           explained: (yield* Redaction.covered()).has(blob!),
         };
       }),
     );
 
-    assert.equal(outcome.strict, 0, "the tombstone was on the commit the walk can no longer read");
+    assert.equal(outcome.aimed, true, "the fixture must remove two distinct trees");
+    assert.equal(outcome.strict, 0, "there is nothing left for the tombstone to name");
     assert.equal(outcome.explained, false, "but nothing failed: gc and fetch both still answer");
   });
 

@@ -53,16 +53,30 @@ export const reachable = Effect.fn("Dag.reachable")(function* (
   const repository = yield* Repository;
 
   const parents = new Map<Oid, ReadonlyArray<Oid>>();
+  /**
+   * Commits `belongs` turned away, remembered.
+   *
+   * Answering the question again per in-edge is the same read twice, and —
+   * because the answer was never recorded — those reads counted toward
+   * nothing: one pushed commit listing a hundred thousand fabricated parents
+   * cost a hundred thousand object reads without ever reaching the limit.
+   */
+  const outside = new Set<Oid>();
   const pending: Oid[] = [head];
   while (pending.length > 0) {
     const oid = pending.pop()!;
-    if (parents.has(oid) || oid === boundary) continue;
-    if (belongs !== undefined && !(yield* belongs(oid))) continue;
-    if (limit !== undefined && parents.size >= limit) {
+    if (parents.has(oid) || outside.has(oid) || oid === boundary) continue;
+    // Before the work, and counting the work already refused. Checked after
+    // `belongs`, the walk pays for every commit it declines to keep.
+    if (limit !== undefined && parents.size + outside.size >= limit) {
       return yield* new Invalid({
         field: "history",
         reason: `this history reaches more than ${limit} commits`,
       });
+    }
+    if (belongs !== undefined && !(yield* belongs(oid))) {
+      outside.add(oid);
+      continue;
     }
 
     const commit = yield* repository.readCommit(oid);

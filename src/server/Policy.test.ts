@@ -513,6 +513,86 @@ describe("Policy", () => {
       assert.equal(outcome.ok === false ? outcome.reason : "allowed", "allowed");
     });
 
+    it("counts a graft as a second beginning even when it names a parent", async () => {
+      // "Root" here means a root of *this* history, which is not the same as a
+      // commit with no parents at all. The walk is bounded to the namespace's
+      // own commits, so a parent outside it — a fabricated oid, or a commit
+      // from the source history — is not an edge this DAG has. Tested against
+      // the raw parent list, a graft naming any junk oid read as attached and
+      // slipped through: it then out-ranked the genuine opening on descent,
+      // supplied the base and the author, and the real `pr.opened` was refused
+      // as re-opening somebody else's pull request.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // A parentless commit, dressed as one that has a parent: the oid it
+          // names is not a commit this repository holds at all.
+          const forged = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            // SAFETY: forty lowercase hex characters, which is what `Oid`
+            // brands; it names nothing, which is the point.
+            parents: ["f".repeat(40) as Oid],
+            message: "pr.opened forged\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!, forged],
+            message: "join\n",
+            author,
+          });
+          return yield* judge(where, { name: `refs/hub/pr/${pr}`, value: joined });
+        }),
+      );
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /second history/);
+    });
+
+    it("refuses to open more pull requests than a push will walk", async () => {
+      // The per-pull-request ceiling bounds one fold; nothing bounded how many
+      // folds a protected-branch push, a collection and a deepening fetch each
+      // have to make. `refs/hub/pr/*` is append-only, so a closed pull request
+      // costs the same as an open one and the list only ever grows — which
+      // makes opening them the cheapest way for anybody holding
+      // `hub.create-pr` to make every later push slower for good.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          const judged = (name: string) =>
+            judge(where, { name, value: head }).pipe(Effect.provide(Event.population(1)));
+          return {
+            // The one that already exists is an append, not a create.
+            existing: yield* judged(`refs/hub/pr/${pr}`),
+            fresh: yield* judged("refs/hub/pr/another"),
+          };
+        }),
+      );
+
+      assert.equal(outcome.existing.ok, true, "an existing pull request keeps working");
+      assert.equal(outcome.fresh.ok, false);
+      assert.match(outcome.fresh.ok === false ? outcome.fresh.reason : "", /already holds 1/);
+    });
+
     it("allows a join that keeps both heads it already had", async () => {
       // The rule is about *new* roots, not about joins: two members appending
       // concurrently is the ordinary case, and the join that reconciles them
