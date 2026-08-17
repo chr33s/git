@@ -660,6 +660,26 @@ describe("Policy", () => {
       assert.equal(outcome.open.updates.length, 1, "--open is what serves them anyway");
     });
 
+    it("refuses the JSON verbs too, not only receive-pack", async () => {
+      // `gateWrite` is the pre-check for the verbs that compute a ref's new
+      // value while doing the work. Allowing there while `gate` refused meant
+      // `git push` was blocked and unauthenticated `POST /commit`, `/branch`,
+      // `/tags`, a merge or rebase with `into`, a pull and commit-pack all
+      // still wrote refs — every door but the one that was locked.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const closed = yield* gateWriteAs(null, "refs/heads/topic");
+          const open = yield* gateWriteAs(null, "refs/heads/topic").pipe(
+            Effect.provide(Policy.anonymousWrites(true)),
+          );
+          return { closed, open };
+        }),
+      );
+
+      assert.match(outcome.closed ?? "", /hub init/);
+      assert.equal(outcome.open, null, "--open is what serves them anyway");
+    });
+
     it("never lets a push establish an identity, open or not", async () => {
       // Whoever got there first would own the repository, and its actual owner
       // would be locked out of it by a stranger.

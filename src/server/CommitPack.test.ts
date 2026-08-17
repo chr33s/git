@@ -17,10 +17,14 @@ import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import * as CommitPack from "./CommitPack.ts";
+import * as Policy from "./Policy.ts";
 
+// Scratch repositories with no genesis, which the policy boundary refuses to
+// write to unless the host says otherwise — `serve --open`'s choice.
 const live = GitRepository.layer.pipe(
   Layer.provide(GitRepository.hooksNoop),
   Layer.provide(stores),
+  Layer.provideMerge(Policy.anonymousWrites(true)),
 );
 
 const encoder = new TextEncoder();

@@ -230,7 +230,7 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(LOG_REF);
-  if (head === null) return [];
+  if (head === null) return { records: [], parents: new Map<Oid, ReadonlyArray<Oid>>() };
 
   // The genesis is the chain's anchor, not a record: bounding the walk there
   // is what stops it reading the whole source history if anything ever points
@@ -271,7 +271,11 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
       signatures: record.signatures,
     });
   }
-  return records;
+  // The whole walked DAG rides along, joins included. A caller deciding
+  // between two records that claim one id needs to know which of them the rest
+  // of the log descends from, and a parent map built from record-carrying
+  // commits alone would break at every join.
+  return { records, parents };
 });
 
 /**

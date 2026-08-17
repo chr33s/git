@@ -22,12 +22,15 @@ import {
   parsePublicKey,
   verify,
 } from "../crypto/SshSignature.ts";
+import * as Dag from "../git/Dag.ts";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
 import { MAX_SIGNATURES } from "./Certificate.ts";
 import { type Genesis, type RepoId, type RootKey } from "./Genesis.ts";
 import * as Log from "./Log.ts";
+
+const decoder = new TextDecoder();
 
 export interface Member {
   readonly fingerprint: Fingerprint;
@@ -201,7 +204,7 @@ const holds = (
  * without its identity — which is over the genesis bytes — ever changing.
  */
 export const project = Effect.fn("trust.Projection.project")(function* (genesis: Genesis) {
-  const entries = yield* Log.entries();
+  const { entries, keyOf, winner } = yield* readLog();
 
   const members = new Map<Fingerprint, Member>();
   const former = new Map<Fingerprint, Member>();
@@ -251,6 +254,17 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     // grind its oid below the real one, push a join, and the forgery folds
     // first, claims the id, is refused for want of authority — and the genuine
     // revocation behind it is then discarded as a duplicate.
+    // Which of several records claiming one id is *the* one is decided by
+    // descent, not by fold order. The ids are inside the signed bytes, so a
+    // byte-identical replay carries the same one — and fold order breaks ties
+    // by raw oid, which anybody who may write the ref can grind. Losing that
+    // race moved `grant`, `history[].commit` and `Revocation.commit` onto a
+    // commit honest trust heads cannot reach, which stops every stored event
+    // by that member counting and stops a revocation applying at all.
+    if (winner.get(keyOf(entry)) !== entry.commit) {
+      rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
+      continue;
+    }
     if (applied.has(payload.id)) {
       rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
       continue;
@@ -415,6 +429,68 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     checkpoint,
     rejected,
   };
+});
+
+/**
+ * The log, plus which commit owns each record id.
+ *
+ * The rest of the log descends from a genuine record; a replay grafted on
+ * later is descended from by nothing, however its oid sorts. Ties — where
+ * descent cannot separate them — go to the lower oid, so every replica still
+ * agrees.
+ */
+const readLog = Effect.fn("trust.Projection.readLog")(function* () {
+  const { parents, records } = yield* Log.entries();
+
+  const ancestors = new Map<Oid, Set<Oid>>();
+  for (const oid of Dag.topological(parents)) {
+    const set = new Set<Oid>();
+    for (const parent of parents.get(oid) ?? []) {
+      set.add(parent);
+      for (const older of ancestors.get(parent) ?? []) set.add(older);
+    }
+    ancestors.set(oid, set);
+  }
+
+  // Grouped by id *and* by the exact bytes. Two records with one id but
+  // different content are two different claims, and which of them counts is a
+  // question about authority — `applied` answers it, by recording an id only
+  // where a record actually took effect. What this decides is the other case:
+  // the same record committed twice, where nothing distinguishes them but the
+  // commit, and the commit is what `grant` and `Revocation.commit` are read
+  // from later.
+  const claimed = new Map<string, Oid[]>();
+  const keyOf = (entry: (typeof records)[number]) =>
+    `${entry.payload.id}\u0000${decoder.decode(entry.bytes)}`;
+  for (const entry of records) {
+    const key = keyOf(entry);
+    claimed.set(key, [...(claimed.get(key) ?? []), entry.commit]);
+  }
+
+  const winner = new Map<string, Oid>();
+  for (const [id, commits] of claimed) {
+    if (commits.length === 1) {
+      winner.set(id, commits[0]!);
+      continue;
+    }
+    const descendants = (commit: Oid) => {
+      let count = 0;
+      for (const seen of ancestors.values()) if (seen.has(commit)) count++;
+      return count;
+    };
+    let best = commits[0]!;
+    let reach = descendants(best);
+    for (const commit of commits.slice(1)) {
+      const count = descendants(commit);
+      if (count > reach || (count === reach && commit < best)) {
+        best = commit;
+        reach = count;
+      }
+    }
+    winner.set(id, best);
+  }
+
+  return { entries: records, winner, keyOf };
 });
 
 /**

@@ -18,6 +18,7 @@ import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
+import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
@@ -42,6 +43,14 @@ import { storeContract } from "./Store.contract.ts";
  */
 interface TestEnv {
   readonly ENABLE_CONFORMANCE?: string;
+  /**
+   * `"1"` serves writes to repositories that have no genesis.
+   *
+   * Off unless set, like `serve --open`: such a repository has no membership
+   * to authorize anybody, and a host that wrote to them by default would be
+   * an open write endpoint nobody asked for.
+   */
+  readonly ALLOW_ANONYMOUS_WRITES?: string;
   readonly GIT_OBJECTS: R2Bucket;
   readonly GIT_REPO: DurableObjectNamespace<GitRepo>;
 }
@@ -86,6 +95,11 @@ export class GitRepo extends DurableObject<TestEnv> {
    * is no longer recognised is told to ask for another — a retry, not a
    * failure worth persisting through.
    */
+  /** Whether this host serves writes to repositories with no genesis. */
+  #openWrites(): Layer.Layer<Policy.AnonymousWrites> {
+    return Policy.anonymousWrites(this.env.ALLOW_ANONYMOUS_WRITES === "1");
+  }
+
   #nonces(): Layer.Layer<Auth.Nonces> {
     this.#nonceStore ??= Auth.noncesInMemory();
     return this.#nonceStore;
@@ -157,7 +171,7 @@ export class GitRepo extends DurableObject<TestEnv> {
         Effect.catch((error: GitError) =>
           Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
         ),
-        Effect.provide(Layer.merge(this.#live(repo), requester)),
+        Effect.provide(Layer.mergeAll(this.#live(repo), requester, this.#openWrites())),
         Effect.map((response) => this.#track(response)),
       ),
     );
@@ -257,6 +271,7 @@ export class GitRepo extends DurableObject<TestEnv> {
       Api.layer(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
         Layer.provideMerge(this.#registry(repo)),
+        Layer.provideMerge(this.#openWrites()),
       ),
       { disableLogger: true },
     ).handler;

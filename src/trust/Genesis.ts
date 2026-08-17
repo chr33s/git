@@ -34,6 +34,7 @@ import {
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import { MAX_SIGNATURES } from "./Certificate.ts";
 import * as Record from "./Record.ts";
 
 const encoder = new TextEncoder();
@@ -268,7 +269,11 @@ export const rootSigners = Effect.fn("Genesis.rootSigners")(function* (
   const roots = new Map(genesis.roots.map((root) => [root.fingerprint, root] as const));
   const signers = new Set<Fingerprint>();
 
-  for (const signature of armored) {
+  // Capped like every other signature list. This one arrives from a *remote*
+  // on the `hub enable` path, before anything about that remote is trusted, so
+  // an uncapped list is one Ed25519 verification per entry that a hostile host
+  // gets to choose the length of.
+  for (const signature of armored.slice(0, MAX_SIGNATURES)) {
     const signer = yield* verify(signature, genesis.bytes, NAMESPACE).pipe(
       // A malformed signature in the list is not a reason to refuse the
       // genesis: it cannot add authority, and the quorum check below is what

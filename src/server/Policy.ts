@@ -564,7 +564,17 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   if (Refspec.isAppendOnly(ref)) return `${ref} may only be appended to by the hub`;
 
   const stored = yield* readGenesis();
-  if (stored === null) return null;
+  if (stored === null) {
+    // The same answer `gate` gives, for the same reason. Allowing here while
+    // receive-pack refused meant `git push` was blocked and unauthenticated
+    // `POST /commit`, `/branch`, `/tags`, a merge or rebase with `into`, a
+    // pull and commit-pack all still wrote refs — every door but the one that
+    // was locked.
+    const open = yield* Effect.serviceOption(AnonymousWrites);
+    return Option.getOrElse(open, () => false)
+      ? null
+      : "this repository has no membership to authorize a write; run `hub init` to give it one";
+  }
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);

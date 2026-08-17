@@ -13,7 +13,7 @@
  */
 import * as Alchemy from "alchemy/Cloudflare";
 import type * as Http from "alchemy/Http";
-import { Context, Effect, Layer } from "effect";
+import { Config, Context, Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
@@ -27,6 +27,7 @@ import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as LfsCore from "../server/Lfs.ts";
+import * as Policy from "../server/Policy.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
@@ -171,6 +172,7 @@ export default Repo.make(
           Api.layer(remotes(repo)).pipe(
             Layer.provideMerge(live(repo)),
             Layer.provideMerge(subscribers(repo)),
+            Layer.provideMerge(openWrites),
           ),
           { disableLogger: true },
         ).handler;
@@ -186,6 +188,19 @@ export default Repo.make(
        * ever complete a challenge.
        */
       const nonces = Auth.noncesInMemory();
+
+      /**
+       * Whether writes to repositories with no genesis are served.
+       *
+       * Off unless the binding says so, like `serve --open`: such a repository
+       * has no membership to authorize anybody with.
+       */
+      const openWrites = Policy.anonymousWrites(
+        yield* Config.boolean("ALLOW_ANONYMOUS_WRITES").pipe(
+          Config.withDefault(false),
+          Effect.orElseSucceed(() => false),
+        ),
+      );
 
       /** The routing, over the platform request the bridge was handed. */
       const serve = (request: Request): Effect.Effect<Response> =>
@@ -244,7 +259,7 @@ export default Repo.make(
               ),
               // With the requester: `commit-pack` writes a ref and so crosses
               // the policy boundary, which has to know who is asking.
-              Effect.provide(Layer.merge(live(repo), requester)),
+              Effect.provide(Layer.mergeAll(live(repo), requester, openWrites)),
               Effect.map((response) => track(repo, response)),
             );
           }
@@ -272,7 +287,7 @@ export default Repo.make(
               Effect.catch((error: GitError) =>
                 Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
               ),
-              Effect.provide(Layer.merge(live(repo), requester)),
+              Effect.provide(Layer.mergeAll(live(repo), requester, openWrites)),
               // The pack is the body that outlives its handler.
               Effect.map((response) => track(repo, response)),
             );
