@@ -793,6 +793,145 @@ describe("hub projection", () => {
     });
   });
 
+  describe("an event folded before the opening one", () => {
+    it("gets no authority from there being no author yet", async () => {
+      // `Dag.topological` orders parentless commits by oid, so grinding a low
+      // one folds it before the `pr.opened` that establishes the author — and
+      // a guard written as `author !== null && signer !== author` was inert
+      // exactly there, letting a `hub.create-pr` holder close a pull request
+      // permanently and freeze the protected branch behind it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+
+          const meddler = yield* generate("meddler@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(meddler.publicKey),
+              capabilities: ["hub.create-pr"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          // Parentless, so `Dag.topological` is free to order it before the
+          // opening event — which it does whenever its oid sorts lower.
+          // Asserted for *either* order rather than ground into the losing
+          // one: the guard has to hold whether or not an author is known yet,
+          // and a test that only ever exercised one ordering would be a test
+          // of the grind.
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.closed",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead,
+          });
+          const forged = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [yield* sign(meddler, bytes, NAMESPACE)],
+            parents: [],
+            message: "pr.closed forged\n",
+          });
+
+          const joined = yield* Event.join(pr, [head!, forged]);
+          yield* repository.setRef({ name: ref, to: joined });
+
+          const trust = yield* projectTrust(where.genesis);
+          return {
+            first: forged < head! ? "forged" : "opened",
+            state: yield* project(where.genesis, trust, pr),
+          };
+        }),
+      );
+
+      assert.equal(
+        outcome.state.state,
+        "open",
+        `the pull request must still be open (${outcome.first} folded first)`,
+      );
+      assert.match(outcome.state.rejected.at(-1)?.reason ?? "", /needs hub\.merge/);
+    });
+  });
+
+  describe("resolving a review thread", () => {
+    it("is refused to somebody who neither opened it nor may review", async () => {
+      // Resolving is what satisfies `requireResolvedThreads`, so leaving it to
+      // any `hub.comment` holder let one clear somebody else's blocking thread
+      // — or reopen a settled one to block a merge indefinitely.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "this needs work",
+            key: where.reviewer,
+          });
+          const { events } = yield* Event.entries(pr);
+          const thread = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          const talker = yield* generate("talker@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(talker.publicKey),
+              capabilities: ["hub.comment"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+
+          yield* PullRequest.resolve({ repo: where.genesis.repoId, pr, thread, key: talker });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.threads[0]?.resolved, false, "somebody else's thread stays open");
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /needs hub\.review/);
+    });
+
+    it("is allowed to the member who opened it", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "a thought",
+            key: where.author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const thread = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          yield* PullRequest.resolve({
+            repo: where.genesis.repoId,
+            pr,
+            thread,
+            key: where.author,
+          });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.threads[0]?.resolved, true);
+      assert.deepEqual(outcome.rejected, []);
+    });
+  });
+
   describe("retargeting a pull request", () => {
     it("is refused to somebody who is neither its author nor a merger", async () => {
       // Moving the head stales every approval of the revision it replaces, so

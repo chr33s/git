@@ -27,6 +27,7 @@ import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
 import * as Policy from "./Policy.ts";
+import * as Redaction from "../hub/Redaction.ts";
 import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
 const decoder = new TextDecoder();
@@ -362,7 +363,21 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
 
     // `fetch` reads an undefined `depth` or `since` exactly as it reads their
     // absence, and an empty `notRefs` as no stops — the locals pass through.
-    const plan = yield* repository.fetch({ wants, haves, clientShallow, depth, since, notRefs });
+    // Redacted payloads are absent by design and their trees still name them,
+    // so a strict closure would fail every fetch of `refs/hub/*` the moment
+    // anything had been redacted. Cheap when nothing has: the set is computed
+    // by a walk that rules out a pull request carrying no tombstone before
+    // folding it, and answers an empty set for a repository with no genesis.
+    const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
+    const plan = yield* repository.fetch({
+      wants,
+      haves,
+      clientShallow,
+      depth,
+      since,
+      notRefs,
+      exclude,
+    });
 
     /**
      * The boundary section comes before anything else, and only when the
@@ -592,7 +607,21 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
 
     // As in the v0 round: `fetch` treats undefined options and an empty
     // `notRefs` exactly like their absence, so the locals pass through.
-    const plan = yield* repository.fetch({ wants, haves, clientShallow, depth, since, notRefs });
+    // Redacted payloads are absent by design and their trees still name them,
+    // so a strict closure would fail every fetch of `refs/hub/*` the moment
+    // anything had been redacted. Cheap when nothing has: the set is computed
+    // by a walk that rules out a pull request carrying no tombstone before
+    // folding it, and answers an empty set for a repository with no genesis.
+    const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
+    const plan = yield* repository.fetch({
+      wants,
+      haves,
+      clientShallow,
+      depth,
+      since,
+      notRefs,
+      exclude,
+    });
 
     const prelude: Uint8Array[] = [...acks];
     if (deepening) {

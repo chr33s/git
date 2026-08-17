@@ -223,6 +223,47 @@ describe("trust projection", () => {
     assert.deepEqual(state.projection.rejected, []);
   });
 
+  it("refuses a record whose id has already been applied", async () => {
+    // The log ref is writable by anybody holding `source.push` — append-only
+    // containment is all the policy boundary checks about it — so
+    // re-committing an existing record's bytes at the head is a push anyone
+    // can make. Without an id check, replaying a revoked member's original
+    // grant passed the re-instatement rule (its signer *is* the original
+    // admin) and cleared the revocation.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const bob = yield* generate("bob@example.com");
+
+        const payload = yield* Certificate.grant({
+          repo: where.genesis.repoId,
+          publicKey: formatPublicKey(bob.publicKey),
+          capabilities: ["source.push"],
+          id: Log.newId(),
+        });
+        yield* Log.issue(payload, where.roots.slice(0, 2));
+        yield* Log.issue(
+          Certificate.revoke({
+            repo: where.genesis.repoId,
+            subject: yield* print(bob),
+            reason: "compromised",
+            id: Log.newId(),
+          }),
+          where.roots.slice(0, 2),
+        );
+
+        // The very same grant, appended again.
+        yield* Log.issue(payload, where.roots.slice(0, 2));
+
+        return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+      }),
+    );
+
+    assert.equal(state.projection.members.get(state.bob), undefined, "the replay must not revive");
+    assert.notEqual(state.projection.revoked.get(state.bob), undefined);
+    assert.match(state.projection.rejected.at(-1)?.reason ?? "", /already been applied/);
+  });
+
   describe("revocation", () => {
     it("removes a member and keeps what they held", async () => {
       const state = await scenario(

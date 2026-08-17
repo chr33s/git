@@ -195,6 +195,20 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
   const former = new Map<Fingerprint, Member>();
   const revoked = new Map<Fingerprint, Revocation>();
   const rejected: Rejected[] = [];
+
+  /**
+   * The record ids already applied, so none is applied twice.
+   *
+   * The log ref is writable by anybody holding `source.push` — append-only
+   * containment is the only thing the policy boundary checks about it — so
+   * re-committing an existing record's bytes at the head is a push anyone can
+   * make. Without this, a replay of a revoked member's original grant passed
+   * the re-instatement check below (its signer *is* the original admin) and
+   * cleared the revocation; the same trick re-revoked a re-instated member,
+   * restored a narrowed grant and reinstalled a stale checkpoint. The id is
+   * inside the signed bytes, so a replay cannot dodge this by changing it.
+   */
+  const applied = new Set<string>();
   let roots: ReadonlyArray<RootKey> = genesis.roots;
   let threshold = genesis.document.threshold;
   let checkpoint: Attestation | null = null;
@@ -218,6 +232,12 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     // What the record says about when it was made, which is what every
     // expiry below is judged against.
     const claimedAt = new Date(payload.issuedAt);
+
+    if (applied.has(payload.id)) {
+      rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
+      continue;
+    }
+    applied.add(payload.id);
 
     if (payload.type === "trust.root-change") {
       // Only the current roots may replace themselves. A member with

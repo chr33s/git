@@ -34,7 +34,12 @@ import type { Oid, RefUpdate } from "../git/Store.ts";
 import { type Genesis, readGenesis } from "../trust/Genesis.ts";
 import { type Member, project, type Projection as TrustProjection } from "../trust/Projection.ts";
 import * as Event from "../hub/Event.ts";
-import { approvals, checksPassed, project as projectPr } from "../hub/Projection.ts";
+import {
+  approvals,
+  checksPassed,
+  project as projectPr,
+  type PullRequest as PullRequestState,
+} from "../hub/Projection.ts";
 import { permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Auth from "./Auth.ts";
@@ -168,6 +173,15 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
   };
 });
 
+/**
+ * Pull requests folded once for a batch of ref updates.
+ *
+ * A pull request's state cannot change while one push is being judged, so a
+ * fold is reusable within it — and only within it, which is why the map is the
+ * caller's rather than a module-level cache.
+ */
+export type FoldCache = Map<string, PullRequestState>;
+
 export interface Allowed {
   readonly update: RefUpdate;
   /** What the ref was when the decision was made — the compare-and-swap. */
@@ -227,19 +241,20 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   readonly trust: TrustProjection | null;
   readonly rules: Rules;
   /**
-   * Pull-request bases already looked up, shared across one batch of updates.
+   * Pull requests already folded, shared across one batch of updates.
    *
-   * A push moving several protected branches otherwise re-walks every pull
-   * request's first-parent chain once per ref. The map is the caller's, so
-   * nothing survives the request that built it.
+   * A push moving several protected branches otherwise folds every pull
+   * request — a DAG walk and a signature verification per event — once per
+   * ref. The map is the caller's, so nothing survives the request that built
+   * it, and a fold cannot go stale inside one.
    */
-  readonly bases?: Event.BaseCache;
+  readonly folds?: FoldCache;
 }) {
   const repository = yield* Repository;
   const { update } = input;
   // A batch of one when the caller did not bring a map, which is what every
   // direct caller outside `gate` is.
-  const bases = input.bases ?? new Map<string, string | null>();
+  const folds: FoldCache = input.folds ?? new Map();
   const current = yield* repository.resolve(update.name);
   // Two readings of "what the ref is now", and they differ for a symbolic ref.
   // Reachability wants the commit it resolves to; the compare-and-swap wants
@@ -310,7 +325,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     genesis: input.genesis,
     trust: input.trust,
     rules: input.rules,
-    bases,
+    folds,
   });
   return gate ?? namespace;
 });
@@ -368,8 +383,8 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   readonly genesis: Genesis;
   readonly trust: TrustProjection;
   readonly rules: Rules;
-  /** Shared across one batch; see `Event.BaseCache`. */
-  readonly bases: Event.BaseCache;
+  /** Shared across one batch; see `FoldCache`. */
+  readonly folds: FoldCache;
 }) {
   const { rules } = input;
   const needsReview =
@@ -383,15 +398,18 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   let shortfall: Decision | null = null;
 
   for (const id of yield* Event.pullRequests()) {
-    // The base is in the opening event, so finding it walks the pull request's
-    // first-parent chain and reads one blob; the full fold on top of that is a
-    // DAG walk plus a signature verification per event. Most pull requests in
-    // a repository are for another branch, so they are ruled out before any of
-    // that happens — and the walk is answered from `bases` for every ref after
-    // the first in one batch, since a pull request's base never moves.
-    if ((yield* Event.baseOf(id, input.bases)) !== input.ref) continue;
-
-    const pullRequest = yield* projectPr(input.genesis, input.trust, id);
+    // Folded, not sniffed. An earlier version read the base straight out of
+    // the first-parent root's payload to skip pull requests cheaply — but
+    // nothing had checked that payload's signature, so appending a commit
+    // whose first parent was a forged `pr.opened` naming another base made an
+    // approved pull request invisible here and its protected branch
+    // unpushable. The fold is the only reading of a pull request that has
+    // verified anything, so it is the only one this may act on. The cache is
+    // what keeps a batch moving several protected branches from paying for it
+    // once per ref.
+    const cached = input.folds.get(id);
+    const pullRequest = cached ?? (yield* projectPr(input.genesis, input.trust, id));
+    input.folds.set(id, pullRequest);
     if (pullRequest.base !== input.ref || pullRequest.head === null) continue;
     // A closed or already-merged pull request authorizes nothing further.
     // "Descends from an approved head" is not enough on its own: every commit
@@ -591,7 +609,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
   }
 
   const decisions: Decision[] = [];
-  const bases: Event.BaseCache = new Map();
+  const folds: FoldCache = new Map();
   for (const update of updates) {
     // A native client signed an envelope naming the refs it was moving and
     // where to. Checking it here rather than in the guard is not a weakening:
@@ -611,7 +629,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
         genesis: stored?.genesis ?? null,
         trust,
         rules,
-        bases,
+        folds,
       }),
     );
   }

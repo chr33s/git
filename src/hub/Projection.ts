@@ -434,7 +434,8 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       case "pr.opened": {
         // A second `pr.opened` rewrites the title, description and base of a
         // pull request somebody else may have opened, so it is held to the
-        // same rule as `pr.updated` below.
+        // same rule as `pr.updated` below. The *first* one establishes the
+        // author and is what `author === null` means here.
         if (author !== null && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
           rejected.push({
             commit: entry.commit,
@@ -464,7 +465,13 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         // somebody else's approved pull request and, with it, block the
         // protected branch that pull request was the route to — the same
         // denial `pr.closed` is defended against.
-        if (author !== null && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
+        //
+        // `author === null` is *not* a licence. An attacker can push a
+        // parentless event and a join reaching it, and `Dag.topological`
+        // orders parentless commits by oid — so grinding a low one folds it
+        // before the `pr.opened` that establishes the author, and a guard
+        // written as `author !== null && …` was inert exactly there.
+        if (signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
           rejected.push({
             commit: entry.commit,
             reason: "retargeting somebody else's pull request needs hub.merge",
@@ -491,7 +498,11 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         // the branch it was approved for cannot be moved at all. Its own
         // author may always close it; anybody else needs `hub.merge`, which is
         // the capability for settling a pull request.
-        if (author !== null && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
+        // As in `pr.updated`: an event folded before the opening one has no
+        // author to compare against, and treating that as permission let a
+        // parentless `pr.closed` close a pull request its signer had no
+        // authority over.
+        if (signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
           rejected.push({
             commit: entry.commit,
             reason: `${payload.type} by somebody other than the author needs hub.merge`,
@@ -598,6 +609,21 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       case "comment.reopened": {
         const found = byEventId(threads, payload.thread);
         if (found === null || found === "ambiguous") break;
+
+        // Resolving a thread is what satisfies `requireResolvedThreads`, and
+        // reopening one is what withholds it — so neither is something any
+        // `hub.comment` holder may do to a thread that is not theirs. The
+        // thread's own author may always settle it; anybody else needs
+        // `hub.review`, the capability for judging somebody else's work.
+        const opener = found.value.comments[0]?.author;
+        if (opener !== signer && !(yield* alsoHolds("hub.review")).ok) {
+          rejected.push({
+            commit: entry.commit,
+            reason: `${payload.type} on somebody else's thread needs hub.review`,
+          });
+          break;
+        }
+
         threads.set(found.key, {
           ...found.value,
           resolved: payload.type === "comment.resolved",

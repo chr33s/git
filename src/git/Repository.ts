@@ -98,6 +98,17 @@ export interface FetchRequest {
   readonly since?: Date;
   /** `deepen-not <ref>`: nothing reachable from these. */
   readonly notRefs?: ReadonlyArray<string>;
+  /**
+   * Objects a tree may name and the pack must not carry.
+   *
+   * Redaction's shape from this side. A tombstoned payload's blob is deleted
+   * while the tree naming it survives — the hash chain depends on that tree —
+   * so a walk that treats every named object as required fails the whole
+   * fetch the moment anything is redacted. The caller supplies the set,
+   * because "which absences are explained" is a question about tombstones and
+   * this layer has never heard of one.
+   */
+  readonly exclude?: ReadonlySet<Oid>;
 }
 
 export type { FsckProblem, FsckReport, GcReport } from "./Maintenance.ts";
@@ -1051,17 +1062,25 @@ export const layer = Layer.effect(
       wants: ReadonlyArray<Oid>,
       haves: ReadonlyArray<Oid>,
       clientShallow?: ReadonlySet<Oid>,
+      exclude?: ReadonlySet<Oid>,
     ) =>
       Effect.gen(function* () {
         // What the client has is walked tolerantly: a `have` can reference
         // history this repository never saw, and that is not an error.
-        const excluded = (yield* reachable(
-          objects,
-          haves,
-          clientShallow === undefined
-            ? { ignoreMissing: true }
-            : { ignoreMissing: true, boundary: clientShallow },
-        )).seen;
+        const excluded = new Set(
+          (yield* reachable(
+            objects,
+            haves,
+            clientShallow === undefined
+              ? { ignoreMissing: true }
+              : { ignoreMissing: true, boundary: clientShallow },
+          )).seen,
+        );
+        // Redacted payloads join the set the walk steps over. Still strict
+        // about everything else: a missing object nobody accounted for is
+        // corruption, and answering a fetch as though it were not would hand
+        // the client a pack it cannot check.
+        for (const oid of exclude ?? []) excluded.add(oid);
         return (yield* reachable(objects, wants, { ignoreMissing: false, skip: excluded })).order;
       });
 
@@ -1118,7 +1137,7 @@ export const layer = Layer.effect(
         input.depth !== undefined || input.since !== undefined || (input.notRefs?.length ?? 0) > 0;
 
       if (!deepening) {
-        const order = yield* closure(input.wants, input.haves, clientShallow);
+        const order = yield* closure(input.wants, input.haves, clientShallow, input.exclude);
         return { shallow: [], unshallow: [], oids: order };
       }
 
