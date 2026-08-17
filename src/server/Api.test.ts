@@ -457,17 +457,33 @@ describe("Api", () => {
           },
         });
 
+        // Spelled short on purpose. The gate qualified the name and the write
+        // used the raw one, so `into: "main"` was judged as `refs/heads/main`
+        // and written to a top-level ref called `main`: the branch never moved
+        // and the response said it had.
         const merged = yield* client.repo.merge({
           params: { repo: "r" },
           payload: {
             ours: "refs/heads/main",
             theirs: "refs/heads/side",
             author: alice,
-            into: "refs/heads/main",
+            into: "main",
           },
         });
         assert.equal(merged.kind, "merged");
         assert.deepEqual(merged.conflicts, []);
+
+        const { refs } = yield* client.repo.refs({ params: { repo: "r" } });
+        assert.equal(
+          refs.find((ref) => ref.name === "refs/heads/main")?.oid,
+          merged.commit,
+          `the branch named must be the branch moved: ${refs.map((ref) => ref.name).join(", ")}`,
+        );
+        assert.equal(
+          refs.find((ref) => ref.name === "main"),
+          undefined,
+          "and no stray top-level ref",
+        );
 
         // The merge commit has both parents, which is what makes it a merge.
         const commit = yield* client.repo.read({

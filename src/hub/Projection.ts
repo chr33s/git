@@ -492,8 +492,6 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
   const dismissed = new Set<string>();
   const threads = new Map<string, Thread>();
   const checks = new Map<string, Check>();
-  /** Which event last wrote each check, so a tombstone can blank its `url`. */
-  const checkKeys = new Map<string, string>();
   /**
    * The *commits* a tombstone reached, not the ids it named.
    *
@@ -879,7 +877,6 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         if (head === null) break;
         // Keyed by name and revision: a check re-run against the same head
         // replaces its own result, and one against a new head is a new answer.
-        checkKeys.set(`${payload.name}@${head}`, mine);
         checks.set(`${payload.name}@${head}`, {
           name: payload.name,
           provider: payload.provider,

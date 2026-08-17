@@ -826,7 +826,11 @@ describe("Policy", () => {
           return yield* gateWriteAs(where, "refs/heads/main");
         }),
       );
-      assert.match(refusal ?? "", /approved pull request/);
+      // Refused by name, before the write: these verbs name a branch and not
+      // the revision the protected-branch rules are about, so there is nothing
+      // here to evaluate those rules against. A protected branch moves through
+      // receive-pack, where the revision arrives with the request.
+      assert.match(refusal ?? "", /pushing an approved revision/);
     });
 
     it("refuses to establish an identity over the API", async () => {

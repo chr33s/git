@@ -574,6 +574,18 @@ policy.write
 repo.admin
 ```
 
+### Advancing a protected branch
+
+A protected branch is advanced by **pushing the approved revision onto it**,
+and by nothing else. A merge commit that merely names an approved head as a
+parent proves nothing about content — a merge's tree is unconstrained — so it
+is refused; whoever wants one makes it on their own branch, opens a pull
+request for it, and has _that_ reviewed. The API's ref-moving verbs are refused
+on a protected ref for the same reason from the other direction: they name a
+branch and not the revision the rules are about, so at the point they are
+gated there is nothing to evaluate those rules against, and a rule that cannot
+be evaluated MUST NOT be treated as satisfied.
+
 ### What the guard charges, and what the boundary charges
 
 Authentication is a coarse filter and authorization is the precise one, so the

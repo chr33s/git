@@ -133,8 +133,14 @@ const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: Readon
  * One entry per state of each repository this process has been asked about —
  * including the "nothing is redacted" answer, which is the one every ordinary
  * repository gives and the one worth not recomputing.
+ *
+ * Process-wide rather than per repository, so the bound has to hold every
+ * repository a host serves at once: at 32 a host with more hub repositories
+ * than that thrashed the map and paid for the whole walk on every deepening
+ * fetch, which is the cost this exists to remove. The entries are sets of
+ * oids, and almost all of them are empty.
  */
-const MEMO = 32;
+const MEMO = 256;
 const memo = new Map<string, ReadonlySet<Oid>>();
 
 export type RedactionError = Invalid | ObjectNotFound | StorageFailure;

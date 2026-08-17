@@ -1365,14 +1365,19 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         };
         if (payload.message !== undefined) request.message = payload.message;
         if (payload.strategy !== undefined) request.strategy = payload.strategy;
-        if (payload.into !== undefined) request.into = payload.into;
         if (payload.no_fast_forward !== undefined) request.noFastForward = payload.no_fast_forward;
         // A merge *into a third branch* is a rewrite: the result is a commit
         // over `ours` and `theirs`, and nothing makes it contain what `into`
         // currently holds. Only merging into one of its own sides is the
         // fast-forward-or-descend transition an ordinary push is.
+        //
+        // The *qualified* name goes to both the gate and the write. Judged
+        // qualified and written raw, `into: "main"` was gated as
+        // `refs/heads/main` and written to a top-level ref called `main`: the
+        // branch never moved and the response said it had.
         if (payload.into !== undefined) {
           const into = refNameOf(payload.into);
+          request.into = into;
           const rewrites = into !== refNameOf(payload.ours) && into !== refNameOf(payload.theirs);
           yield* gateWrite(into, rewrites);
         }
@@ -1386,16 +1391,21 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
         if (payload.author !== undefined) request.author = signatureFrom(payload.author);
-        if (payload.into !== undefined) request.into = payload.into;
-        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into), true);
+        // Qualified once, for the gate and the write alike; see `merge` above.
+        if (payload.into !== undefined) {
+          request.into = refNameOf(payload.into);
+          yield* gateWrite(request.into, true);
+        }
         return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
     )
     .handle("rebase", ({ payload }) =>
       Effect.gen(function* () {
         const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
-        if (payload.into !== undefined) request.into = payload.into;
-        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into), true);
+        if (payload.into !== undefined) {
+          request.into = refNameOf(payload.into);
+          yield* gateWrite(request.into, true);
+        }
         return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
     )

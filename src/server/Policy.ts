@@ -485,7 +485,14 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     // The tip has to *be* the reviewed revision. A merge commit that merely
     // names it as a parent proves nothing about content — a merge's tree is
     // unconstrained, so anybody who may push could wrap whatever they liked
-    // around an approved head. Merging goes through the API's merge verb.
+    // around an approved head.
+    //
+    // So a protected branch is advanced by *pushing the approved revision onto
+    // it*, and by nothing else: a merge commit cannot land there, and neither
+    // can the API's ref-moving verbs, which are refused on a protected ref by
+    // `gateWrite` because they name a branch and not the revision these rules
+    // are about. Whoever wants a merge commit makes one on their own branch,
+    // opens a pull request for it, and has *that* reviewed.
     if (input.to !== pullRequest.head) continue;
 
     // Why this one did not satisfy the rules, kept rather than returned. Two
@@ -588,8 +595,13 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     if (!stale.ok) return stale.reason;
   }
 
+  // Refused outright, not evaluated. Every caller of this gates by ref *name*
+  // and before the write, so the revision the protected-branch rules are about
+  // does not exist yet — and a rule that cannot be evaluated is one this must
+  // not pretend to have satisfied. A protected branch moves through
+  // receive-pack, where the revision arrives with the request.
   return isProtected(rules, ref)
-    ? `${ref} is protected and may only be moved by an approved pull request`
+    ? `${ref} is protected and may only be moved by pushing an approved revision`
     : null;
 });
 
