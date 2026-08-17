@@ -627,6 +627,47 @@ describe("cli hub", () => {
     }
   });
 
+  it("refuses a push before it unpacks it, on a delete-only credential", async () => {
+    // The ref rules need the objects — a fast-forward cannot be told from a
+    // force push until the pack is unpacked — so `Policy.gate` runs after the
+    // object phase. Left entirely to it, a credential scoped to *delete* a
+    // branch had its whole pack persisted before being refused, which is the
+    // object half of the write the refusal is about. What can be judged from
+    // the commands alone is judged before the body is read.
+    const serverRoot = path.join(root, "prepush");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "guarded"]);
+    const owner = await enableHubUnder(serverRoot, "guarded", ["repo.admin"]);
+    const deleter = await grantMemberUnder(serverRoot, "guarded", owner.root, owner.repoId, [
+      "repo.read",
+      "source.delete",
+    ]);
+
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
+    try {
+      // A create command with a pack behind it. The body is deliberately not
+      // a valid pack: a refusal that arrives *before* the unpack cannot have
+      // noticed, and one that arrives after would report an unpacker error.
+      const line = (text: string) => `${(text.length + 4).toString(16).padStart(4, "0")}${text}`;
+      const zero = "0".repeat(40);
+      const one = "1".repeat(40);
+      const answered = await fetch(`${server.url}/guarded/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-git-receive-pack-request",
+          authorization: `Bearer ${deleter.credential}`,
+        },
+        body: `${line(`${zero} ${one} refs/heads/new\0report-status\n`)}0000not a pack at all`,
+      });
+      const report = await answered.text();
+      assert.equal(answered.status, 200, report);
+      assert.match(report, /source\.push/, report);
+      assert.ok(!report.includes("unpacker error"), `refused before the unpack: ${report}`);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("refuses to write objects on a delete-only credential", async () => {
     // Writing a blob or a tree moves no ref, so the policy boundary never sees
     // it and the guard's charge is deliberately coarse — a write being
@@ -657,6 +698,21 @@ describe("cli hub", () => {
 
       const allowed = await write(owner.credential);
       assert.equal(allowed.status, 200, await allowed.text());
+
+      // And through the verbs that write a commit without moving a ref: with
+      // no `into` there is no ref for the boundary to gate, so nothing else
+      // charged them.
+      const merged = await fetch(`${server.url}/store/merge`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${deleter.credential}`,
+        },
+        body: JSON.stringify({ ours: "refs/heads/main", theirs: "refs/heads/main" }),
+      });
+      const mergeBody = await merged.text();
+      assert.equal(merged.status, 400, mergeBody);
+      assert.match(mergeBody, /source\.push/);
 
       // The same gap, through the other door that writes unbounded content.
       const lfs = (credential: string) =>

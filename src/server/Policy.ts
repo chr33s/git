@@ -533,6 +533,35 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
  * all: a protected branch is not, because the only thing that may move one is
  * an approved pull request, and none of these verbs is that.
  */
+/**
+ * Whether the requester may write at all, without naming a ref.
+ *
+ * The ref rules need the ref, and sometimes the objects behind it — a
+ * fast-forward cannot be told from a force push until the pack is unpacked. So
+ * receive-pack judges *after* the object phase, which means a caller the
+ * boundary was always going to refuse had their pack persisted first. This is
+ * the half of the answer available before a byte of the body is read: a
+ * credential scoped to delete a branch is not one that may create or move one,
+ * and that is knowable from the commands alone.
+ *
+ * `null` means nothing was refused; anything else is the reason.
+ */
+export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: string) {
+  const stored = yield* readGenesis();
+  if (stored === null) {
+    const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
+    return Option.getOrElse(open, () => false)
+      ? null
+      : "this repository has no membership to authorize a write; run `hub init` to give it one";
+  }
+
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  const who = Option.getOrElse(requester, () => Auth.anonymous);
+  const principal = { member: who.principal, capabilities: who.capabilities };
+  if (principal.member === null) return "authentication required to write refs";
+  return may(principal, capability) ? null : `this needs ${capability}`;
+});
+
 export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   ref: string,
   /**

@@ -618,6 +618,14 @@ Uploading an LFS object is charged `source.push`, for the same reason as
 pointing one at a URL of the caller's choosing discloses a read-restricted
 repository's commit oids, and `source.push` does not carry `repo.read`.
 
+A gate that cannot run yet still refuses what it can. The ref rules need the
+objects — a fast-forward cannot be told from a force push until the pack is
+unpacked, so receive-pack judges after the object phase — but "may this
+requester create or move a ref at all?" is knowable from the commands alone
+and MUST be asked before the body is read. Otherwise a credential scoped to
+delete a branch has its whole pack persisted before the boundary refuses it,
+which is the object half of the write the refusal is about.
+
 A gate that covers only _part_ of a verb refuses that part, not the verb: a
 repository protecting `refs/tags/*` still has tracking refs to update, so a
 fetch takes what it may and leaves the tags, and the answer lists what moved.

@@ -1434,6 +1434,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         };
         if (payload.message !== undefined) request.message = payload.message;
         if (payload.strategy !== undefined) request.strategy = payload.strategy;
+        // Objects are written whether or not `into` is set — a merge produces
+        // a commit and a tree either way — and without `into` no ref moves, so
+        // `gateWrite` below never runs and nothing else charges it. The same
+        // gap `blob` and `tree` were closed for.
+        yield* requireCapability("source.push");
         if (payload.no_fast_forward !== undefined) request.noFastForward = payload.no_fast_forward;
         // A merge *into a third branch* is a rewrite: the result is a commit
         // over `ours` and `theirs`, and nothing makes it contain what `into`
@@ -1478,6 +1483,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("cherry-pick", ({ payload }) =>
       Effect.gen(function* () {
+        // As `merge` above: a cherry-pick writes a commit with or without a
+        // branch to land it on.
+        yield* requireCapability("source.push");
         const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
         if (payload.author !== undefined) request.author = signatureFrom(payload.author);
         // Qualified once, for the gate and the write alike; see `merge` above.
@@ -1490,6 +1498,8 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("rebase", ({ payload }) =>
       Effect.gen(function* () {
+        // As `merge` above: a rebase writes its replayed commits either way.
+        yield* requireCapability("source.push");
         const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
         if (payload.into !== undefined) {
           request.into = refNameOf(payload.into);

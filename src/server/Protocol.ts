@@ -805,6 +805,21 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // The object phase. A pack arrives whenever any command creates or moves
     // a ref; a delete-only push sends none.
     if (updates.some((update) => update.value !== null)) {
+      // What can be judged before the body is read, is. The full rules need
+      // the objects — a fast-forward cannot be told from a force push until
+      // the pack is unpacked, so `Policy.gate` has to run after — but a
+      // credential scoped to *delete* a branch is not one that may create or
+      // move one, and the guard charges receive-pack either. Left entirely to
+      // the gate, such a caller had their whole pack persisted before being
+      // refused, which is the object half of the write the refusal is about.
+      const refusal = yield* Policy.mayWrite("source.push").pipe(
+        Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+      );
+      if (refusal !== null) {
+        yield* drain;
+        return respond(allFailed(updates, refusal), "ok");
+      }
+
       const unpacked = yield* repository
         .unpack(Stream.fromAsyncIterable(reader.rest(), (cause) => corrupt(String(cause))))
         .pipe(
