@@ -14,6 +14,7 @@ import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
 import * as Event from "./Event.ts";
 import * as PullRequest from "./PullRequest.ts";
+import * as Protocol from "../server/Protocol.ts";
 import * as Redaction from "./Redaction.ts";
 
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =>
@@ -276,6 +277,57 @@ describe("hub redaction", () => {
 
     assert.equal(outcome.same, true, "the fixture must actually collide");
     assert.equal(outcome.held, true, "the reflog still leads back to it");
+  });
+
+  it("does not drop a redacted oid a fetch's own trees still need", async () => {
+    // The exclusion `gc` takes says "stop protecting this"; the one a fetch
+    // takes says "this is not here, walk past it". They are not the same set,
+    // because git dedupes by content — `gc` keeps a redacted payload a branch
+    // also names — and handing the whole set to a fetch dropped an object the
+    // pack genuinely needs, so the client rebuilt a tree pointing at nothing.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+
+        const payload = yield* objects.read(blob!);
+        const tree = yield* repository.writeTree([
+          { mode: "100644", name: "leaked.json", oid: yield* repository.writeBlob(payload.data) },
+        ]);
+        const commit = yield* repository.commitTree({
+          tree,
+          parents: [],
+          message: "the same bytes\n",
+          author: Record.identityAt(new Date(1_700_000_000_000)),
+        });
+        yield* repository.setRef({ name: "refs/heads/main", to: commit });
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+        yield* repository.gc({ repack: true, exclude: yield* Redaction.excluded() });
+
+        // The deepening path, which computes the exclusion up front.
+        const plan = yield* Protocol.planFor({
+          wants: [commit],
+          haves: [],
+          clientShallow: [],
+          depth: 1,
+          since: undefined,
+          notRefs: [],
+        });
+        return { held: yield* objects.has(blob!), carried: plan.oids.includes(blob!) };
+      }),
+    );
+
+    assert.equal(outcome.held, true, "a branch still reaches it, so it survives");
+    assert.equal(outcome.carried, true, "and the pack the branch needs must carry it");
   });
 
   it("excludes nothing in a repository that has no genesis", async () => {

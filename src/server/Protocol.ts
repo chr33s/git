@@ -50,7 +50,7 @@ const corrupt = (reason: string) => new PackCorrupt({ reason });
  * hits a missing object asks what the tombstones say. An absence no tombstone
  * covers fails the retry too, which is the corruption it is.
  */
-const planFor = (request: {
+export const planFor = (request: {
   readonly wants: ReadonlyArray<Oid>;
   readonly haves: ReadonlyArray<Oid>;
   readonly clientShallow: ReadonlyArray<Oid>;
@@ -70,8 +70,11 @@ const planFor = (request: {
     const deepening =
       request.depth !== undefined || request.since !== undefined || request.notRefs.length > 0;
     if (deepening) {
-      const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
-      return yield* repository.fetch({ ...request, exclude });
+      // Not swallowed. An exclusion this could not compute is an exclusion the
+      // plan does not have, and the request would then fail inside `packOids`
+      // — after the 200 and the boundary lines — which is precisely the
+      // outcome computing it up front exists to avoid.
+      return yield* repository.fetch({ ...request, exclude: yield* missing() });
     }
 
     // Only a *missing object* is worth a second look; a storage fault is not
@@ -82,9 +85,27 @@ const planFor = (request: {
       .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
     if (plan !== null) return plan;
 
-    const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
-    return yield* repository.fetch({ ...request, exclude });
+    return yield* repository.fetch({ ...request, exclude: yield* missing() });
   });
+
+/**
+ * What a tombstone covers *and this repository no longer holds*.
+ *
+ * The exclusion `gc` takes says "stop protecting this"; the one a fetch takes
+ * says "this is not here, walk past it". They are not the same set, because
+ * git dedupes by content: a redacted payload can be the very object a branch's
+ * tree names, and `gc` keeps that one. Handing the whole set to a fetch then
+ * dropped an object the pack genuinely needs, and the client rebuilt a tree
+ * pointing at nothing.
+ */
+const missing = Effect.fn("Protocol.missing")(function* () {
+  const repository = yield* Repository;
+  const covered = yield* Redaction.excluded();
+
+  const gone = new Set<Oid>();
+  for (const oid of covered) if (!(yield* repository.contains(oid))) gone.add(oid);
+  return gone;
+});
 
 /** A text pkt-line, the conventional trailing newline stripped. */
 const text = (payload: Uint8Array): string => {
@@ -802,24 +823,46 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       yield* drain;
     }
 
-    // The object phase. A pack arrives whenever any command creates or moves
-    // a ref; a delete-only push sends none.
-    if (updates.some((update) => update.value !== null)) {
-      // What can be judged before the body is read, is. The full rules need
-      // the objects — a fast-forward cannot be told from a force push until
-      // the pack is unpacked, so `Policy.gate` has to run after — but a
-      // credential scoped to *delete* a branch is not one that may create or
-      // move one, and the guard charges receive-pack either. Left entirely to
-      // the gate, such a caller had their whole pack persisted before being
-      // refused, which is the object half of the write the refusal is about.
-      const refusal = yield* Policy.mayWrite("source.push").pipe(
-        Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
-      );
-      if (refusal !== null) {
-        yield* drain;
-        return respond(allFailed(updates, refusal), "ok");
+    // What can be judged before the body is read, is. The full rules need the
+    // objects — a fast-forward cannot be told from a force push until the pack
+    // is unpacked, so `Policy.gate` has to run after — but a credential scoped
+    // to *delete* a branch is not one that may create or move one, and the
+    // guard charges receive-pack either. Left entirely to the gate, such a
+    // caller had their whole pack persisted before being refused, which is the
+    // object half of the write the refusal is about.
+    //
+    // Only the commands it is about, though. Refusing the batch took the
+    // *delete* down with the create in a mixed push, and the delete is the one
+    // thing this principal was entitled to do — `Policy.gate` would have
+    // refused the create alone.
+    const writes = updates.filter((update) => update.value !== null);
+    const refusal =
+      writes.length === 0
+        ? null
+        : yield* Policy.mayWrite("source.push").pipe(
+            Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+          );
+    if (refusal !== null) {
+      // The body was sent for the creates; the report only reaches the client
+      // if it is read first, whether or not anything else here proceeds.
+      yield* drain;
+      if (atomic) return respond(allFailed(updates, refusal), "ok");
+      for (const update of writes) {
+        refused.push({
+          ref: update.name,
+          from: update.expected ?? null,
+          to: update.value,
+          ok: false,
+          reason: refusal,
+        });
       }
+    }
+    const allowed = refusal === null ? updates : updates.filter((update) => update.value === null);
 
+    // The object phase. A pack arrives whenever any command creates or moves
+    // a ref; a delete-only push sends none, and a push whose creates were all
+    // refused above has already had its body drained.
+    if (refusal === null && writes.length > 0) {
       const unpacked = yield* repository
         .unpack(Stream.fromAsyncIterable(reader.rest(), (cause) => corrupt(String(cause))))
         .pipe(
@@ -836,7 +879,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
 
       // No full connectivity check, but never point a ref at an object this
       // repository does not hold.
-      for (const update of updates) {
+      for (const update of allowed) {
         if (update.value !== null && !(yield* repository.contains(update.value))) {
           yield* drain;
           return respond(allFailed(updates, "missing necessary objects"), "ok");
@@ -848,7 +891,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // the requester is; this is where what they may do meets what the branch
     // requires, and the compare-and-swap that carries the verdict is applied
     // with it rather than after it.
-    const judged = yield* Policy.gate(updates, atomic);
+    const judged = yield* Policy.gate(allowed, atomic);
     if (atomic && judged.refused.length > 0) {
       // The client's whole list, not `judged.updates`: an atomic batch with a
       // refusal in it has *no* allowed updates, so reporting on those produces

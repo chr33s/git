@@ -290,17 +290,21 @@ export const checkCompleted = Effect.fn("hub.PullRequest.checkCompleted")(functi
 /**
  * Redact an event's content.
  *
- * Two things happen, and both are necessary. A signed tombstone is appended,
- * because that is what replicates — a deletion that is only a deletion comes
- * back from the first replica that still has the object. And the payload blob
- * is dropped from this repository, because a tombstone alone removes nothing.
+ * What happens here is that a signed tombstone is appended, because that is
+ * what replicates — a deletion that is only a deletion comes back from the
+ * first replica that still has the object. The commit, the tree and the
+ * event's place in the chain all stay. Content goes; structure does not,
+ * because every later event's hash depends on it.
  *
- * The commit, the tree and the event's place in the chain all stay. Content
- * goes; structure does not, because every later event's hash depends on it.
- *
- * "Dropped" is immediate for a loose object and takes until the next repack
- * for a packed one — a pack cannot give up one object without being rewritten.
- * `Redaction.excluded()` is the other half, and `gc` is where it lands.
+ * The bytes go in `gc`, which takes `Redaction.excluded()` and stops
+ * protecting what a tombstone covers. Not here, and deliberately: a packed
+ * object cannot be dropped without rewriting its pack, and the loose copy
+ * needs a question answered that only a reachability walk can answer — git
+ * dedupes by content, so a redacted payload can be the very object a branch
+ * names, or one a reflog still leads back to. Deleting it here left the source
+ * history dangling; answering it here would mean reproducing the walk `gc`
+ * *is*. So an operator's removal is complete at the next collection, and this
+ * says so rather than reporting bytes gone that are still on disk.
  */
 export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   readonly repo: RepoId;

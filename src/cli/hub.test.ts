@@ -663,6 +663,42 @@ describe("cli hub", () => {
       assert.equal(answered.status, 200, report);
       assert.match(report, /source\.push/, report);
       assert.ok(!report.includes("unpacker error"), `refused before the unpack: ${report}`);
+
+      // And the refusal covers the commands it is about. A mixed push carries
+      // a delete this principal *is* entitled to make, and refusing the batch
+      // took it down with the create — the full gate would have refused the
+      // create alone.
+      const seeded = await fetch(`${server.url}/guarded/commit`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${owner.credential}`,
+        },
+        body: JSON.stringify({
+          branch: "doomed",
+          message: "one",
+          author: { name: "A", email: "a@example.com", at: new Date().toISOString(), offset: 0 },
+          files: [{ path: "a.txt", content: "one\n" }],
+        }),
+      });
+      const seededBody = await seeded.text();
+      assert.equal(seeded.status, 200, seededBody);
+      // SAFETY: a 200 from `commit`, whose success schema carries `oid`.
+      const { oid } = JSON.parse(seededBody) as { readonly oid: string };
+
+      const mixed = await fetch(`${server.url}/guarded/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-git-receive-pack-request",
+          authorization: `Bearer ${deleter.credential}`,
+        },
+        body:
+          `${line(`${zero} ${one} refs/heads/also-new\0report-status\n`)}` +
+          `${line(`${oid} ${zero} refs/heads/doomed\n`)}0000not a pack at all`,
+      });
+      const mixedReport = await mixed.text();
+      assert.match(mixedReport, /ng refs\/heads\/also-new/, mixedReport);
+      assert.match(mixedReport, /ok refs\/heads\/doomed/, mixedReport);
     } finally {
       await server.close();
     }

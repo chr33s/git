@@ -307,17 +307,6 @@ export class Repository extends Context.Service<
       oids: ReadonlyArray<Oid>,
     ) => Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure>;
 
-    /**
-     * Remove one object.
-     *
-     * Redaction is the only caller (`hub/PullRequest.ts`): a tombstoned event
-     * keeps its commit and its tree, and loses the blob those name. Everything
-     * else that deletes goes through `gc`, which decides by reachability —
-     * this deletes something still reachable, on purpose, which is why it is
-     * its own verb rather than a flag on collection.
-     */
-    readonly deleteObject: (oid: Oid) => Effect.Effect<void, StorageFailure>;
-
     readonly readTag: (oid: Oid) => Effect.Effect<TagInfo, ObjectNotFound | StorageFailure>;
 
     /**
@@ -1711,7 +1700,6 @@ export const layer = Layer.effect(
           ? Effect.succeed(true)
           : ancestry([descendant]).pipe(Effect.map((seen) => seen.has(ancestor))),
 
-      deleteObject: (oid) => objects.delete(oid),
       gc: (options) => Maintenance.gc({ objects, packs, refs }, options),
     });
   }),

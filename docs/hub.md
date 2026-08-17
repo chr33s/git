@@ -618,7 +618,9 @@ Uploading an LFS object is charged `source.push`, for the same reason as
 pointing one at a URL of the caller's choosing discloses a read-restricted
 repository's commit oids, and `source.push` does not carry `repo.read`.
 
-A gate that cannot run yet still refuses what it can. The ref rules need the
+A gate that cannot run yet still refuses what it can, and refuses only the
+commands it is about: a mixed push carrying a create and a delete, from a
+principal entitled to the delete alone, loses the create and keeps the delete. The ref rules need the
 objects — a fast-forward cannot be told from a force push until the pack is
 unpacked, so receive-pack judges after the object phase — but "may this
 requester create or move a ref at all?" is knowable from the commands alone
@@ -1163,7 +1165,12 @@ A tombstone excludes a payload from _the hub's_ reachability, not from the
 repository's. Git dedupes by content, so a redacted payload can be the very
 object a branch names — post the comment, commit the same bytes as a file,
 then have the comment redacted — and treating the exclusion as "delete this"
-leaves the source history dangling. The removal happens in one place — `gc`, which walks the refs the
+leaves the source history dangling. The exclusion a _fetch_ takes is a different set again: it says "this is not
+here, walk past it", so it holds only what a tombstone covers **and this
+repository no longer has**. Handing a fetch the whole set dropped an object
+the pack genuinely needs, and the client rebuilt a tree pointing at nothing.
+
+The removal happens in one place — `gc`, which walks the refs the
 exclusion is not about, `HEAD` and the reflogs included, and keeps what those
 reach. Deleting the loose copy the moment a tombstone is written cannot answer
 that question without reproducing the walk, and a packed copy needed `gc`

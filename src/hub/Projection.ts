@@ -338,6 +338,8 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
   skip: ReadonlySet<Oid>,
 ) {
   const { events, parents } = walked;
+  /** Events by commit, since a tombstone resolves its target by one. */
+  const byCommit = new Map(events.map((entry) => [entry.commit, entry]));
   const rejected: Rejected[] = [];
 
   /**
@@ -966,9 +968,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // anything packed or collected. `PullRequest.redact` already refuses
         // to write one; the fold has to refuse to honour one, because a
         // replica sees the event and never the command.
-        if (
-          events.find((event) => event.commit === targetCommit)?.payload?.type === "event.redacted"
-        ) {
+        if (byCommit.get(targetCommit)?.payload?.type === "event.redacted") {
           rejected.push({
             commit: entry.commit,
             reason: "a tombstone is the record of a removal and is not itself removable",
