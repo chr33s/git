@@ -354,8 +354,16 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       });
       // Closed, not erased: everything the key signed between the revocation
       // and this grant stays refused.
+      // Only a revocation that is still *open* is closed by this grant. An
+      // ordinary renewal would otherwise move an already-closed window's end
+      // forward, and every event signed after the first re-instatement — which
+      // named the old end as its trust head — would stop reaching it and be
+      // refused: approvals vanishing and protected-branch merges failing for a
+      // key that had been a member the whole time.
       const ending = revoked.get(subject);
-      if (ending !== undefined) revoked.set(subject, { ...ending, supersededBy: entry.commit });
+      if (ending !== undefined && ending.supersededBy === null) {
+        revoked.set(subject, { ...ending, supersededBy: entry.commit });
+      }
       // `former` is what a forward-only revocation is judged against, and this
       // key is a current member again: leaving a stale entry there would let a
       // later revocation be measured against capabilities they no longer hold.

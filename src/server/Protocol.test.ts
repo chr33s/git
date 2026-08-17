@@ -699,6 +699,39 @@ describe("advertisement hiding", () => {
     assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
   });
 
+  it("answers one that names it without a trailing slash, which is what git sends", async () => {
+    // git derives the prefix from the configured refspec, so `refs/hub/*`
+    // yields `refs/hub` — no slash. The un-hiding test was written against
+    // `hiddenFromAdvertisement`, which asks whether a *ref* is hidden, and
+    // `refs/hub` is not one: the answer came back empty for a client that had
+    // asked by name, and a mirror reported a replication that fetched nothing.
+    const refs = await scenario(
+      Effect.gen(function* () {
+        yield* withHubRefs();
+        return yield* namedBy(lsRefs(["refs/meta/trust", "refs/hub"]));
+      }),
+    );
+
+    assert.ok(refs.includes("refs/meta/trust/log"), refs.join("\n"));
+    assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
+  });
+
+  it("still hides them from a prefix that only overlaps `refs/`", async () => {
+    // The prefix has to reach the namespace, not merely share a start with it:
+    // `refs/heads/` names no hidden ref, and answering it with hub state would
+    // undo the hiding for every stock client that fetches branches by prefix.
+    const refs = await scenario(
+      Effect.gen(function* () {
+        yield* withHubRefs();
+        return yield* namedBy(lsRefs(["refs/heads/", "refs/hub"]));
+      }),
+    );
+
+    assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
+    assert.ok(refs.includes("refs/hub/pr/1"), "the named namespace still answers");
+    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
+  });
+
   it("still shows them to a pusher, who has to know what it is replacing", async () => {
     // receive-pack's old-oid is how a stale push is caught, so hiding these
     // from the push advertisement would make every hub ref writable exactly

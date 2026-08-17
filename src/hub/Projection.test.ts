@@ -938,6 +938,82 @@ describe("hub projection", () => {
       assert.match(outcome.state.rejected.at(-1)?.reason ?? "", /needs hub\.merge/);
     });
 
+    it("cannot blank the base and freeze the branch behind it", async () => {
+      // Withholding *all* of a contested opening's content left `base` empty,
+      // and `Policy.protectedBranch` compares `pullRequest.base` against the
+      // ref being pushed — so an empty base matched nothing, the pull request
+      // stopped counting towards its own branch's approvals, and a member
+      // holding only `hub.create-pr` could freeze a protected branch by
+      // pushing one parentless `pr.opened` at every review in flight. Content
+      // now comes from whichever opening wins descent, which a forgery cannot
+      // do against a pull request that has any activity at all.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          // Activity, so descent has something to decide with: every honest
+          // event parents on the head, and the forgery is an ancestor of none.
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "looks right",
+            key: where.reviewer,
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+
+          const meddler = yield* generate("meddler@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(meddler.publicKey),
+              capabilities: ["hub.create-pr"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.opened",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead,
+            title: "not yours any more",
+            description: "",
+            base: "refs/heads/elsewhere",
+            head: Event.qualify(NEXT),
+          });
+          const forged = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [yield* sign(meddler, bytes, NAMESPACE)],
+            parents: [],
+            message: "pr.opened forged\n",
+          });
+
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Event.join(pr, [head!, forged]),
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(
+        outcome.base,
+        "refs/heads/main",
+        "the pull request must still name the branch it targets",
+      );
+      assert.equal(outcome.title, "Add a thing", "and keep the content it was opened with");
+      // The part a contested opening still does not confer.
+      assert.equal(outcome.author, null, "and confer no authorship on the forgery");
+    });
+
     it("gets no authority from there being no author yet", async () => {
       // `Dag.topological` orders parentless commits by oid, so grinding a low
       // one folds it before the `pr.opened` that establishes the author — and

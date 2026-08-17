@@ -165,3 +165,22 @@ export const TRUST_GENESIS = "refs/meta/trust/genesis";
  */
 export const hiddenFromAdvertisement = (ref: string): boolean =>
   ref !== TRUST_GENESIS && (ref.startsWith("refs/hub/") || ref.startsWith("refs/meta/"));
+
+/**
+ * Whether a `ref-prefix` is asking for a hidden namespace.
+ *
+ * Not the same question as `hiddenFromAdvertisement`, and conflating them cost
+ * clients their answer: `ref-prefix refs/hub` — no trailing slash, which git
+ * writes whenever the configured refspec has none — is not itself a ref in a
+ * hidden namespace, so it matched nothing and the hub refs were withheld from
+ * a client that had asked for them by name. Since v0 hides them too, that
+ * client could never discover them at all, and a mirror reported a successful
+ * replication having fetched nothing.
+ *
+ * `refs/` and anything shorter is what "everything" looks like, and answering
+ * it with hub state is the default the hiding exists to avoid.
+ */
+export const namesHiddenNamespace = (prefix: string): boolean =>
+  ["refs/hub", "refs/meta"].some(
+    (namespace) => prefix.startsWith(namespace) || namespace.startsWith(prefix),
+  ) && prefix.length > "refs/".length;

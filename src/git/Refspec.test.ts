@@ -78,4 +78,26 @@ describe("Refspec", () => {
     assert.equal(Refspec.hiddenFromAdvertisement(Refspec.TRUST_GENESIS), false);
     assert.equal(Refspec.hiddenFromAdvertisement("refs/heads/main"), false);
   });
+
+  it("recognizes a ref-prefix that asks for a hidden namespace", () => {
+    // git writes the prefix its refspec gives it, and a refspec written
+    // `refs/hub/*` yields `refs/hub` — no trailing slash. Answered with
+    // `hiddenFromAdvertisement`, which asks whether a *ref* is hidden, that
+    // prefix matched nothing: the client that had named the namespace by hand
+    // was told there was nothing in it, and since v0 hides it too, could never
+    // discover it at all.
+    assert.equal(Refspec.namesHiddenNamespace("refs/hub"), true);
+    assert.equal(Refspec.namesHiddenNamespace("refs/hub/"), true);
+    assert.equal(Refspec.namesHiddenNamespace("refs/hub/pr/1"), true);
+    assert.equal(Refspec.namesHiddenNamespace("refs/meta"), true);
+    assert.equal(Refspec.namesHiddenNamespace("refs/meta/trust/"), true);
+    // A prefix on the way to one counts, since the client walking down to it
+    // asks with each: `refs/h` reaches `refs/hub`.
+    assert.equal(Refspec.namesHiddenNamespace("refs/h"), true);
+
+    // "Everything" is what the hiding exists to answer with less.
+    assert.equal(Refspec.namesHiddenNamespace("refs/"), false);
+    assert.equal(Refspec.namesHiddenNamespace(""), false);
+    assert.equal(Refspec.namesHiddenNamespace("refs/heads/"), false);
+  });
 });

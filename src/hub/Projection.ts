@@ -575,17 +575,19 @@ export const project = Effect.fn("hub.Projection.project")(function* (
           break;
         }
 
-        // A contested opening does not get to say what the pull request *is*
-        // either. Its `base` is what `protectedBranch` matches against, so an
-        // impostor that won a tie could point an approved pull request at
-        // another branch and make the boundary skip it — the freeze this
-        // whole rule exists to prevent, entered through the back door.
-        if (!opening.contested) {
-          title = payload.title;
-          description = payload.description;
-          base = payload.base;
-          author ??= signer;
-        }
+        // The winner supplies the content. Withholding it when the opening was
+        // contested left `base` empty, which `protectedBranch` matches against
+        // nothing — so a competing `pr.opened` froze the very pull request it
+        // was pushed at, which is the denial the capability charges exist to
+        // stop. Capturing the content instead requires *winning descent*, and
+        // that means being an ancestor of the events the pull request already
+        // has: impossible for a forgery on any pull request with activity, and
+        // an approved one has activity by definition.
+        title = payload.title;
+        description = payload.description;
+        base = payload.base;
+        // Authorship is the part a contested opening still does not confer.
+        if (!opening.contested) author ??= signer;
         openedBy = mine;
         const head = Event.unqualify(payload.head);
         if (

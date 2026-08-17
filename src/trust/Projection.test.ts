@@ -542,6 +542,59 @@ describe("trust projection", () => {
       assert.equal(outcome.projection.former.has(outcome.bob), false, "no stale former entry");
     });
 
+    it("does not move a closed window's end forward on an ordinary renewal", async () => {
+      // The window ends where the key came *back*, and nowhere later. Written
+      // as an unconditional overwrite, every subsequent grant to the same key
+      // — a renewal, an added capability, an extended expiry — pushed the end
+      // along, and every event signed against the *first* re-instatement
+      // stopped reaching it and was judged as if made while revoked. A member
+      // in good standing would watch their approvals vanish and their merges
+      // start failing, at the moment somebody widened their capabilities.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "rotated",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+          const back = yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          // Bob signs as a member again, naming the head that re-instated him.
+          const reinstated = yield* repository.resolve(Log.LOG_REF);
+          const bytes = new TextEncoder().encode("a review made after coming back");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          // And only then is his membership renewed with one more capability.
+          yield* grantTo(where, bob, ["hub.review", "hub.comment"], where.roots.slice(0, 2));
+
+          const projection = yield* projectionOf(where);
+          return {
+            back,
+            ended: projection.revoked.get(yield* print(bob))?.supersededBy ?? null,
+            authorized: yield* Verify.authorize({
+              projection,
+              bytes,
+              signatures: [signature],
+              capability: "hub.review",
+              made: { at: new Date(), trustHead: reinstated },
+            }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.ended, outcome.back, "the window ends where the key came back");
+      assert.equal(outcome.authorized.ok, true, "a renewal must not invalidate signed history");
+    });
+
     it("leaves an event made before the revocation was visible valid", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {

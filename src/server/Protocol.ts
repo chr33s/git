@@ -548,9 +548,7 @@ const lsRefs = (request: V2Request): Effect.Effect<Response, GitError, Repositor
       // it with hub state would be the default this exists to avoid.
       if (
         Refspec.hiddenFromAdvertisement(name) &&
-        !prefixes.some(
-          (prefix) => name.startsWith(prefix) && Refspec.hiddenFromAdvertisement(prefix),
-        )
+        !prefixes.some((prefix) => name.startsWith(prefix) && Refspec.namesHiddenNamespace(prefix))
       ) {
         continue;
       }
