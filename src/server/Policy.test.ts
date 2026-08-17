@@ -394,6 +394,84 @@ describe("Policy", () => {
       assert.match(outcome.added.ok === false ? outcome.added.reason : "", /has been revoked/);
     });
 
+    it("does not re-judge what the ref already holds when a join reconciles it", async () => {
+      // The walk's boundary is one oid, and it cuts only the chain that runs
+      // through it — a join has a second parent, so an ordinary reconciling
+      // push walked back to the root and re-read every event already on the
+      // ref. One old comment from a member revoked since then made that pull
+      // request refuse its own joins for good, on a namespace that cannot be
+      // rewound: the pull request, and any protected branch behind it, stuck.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          // An approval from the member who is about to be revoked, already on
+          // the ref and already judged when it arrived.
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: EMPTY_TREE_OID,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          const settled = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          // Two ordinary appends by a live member, reconciled by a join: the
+          // everyday shape of two people commenting at once.
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "mine",
+            key: where.dev,
+          });
+          const mine = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          const yours = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [settled!],
+            message: "join\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [mine!, yours],
+            message: "join\n",
+            author,
+          });
+
+          return yield* evaluate({
+            update: { name: `refs/hub/pr/${pr}`, value: joined },
+            principal: where.principal,
+            genesis: where.genesis,
+            trust: yield* projectTrust(where.genesis),
+            rules: OPEN,
+          });
+        }),
+      );
+
+      assert.equal(
+        outcome.ok === false ? outcome.reason : "allowed",
+        "allowed",
+        "the revoked member's approval was judged when it arrived, not again now",
+      );
+    });
+
     it("holds the trust log to a ceiling of its own", async () => {
       // The log is append-only and needs only `source.push` to grow, and every
       // duplicate statement in it is ranked by a reach walk per copy. Bounded

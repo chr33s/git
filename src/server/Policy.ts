@@ -535,6 +535,19 @@ const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string,
 });
 
 /**
+ * Whether a commit is one this push is *adding* to a hub ref.
+ *
+ * A hub commit, and one the ref does not already reach. `Dag.reachable`'s
+ * boundary cuts only the chain that runs through the named oid, and a join has
+ * a second parent — so an ordinary reconciling push walked back to the root
+ * and re-read every event already on the ref.
+ */
+const added = Effect.fnUntraced(function* (commit: Oid, current: Oid | null) {
+  if (!(yield* Event.isHubCommit(commit))) return false;
+  return current === null ? true : !(yield* contains(commit, current));
+});
+
+/**
  * A revoked signer on an event the push is adding, or `null`.
  *
  * Narrow on purpose. Refusing every event whose declared trust head predates a
@@ -555,7 +568,13 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
 ) {
   if (trust.revoked.size === 0) return null;
 
-  const parents = yield* Dag.reachable(to, current, (commit) => Event.isHubCommit(commit)).pipe(
+  // Stopped at everything the ref already reaches, not at the tip alone. A
+  // boundary of one oid only cuts the chain that runs through it, and a join
+  // has a second parent — so an ordinary reconciling push walked back to the
+  // root and re-judged every event already on the ref. One old comment from a
+  // member revoked since then made that pull request refuse its own joins for
+  // good, on a namespace that cannot be rewound.
+  const parents = yield* Dag.reachable(to, current, (commit) => added(commit, current)).pipe(
     // An unreadable history is not a signature claim. It is refused, or passed
     // over, by the walks that own that question.
     Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
@@ -599,27 +618,38 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   // the receive-pack path, from a push of one tiny commit. The ceiling check
   // above does not catch it — that walk is bounded, so it simply steps over
   // the foreign parent and finds nothing to refuse.
+  // Stopped at everything the ref already reaches, and not at the tip alone:
+  // the boundary oid cuts only the chain running through it, and a join has a
+  // second parent, so an ordinary reconciling push walked back to the root.
   const belongs = name.startsWith("refs/hub/") ? Event.isHubCommit : Log.isTrustCommit;
-  const parents = yield* Dag.reachable(to, current, (commit) => belongs(commit)).pipe(
-    Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
-  );
+  const parents = yield* Dag.reachable(to, current, (commit) =>
+    Effect.gen(function* () {
+      if (!(yield* belongs(commit))) return false;
+      return !(yield* contains(commit, current));
+    }),
+  ).pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   // Unreadable is not "no second root": the objects arrived with this push, so
   // a missing one is a push this cannot judge rather than one it may wave on.
   if (parents === null) return to;
   for (const [commit, of] of parents) {
-    if (commit === current) continue;
     // A root of *this* history, which is not the same as a commit with no
-    // parents at all. The walk is bounded to the namespace's own commits, so a
-    // parent outside it — a fabricated oid, or a commit from the source
-    // history — is not an edge this DAG has. Tested against the raw parent
-    // list, a graft that named any junk oid as its parent read as attached and
+    // parents at all. The walk holds only what the push adds, so a parent is
+    // an edge of this DAG when the walk kept it or when the ref already
+    // reached it — and anything else, a fabricated oid or a commit from the
+    // source history included, is not an edge at all. Tested against the raw
+    // parent list, a graft that named any junk oid read as attached and
     // slipped through: it then out-ranked the genuine opening on descent,
     // supplied the base and the author, and the real `pr.opened` was refused
     // as "re-opening somebody else's pull request" — freezing the protected
     // branch behind an approved pull request the boundary could no longer see.
-    if (of.some((parent) => parent === current || parents.has(parent))) continue;
-    if (yield* contains(commit, current)) continue;
-    return commit;
+    let attached = false;
+    for (const parent of of) {
+      if (parents.has(parent) || (yield* contains(parent, current))) {
+        attached = true;
+        break;
+      }
+    }
+    if (!attached) return commit;
   }
   return null;
 });

@@ -633,11 +633,18 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
     // replay can grind. The genuine record hangs off the log's history; a copy
     // grafted in beside it does not, and cannot be given that history without
     // being made a descendant of the record it is trying to displace.
-    const rank = (commit: Oid): readonly [number, number, Oid] => [
-      descendants(commit),
-      reach(commit, parents),
-      commit,
-    ];
+    // Memoised across both passes below. Each call is two whole-log walks, and
+    // the endorsement list re-ranked every copy the winner loop had already
+    // ranked — four walks per copy, on a log any `source.push` holder can add
+    // duplicates to, paid again on every fold.
+    const ranks = new Map<Oid, readonly [number, number, Oid]>();
+    const rank = (commit: Oid): readonly [number, number, Oid] => {
+      const known = ranks.get(commit);
+      if (known !== undefined) return known;
+      const found = [descendants(commit), reach(commit, parents), commit] as const;
+      ranks.set(commit, found);
+      return found;
+    };
     let best = rank(commits[0]!);
     for (const commit of commits.slice(1)) {
       const candidate = rank(commit);

@@ -40,6 +40,8 @@ export interface Review {
   readonly head: Oid;
   /** The branch it was reviewed *for*; retargeting the pull request stales it. */
   readonly base: string;
+  /** The event commit, which is how its place in the history is known. */
+  readonly commit: Oid;
   readonly decision: "approve" | "reject" | "comment";
   readonly body: string;
   readonly at: Date;
@@ -560,7 +562,14 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
      * what its author wrote, so displacing a real conversation costs one
      * member key per participant rather than one commit per event.
      */
+    const ranks = new Map<Oid, readonly [number, number, Oid]>();
     const rank = Effect.fnUntraced(function* (commit: Oid) {
+      // Memoised: the contest check below asks again about candidates the
+      // winner loop has already ranked, and each ask is a pass over every
+      // event with a signature verification per member — on the synchronous
+      // receive-pack path.
+      const known = ranks.get(commit);
+      if (known !== undefined) return known;
       const signers = new Set<Fingerprint>();
       let count = 0;
       for (const entry of events) {
@@ -574,7 +583,9 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         count++;
         for (const signer of yield* signersOf(entry)) signers.add(signer);
       }
-      return [signers.size, count, commit] as const;
+      const found = [signers.size, count, commit] as const;
+      ranks.set(commit, found);
+      return found;
     });
 
     let best = yield* rank(candidates[0]!);
@@ -609,6 +620,10 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
   let title = "";
   let description = "";
   let base = "";
+  /** Which `pr.opened` supplied the content above; see the `pr.opened` case. */
+  let opened: { readonly commit: Oid; readonly id: string } | null = null;
+  /** Every accepted `pr.opened` and the base it named, in fold order. */
+  const openings: Array<{ readonly commit: Oid; readonly base: string }> = [];
   let state: PullRequest["state"] = "open";
   let author: Fingerprint | null = null;
   let mergeCommit: Oid | null = null;
@@ -836,9 +851,20 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // that means being an ancestor of the events the pull request already
         // has: impossible for a forgery on any pull request with activity, and
         // an approved one has activity by definition.
-        title = payload.title;
-        description = payload.description;
-        base = Event.branchRef(payload.base);
+        // By descent, exactly as the head is, and for the same reason. Taken
+        // in fold order, the last `pr.opened` the walk reached won — and that
+        // order breaks ties by oid, which whoever writes the commit grinds. A
+        // sibling `pr.opened` ground *below* an existing approval folds first,
+        // so the approval is then recorded against the base the sibling chose
+        // and is not stale: an approval given for `refs/heads/docs` satisfied
+        // a protected `refs/heads/main`.
+        openings.push({ commit: entry.commit, base: Event.branchRef(payload.base) });
+        if (supersedes({ commit: entry.commit, id: payload.id }, opened, ancestors)) {
+          opened = { commit: entry.commit, id: payload.id };
+          title = payload.title;
+          description = payload.description;
+          base = Event.branchRef(payload.base);
+        }
         // Authorship comes from the opening that *won*, and from nothing else.
         // Applied to every accepted `pr.opened`, a second one the pre-pass had
         // refused but the loop accepted — the floor raises the head it is
@@ -925,13 +951,10 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
           id: payload.id,
           author: signer,
           head,
-          // The base in force when the review was made. A reviewer approves a
-          // revision *for a destination*, and the destination can be rewritten
-          // afterwards by a second `pr.opened` from the pull request's own
-          // author — which passes every capability check there is. Compared
-          // only on `head`, an approval given for `refs/heads/docs` then
-          // authorized pushing that same revision to `refs/heads/main`.
-          base,
+          // Filled in below, from the openings this review descends from
+          // rather than from whichever one the walk happened to reach first.
+          base: "",
+          commit: entry.commit,
           decision: payload.decision,
           body: payload.body,
           at: issued,
@@ -1105,6 +1128,27 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
 
   const head = headSetter?.head ?? null;
 
+  /**
+   * The base a review was actually given for.
+   *
+   * The last opening the review descends from, and not the last one the walk
+   * reached before it. Fold order breaks ties by oid, which whoever writes the
+   * commit grinds — so a sibling `pr.opened` ground below an existing approval
+   * folded first, the approval was recorded against the base that sibling
+   * chose, and an approval given for `refs/heads/docs` satisfied a protected
+   * `refs/heads/main`. Descent is the relation nobody can grind, which is why
+   * the head already uses it.
+   */
+  const baseGiven = (commit: Oid): string => {
+    for (let at = openings.length - 1; at >= 0; at--) {
+      const opening = openings[at]!;
+      if (opening.commit === commit || ancestors.get(commit)?.has(opening.commit) === true) {
+        return opening.base;
+      }
+    }
+    return base;
+  };
+
   return {
     id: pr,
     title,
@@ -1114,13 +1158,17 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     state,
     author,
     mergeCommit,
-    reviews: [...reviews.entries()].map(([key, review]) => ({
-      ...review,
-      dismissed: dismissed.has(key),
-      // Stale, not gone: the statement stays true about the revision it named,
-      // and about the branch it named it for.
-      stale: head === null || review.head !== head || review.base !== base,
-    })),
+    reviews: [...reviews.entries()].map(([key, review]) => {
+      const given = baseGiven(review.commit);
+      return {
+        ...review,
+        base: given,
+        dismissed: dismissed.has(key),
+        // Stale, not gone: the statement stays true about the revision it named,
+        // and about the branch it named it for.
+        stale: head === null || review.head !== head || given !== base,
+      };
+    }),
     threads: [...threads.values()],
     checks: [...checks.values()],
     claims: byId,

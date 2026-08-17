@@ -364,6 +364,114 @@ describe("hub projection", () => {
       assert.equal(approvals(state).length, 0, "so it authorizes nothing on the new branch");
     });
 
+    it("does not let a ground-down retarget rewrite what an approval was given for", async () => {
+      // The base a review was given for was read off the walk's position
+      // rather than off the review's own history. Fold order breaks ties by
+      // oid, which whoever writes the commit grinds — so a sibling `pr.opened`
+      // ground *below* an existing approval folds first, the approval is
+      // recorded against the base that sibling chose, and it is not stale. An
+      // approval given for `refs/heads/docs` then satisfied a protected
+      // `refs/heads/main`. The head already uses descent for exactly this
+      // reason; the base did not.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+
+          // Opened until the approval's oid sorts *above* the opening's, so
+          // that there is a window between them for the sibling to land in.
+          // Both oids are the repository's to choose and neither is grindable
+          // from here, so the fixture retries rather than steering them.
+          let pr = "";
+          let first: Event.Walked["events"][number] | undefined;
+          // SAFETY: replaced on the first pass of the loop below, before it is
+          // compared against anything; the empty string is only its shape.
+          let approval = "" as Oid;
+          for (let round = 0; round < 32; round++) {
+            ({ pr } = yield* PullRequest.open({
+              repo: where.genesis.repoId,
+              title: "Add a thing",
+              description: "It does the thing.",
+              base: "refs/heads/docs",
+              head: REVISION,
+              key: where.author,
+            }));
+            approval = yield* PullRequest.review({
+              repo: where.genesis.repoId,
+              pr,
+              head: REVISION,
+              decision: "approve",
+              key: where.reviewer,
+            });
+            first = (yield* Event.entries(pr)).events.find(
+              (entry) => entry.payload?.type === "pr.opened",
+            );
+            if (first !== undefined && first.commit < approval) break;
+          }
+
+          // The author's own retarget: written the ordinary way, then moved
+          // to sit *beside* the approval rather than on top of it, and ground
+          // below it so the walk reaches it first. Nothing here is forged —
+          // every byte of it is the author's to write.
+          const ref = Event.refOf(pr);
+          const approved = yield* repository.resolve(ref);
+          yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            id: pr,
+            title: "Add a thing",
+            description: "It does the thing.",
+            base: "refs/heads/main",
+            head: REVISION,
+            key: where.author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const retarget = events.find(
+            (entry) =>
+              entry.payload?.type === "pr.opened" && entry.payload.base === "refs/heads/main",
+          );
+
+          // Ground into the window *between* the two, which is the only
+          // placement that demonstrates anything. Below the opening, the
+          // sibling folds before any author is established and the capability
+          // check refuses it on its own merits. Above the approval, the
+          // approval is folded first and records the right base whether or not
+          // this is fixed. In between, the sibling folds first and the
+          // approval is the thing whose base is at stake.
+          let sibling = first!.commit;
+          const between = () => sibling > first!.commit && sibling < approval;
+          for (let attempt = 0; attempt < 512 && !between(); attempt++) {
+            sibling = yield* Record.write({
+              name: Event.RECORD,
+              payload: retarget!.bytes,
+              signatures: retarget!.signatures,
+              parents: [],
+              message: `pr.opened moved ${attempt}\n`,
+            });
+          }
+          yield* repository.setRef({ name: ref, to: approved! });
+          yield* repository.setRef({ name: ref, to: yield* Event.join(pr, [approved!, sibling]) });
+
+          return {
+            ground: sibling > first!.commit && sibling < approval,
+            state: yield* projectionOf(where, pr),
+          };
+        }),
+      );
+
+      assert.equal(
+        outcome.ground,
+        true,
+        "the fixture must land the sibling between the opening and the approval",
+      );
+      assert.equal(
+        outcome.state.reviews[0]?.base,
+        "refs/heads/docs",
+        "the approval was given for the branch its own history named",
+      );
+      assert.equal(outcome.state.reviews[0]?.stale, true);
+      assert.equal(approvals(outcome.state).length, 0, "so it authorizes nothing on the new base");
+    });
+
     it("counts approvers, not approval events", async () => {
       const state = await scenario(
         Effect.gen(function* () {
