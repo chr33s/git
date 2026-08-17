@@ -1441,6 +1441,58 @@ describe("hub projection", () => {
       assert.equal(redactedEntry?.summary?.type, "comment.created", "what it was survives");
     });
 
+    it("removes where an inline comment pointed, not only what it said", async () => {
+      // On any replica that still holds the blob — which is the case redaction
+      // exists for — a redacted inline comment that still names a file and a
+      // line says most of what it said.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "the deploy key is hunter2",
+            key: where.author,
+            head: REVISION,
+            path: "secrets/deploy.key",
+            side: "new",
+            line: 12,
+          });
+          const { events } = yield* Event.entries(pr);
+          const entry = events.find((event) => event.commit === commit);
+          const target = entry?.payload?.id ?? "";
+
+          yield* PullRequest.redact({
+            repo: where.genesis.repoId,
+            pr,
+            target,
+            reason: "sensitive-content",
+            key: where.reviewer,
+          });
+
+          // A replica that still holds the payload. This is the case the
+          // blanking exists for: locally the blob is gone and the event simply
+          // reads as absent, but everywhere the tombstone has not yet been
+          // acted on the content is right there to be projected.
+          const repository = yield* Repository;
+          yield* repository.writeBlob(entry!.bytes);
+
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      const thread = outcome.threads.at(0);
+      assert.notEqual(thread, undefined, "the thread keeps its place in the history");
+      assert.equal(thread?.comments[0]?.body, "");
+      assert.equal(thread?.comments[0]?.redacted, true);
+      assert.equal(thread?.path, null, "the file it pointed at is content too");
+      assert.equal(thread?.side, null);
+      assert.equal(thread?.line, null);
+      assert.equal(thread?.head, null);
+    });
+
     it("refuses a redaction from a member without hub.redact, and keeps the content", async () => {
       // Writing the tombstone and deleting the payload are two different
       // authorities. Treating the first as implying the second let anybody who

@@ -342,6 +342,43 @@ describe("trust projection", () => {
     assert.equal(outcome.checkpoint?.at.getTime(), 1_800_000_000_000);
   });
 
+  it("verifies a bounded number of signatures on one record", async () => {
+    // The list is attacker-chosen and every entry costs an Ed25519
+    // verification, on a path every protected-branch push runs. Far above any
+    // real quorum, so nothing honest is truncated.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const bob = yield* generate("bob@example.com");
+        const noise = yield* generate("noise@example.com");
+
+        const payload = yield* Certificate.grant({
+          repo: where.genesis.repoId,
+          publicKey: formatPublicKey(bob.publicKey),
+          capabilities: ["source.push"],
+          id: Log.newId(),
+        });
+        const bytes = Certificate.encode(payload);
+        // Padding first, so the quorum's signatures fall off the end.
+        const padding = yield* Effect.forEach(
+          Array.from({ length: Certificate.MAX_SIGNATURES }, () => noise),
+          (key) => sign(key, bytes, NAMESPACE),
+        );
+        const real = yield* Effect.forEach(where.roots.slice(0, 2), (key) =>
+          sign(key, bytes, NAMESPACE),
+        );
+        yield* Log.append(payload, bytes, [...padding, ...real]);
+
+        return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+      }),
+    );
+
+    // The record is not accepted, because the signatures that would have
+    // authorized it were never reached — which is the bound doing its job
+    // rather than an oversight.
+    assert.equal(state.projection.members.get(state.bob), undefined);
+  });
+
   describe("revocation", () => {
     it("removes a member and keeps what they held", async () => {
       const state = await scenario(
@@ -465,7 +502,9 @@ describe("trust projection", () => {
       );
 
       assert.equal(outcome.projection.members.has(outcome.bob), true);
-      assert.equal(outcome.projection.revoked.has(outcome.bob), false);
+      // The record survives with its window closed: everything the key signed
+      // while it was revoked stays refused.
+      assert.notEqual(outcome.projection.revoked.get(outcome.bob)?.supersededBy, null);
       assert.equal(outcome.projection.former.has(outcome.bob), false, "no stale former entry");
     });
 
@@ -810,7 +849,58 @@ describe("trust projection", () => {
       );
 
       assert.notEqual(state.projection.members.get(state.bob), undefined);
-      assert.equal(state.projection.revoked.get(state.bob), undefined);
+      // Kept, with its window closed: the record is still true about the
+      // period it covers, and only deleting it would make what the key signed
+      // while revoked authorized again.
+      assert.notEqual(state.projection.revoked.get(state.bob)?.supersededBy, null);
+    });
+
+    it("still refuses what the key signed while it was revoked", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.approve"], where.roots.slice(0, 2));
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "rotated",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+
+          // Signed while out, against the head that already held the
+          // revocation.
+          const during = yield* repository.resolve(Log.LOG_REF);
+          const bytes = new TextEncoder().encode("an approval made while revoked");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          yield* grantTo(where, bob, ["hub.approve"], where.roots.slice(0, 2));
+
+          return {
+            inside: yield* Verify.authorize({
+              projection: yield* projectionOf(where),
+              bytes,
+              signatures: [signature],
+              capability: "hub.approve",
+              made: { at: new Date(), trustHead: during },
+            }),
+            after: yield* Verify.authorize({
+              projection: yield* projectionOf(where),
+              bytes,
+              signatures: [signature],
+              capability: "hub.approve",
+              made: { at: new Date(), trustHead: yield* repository.resolve(Log.LOG_REF) },
+            }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.inside.ok, false, "the window must still refuse what it covered");
+      assert.equal(outcome.after.ok, true, "and end where the key came back");
     });
   });
 

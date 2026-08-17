@@ -182,6 +182,33 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
  */
 export type FoldCache = Map<string, PullRequestState>;
 
+/**
+ * Which revisions each pull request has ever proposed, from its raw events.
+ *
+ * A pre-filter, not a decision: it says which pull requests are *worth*
+ * folding, and the fold is what decides anything. Shared across one batch, for
+ * the same reason `FoldCache` is.
+ */
+export type MentionCache = Map<string, ReadonlySet<string>>;
+
+/** Whether a pull request's events ever named this revision as a head. */
+const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, cache: MentionCache) {
+  const known = cache.get(pr);
+  if (known !== undefined) return known.has(to);
+
+  const { events } = yield* Event.entries(pr);
+  const heads = new Set<string>();
+  for (const entry of events) {
+    const payload = entry.payload;
+    if (payload === null) continue;
+    if (payload.type !== "pr.opened" && payload.type !== "pr.updated") continue;
+    const head = Event.unqualify(payload.head);
+    if (head !== null) heads.add(head);
+  }
+  cache.set(pr, heads);
+  return heads.has(to);
+});
+
 export interface Allowed {
   readonly update: RefUpdate;
   /** What the ref was when the decision was made — the compare-and-swap. */
@@ -249,12 +276,15 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
    * it, and a fold cannot go stale inside one.
    */
   readonly folds?: FoldCache;
+  /** As `folds`, for the walk that decides which pull requests to fold. */
+  readonly mentions?: MentionCache;
 }) {
   const repository = yield* Repository;
   const { update } = input;
   // A batch of one when the caller did not bring a map, which is what every
   // direct caller outside `gate` is.
   const folds: FoldCache = input.folds ?? new Map();
+  const mentions: MentionCache = input.mentions ?? new Map();
   const current = yield* repository.resolve(update.name);
   // Two readings of "what the ref is now", and they differ for a symbolic ref.
   // Reachability wants the commit it resolves to; the compare-and-swap wants
@@ -326,6 +356,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     trust: input.trust,
     rules: input.rules,
     folds,
+    mentions,
   });
   return gate ?? namespace;
 });
@@ -385,6 +416,8 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   readonly rules: Rules;
   /** Shared across one batch; see `FoldCache`. */
   readonly folds: FoldCache;
+  /** Shared across one batch; see `MentionCache`. */
+  readonly mentions: MentionCache;
 }) {
   const { rules } = input;
   const needsReview =
@@ -407,7 +440,19 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     // verified anything, so it is the only one this may act on. The cache is
     // what keeps a batch moving several protected branches from paying for it
     // once per ref.
+    // Ruled out by a walk before it is ruled out by a fold. Only a pull
+    // request that has *proposed this exact revision* can authorize moving the
+    // branch to it, and whether it ever did is visible in its event payloads
+    // without verifying a signature — the expensive half. A forged payload can
+    // add the string and buy itself one wasted fold; it cannot remove it from
+    // an honest event, so the filter can never hide a real pull request.
+    //
+    // Without this, every protected-branch push folded every pull request the
+    // repository had ever had, closed and merged included, at a signature
+    // verification per event.
     const cached = input.folds.get(id);
+    if (cached === undefined && !(yield* proposes(id, input.to, input.mentions))) continue;
+
     const pullRequest = cached ?? (yield* projectPr(input.genesis, input.trust, id));
     input.folds.set(id, pullRequest);
     if (pullRequest.base !== input.ref || pullRequest.head === null) continue;
@@ -610,6 +655,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
 
   const decisions: Decision[] = [];
   const folds: FoldCache = new Map();
+  const mentions: MentionCache = new Map();
   for (const update of updates) {
     // A native client signed an envelope naming the refs it was moving and
     // where to. Checking it here rather than in the guard is not a weakening:
@@ -630,6 +676,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
         trust,
         rules,
         folds,
+        mentions,
       }),
     );
   }

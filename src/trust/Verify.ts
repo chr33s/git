@@ -26,7 +26,7 @@ import { type Fingerprint, fingerprint, NAMESPACE, verify } from "../crypto/SshS
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import type { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
-import { permits } from "./Certificate.ts";
+import { MAX_SIGNATURES, permits } from "./Certificate.ts";
 import * as Log from "./Log.ts";
 import type { Member, Projection } from "./Projection.ts";
 
@@ -69,7 +69,7 @@ export const signers = Effect.fn("trust.Verify.signers")(function* (
   signatures: ReadonlyArray<string>,
 ) {
   const found: Fingerprint[] = [];
-  for (const armored of signatures) {
+  for (const armored of signatures.slice(0, MAX_SIGNATURES)) {
     const key = yield* verify(armored, bytes, NAMESPACE).pipe(
       Effect.catchTag("Invalid", () => Effect.succeed(null)),
     );
@@ -95,8 +95,18 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   const revocation = projection.revoked.get(subject);
   if (revocation === undefined) return false;
 
-  // A live request is held to the current state: revoked is revoked.
-  if (made === null) return true;
+  // A live request is held to the current state: revoked is revoked, and a
+  // key that has since been granted again is not.
+  if (made === null) return revocation.supersededBy === null;
+
+  // A revocation that a later grant ended still covers its own window. An
+  // event that can show it was made after the key came back is outside it;
+  // one that cannot is inside, which is where every signature made *while*
+  // revoked lives.
+  const ended = revocation.supersededBy;
+  if (ended !== null && made.trustHead !== null && (yield* seen(made.trustHead)).has(ended)) {
+    return false;
+  }
 
   // A compromise reaches everything the key signed, without consulting the
   // event's own `issuedAt`. That field is written by whoever holds the key,
@@ -105,6 +115,10 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // to reach backwards. `compromisedFrom` stays on the record as the
   // operator's account of when it began; it is not a verification input.
   if (revocation.compromisedFrom !== null) return true;
+
+  // Past the window's end the check above has already answered; what is left
+  // is an event that cannot show it, and it is judged against the revocation
+  // as if the grant that ended it had not happened.
 
   // Forward-only. An event that cannot *show* it predates the revocation does
   // not get the benefit of the doubt — and that covers a trust head this

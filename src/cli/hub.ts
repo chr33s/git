@@ -268,6 +268,10 @@ const members = Command.make("members", { root: rootFlag, repo: repoArgument }, 
         yield* Console.log(`  ${member.fingerprint}  ${member.capabilities.join(",")}${expiry}`);
       }
       for (const revoked of projection.revoked.values()) {
+        // A revocation a later grant ended stays on the record — it is still
+        // true about the window it covers — but the key is a member again, and
+        // listing it beside the live ones would read as though it were not.
+        if (revoked.supersededBy !== null) continue;
         yield* Console.log(`  ${revoked.subject}  revoked (${revoked.reason})`);
       }
       // Said out loud rather than swallowed: a record that did not count is

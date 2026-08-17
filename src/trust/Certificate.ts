@@ -31,6 +31,18 @@ import type { RepoId } from "./Genesis.ts";
  * be a capability that exists, is held by somebody, and authorizes nothing —
  * discovered when a merge is refused for a reason nobody can find.
  */
+/**
+ * How many signatures on one record are ever worth verifying.
+ *
+ * Every entry costs an Ed25519 verification, and the list is attacker-chosen:
+ * anybody who may write a record can attach a hundred thousand well-formed
+ * armors to it and multiply the cost of every later fold — which is on the
+ * path of every protected-branch push. Far above any real quorum, so no honest
+ * record is truncated; a record needing more than this is one nobody can
+ * afford to check.
+ */
+export const MAX_SIGNATURES = 64;
+
 export const CAPABILITIES = [
   "repo.read",
   "source.push",

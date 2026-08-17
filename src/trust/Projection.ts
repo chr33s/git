@@ -25,6 +25,7 @@ import {
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
+import { MAX_SIGNATURES } from "./Certificate.ts";
 import { type Genesis, type RepoId, type RootKey } from "./Genesis.ts";
 import * as Log from "./Log.ts";
 
@@ -66,6 +67,17 @@ export interface Revocation {
    */
   readonly compromisedFrom: Date | null;
   readonly commit: Oid;
+  /**
+   * The grant that put this key back, if one has.
+   *
+   * The revocation is *not* removed when a key is re-granted, because it is
+   * still true about the window it covers: deleting it made every signature
+   * the key made while revoked authorized again — at the old grant's
+   * capabilities, not the narrower ones it was let back in with, and
+   * including under a `compromised` revocation, the one class meant to reach
+   * backwards. What a re-grant ends is the window, not the record.
+   */
+  readonly supersededBy: Oid | null;
 }
 
 export interface Attestation {
@@ -108,7 +120,7 @@ const signersOf = Effect.fn("trust.Projection.signersOf")(function* (
   signatures: ReadonlyArray<string>,
 ) {
   const signers = new Set<Fingerprint>();
-  for (const armored of signatures) {
+  for (const armored of signatures.slice(0, MAX_SIGNATURES)) {
     const key = yield* verify(armored, bytes, NAMESPACE).pipe(
       // A signature that does not parse cannot add authority, and refusing the
       // whole record for it would let anyone break a grant by appending junk.
@@ -156,7 +168,7 @@ const inviters = (
 ): ReadonlyArray<Fingerprint> => {
   const found: Fingerprint[] = [];
   for (const signer of signers) {
-    if (revoked.has(signer)) continue;
+    if (revoked.get(signer)?.supersededBy === null) continue;
     const member = members.get(signer);
     if (member === undefined || expired(member, at)) continue;
     if (Certificate.permits(member.capabilities, "member.invite")) found.push(signer);
@@ -173,7 +185,7 @@ const holds = (
   at: Date,
 ): Fingerprint | null => {
   for (const signer of signers) {
-    if (revoked.has(signer)) continue;
+    if (revoked.get(signer)?.supersededBy === null) continue;
     const member = members.get(signer);
     if (member === undefined || expired(member, at)) continue;
     if (Certificate.permits(member.capabilities, capability)) return signer;
@@ -298,7 +310,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // `revoke` undoable by anybody who could `grant`, retroactive compromise
       // revocations included, and left nothing in `revoked` to say so.
       if (
-        revoked.has(subject) &&
+        revoked.get(subject)?.supersededBy === null &&
         !quorum &&
         holds(members, revoked, signers, "member.revoke", claimedAt) === null
       ) {
@@ -326,7 +338,10 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
           { commit: entry.commit, capabilities: payload.capabilities },
         ],
       });
-      revoked.delete(subject);
+      // Closed, not erased: everything the key signed between the revocation
+      // and this grant stays refused.
+      const ending = revoked.get(subject);
+      if (ending !== undefined) revoked.set(subject, { ...ending, supersededBy: entry.commit });
       // `former` is what a forward-only revocation is judged against, and this
       // key is a current member again: leaving a stale entry there would let a
       // later revocation be measured against capabilities they no longer hold.
@@ -345,6 +360,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       const compromised = payload.reason === "compromised";
       revoked.set(subject, {
         subject,
+        supersededBy: null,
         reason: payload.reason,
         compromisedFrom: !compromised
           ? null

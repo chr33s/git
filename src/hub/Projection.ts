@@ -246,7 +246,20 @@ const trustReach = () => {
     return (yield* ancestry(head)).has(target);
   });
 
-  return { ancestry, reaches };
+  /**
+   * "Is this a trust-log commit at all?", memoised for the same reason.
+   *
+   * Asked once per accepted event, about the same handful of heads, and a
+   * head cannot move while a projection is being built.
+   */
+  const held = new Map<Oid, boolean>();
+  const contains = Effect.fnUntraced(function* (commit: Oid) {
+    const known = held.get(commit) ?? (yield* Log.contains(commit));
+    held.set(commit, known);
+    return known;
+  });
+
+  return { ancestry, contains, reaches };
 };
 
 /**
@@ -286,7 +299,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   // concurrent histories met, and `supersedes` would fall back to comparing
   // ids for events that are genuinely ordered.
   const ancestors = ancestorSets(parents, Dag.topological(parents));
-  const { ancestry, reaches: reachesTrust } = trustReach();
+  const { ancestry, contains: inTrustLog, reaches: reachesTrust } = trustReach();
 
   /**
    * The opening event, and whether anything is competing to be it.
@@ -394,6 +407,8 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   const dismissed = new Set<string>();
   const threads = new Map<string, Thread>();
   const checks = new Map<string, Check>();
+  /** Which event last wrote each check, so a tombstone can blank its `url`. */
+  const checkKeys = new Map<string, string>();
   /**
    * The *commits* a tombstone reached, not the ids it named.
    *
@@ -492,7 +507,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     // would then become the floor for everything after it, which nothing can
     // reach: `Log.ancestry` of a commit nobody has is empty, so every later
     // event is refused forever on a ref that only grows.
-    if (declared !== null && (yield* Log.contains(declared))) {
+    if (declared !== null && (yield* inTrustLog(declared))) {
       heads.set(entry.commit, declared);
     }
 
@@ -722,7 +737,16 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       case "comment.resolved":
       case "comment.reopened": {
         const found = byEventId(threads, payload.thread);
-        if (found === null || found === "ambiguous") break;
+        // Said out loud, like every other cross-reference: a pull request held
+        // shut by `requireResolvedThreads` needs somewhere to show why.
+        if (found === null || found === "ambiguous") {
+          rejected.push({
+            commit: entry.commit,
+            reason:
+              found === null ? `no thread ${payload.thread}` : `ambiguous thread ${payload.thread}`,
+          });
+          break;
+        }
 
         // Resolving a thread is what satisfies `requireResolvedThreads`, and
         // reopening one is what withholds it — so neither is something any
@@ -751,6 +775,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         if (head === null) break;
         // Keyed by name and revision: a check re-run against the same head
         // replaces its own result, and one against a new head is a new answer.
+        checkKeys.set(`${payload.name}@${head}`, mine);
         checks.set(`${payload.name}@${head}`, {
           name: payload.name,
           provider: payload.provider,
@@ -816,15 +841,30 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       // blob — which is most of them, since the object is deleted locally.
       body: blanked(key) ? "" : review.body,
     })),
-    threads: [...threads.values()].map((thread) => ({
-      ...thread,
-      comments: thread.comments.map((comment) =>
-        blanked(keyOf(comment.author, comment.id))
-          ? { ...comment, body: "", redacted: true }
-          : comment,
-      ),
-    })),
-    checks: [...checks.values()],
+    threads: [...threads.entries()].map(([key, thread]) => {
+      // Where a comment pointed is content too. A redacted inline comment that
+      // still names a file and a line says most of what it said, on every
+      // replica that holds the blob — which is the case redaction exists for.
+      const opener = blanked(key);
+      return {
+        ...thread,
+        path: opener ? null : thread.path,
+        side: opener ? null : thread.side,
+        line: opener ? null : thread.line,
+        head: opener ? null : thread.head,
+        comments: thread.comments.map((comment) =>
+          blanked(keyOf(comment.author, comment.id))
+            ? { ...comment, body: "", redacted: true }
+            : comment,
+        ),
+      };
+    }),
+    checks: [...checks.entries()].map(([name, check]) => {
+      const key = checkKeys.get(name);
+      // A check's `url` points at somebody's build output, which is content a
+      // tombstone is entitled to remove along with the rest.
+      return key !== undefined && blanked(key) ? { ...check, url: null } : check;
+    }),
     claims: byId,
     openers,
     redacted,
