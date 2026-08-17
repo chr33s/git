@@ -260,6 +260,19 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
   const found = input.signed ?? (yield* signers(input.bytes, input.signatures));
   if (found.length === 0) return denied("no valid signature");
 
+  // A verdict that has to hold for good has to say what it was judged against.
+  // `trustHead` is nullable and means "had seen everything", which every other
+  // reading treats as the conservative one — but here it makes the answer move:
+  // `reaches` refuses such an event the moment its signer is revoked at all,
+  // and `held` falls back to the *latest* grant, which a narrowing re-grant
+  // shrinks. Either turns a tombstone this repository already acted on into
+  // one it no longer honours, which is the divergence `permanent` exists to
+  // remove. Refused instead, and refused the same way on every replica for
+  // ever.
+  if (input.permanent === true && made !== null && made.trustHead === null) {
+    return denied("a redaction must record the trust head it was signed against");
+  }
+
   let closest = "signer is not a member of this repository";
   for (const signer of found) {
     if (

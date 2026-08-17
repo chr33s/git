@@ -472,6 +472,84 @@ describe("Policy", () => {
       );
     });
 
+    it("refuses a pushed tombstone from a member whose hub.redact was narrowed away", async () => {
+      // The fold's first pass asks only whether a tombstone's signer *ever*
+      // held `hub.redact`, because that set has to be monotone: an answer that
+      // shrinks leaves the host which already deleted a payload folding a
+      // history no replica agrees with. Generous and monotone is right there
+      // and wrong here — a member whose grant was narrowed, keeping
+      // `source.push`, could push decoy tombstones naming the ancestors of a
+      // real one, drop them out of the first pass and with them the trust
+      // floor, and have a tombstone signed against a stale head accepted,
+      // sending somebody else's payload to `gc`. "Now" is knowable at the
+      // boundary, so it is refused there.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(where.dev.publicKey),
+              capabilities: ["hub.create-pr", "hub.comment", "hub.redact"],
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const comment = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "the deploy key is hunter2",
+            key: where.dev,
+          });
+          const before = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === comment)?.payload?.id ?? "";
+          yield* PullRequest.redact({
+            repo: where.genesis.repoId,
+            pr,
+            target,
+            reason: "sensitive-content",
+            key: where.dev,
+          });
+          const after = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          // Rewound, so the tombstone reads as new to the boundary.
+          yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: before! });
+
+          // Narrowed, not revoked: they may still push, and they still *ever*
+          // held the capability.
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(where.dev.publicKey),
+              capabilities: ["hub.create-pr", "hub.comment"],
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          return yield* evaluate({
+            update: { name: `refs/hub/pr/${pr}`, value: after },
+            principal: where.principal,
+            genesis: where.genesis,
+            trust: yield* projectTrust(where.genesis),
+            rules: OPEN,
+          });
+        }),
+      );
+
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /needs hub\.redact/);
+    });
+
     it("holds the trust log to a ceiling of its own", async () => {
       // The log is append-only and needs only `source.push` to grow, and every
       // duplicate statement in it is ranked by a reach walk per copy. Bounded

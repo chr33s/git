@@ -414,10 +414,8 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // *now*, and a signature arriving now from a key this repository has already
   // revoked is one it has no reason to take.
   if (update.name.startsWith("refs/hub/") && update.value !== null) {
-    const revoked = yield* signedByRevoked(update.value, current, input.trust);
-    if (revoked !== null) {
-      return refused(update.name, `${revoked} has been revoked and may not add events`);
-    }
+    const refusal = yield* signedByRevoked(update.value, current, input.trust);
+    if (refusal !== null) return refused(update.name, refusal);
   }
 
   if (!isProtected(input.rules, update.name)) return namespace;
@@ -592,8 +590,6 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   current: Oid | null,
   trust: TrustProjection,
 ) {
-  if (trust.revoked.size === 0) return null;
-
   // Stopped at everything the ref already reaches, not at the tip alone. A
   // boundary of one oid only cuts the chain that runs through it, and a join
   // has a second parent — so an ordinary reconciling push walked back to the
@@ -616,9 +612,29 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
       }),
     );
     if (record === null) continue;
-    for (const signer of yield* Verify.signers(record.payload, record.signatures)) {
-      if (openWindow(trust.revoked.get(signer)) !== null) return signer;
+    const signed = yield* Verify.signers(record.payload, record.signatures);
+    for (const signer of signed) {
+      if (openWindow(trust.revoked.get(signer)) !== null) {
+        return `${signer} has been revoked and may not add events`;
+      }
     }
+
+    // And a tombstone needs the capability *now*. The fold's first pass asks
+    // only whether its signer ever held `hub.redact`, because that set has to
+    // be monotone — an answer that shrinks leaves the host which already
+    // deleted a payload folding a history no replica agrees with. Monotone and
+    // generous is the right trade there and the wrong one here: a member whose
+    // `hub.redact` was narrowed away, keeping `source.push`, could push decoy
+    // tombstones naming the ancestors of a real one, drop them out of the
+    // first pass and with them the trust floor, and have a tombstone signed
+    // against a stale head accepted — sending somebody else's payload to `gc`.
+    // The boundary is where "now" is knowable, so it is where that is refused.
+    const payload = yield* Event.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    if (payload?.type !== "event.redacted") continue;
+    const holds = signed.some((signer) =>
+      permits(trust.members.get(signer)?.capabilities ?? [], "hub.redact"),
+    );
+    if (!holds) return "a redaction needs hub.redact";
   }
   return null;
 });

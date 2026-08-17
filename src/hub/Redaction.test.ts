@@ -3,7 +3,13 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
+import {
+  formatPublicKey,
+  generate,
+  NAMESPACE,
+  type PrivateKey,
+  sign,
+} from "../crypto/SshSignature.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -625,6 +631,72 @@ describe("hub redaction", () => {
     assert.equal(outcome.aimed, true, "the fixture must remove two distinct trees");
     assert.equal(outcome.strict, 0, "there is nothing left for the tombstone to name");
     assert.equal(outcome.explained, false, "but nothing failed: gc and fetch both still answer");
+  });
+
+  it("does not honour a tombstone that records no trust head", async () => {
+    // A permanent verdict has to say what it was judged against. `trustHead`
+    // is nullable and means "had seen everything", which every other reading
+    // treats as conservative — but here it makes the answer move: a revocation
+    // of the signer refuses such an event outright, and a narrowing re-grant
+    // shrinks what it is judged to have held. Either turns a tombstone the
+    // repository already acted on into one it no longer honours, which is the
+    // divergence a permanent verdict exists to remove.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const { pr, target } = yield* withASecret(where);
+
+        // A second secret, for the headless tombstone to name — so honouring
+        // it would show up as one more blob and not as the same one twice.
+        const second = yield* PullRequest.comment({
+          repo: where.genesis.repoId,
+          pr,
+          body: "and the other one is hunter3",
+          key: where.author,
+        });
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const { events } = yield* Event.entries(pr);
+        const written = events.find((entry) => entry.payload?.type === "event.redacted")?.payload;
+        const other = events.find((entry) => entry.commit === second)?.payload?.id ?? "";
+        if (written?.type !== "event.redacted") return { honoured: -1, headless: -1 };
+
+        const honoured = (yield* Redaction.excluded()).size;
+
+        // The same statement, aimed at the second secret and recording no
+        // trust head — a payload this schema accepts and a client may write.
+        const headless = Event.encode({
+          ...written,
+          id: Log.newId(),
+          target: other,
+          targetCommit: Event.qualify(second),
+          trustHead: null,
+        });
+        const head = yield* repository.resolve(Event.refOf(pr));
+        yield* repository.setRef({
+          name: Event.refOf(pr),
+          to: yield* Record.write({
+            name: Event.RECORD,
+            payload: headless,
+            signatures: [yield* sign(where.author, headless, NAMESPACE)],
+            parents: [head!],
+            message: "event.redacted headless\n",
+          }),
+        });
+
+        return { honoured, headless: (yield* Redaction.excluded()).size };
+      }),
+    );
+
+    assert.equal(outcome.honoured, 1, "the tombstone that records a head counts");
+    assert.equal(outcome.headless, 1, "and the one that records none adds nothing");
   });
 
   it("passes over a pull request this replica cannot walk", async () => {
