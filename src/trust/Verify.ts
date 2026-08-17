@@ -324,22 +324,33 @@ export const fresh = (
   maxAge: number,
   now: Date = new Date(),
 ): Freshness => {
-  if (projection.checkpoint === null) {
+  if (projection.checkpoints.length === 0) {
     return {
       ok: false,
       reason: "this repository has no trust checkpoint; its membership view may be stale",
     };
   }
-  const age = now.getTime() - projection.checkpoint.at.getTime();
-  if (age < -SKEW) {
-    return {
-      ok: false,
-      reason: `the newest trust checkpoint is dated ${Math.floor(-age / 1000)}s in the future`,
-    };
+  // The newest *credible* one, not simply the newest. A single attestation
+  // dated ahead — a malicious admin, or a CI box with a fast clock — would
+  // otherwise be the only one this ever looked at, and refusing it would then
+  // refuse every write on a repository with `maxTrustAgeSeconds` set, the write
+  // to `refs/meta/policy` that lifts the bound included. Skipping past it costs
+  // nothing: a checkpoint nobody can believe is not evidence either way.
+  let ahead = 0;
+  for (const checkpoint of projection.checkpoints) {
+    const age = now.getTime() - checkpoint.at.getTime();
+    if (age < -SKEW) {
+      ahead++;
+      continue;
+    }
+    return age <= maxAge
+      ? { ok: true }
+      : { ok: false, reason: `the newest trust checkpoint is ${Math.floor(age / 1000)}s old` };
   }
-  return age <= maxAge
-    ? { ok: true }
-    : { ok: false, reason: `the newest trust checkpoint is ${Math.floor(age / 1000)}s old` };
+  return {
+    ok: false,
+    reason: `every trust checkpoint on record (${ahead}) is dated in the future`,
+  };
 };
 
 export type VerifyError = Invalid | ObjectNotFound | StorageFailure;

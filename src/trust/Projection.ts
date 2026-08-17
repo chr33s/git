@@ -32,6 +32,9 @@ import * as Log from "./Log.ts";
 
 const decoder = new TextDecoder();
 
+/** How many checkpoints a projection carries, newest first. */
+const CHECKPOINTS = 32;
+
 export interface Member {
   readonly fingerprint: Fingerprint;
   /** The `authorized_keys` line the grant carried. */
@@ -84,13 +87,27 @@ export interface Revocation {
 }
 
 /**
+ * The earlier of two moments, either of which may be absent.
+ *
+ * A revocation can only ever be *strengthened* while it is open, so where two
+ * statements about when a compromise began meet, the one reaching further back
+ * is the one that survives.
+ */
+const earliest = (left: Date | null, right: Date | null): Date | null => {
+  if (left === null) return right;
+  if (right === null) return left;
+  return left <= right ? left : right;
+};
+
+/**
  * The window a key is currently out on, if it is out.
  *
  * A key can be revoked, let back in, and revoked again, so what it has is a
  * *list* of disjoint windows rather than one. Only the last of them can still
- * be open — a grant closes the open one before another revocation can follow —
- * so this is the whole of "is this key revoked right now", and every earlier
- * window stays on the record because it is still true about its own interval.
+ * be open — a revocation of a key already out strengthens the window it is in
+ * rather than opening a second — so this is the whole of "is this key revoked
+ * right now", and every earlier window stays on the record because it is still
+ * true about its own interval.
  */
 export const openWindow = (
   revocations: ReadonlyArray<Revocation> | undefined,
@@ -138,8 +155,21 @@ export interface Projection {
   readonly revoked: ReadonlyMap<Fingerprint, ReadonlyArray<Revocation>>;
   readonly roots: ReadonlyArray<RootKey>;
   readonly threshold: number;
-  /** The most recent checkpoint, for callers that bound how stale a view may be. */
+  /** The most recent checkpoint, for callers that only want to show one. */
   readonly checkpoint: Attestation | null;
+  /**
+   * The newest checkpoints, newest first, for callers that bound staleness.
+   *
+   * More than one because `at` is written by whoever signed the checkpoint and
+   * the fold has no clock to disbelieve it with. Keeping only the greatest `at`
+   * meant a single attestation dated ahead — a malicious admin, or a CI box
+   * with a fast clock — became the only checkpoint on record, and a verifier
+   * that refuses a future date then refused *every* write on a repository with
+   * `maxTrustAgeSeconds` set, including the write to `refs/meta/policy` that
+   * would lift the bound. `Verify.fresh` holds the clock, so it can skip past
+   * one and find an honest checkpoint behind it.
+   */
+  readonly checkpoints: ReadonlyArray<Attestation>;
   readonly rejected: ReadonlyArray<Rejected>;
 }
 
@@ -264,7 +294,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     `${entry.payload.id}\u0000${decoder.decode(entry.bytes)}`;
   let roots: ReadonlyArray<RootKey> = genesis.roots;
   let threshold = genesis.document.threshold;
-  let checkpoint: Attestation | null = null;
+  const checkpoints: Attestation[] = [];
   let head: Oid | null = null;
 
   for (const entry of entries) {
@@ -420,25 +450,41 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // SAFETY: `Certificate.validate` has checked the subject is a fingerprint.
       const subject = payload.subject as Fingerprint;
       const compromised = payload.reason === "compromised";
-      // Appended, never replacing: a key revoked, re-instated and revoked
-      // again was out for two separate intervals, and the events it signed in
-      // the first are not made authorized by the second ending.
-      revoked.set(subject, [
-        ...(revoked.get(subject) ?? []),
-        {
-          subject,
-          supersededBy: null,
-          reason: payload.reason,
-          compromisedFrom: !compromised
-            ? null
-            : payload.compromisedAt !== null
-              ? new Date(payload.compromisedAt)
-              : // A compromise of unknown age is not a compromise of no age:
-                // fall back to the grant, so everything the key signed is suspect.
-                (members.get(subject)?.grantedAt ?? new Date(0)),
-          commit: entry.commit,
-        },
-      ]);
+      const from = !compromised
+        ? null
+        : payload.compromisedAt !== null
+          ? new Date(payload.compromisedAt)
+          : // A compromise of unknown age is not a compromise of no age: fall
+            // back to the grant, so everything the key signed is suspect. Read
+            // from `former` too, because a second revocation arrives after the
+            // first already moved them there.
+            ((members.get(subject) ?? former.get(subject))?.grantedAt ?? new Date(0));
+
+      // A key already out is not put out twice. Appending a second open window
+      // left the first one open forever — a re-grant closes the *last* window,
+      // so every stored event by that key stayed refused while live pushes were
+      // waved through, on a ref that can never be rewound. What a revocation of
+      // an already-revoked key does is *strengthen* the window it is already
+      // in: learning afterwards that a key was compromised is the reason to
+      // send one, and the window keeps its original start, since that is when
+      // the key stopped being trusted.
+      const windows = revoked.get(subject) ?? [];
+      const already = openWindow(windows);
+      const record: Revocation = {
+        subject,
+        supersededBy: null,
+        reason: payload.reason,
+        compromisedFrom: earliest(already?.compromisedFrom ?? null, from),
+        commit: already?.commit ?? entry.commit,
+      };
+      // Appended when the key is in, replacing when it is already out: a key
+      // revoked, re-instated and revoked again was out for two separate
+      // intervals, and the events it signed in the first are not made
+      // authorized by the second ending.
+      revoked.set(
+        subject,
+        already === null ? [...windows, record] : [...windows.slice(0, -1), record],
+      );
       const held = members.get(subject);
       if (held !== undefined) former.set(subject, held);
       members.delete(subject);
@@ -450,27 +496,33 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       rejected.push({ commit: entry.commit, reason: "issuer may not checkpoint" });
       continue;
     }
-    applied.add(statement);
 
-    // The *newest*, not the last folded. Fold order is topological with an oid
+    // Sorted by `at`, not by fold order. Fold order is topological with an oid
     // tie-break, so two checkpoints made concurrently on two replicas and then
     // joined could leave the older one in force — and a repository that had
     // set `maxTrustAgeSeconds` would then refuse every push against an
     // attestation it already had a fresher replacement for. Ties go to the
     // greater oid, so every replica still agrees.
-    const attested = {
+    checkpoints.push({
       commit: entry.commit,
       at: new Date(payload.issuedAt),
       frontier: payload.frontier,
-    };
-    if (
-      checkpoint === null ||
-      attested.at > checkpoint.at ||
-      (attested.at.getTime() === checkpoint.at.getTime() && attested.commit > checkpoint.commit)
-    ) {
-      checkpoint = attested;
-    }
+    });
+    applied.add(statement);
   }
+
+  // Newest first, and bounded: a checkpoint costs a commit to write and this
+  // list is walked on every gated write, so an unbounded one is a cost anybody
+  // holding `repo.admin` could impose. Deep enough that a run of bad-clock
+  // attestations does not bury the honest one behind them.
+  checkpoints.sort((left, right) =>
+    left.at.getTime() !== right.at.getTime()
+      ? right.at.getTime() - left.at.getTime()
+      : right.commit < left.commit
+        ? -1
+        : 1,
+  );
+  checkpoints.length = Math.min(checkpoints.length, CHECKPOINTS);
 
   return {
     repoId: genesis.repoId,
@@ -480,7 +532,8 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     revoked,
     roots,
     threshold,
-    checkpoint,
+    checkpoint: checkpoints[0] ?? null,
+    checkpoints,
     rejected,
   };
 });
@@ -536,16 +589,30 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
       for (const seen of ancestors.values()) if (seen.has(commit)) count++;
       return count;
     };
-    let best = commits[0]!;
-    let reach = descendants(best);
+    // Depth breaks what descent cannot. Append-only containment forces a replay
+    // to be published as a join over both copies, and a join descends from
+    // both — so where the targeted record is the current head, the counts came
+    // out equal and the decision fell to the oid, which whoever writes the
+    // replay can grind. The genuine record hangs off the log's history; a copy
+    // grafted in beside it does not, and cannot be given that history without
+    // being made a descendant of the record it is trying to displace.
+    const rank = (commit: Oid): readonly [number, number, Oid] => [
+      descendants(commit),
+      ancestors.get(commit)?.size ?? 0,
+      commit,
+    ];
+    let best = rank(commits[0]!);
     for (const commit of commits.slice(1)) {
-      const count = descendants(commit);
-      if (count > reach || (count === reach && commit < best)) {
-        best = commit;
-        reach = count;
-      }
+      const candidate = rank(commit);
+      const better =
+        candidate[0] !== best[0]
+          ? candidate[0] > best[0]
+          : candidate[1] !== best[1]
+            ? candidate[1] > best[1]
+            : candidate[2] < best[2];
+      if (better) best = candidate;
     }
-    winner.set(id, best);
+    winner.set(id, best[2]);
   }
 
   return { entries: records, winner, keyOf };

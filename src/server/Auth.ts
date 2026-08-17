@@ -711,6 +711,7 @@ const EMPTY: Projection = {
   roots: [],
   threshold: 0,
   checkpoint: null,
+  checkpoints: [],
   rejected: [],
 };
 

@@ -298,6 +298,66 @@ describe("trust projection", () => {
     assert.match(state.projection.rejected.at(-1)?.reason ?? "", /already been applied/);
   });
 
+  it("does not let a grafted replay of a record displace the original", async () => {
+    // Which commit owns a record decides what `Revocation.commit` is, and an
+    // event's trust head has to *reach* that commit for the revocation to
+    // apply. Decided by descendant count alone, the rule assumed a replay is
+    // descended from by nothing — but append-only containment forces the
+    // replay to arrive as a join over both copies, and a join descends from
+    // both. Where the targeted record is the current head the counts came out
+    // equal, the decision fell to the oid, and whoever writes the replay can
+    // grind that: the revocation's commit moves onto a graft that honest trust
+    // heads cannot reach, and the revocation stops applying.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const bob = yield* generate("bob@example.com");
+        yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+
+        const payload = Certificate.revoke({
+          repo: where.genesis.repoId,
+          subject: yield* print(bob),
+          reason: "left",
+          id: Log.newId(),
+        });
+        const bytes = Certificate.encode(payload);
+        const signatures = yield* Effect.forEach(where.roots.slice(0, 2), (key) =>
+          sign(key, bytes, NAMESPACE),
+        );
+        const genuine = yield* Log.append(payload, bytes, signatures);
+
+        // The same record, byte for byte, grafted in with no history behind
+        // it. The message is not part of the record's identity, so varying it
+        // is free oid grinding — which is exactly the attacker's position.
+        let replay = genuine;
+        for (let attempt = 0; attempt < 64 && replay >= genuine; attempt++) {
+          replay = yield* Record.write({
+            name: Log.RECORD,
+            payload: bytes,
+            signatures,
+            parents: [],
+            message: `${payload.type} ${payload.id} ${attempt}\n`,
+          });
+        }
+        yield* repository.setRef({
+          name: Log.LOG_REF,
+          to: yield* Log.join([genuine, replay]),
+        });
+
+        const projection = yield* projectionOf(where);
+        return {
+          ground: replay < genuine,
+          genuine,
+          owner: projection.revoked.get(yield* print(bob))?.[0]?.commit ?? null,
+        };
+      }),
+    );
+
+    assert.equal(outcome.ground, true, "the fixture must actually grind a lower oid");
+    assert.equal(outcome.owner, outcome.genuine, "the record in the log's history owns it");
+  });
+
   it("does not let one record's id burn a different record's", async () => {
     // Keyed on the bare id, "already applied" was a weapon: any member holding
     // a trust capability could publish a record they were perfectly entitled
@@ -654,6 +714,69 @@ describe("trust projection", () => {
         outcome.authorized.ok,
         false,
         "a compromise still reaches everything the key signed",
+      );
+    });
+
+    it("strengthens the window a key is already out on rather than opening a second", async () => {
+      // Two consecutive revocations appended two *open* windows, and a grant
+      // closes the last one — so the first stayed open forever. Live pushes
+      // were waved through (`openWindow` reads the last) while every stored
+      // event by that key was refused against the window nothing could close,
+      // on a ref that can never be rewound: a key re-instated in good faith
+      // and then unable to have a single review counted.
+      //
+      // Learning afterwards that a key was compromised is the reason to send a
+      // second revocation, so it escalates the window in place — keeping its
+      // original start, because that is when the key stopped being trusted.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          const subject = yield* print(bob);
+          const revoke = (reason: "left" | "compromised") =>
+            Log.issue(
+              Certificate.revoke({
+                repo: where.genesis.repoId,
+                subject,
+                reason,
+                id: Log.newId(),
+              }),
+              where.roots.slice(0, 2),
+            );
+
+          yield* revoke("left");
+          yield* revoke("compromised");
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          // Bob is back, and signs against the head that let him back in.
+          const back = yield* repository.resolve(Log.LOG_REF);
+          const bytes = new TextEncoder().encode("a review made after coming back");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          const projection = yield* projectionOf(where);
+          return {
+            windows: projection.revoked.get(subject)?.length ?? 0,
+            member: projection.members.has(subject),
+            authorized: yield* Verify.authorize({
+              projection,
+              bytes,
+              signatures: [signature],
+              capability: "hub.review",
+              made: { at: new Date(), trustHead: back },
+            }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.windows, 1, "a key already out is not put out twice");
+      assert.equal(outcome.member, true, "and the re-instatement takes effect");
+      assert.equal(
+        outcome.authorized.ok,
+        true,
+        "an event made after the re-instatement must not be refused forever",
       );
     });
 
@@ -1473,6 +1596,38 @@ describe("trust projection", () => {
       const freshness = Verify.fresh(state, 60_000);
       assert.equal(freshness.ok, false);
       assert.match(freshness.ok ? "" : freshness.reason, /in the future/);
+    });
+
+    it("looks past one dated in the future to the honest one behind it", async () => {
+      // The other half of that guard. `project` used to keep only the greatest
+      // `at`, so one attestation dated ahead — a malicious admin, or a CI box
+      // with a fast clock — became the *only* checkpoint on record, and
+      // refusing it then refused every write on a repository with
+      // `maxTrustAgeSeconds` set: including the write to `refs/meta/policy`
+      // that would lift the bound. A repository frozen by a typo, with no way
+      // back. The fold keeps the newest few and the clock lives in `fresh`.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const checkpoint = (at: Date) =>
+            Log.issue(
+              Certificate.checkpoint({
+                repo: where.genesis.repoId,
+                frontier: [],
+                id: Log.newId(),
+                at,
+              }),
+              where.roots.slice(0, 2),
+            );
+          yield* checkpoint(new Date(Date.now() - 30_000));
+          yield* checkpoint(new Date(Date.now() + 86_400_000));
+          return yield* projectionOf(where);
+        }),
+      );
+
+      assert.equal(state.checkpoints.length, 2, "both stay on the record");
+      assert.equal(Verify.fresh(state, 60_000).ok, true, "the honest one still answers");
+      assert.equal(Verify.fresh(state, 10_000).ok, false, "and it is still judged on its age");
     });
 
     it("still allows the seconds of clock skew two honest hosts have", async () => {

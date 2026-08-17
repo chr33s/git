@@ -34,6 +34,7 @@ const EMPTY_PROJECTION = {
   roots: [],
   threshold: 0,
   checkpoint: null,
+  checkpoints: [],
   rejected: [],
 };
 
