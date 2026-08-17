@@ -252,7 +252,7 @@ export class Ceiling extends Context.Service<Ceiling, number>()("trust/Log/Ceili
 
 export const ceiling = (records: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(records);
 
-const ceilingOf = Effect.fnUntraced(function* () {
+export const ceilingOf = Effect.fnUntraced(function* () {
   return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
 });
 

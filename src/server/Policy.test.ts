@@ -12,7 +12,7 @@ import { stores } from "../git/Memory.ts";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid, RefUpdate } from "../git/Store.ts";
+import { ObjectStore, type Oid, type RefUpdate } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Certificate from "../trust/Certificate.ts";
@@ -39,7 +39,7 @@ const EMPTY_PROJECTION = {
   rejected: [],
 };
 
-const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
+const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(
@@ -540,6 +540,54 @@ describe("Policy", () => {
       assert.match(outcome.verdict.ok === false ? outcome.verdict.reason : "", /has been revoked/);
     });
 
+    it("refuses a since-revoked member's close, which takes authority away", async () => {
+      // Granting is not the only way to move authority. `protectedBranch`
+      // skips a pull request that is not open, so a relayed `pr.closed` from a
+      // revoked key freezes the branch behind an approved change until a
+      // `hub.merge` holder reopens it — and with the revocation post-dating
+      // the pull request's last event there is no floor to catch the
+      // back-declared head, `former` supplies the capabilities it had, and
+      // `signer === author` waives the charge that would otherwise apply.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.reviewer,
+          });
+          const opened = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.close({ repo: where.genesis.repoId, pr, key: where.reviewer });
+          const closed = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: opened! });
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          return yield* evaluate({
+            update: { name: `refs/hub/pr/${pr}`, value: closed },
+            principal: where.principal,
+            genesis: where.genesis,
+            trust: yield* projectTrust(where.genesis),
+            rules: OPEN,
+          });
+        }),
+      );
+
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /has been revoked/);
+    });
+
     it("refuses a pushed tombstone from a member whose hub.redact was narrowed away", async () => {
       // The fold's first pass asks only whether a tombstone's signer *ever*
       // held `hub.redact`, because that set has to be monotone: an answer that
@@ -643,6 +691,62 @@ describe("Policy", () => {
       );
       assert.equal(outcome.ok, false);
       assert.match(outcome.ok === false ? outcome.reason : "", /a fold will walk/);
+    });
+
+    it("still reconciles a pull request whose tree object never arrived", async () => {
+      // What the ref already reaches was walked with the namespace predicate,
+      // which deliberately steps over a commit whose *tree* is absent — refs
+      // are applied without a connectivity check, so a replica can hold one.
+      // The walk stopped there, everything behind it dropped out of the set,
+      // and the next ordinary reconciling push met an unaccounted parent and
+      // was refused for good on a ref that cannot be rewound.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const objects = yield* ObjectStore;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const opened = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "more",
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // The middle of the history loses its tree.
+          const info = yield* repository.readCommit(head!);
+          yield* objects.delete(info.tree);
+
+          // An ordinary concurrent append, reconciled by a join.
+          const sibling = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [opened!],
+            message: "concurrent\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!, sibling],
+            message: "join\n",
+            author,
+          });
+          return yield* judge(where, { name: `refs/hub/pr/${pr}`, value: joined });
+        }),
+      );
+
+      assert.equal(
+        outcome.ok === false ? outcome.reason : "allowed",
+        "allowed",
+        "one missing object must not make the pull request unpushable",
+      );
     });
 
     it("refuses a hub ref pointed at a commit from outside the namespace", async () => {
