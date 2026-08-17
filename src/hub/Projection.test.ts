@@ -244,6 +244,61 @@ describe("hub projection", () => {
       assert.equal(state.reviews.length, 2, "both statements are still on the record");
     });
 
+    it("withdraws an approval with a back-dated rejection too", async () => {
+      // Which of a reviewer's statements counts was decided by the date the
+      // statement claimed, and `issuedAt` is written by whoever signed it — so
+      // a reviewer could withdraw an approval in a way that did not withdraw
+      // it, by dating the withdrawal before the approval. Fold order is
+      // ancestry with a deterministic tie-break, and the withdrawal is built
+      // on the approval, so it is the later word wherever it is folded.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "review.submitted",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            // Well before the approval it is meant to withdraw.
+            issuedAt: new Date(1_600_000_000_000).toISOString(),
+            trustHead: yield* repository.resolve(Log.LOG_REF),
+            head: Event.qualify(REVISION),
+            decision: "reject",
+            body: "actually, no",
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.reviewer, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "review.submitted backdated\n",
+            }),
+            expected: head,
+          });
+
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(state.reviews.length, 2, "both statements are on the record");
+      assert.equal(approvals(state).length, 0, "and the later one is the one that counts");
+    });
+
     it("lets a later rejection withdraw the same author's approval", async () => {
       const state = await scenario(
         Effect.gen(function* () {
@@ -1769,6 +1824,59 @@ describe("hub projection", () => {
       assert.equal(approvals(outcome.host).length, 1, "an untouched approval still counts");
       assert.equal(approvals(outcome.replica).length, 1, "on both");
       assert.deepEqual(outcome.replica.redacted, outcome.host.redacted);
+    });
+
+    it("decides the opening by the tombstone too, not by the bytes", async () => {
+      // The opening pass is where `author` and `openers` are settled, and
+      // `approvals` excludes every opener as self-approval. Left out of the
+      // redaction decision, that pass read the payload bytes directly: the
+      // host that performed a redaction saw no opening and no author, and a
+      // replica that still held the blob saw both — so the same approval
+      // counted on one and not the other, and the two gave opposite verdicts
+      // on the same protected-branch push.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "Add a thing",
+            base: "refs/heads/main",
+            head: REVISION,
+            key: where.reviewer,
+          });
+          const { events } = yield* Event.entries(pr);
+          const entry = events.at(0);
+
+          // The opener redacts their own opening, and then approves.
+          yield* PullRequest.redact({
+            repo: where.genesis.repoId,
+            pr,
+            target: entry?.payload?.id ?? "",
+            reason: "sensitive-content",
+            key: where.reviewer,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+
+          const host = yield* projectionOf(where, pr);
+          yield* repository.writeBlob(entry!.bytes);
+          return { host, replica: yield* projectionOf(where, pr) };
+        }),
+      );
+
+      assert.deepEqual(
+        [...outcome.replica.openers],
+        [...outcome.host.openers],
+        "who opened it must not depend on which host is asking",
+      );
+      assert.equal(outcome.replica.author, outcome.host.author);
+      assert.equal(approvals(outcome.replica).length, approvals(outcome.host).length);
     });
 
     it("refuses a redaction from a member without hub.redact, and writes nothing", async () => {

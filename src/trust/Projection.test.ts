@@ -456,6 +456,56 @@ describe("trust projection", () => {
     assert.equal(outcome.owner, outcome.genuine, "and the record in the log's history owns it");
   });
 
+  it("does not let unsigned replays crowd the real signatures out of a record", async () => {
+    // Authority for a statement is the union of the signatures every copy of
+    // it carried, and verifying them is what that union costs — so the number
+    // of copies consulted is bounded. Bounded in *walk* order, the bound was
+    // itself the attack: parentless replays sort early, so a handful of
+    // unsigned copies filled the list with empty signature sets and the
+    // genuine commit — which still wins the descent — was folded with no
+    // signers at all. The quorum then failed and the record was rejected,
+    // which is any `source.push` holder nullifying a revocation.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const bob = yield* generate("bob@example.com");
+        yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+
+        const subject = yield* print(bob);
+        const record = yield* highRecord(where, (id) =>
+          Certificate.revoke({ repo: where.genesis.repoId, subject, reason: "left", id }),
+        );
+
+        // More unsigned copies than the endorsement bound holds, each grafted
+        // in with no history and joined over the genuine one.
+        const heads = [record.commit];
+        for (let attempt = 0; attempt < 12; attempt++) {
+          heads.push(
+            yield* Record.write({
+              name: Log.RECORD,
+              payload: record.bytes,
+              signatures: [],
+              parents: [],
+              message: `${record.payload.type} ${record.payload.id} ${attempt}\n`,
+            }),
+          );
+        }
+        yield* repository.setRef({ name: Log.LOG_REF, to: yield* Log.join(heads) });
+
+        const projection = yield* projectionOf(where);
+        return {
+          applied: !projection.members.has(subject),
+          owner: projection.revoked.get(subject)?.[0]?.commit ?? null,
+          genuine: record.commit,
+        };
+      }),
+    );
+
+    assert.equal(outcome.applied, true, "the revocation must still apply");
+    assert.equal(outcome.owner, outcome.genuine, "and the record in the log's history owns it");
+  });
+
   it("does not let one record's id burn a different record's", async () => {
     // Keyed on the bare id, "already applied" was a weapon: any member holding
     // a trust capability could publish a record they were perfectly entitled

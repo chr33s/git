@@ -379,6 +379,9 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
   /** Which members signed each event, for the contested-opening ranking. */
   const members = new Map<Oid, ReadonlySet<Fingerprint>>();
 
+  /** What the opening pass decided about each `pr.opened`, so the loop agrees. */
+  const settled = new Map<Oid, Verify.Authorization>();
+
   const opening = yield* Effect.gen(function* () {
     // Only openings that would actually be *accepted* compete. Computed over
     // the raw walk, an unsigned second `pr.opened` — pushable by any
@@ -389,6 +392,13 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     const candidates: Oid[] = [];
     for (const entry of events) {
       if (entry.payload?.type !== "pr.opened") continue;
+      // Redaction decides absence here too. Left out, an opening's author —
+      // and with it every approval `approvals` excludes as self-approval — was
+      // decided by whether the payload bytes were still present, so the host
+      // that performed a redaction and a replica that has not yet reached it
+      // gave opposite verdicts on the same protected-branch push. That is the
+      // divergence the two-pass fold exists to remove.
+      if (skip.has(entry.commit)) continue;
       const payload = entry.payload;
       if (payload.pr !== pr) continue;
 
@@ -407,6 +417,14 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         seen: ancestry,
         contains: inTrustLog,
       });
+      // Recorded, refusal and all: this pass is what the loop below uses for
+      // every `pr.opened`, rather than asking again. Asked twice, the two
+      // asked *different questions* — this one against the head the event
+      // declares, the loop against the floor its ancestors raised it to — so
+      // an opening could win the descent here and be refused there, leaving
+      // the pull request with the winner it could not read a `base` from and
+      // the branch behind it unpushable.
+      settled.set(entry.commit, authorized);
       if (authorized.ok) {
         candidates.push(entry.commit);
         openers.add(authorized.principal.fingerprint);
@@ -581,16 +599,20 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     // `MAX_SIGNATURES` attacker-supplied signatures to ask a second question
     // about the same bytes doubles the work on the synchronous push path.
     const signed = yield* Verify.signers(entry.bytes, entry.signatures);
-    const authorized = yield* Verify.authorize({
-      projection: trust,
-      bytes: entry.bytes,
-      signatures: entry.signatures,
-      signed,
-      capability: Event.capabilityFor(payload),
-      made: { at: new Date(payload.issuedAt), trustHead: effective },
-      seen: ancestry,
-      contains: inTrustLog,
-    });
+    // A `pr.opened` is judged once, by the pass that decided which opening
+    // won; see `settled`. Everything else is judged here, against the floor.
+    const authorized =
+      settled.get(entry.commit) ??
+      (yield* Verify.authorize({
+        projection: trust,
+        bytes: entry.bytes,
+        signatures: entry.signatures,
+        signed,
+        capability: Event.capabilityFor(payload),
+        made: { at: new Date(payload.issuedAt), trustHead: effective },
+        seen: ancestry,
+        contains: inTrustLog,
+      }));
     if (!authorized.ok) {
       rejected.push({ commit: entry.commit, reason: authorized.reason });
       continue;
@@ -978,8 +1000,14 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
     // claimed opener, not merely `author`: a contested opening establishes no
     // author, and an approval from either claimant is still their own.
     if (pullRequest.openers.has(review.author)) continue;
-    const existing = latest.get(review.author);
-    if (existing === undefined || existing.at <= review.at) latest.set(review.author, review);
+    // Last in *fold* order, not by the date the review claims. `issuedAt` is
+    // written by whoever signed it, so ordering on it let a reviewer withdraw
+    // an approval in a way that did not withdraw it: back-date the "request
+    // changes" and the earlier approval still counts, on every replica. Fold
+    // order is `Dag.topological`, which is ancestry with a deterministic
+    // tie-break — the same discipline `supersedes` applies for the same
+    // reason, and `reviews` is built in it.
+    latest.set(review.author, review);
   }
   return [...latest.values()].filter((review) => review.decision === "approve");
 };

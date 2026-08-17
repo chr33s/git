@@ -360,11 +360,35 @@ export const writeGenesis = Effect.fn("Genesis.write")(function* (
  * as one: a storage fault read as "not hub-enabled" would serve a private
  * repository to anybody, which is the worst possible way to fail.
  */
+/**
+ * Genesis documents already read, by the commit they were read from.
+ *
+ * A genesis is a commit, two blobs, a SHA-256 over the payload and an Ed25519
+ * verification per root signature, and it is read on *every* request — twice
+ * or three times on a write, since the guard, the policy boundary and the
+ * redaction check each ask. That is the same anonymous `GET /info/refs` loop
+ * the trust-fold memo exists to protect, amplified through a second door.
+ *
+ * The ref never moves: a genesis is written once and the policy boundary
+ * refuses to move it, so the key is a formality that keeps the memo honest if
+ * that ever stops being true. Bounded by repositories, like the fold's.
+ */
+const GENESES = 256;
+const geneses = new Map<Oid, Stored>();
+
 export const readGenesis = Effect.fn("Genesis.read")(function* () {
   const repository = yield* Repository;
 
   const commit = yield* repository.resolve(GENESIS_REF);
   if (commit === null) return null;
+
+  const remembered = geneses.get(commit);
+  if (remembered !== undefined) {
+    // Re-inserted so iteration order is least-recently-used first.
+    geneses.delete(commit);
+    geneses.set(commit, remembered);
+    return remembered;
+  }
 
   const record = yield* Record.read(commit, RECORD);
   const genesis = yield* load(record.payload);
@@ -383,5 +407,19 @@ export const readGenesis = Effect.fn("Genesis.read")(function* () {
     });
   }
 
-  return { genesis, signatures: record.signatures, commit };
+  const stored: Stored = { genesis, signatures: record.signatures, commit };
+  geneses.set(commit, stored);
+  while (geneses.size > GENESES) {
+    const oldest = geneses.keys().next();
+    if (oldest.done === true) break;
+    geneses.delete(oldest.value);
+  }
+  return stored;
 });
+
+/** A genesis as it was stored, with the commit it was read from. */
+export interface Stored {
+  readonly genesis: Genesis;
+  readonly signatures: ReadonlyArray<string>;
+  readonly commit: Oid;
+}

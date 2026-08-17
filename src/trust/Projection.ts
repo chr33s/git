@@ -563,22 +563,21 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
   // requiring them to be in the *winning* copy would let a replay that drops
   // the signatures strip a revocation's authority by winning descent.
   const endorsed = new Map<string, ReadonlyArray<ReadonlyArray<string>>>();
+  const signatures = new Map<Oid, ReadonlyArray<string>>();
   const keyOf = (entry: (typeof records)[number]) =>
     `${entry.payload.id}\u0000${decoder.decode(entry.bytes)}`;
   for (const entry of records) {
     const key = keyOf(entry);
     claimed.set(key, [...(claimed.get(key) ?? []), entry.commit]);
-    // Bounded: verifying every copy's signatures is what the union costs, and
-    // the copies are written by whoever may push. Past this many the record is
-    // being spammed, not endorsed.
-    const seen = endorsed.get(key) ?? [];
-    if (seen.length < COPIES) endorsed.set(key, [...seen, entry.signatures]);
+    signatures.set(entry.commit, entry.signatures);
   }
 
   const winner = new Map<string, Oid>();
   const disputed = [...claimed].filter(([, commits]) => commits.length > 1);
   for (const [id, commits] of claimed) {
-    if (commits.length === 1) winner.set(id, commits[0]!);
+    if (commits.length !== 1) continue;
+    winner.set(id, commits[0]!);
+    endorsed.set(id, [signatures.get(commits[0]!) ?? []]);
   }
 
   // The transitive ancestor closure, built only when something needs it.
@@ -632,6 +631,33 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
       if (better) best = candidate;
     }
     winner.set(id, best[2]);
+
+    // The endorsements come from the *best-ranked* copies, not the first few
+    // the walk reached. Verifying every copy is what the union costs, and the
+    // copies are written by whoever may push — so a cap taken in walk order
+    // was a way to spend it: eight parentless, unsigned replays of a record
+    // sort early, fill the list with empty signature sets, and the genuine
+    // commit — which still wins `winner` — is folded with no signers at all.
+    // The quorum then fails and the record is rejected, which turns any
+    // `source.push` holder into somebody who can nullify a revocation.
+    // Ranked, the copies that fill the list are the ones grafting cannot
+    // displace, for the same reason the winner is.
+    endorsed.set(
+      id,
+      commits
+        .map((commit) => [rank(commit), commit] as const)
+        .sort(([left], [right]) =>
+          left[0] !== right[0]
+            ? right[0] - left[0]
+            : left[1] !== right[1]
+              ? right[1] - left[1]
+              : left[2] < right[2]
+                ? -1
+                : 1,
+        )
+        .slice(0, COPIES)
+        .map(([, commit]) => signatures.get(commit) ?? []),
+    );
   }
 
   return { entries: records, winner, keyOf, endorsed };
