@@ -88,6 +88,7 @@ export const rm = Command.make(
   {
     work: workFlag,
     cached: Flag.boolean("cached").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Unstage only, and leave the file on disk"),
     ),
     paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })),
@@ -120,6 +121,7 @@ export const restore = Command.make(
   {
     work: workFlag,
     staged: Flag.boolean("staged").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Restore the index rather than the work tree"),
     ),
     source: Flag.string("source").pipe(
@@ -145,8 +147,12 @@ export const switchCommand = Command.make(
   "switch",
   {
     work: workFlag,
-    create: Flag.boolean("create").pipe(Flag.withDescription("Branch from HEAD first")),
+    create: Flag.boolean("create").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Branch from HEAD first"),
+    ),
     force: Flag.boolean("force").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Overwrite unstaged changes instead of refusing"),
     ),
     branch: Argument.string("branch"),

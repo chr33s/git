@@ -361,6 +361,7 @@ const serveCommand = Command.make(
     port: Flag.integer("port").pipe(Flag.withDefault(8080), Flag.withAlias("p")),
     hostname: Flag.string("hostname").pipe(Flag.withDefault("127.0.0.1")),
     open: Flag.boolean("open").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Serve writes to repositories that have no genesis"),
     ),
   },
@@ -436,7 +437,7 @@ const tag = Command.make(
     delete: Flag.string("delete").pipe(Flag.withDefault(""), Flag.withAlias("d")),
     name: Flag.string("name").pipe(Flag.withDefault("")),
     target: Flag.string("target").pipe(Flag.withDefault("HEAD")),
-    force: Flag.boolean("force").pipe(Flag.withAlias("f")),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
     repo: repoArgument,
   },
   ({ delete: remove, force, message, name, repo, root, target }) =>
@@ -622,7 +623,7 @@ const grep = Command.make(
   {
     root: rootFlag,
     ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
-    ignoreCase: Flag.boolean("ignore-case").pipe(Flag.withAlias("i")),
+    ignoreCase: Flag.boolean("ignore-case").pipe(Flag.withDefault(false), Flag.withAlias("i")),
     repo: repoArgument,
     pattern: Argument.string("pattern"),
   },
@@ -674,8 +675,9 @@ const gc = Command.make(
   "gc",
   {
     root: rootFlag,
-    dryRun: Flag.boolean("dry-run").pipe(Flag.withAlias("n")),
+    dryRun: Flag.boolean("dry-run").pipe(Flag.withDefault(false), Flag.withAlias("n")),
     repack: Flag.boolean("repack").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Write what survives into one pack and drop the loose objects"),
     ),
     repo: repoArgument,
@@ -723,9 +725,10 @@ const pushCommand = Command.make(
   {
     root: rootFlag,
     token: Flag.string("token").pipe(Flag.withDefault("")),
-    force: Flag.boolean("force").pipe(Flag.withAlias("f")),
-    atomic: Flag.boolean("atomic"),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
+    atomic: Flag.boolean("atomic").pipe(Flag.withDefault(false)),
     delete: Flag.boolean("delete").pipe(
+      Flag.withDefault(false),
       Flag.withAlias("d"),
       Flag.withDescription("Remove the ref on the server instead of updating it"),
     ),

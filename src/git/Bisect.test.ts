@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { gitIn, hasGit } from "../testing/Git.ts";
+import { fastImport, gitIn, hasGit, importCommit } from "../testing/Git.ts";
 import { next } from "./Bisect.ts";
 import { stores as memoryStores } from "./Memory.ts";
 import { stores as nodeStores } from "./Node.ts";
@@ -165,12 +165,31 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
     assert.equal(mine?.distance, best, `chose dist=${mine?.distance}, best available is ${best}`);
   };
 
-  /** `file` is a parameter so two branches can move without conflicting. */
-  const commit = (message: string, file = "n.txt") => {
-    execFileSync("sh", ["-c", `echo ${message} > ${file}`], { cwd: root });
-    git("add", file);
-    git("commit", "-q", "-m", message);
-    return git("rev-parse", "HEAD").trim();
+  /**
+   * A chain of `count` commits on `main`, oldest first.
+   *
+   * One `git fast-import` rather than four processes per commit. The oids come
+   * back from the stream's own marks, so there is no `rev-parse` per commit
+   * either — which is what took a thirteen-commit fixture from three seconds
+   * of process startup to none.
+   */
+  const chainOf = (count: number): ReadonlyArray<string> => {
+    git("init", "-q", "-b", "main", ".");
+
+    let stream = "";
+    for (let index = 0; index < count; index++) {
+      const made = {
+        branch: "refs/heads/main",
+        mark: index + 1,
+        message: `c${index}`,
+        files: [{ path: "n.txt", content: `c${index}\n` }],
+      };
+      // The first commit is a root and has no parent to name.
+      stream += index === 0 ? importCommit(made) : importCommit({ ...made, from: index });
+    }
+
+    const marks = fastImport(root, stream);
+    return Array.from({ length: count }, (_, index) => marks.get(index + 1)!);
   };
 
   /** `git merge-base --is-ancestor` answers by exit code, not by output. */
@@ -184,10 +203,7 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
   };
 
   it("picks the same commit as git on a linear history", async () => {
-    git("init", "-q", "-b", "main", ".");
-
-    const made: string[] = [];
-    for (let index = 0; index < 13; index++) made.push(commit(`c${index}`));
+    const made = chainOf(13);
 
     const bad = made[12]!;
     const good = [made[0]!];
@@ -200,13 +216,10 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
   });
 
   it("picks an equally good commit where git has a tie to break", async () => {
-    git("init", "-q", "-b", "main", ".");
-
     // Seven suspects split three and four either way, so two commits are
     // exactly as informative and there is no better one to name. Asserting
     // git's own pick here would be pinning its tie-break, not our answer.
-    const made: string[] = [];
-    for (let index = 0; index < 8; index++) made.push(commit(`c${index}`));
+    const made = chainOf(8);
 
     const bad = made[7]!;
     const good = [made[0]!];
@@ -224,18 +237,70 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
   it("picks the same commit as git across a merge", async () => {
     git("init", "-q", "-b", "main", ".");
 
-    const root0 = commit("root");
-    commit("main-1");
-    commit("main-2");
+    // main:  root ── main-1 ── main-2 ─────────── merge ── after-merge
+    //             ╲                              ╱
+    // side:        side-1 ── side-2 ── side-3 ──╯
+    //
+    // Spelled as one stream rather than driven with `checkout` and `merge`:
+    // the shape is the whole point of the fixture, and here it is legible in
+    // one place instead of inferred from a sequence of commands.
+    const main = (mark: number, message: string, from: number) =>
+      importCommit({
+        branch: "refs/heads/main",
+        mark,
+        message,
+        from,
+        files: [{ path: "n.txt", content: `${message}\n` }],
+      });
+    const side = (mark: number, message: string, from: number) =>
+      importCommit({
+        branch: "refs/heads/side",
+        mark,
+        message,
+        from,
+        files: [{ path: "s.txt", content: `${message}\n` }],
+      });
 
-    git("checkout", "-q", "-b", "side", root0);
-    commit("side-1", "s.txt");
-    commit("side-2", "s.txt");
-    commit("side-3", "s.txt");
+    const marks = fastImport(
+      root,
+      importCommit({
+        branch: "refs/heads/main",
+        mark: 1,
+        message: "root",
+        files: [{ path: "n.txt", content: "root\n" }],
+      }) +
+        main(2, "main-1", 1) +
+        main(3, "main-2", 2) +
+        side(4, "side-1", 1) +
+        side(5, "side-2", 4) +
+        side(6, "side-3", 5) +
+        // The merge carries both sides' files: `merge` adds the parent, it
+        // does not merge the trees, so the tree is stated.
+        importCommit({
+          branch: "refs/heads/main",
+          mark: 7,
+          message: "merge side",
+          from: 3,
+          merge: 6,
+          files: [
+            { path: "n.txt", content: "main-2\n" },
+            { path: "s.txt", content: "side-3\n" },
+          ],
+        }) +
+        importCommit({
+          branch: "refs/heads/main",
+          mark: 8,
+          message: "after-merge",
+          from: 7,
+          files: [
+            { path: "n.txt", content: "after-merge\n" },
+            { path: "s.txt", content: "side-3\n" },
+          ],
+        }),
+    );
 
-    git("checkout", "-q", "main");
-    git("merge", "-q", "--no-ff", "-m", "merge side", "side");
-    const bad = commit("after-merge");
+    const root0 = marks.get(1)!;
+    const bad = marks.get(8)!;
 
     // A merge means the suspects are a graph, not a line: the midpoint of a
     // list would be the wrong answer here and git's choice is not it either.
@@ -250,10 +315,7 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
   });
 
   it("agrees with git all the way down to the culprit", async () => {
-    git("init", "-q", "-b", "main", ".");
-
-    const made: string[] = [];
-    for (let index = 0; index < 9; index++) made.push(commit(`c${index}`));
+    const made = chainOf(9);
 
     // Drive a whole session: the fault is at made[6], so every commit from
     // there on is "bad". Both implementations should walk the same path and

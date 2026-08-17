@@ -435,6 +435,7 @@ const enable = Command.make(
   {
     root: rootFlag,
     yes: Flag.boolean("yes").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Accept a new repository identity without prompting"),
     ),
     name: Flag.string("as").pipe(

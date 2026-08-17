@@ -25,13 +25,13 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "effect": "4.0.0-beta.107"
+    "effect": "4.0.0-rc.110"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.0-beta.107",
-    "@effect/platform-node": "4.0.0-beta.107",
-    "@effect/tsgo": "0.36.4",
-    "@effect/vitest": "4.0.0-beta.107",
+    "@effect/platform-bun": "4.0.0-rc.110",
+    "@effect/platform-node": "4.0.0-rc.110",
+    "@effect/tsgo": "0.36.5",
+    "@effect/vitest": "4.0.0-rc.110",
     "@oxlint/plugins": "1.78.0",
     "@types/node": "26.2.0",
     "alchemy": "2.0.0-beta.72",
@@ -43,7 +43,7 @@
     "playwright": "1.62.1",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
-    "wrangler": "4.121.0"
+    "wrangler": "4.123.0"
   },
   "engines": {
     "node": ">=24.12.0"
