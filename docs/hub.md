@@ -618,8 +618,9 @@ Uploading an LFS object is charged `source.push`, for the same reason as
 pointing one at a URL of the caller's choosing discloses a read-restricted
 repository's commit oids, and `source.push` does not carry `repo.read`.
 
-A gate that cannot run yet still refuses what it can, and refuses only the
-commands it is about: a mixed push carrying a create and a delete, from a
+A gate that cannot run yet still refuses what it can — the envelope binding
+included, since which refs a signature covers needs nothing from the pack —
+and refuses only the commands it is about: a mixed push carrying a create and a delete, from a
 principal entitled to the delete alone, loses the create and keeps the delete. The ref rules need the
 objects — a fast-forward cannot be told from a force push until the pack is
 unpacked, so receive-pack judges after the object phase — but "may this
