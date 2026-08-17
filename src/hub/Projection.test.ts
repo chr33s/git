@@ -1985,6 +1985,13 @@ describe("hub projection", () => {
       );
       assert.equal(outcome.replica.author, outcome.host.author);
       assert.equal(approvals(outcome.replica).length, approvals(outcome.host).length);
+      // And the content the winning opening supplies, which is what
+      // `Policy.protectedBranch` matches a pull request to its branch by. The
+      // contested-opening ranking counts events and their distinct member
+      // signers, so an event one host reads and the other does not is a vote
+      // one host counts and the other does not.
+      assert.equal(outcome.replica.base, outcome.host.base);
+      assert.equal(outcome.replica.title, outcome.host.title);
     });
 
     it("cannot be undone by a junk tombstone naming the tombstone", async () => {

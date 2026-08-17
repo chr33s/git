@@ -485,7 +485,12 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
       const signers = new Set<Fingerprint>();
       let count = 0;
       for (const entry of events) {
-        if (entry.commit === commit || entry.payload === null) continue;
+        // `skip`, not "the payload is missing". Filtered on the bytes, the
+        // host that performed a redaction counted one event fewer than a
+        // replica that still holds the blob — and with a contested opening
+        // that flips which `pr.opened` wins, so the two disagree about `base`
+        // and about the protected-branch push it is the route to.
+        if (entry.commit === commit || entry.payload === null || skip.has(entry.commit)) continue;
         if (ancestors.get(entry.commit)?.has(commit) !== true) continue;
         count++;
         for (const signer of yield* signersOf(entry)) signers.add(signer);

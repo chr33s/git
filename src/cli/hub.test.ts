@@ -562,6 +562,106 @@ describe("cli hub", () => {
     }
   });
 
+  /** What the JSON verbs take: a record the endpoint's own schema decodes. */
+  interface JsonBody {
+    readonly [field: string]: string | number | boolean | null | ReadonlyArray<JsonBody> | JsonBody;
+  }
+
+  it("does not charge a merge into its own side a force-push for spelling it as an oid", async () => {
+    // `ours` and `theirs` take anything the merge can resolve — an oid, a tag,
+    // a tracking ref — so comparing the *spellings* charged
+    // `source.force-push` for an ordinary merge whenever the side happened to
+    // be written another way, and refused it to a member holding only
+    // `source.push`. Compared as revisions, the two are the same commit.
+    const serverRoot = path.join(root, "merging");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "work"]);
+    const owner = await enableHubUnder(serverRoot, "work", ["repo.admin"]);
+    const merger = await grantMemberUnder(serverRoot, "work", owner.root, owner.repoId, [
+      "repo.read",
+      "source.push",
+    ]);
+
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
+    try {
+      const call = (verb: string, credential: string, body: JsonBody) =>
+        fetch(`${server.url}/work/${verb}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${credential}` },
+          body: JSON.stringify(body),
+        });
+
+      const author = { name: "A", email: "a@example.com", at: new Date().toISOString(), offset: 0 };
+      const seeded = await call("commit", owner.credential, {
+        branch: "main",
+        message: "one",
+        author,
+        files: [{ path: "a.txt", content: "one\n" }],
+      });
+      const seededBody = await seeded.text();
+      assert.equal(seeded.status, 200, seededBody);
+      // SAFETY: a 200 from `commit`, whose success schema carries `oid`.
+      const { oid } = JSON.parse(seededBody) as { readonly oid: string };
+
+      await call("branches/create", owner.credential, { name: "side", base: "refs/heads/main" });
+      const grown = await call("commit", owner.credential, {
+        branch: "side",
+        message: "two",
+        author,
+        files: [{ path: "b.txt", content: "two\n" }],
+      });
+      assert.equal(grown.status, 200, await grown.text());
+
+      // `ours` as the oid `main` currently points at, merging into `main`.
+      const merged = await call("merge", merger.credential, {
+        ours: oid,
+        theirs: "refs/heads/side",
+        author,
+        into: "main",
+      });
+      const body = await merged.text();
+      assert.equal(merged.status, 200, body);
+      assert.ok(!body.includes("force-push"), body);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses to write objects on a delete-only credential", async () => {
+    // Writing a blob or a tree moves no ref, so the policy boundary never sees
+    // it and the guard's charge is deliberately coarse — a write being
+    // `source.push` *or* `source.delete`, since it cannot read a push's
+    // commands. Left at that, a credential scoped to delete a branch could put
+    // unbounded content into the object store.
+    const serverRoot = path.join(root, "objects");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "store"]);
+    const owner = await enableHubUnder(serverRoot, "store", ["repo.admin"]);
+    const deleter = await grantMemberUnder(serverRoot, "store", owner.root, owner.repoId, [
+      "source.delete",
+    ]);
+
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
+    try {
+      const write = (credential: string) =>
+        fetch(`${server.url}/store/blob`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${credential}` },
+          body: JSON.stringify({ content: btoa("unbounded\n"), encoding: "base64" }),
+        });
+
+      const refused = await write(deleter.credential);
+      const body = await refused.text();
+      assert.equal(refused.status, 400, body);
+      assert.match(body, /source\.push/);
+
+      const allowed = await write(owner.credential);
+      assert.equal(allowed.status, 200, await allowed.text());
+    } finally {
+      await server.close();
+    }
+  });
+
   it("refuses to negotiate with a remote on a push-only credential", async () => {
     // Negotiation is a disclosure: a fetch offers a `have` line for every
     // local ref, so pointing one at a URL of the caller's choosing hands that

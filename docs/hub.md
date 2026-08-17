@@ -605,9 +605,10 @@ written to admit them ever sees the request.
 A few operations change what a repository _is_ without moving any ref, so the
 policy boundary has nothing to judge and the guard's charge — a write being
 `source.push` **or** `source.delete`, since it cannot see a push's commands —
-is all that stands behind them. Registering a webhook or a remote (a
-destination this repository will send to) and collecting the object store are
-charged `repo.admin` at the handler; left at the guard's charge, a bot scoped
+is all that stands behind them. Writing a blob or a tree is charged
+`source.push`; registering a webhook or a remote (a destination this repository
+will send to) and collecting the object store are charged `repo.admin` at the
+handler; left at the guard's charge, a bot scoped
 to delete a branch could register a receiver for every push the repository
 ever accepts, or throw the objects away.
 

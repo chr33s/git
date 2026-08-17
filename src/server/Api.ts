@@ -530,6 +530,9 @@ const repo = HttpApiGroup.make("repo")
         encoding: Schema.optional(Encoding),
       }),
       success: Schema.Struct({ oid: OidString }),
+      // Writing objects is a write, and "you may not" is an answer this has
+      // to be able to give.
+      error: Invalid,
     }),
   )
   .add(
@@ -1182,6 +1185,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("blob", ({ payload }) =>
       Effect.gen(function* () {
+        // Writing objects moves no ref, so the policy boundary never sees it
+        // and the guard's charge is deliberately coarse — a write being
+        // `source.push` *or* `source.delete`, since it cannot read a push's
+        // commands. Left at that, a credential scoped to delete a branch could
+        // put unbounded content into the object store, which is the same gap
+        // `CommitPack` closed by gating before it writes the body.
+        yield* requireCapability("source.push");
         const repository = yield* Repository;
         const oid = yield* repository
           .writeBlob(decodeContent(payload.content, payload.encoding))
@@ -1200,6 +1210,8 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("tree", ({ payload }) =>
       Effect.gen(function* () {
+        // As `blob` above: objects are written here and no ref moves.
+        yield* requireCapability("source.push");
         const repository = yield* Repository;
         const oid = yield* (
           payload.entries === undefined
@@ -1435,7 +1447,24 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         if (payload.into !== undefined) {
           const into = refNameOf(payload.into);
           request.into = into;
-          const rewrites = into !== refNameOf(payload.ours) && into !== refNameOf(payload.theirs);
+          // Compared as *revisions*, not as names. `ours` and `theirs` take
+          // anything `merge` can resolve — an oid, a tag, a tracking ref — so
+          // comparing the spellings charged `source.force-push` for a merge
+          // into one of its own sides whenever the side happened to be
+          // written another way, and refused it to a member holding only
+          // `source.push`. An `into` that does not exist yet holds nothing
+          // that a merge could discard.
+          const at = (revision: string) =>
+            isOid(revision)
+              ? Effect.succeed(revision)
+              : repository
+                  .resolve(refNameOf(revision))
+                  .pipe(Effect.catchTag("StorageFailure", Effect.die));
+          const tip = yield* at(into);
+          const rewrites =
+            tip !== null &&
+            tip !== (yield* at(payload.ours)) &&
+            tip !== (yield* at(payload.theirs));
           yield* gateWrite(into, rewrites);
         }
         const outcome = yield* repository
