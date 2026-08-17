@@ -330,6 +330,39 @@ describe("hub redaction", () => {
     assert.equal(outcome.carried, true, "and the pack the branch needs must carry it");
   });
 
+  it("says the same thing on a dry run as on the run it predicts", async () => {
+    // A dry run exists to say what the real one would do. Skipping the
+    // exclusion to save a trust fold made it say something else: a tombstoned
+    // payload reported as reachable and "would remove 0", and the same call
+    // without the flag removing it.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const exclude = yield* Redaction.excluded();
+        const predicted = yield* repository.gc({ dryRun: true, repack: true, exclude });
+        const actual = yield* repository.gc({ repack: true, exclude });
+        return {
+          predicted: predicted.removed.includes(blob!),
+          actual: actual.removed.includes(blob!),
+        };
+      }),
+    );
+
+    assert.equal(outcome.actual, true, "the real run removes it");
+    assert.equal(outcome.predicted, outcome.actual, "and the dry run says so");
+  });
+
   it("excludes nothing in a repository that has no genesis", async () => {
     const excluded = await scenario(Redaction.excluded());
     assert.equal(excluded.size, 0);

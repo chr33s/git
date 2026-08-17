@@ -547,9 +547,13 @@ const gc = Command.make(
         const repository = yield* Repository;
         // A tombstoned payload is still named by its own event's tree, so
         // reachability protects it unless it is excluded here. Without this,
-        // `hub redact` never removes anything a pack already holds. A dry run
-        // deletes nothing, so it does not pay for the set.
-        const exclude = dryRun ? new Set<Oid>() : yield* Redaction.excluded();
+        // `hub redact` never removes anything a pack already holds.
+        //
+        // A dry run pays for the set too. It exists to say what the real run
+        // would do, and skipping it to save a trust fold made it say something
+        // else: a tombstoned payload reported as reachable, "would remove 0",
+        // and the same command without `--dry-run` removing it.
+        const exclude = yield* Redaction.excluded();
         const report = yield* repository.gc({ dryRun, repack, exclude });
         yield* Console.log(
           `${dryRun ? "would remove" : "removed"} ${report.removed.length} of ${report.scanned} object(s), ${report.reachable} reachable`,

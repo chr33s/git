@@ -98,14 +98,17 @@ export class GitRepo extends DurableObject<TestEnv> {
   /**
    * Whether this host serves writes to repositories with no genesis.
    *
-   * The spellings `Config.boolean` accepts, because that is what the Worker
-   * beside this reads the very same variable with: `=true` opened one host and
-   * silently did nothing on the other, which is the worst shape a security
-   * switch can have.
+   * Exactly the spellings `Config.boolean` accepts, and exactly as it accepts
+   * them — case-sensitively, `y` included — because that is what the Worker
+   * beside this reads the very same variable with. A list that merely looked
+   * similar was the same defect in a smaller size: `=y` opened one host and
+   * not the other, `=TRUE` opened the other and not the one, and a security
+   * switch that means different things on two hosts is worse than one that
+   * means nothing.
    */
   #openWrites(): Layer.Layer<Auth.AnonymousWrites> {
-    const value = (this.env.ALLOW_ANONYMOUS_WRITES ?? "").trim().toLowerCase();
-    return Policy.anonymousWrites(["1", "true", "yes", "on"].includes(value));
+    const value = this.env.ALLOW_ANONYMOUS_WRITES ?? "";
+    return Policy.anonymousWrites(["true", "yes", "on", "1", "y"].includes(value));
   }
 
   #nonces(): Layer.Layer<Auth.Nonces> {

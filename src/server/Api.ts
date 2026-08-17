@@ -1730,14 +1730,15 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         }
         // Redaction's other half: a tombstoned payload is still named by its
         // own event's tree, so it survives reachability unless excluded here.
-        // Skipped for a dry run, which deletes nothing and so has nothing to
-        // exclude from — the set costs a trust fold and a walk per pull
-        // request, which is a steep price for a report.
-        if (payload.dry_run !== true) {
-          request.exclude = yield* Redaction.excluded().pipe(
-            Effect.catchTag("StorageFailure", Effect.die),
-          );
-        }
+        //
+        // Computed for a dry run too, though it deletes nothing. A dry run
+        // exists to predict the real one, and skipping the set to save a trust
+        // fold made it predict the wrong answer: a tombstoned payload was
+        // reported as reachable and "would remove 0", and the same call
+        // without `dry_run` removed it.
+        request.exclude = yield* Redaction.excluded().pipe(
+          Effect.catchTag("StorageFailure", Effect.die),
+        );
         const report = yield* repository
           .gc(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
