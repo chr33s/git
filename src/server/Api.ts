@@ -197,8 +197,20 @@ const requireRead = Effect.fn("Api.requireRead")(function* () {
   );
   if (stored === null) return;
 
+  // No requester at all is a host that did not provide one, not an anonymous
+  // request — and `Auth.anonymous` carries the *empty* projection, which has
+  // no members and so reads as a repository anonymous readers may clone. Left
+  // to the fallback, a hub-enabled repository that restricts reads answered
+  // `POST /push` to anybody the moment the context was missing, which is the
+  // fail-open this function's own comment says it refuses.
   const requester = yield* Effect.serviceOption(Auth.Requester);
-  const who = Option.getOrElse(requester, () => Auth.anonymous);
+  if (Option.isNone(requester)) {
+    return yield* new Invalid({
+      field: "capability",
+      reason: "sending this repository's objects elsewhere needs repo.read",
+    });
+  }
+  const who = requester.value;
   if (permits(who.capabilities, "repo.read")) return;
 
   // A repository the world may already clone has nothing to protect here: a
@@ -1267,6 +1279,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // a value the policy boundary never saw. `receive` is the delete that
         // carries a compare-and-swap.
         const judged = yield* gateOne({ name: `refs/tags/${params.name}`, value: null });
+        // Whether there was anything to delete, asked before the delete and
+        // through `resolve`. `receive` reports `from` as the value the command
+        // was *judged* against, which for a symbolic ref is `null` — so a
+        // symbolic tag was removed and the answer said it had not been.
+        const existed = yield* repository
+          .resolve(`refs/tags/${params.name}`)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
         const results = yield* repository
           .receive([judged])
           .pipe(Effect.catchTags({ StorageFailure: Effect.die, HookRejected: Effect.die }));
@@ -1280,7 +1299,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // `undefined` is "the store returned no result for a command we
         // submitted", which is not "it was deleted": reading it as `true`
         // would report a removal that never happened.
-        return { deleted: outcome !== undefined && outcome.from !== null };
+        return { deleted: outcome !== undefined && existed !== null };
       }),
     )
     .handle("fsck", () =>
@@ -1302,6 +1321,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // that moved between the decision and the delete would otherwise lose
         // a push the boundary never judged.
         const judged = yield* gateOne({ name: `refs/heads/${params.name}`, value: null });
+        // As in `tagRemove`: asked before the delete and through `resolve`, so
+        // a symbolic branch is not reported as one that was never there.
+        const existed = yield* repository
+          .resolve(`refs/heads/${params.name}`)
+          .pipe(Effect.catchTag("StorageFailure", Effect.die));
         const results = yield* repository
           .receive([judged])
           .pipe(Effect.catchTags({ StorageFailure: Effect.die, HookRejected: Effect.die }));
@@ -1313,7 +1337,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           });
         }
         // As in `tagRemove`: a missing result is not a deletion.
-        return { deleted: outcome !== undefined && outcome.from !== null };
+        return { deleted: outcome !== undefined && existed !== null };
       }),
     )
     .handle("reset", ({ payload }) =>

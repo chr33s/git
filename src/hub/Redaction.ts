@@ -26,7 +26,7 @@ import { Effect } from "effect";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
-import { type Genesis, readGenesis } from "../trust/Genesis.ts";
+import { GENESIS_REF, type Genesis, readGenesis } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import {
   project as projectTrust,
@@ -89,6 +89,14 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   // moved ref changes the key and a stale answer is not possible.
   const refs = yield* Event.pullRequests();
   const key = [
+    // The repository's own identity leads the key. Left out, the key was the
+    // hub and trust refs alone: two repositories on one host whose heads
+    // happen to match — the same trust log under a *different* genesis, which
+    // is a different membership and so a different answer — shared an entry,
+    // and one of them collected with an exclusion set computed for the other.
+    // A tombstoned payload the operator believes is gone is then re-protected
+    // by reachability and stays in the pack.
+    yield* repository.resolve(GENESIS_REF),
     yield* repository.resolve(LOG_REF),
     ...(yield* Effect.forEach(refs, (pr) => repository.resolve(Event.refOf(pr)))),
   ].join("\u0000");
