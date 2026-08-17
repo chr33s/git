@@ -574,6 +574,18 @@ policy.write
 repo.admin
 ```
 
+### What the guard charges, and what the boundary charges
+
+Authentication is a coarse filter and authorization is the precise one, so the
+two ask different questions. The guard sees a URL and a method, not a push's
+commands, and MUST therefore charge receive-pack (and every other write
+endpoint) **`source.push` _or_ `source.delete`** — either is enough to be let
+through the door. Which one a particular command actually needs, and whether it
+also needs `source.force-push`, is settled at the policy boundary, which reads
+the commands. Charging `source.push` alone at the guard makes `source.delete`
+unusable as a standalone capability: its holder is refused before the boundary
+written to admit them ever sees the request.
+
 ### Scoped check capability
 
 `hub.check` is scoped **per check name**: a CI principal granted `hub.check:test` may sign `check.completed` events only for the check named `test`. An unscoped `hub.check:*` MAY be granted but SHOULD be reserved for trusted infrastructure. Without scoping, any CI bot could sign any required check, and merge policy would be only as strong as the least-trusted bot.

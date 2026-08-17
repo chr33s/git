@@ -297,7 +297,27 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       continue;
     }
 
+    const payload = entry.payload;
     const key = keyOf(entry);
+
+    // Which of several commits carrying one statement is *the* one, decided by
+    // descent rather than by fold order. The id is inside the signed bytes, so
+    // a replay carries the same one — and fold order breaks ties by raw oid,
+    // which anybody who may write the ref can grind. Losing that race moved
+    // `grant`, `history[].commit` and `Revocation.commit` onto a commit honest
+    // trust heads cannot reach, which stops every stored event by that member
+    // counting and stops a revocation applying at all.
+    //
+    // Asked *before* the signatures are verified, which is the whole cost of
+    // this loop. Asked after, N copies of one record — a single push, and
+    // append-only containment does not stop it — each paid for the union's
+    // worth of Ed25519 verifications before being dropped as duplicates, so
+    // the bound on the union was multiplied by the very thing it bounded.
+    if (winner.get(key) !== entry.commit) {
+      rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
+      continue;
+    }
+
     // Every signature any copy of this statement carried. They all sign the
     // same bytes, so they are all endorsements of the same thing, and which
     // commit one arrived in says nothing about it. Requiring them to be in the
@@ -309,28 +329,9 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       for (const signer of yield* signersOf(entry.bytes, copy)) signers.add(signer);
     }
     const quorum = rootQuorum(signers, roots, threshold);
-    const payload = entry.payload;
     // What the record says about when it was made, which is what every
     // expiry below is judged against.
     const claimedAt = new Date(payload.issuedAt);
-
-    // Asked here, recorded only where a record actually takes effect. Marking
-    // the id before the authority check let an unauthorized record *burn* a
-    // legitimate one's id: build a same-id record off the target's parent,
-    // grind its oid below the real one, push a join, and the forgery folds
-    // first, claims the id, is refused for want of authority — and the genuine
-    // revocation behind it is then discarded as a duplicate.
-    // Which of several records claiming one id is *the* one is decided by
-    // descent, not by fold order. The ids are inside the signed bytes, so a
-    // byte-identical replay carries the same one — and fold order breaks ties
-    // by raw oid, which anybody who may write the ref can grind. Losing that
-    // race moved `grant`, `history[].commit` and `Revocation.commit` onto a
-    // commit honest trust heads cannot reach, which stops every stored event
-    // by that member counting and stops a revocation applying at all.
-    if (winner.get(key) !== entry.commit) {
-      rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
-      continue;
-    }
 
     if (payload.type === "trust.root-change") {
       // Only the current roots may replace themselves. A member with
@@ -542,16 +543,6 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
 const readLog = Effect.fn("trust.Projection.readLog")(function* () {
   const { parents, records } = yield* Log.entries();
 
-  const ancestors = new Map<Oid, Set<Oid>>();
-  for (const oid of Dag.topological(parents)) {
-    const set = new Set<Oid>();
-    for (const parent of parents.get(oid) ?? []) {
-      set.add(parent);
-      for (const older of ancestors.get(parent) ?? []) set.add(older);
-    }
-    ancestors.set(oid, set);
-  }
-
   // Grouped by id *and* by the exact bytes — the *statement*, and nothing else.
   // Two records with one id but different content are two different claims,
   // and each is answered on its own authority rather than by whichever reached
@@ -585,11 +576,33 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
   }
 
   const winner = new Map<string, Oid>();
+  const disputed = [...claimed].filter(([, commits]) => commits.length > 1);
   for (const [id, commits] of claimed) {
-    if (commits.length === 1) {
-      winner.set(id, commits[0]!);
-      continue;
+    if (commits.length === 1) winner.set(id, commits[0]!);
+  }
+
+  // The transitive ancestor closure, built only when something needs it.
+  //
+  // It is quadratic in the log's length — a set per commit holding every
+  // commit before it — and the log only grows, on a ref that cannot be
+  // rewound. Built unconditionally, a repository checkpointing hourly reached
+  // tens of millions of set entries within a year, on a path (`Policy.gate`,
+  // `Redaction.excluded`, every `gc`) that runs it un-memoised and inside a
+  // 128 MiB worker. Nothing reads it unless two commits carry one statement,
+  // which is a replay, and a log without one pays nothing.
+  const ancestors = new Map<Oid, Set<Oid>>();
+  if (disputed.length > 0) {
+    for (const oid of Dag.topological(parents)) {
+      const set = new Set<Oid>();
+      for (const parent of parents.get(oid) ?? []) {
+        set.add(parent);
+        for (const older of ancestors.get(parent) ?? []) set.add(older);
+      }
+      ancestors.set(oid, set);
     }
+  }
+
+  for (const [id, commits] of disputed) {
     const descendants = (commit: Oid) => {
       let count = 0;
       for (const seen of ancestors.values()) if (seen.has(commit)) count++;

@@ -57,25 +57,31 @@ const decoder = new TextDecoder();
 /**
  * The capability a request needs before anything else is checked.
  *
- * Receive-pack is charged `source.push` from the advertisement on, because a
- * client that cannot push has no business learning the ref layout through the
- * push endpoint. Whether a *particular* push additionally needs
- * `source.force-push` or `source.delete` is a question about its commands, and
- * it belongs to the policy boundary, which can see them.
+ * Receive-pack is charged a write from the advertisement on, because a client
+ * that cannot write has no business learning the ref layout through the push
+ * endpoint. Which write it is — whether a *particular* push also needs
+ * `source.force-push`, or is a deletion needing `source.delete` — is a question
+ * about its commands, and it belongs to the policy boundary, which can see
+ * them. So the guard asks for `source.push` *or* `source.delete`: charging
+ * `source.push` alone made `source.delete` unusable as a standalone
+ * capability, refusing at the door the very holder the policy boundary was
+ * written to admit.
  */
-export const requiredCapability = (request: Request): string => {
+const WRITE = ["source.push", "source.delete"];
+
+export const requiredCapability = (request: Request): ReadonlyArray<string> => {
   const url = new URL(request.url);
   const last = url.pathname.split("/").at(-1);
 
-  if (last === "git-receive-pack") return "source.push";
+  if (last === "git-receive-pack") return WRITE;
   if (last === "refs" && url.searchParams.get("service") === "git-receive-pack") {
-    return "source.push";
+    return WRITE;
   }
-  if (last === "git-upload-pack") return "repo.read";
+  if (last === "git-upload-pack") return READ;
   // The LFS batch endpoint negotiates downloads as well as uploads, so method
   // alone would lock a reader out of cloning any repository that uses LFS. The
   // upload it hands back is a separate PUT, and that one is charged as a write.
-  if (last === "batch" && url.pathname.includes("/info/lfs/")) return "repo.read";
+  if (last === "batch" && url.pathname.includes("/info/lfs/")) return READ;
   // POST is not the same thing as "writes". These take a body because their
   // inputs do not fit in a URL, and they change nothing — charging them a
   // write locks a reader out of `diff` and `grep`, and makes an otherwise
@@ -87,10 +93,16 @@ export const requiredCapability = (request: Request): string => {
   // Matching on the word alone charged them `repo.read`, and neither endpoint
   // has a policy gate behind it to catch what got through.
   if (request.method === "POST" && last !== undefined && READ_ONLY_POSTS.has(last)) {
-    return "repo.read";
+    return READ;
   }
-  return request.method === "GET" || request.method === "HEAD" ? "repo.read" : "source.push";
+  return request.method === "GET" || request.method === "HEAD" ? READ : WRITE;
 };
+
+const READ = ["repo.read"];
+
+/** Whether a request asked for nothing more than to read. */
+const readOnly = (capabilities: ReadonlyArray<string>): boolean =>
+  capabilities.length === 1 && capabilities[0] === "repo.read";
 
 /**
  * POST endpoints that read and never write.
@@ -538,7 +550,14 @@ export const isPublic = (projection: Projection | null): boolean => projection =
  */
 export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
   readonly request: Request;
-  readonly capability: string;
+  /**
+   * What the request needs — any *one* of these, not all of them.
+   *
+   * A list because a push is charged `source.push` or `source.delete` and the
+   * guard cannot see which it is; the policy boundary, which reads the
+   * commands, makes the precise charge.
+   */
+  readonly capability: ReadonlyArray<string>;
   readonly now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -558,7 +577,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     // the ref boundary alone, it left webhook and remote registration, the
     // remote-push verb and LFS uploads reachable by anybody.
     const open = yield* Effect.serviceOption(AnonymousWrites);
-    if (input.capability !== "repo.read" && !Option.getOrElse(open, () => false)) {
+    if (!readOnly(input.capability) && !Option.getOrElse(open, () => false)) {
       return {
         ok: false,
         status: 403,
@@ -571,7 +590,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
       authenticated: {
         principal: null,
         signer: null,
-        capabilities: [input.capability],
+        capabilities: input.capability,
         projection: EMPTY,
         envelope: null,
       },
@@ -586,7 +605,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     // Anonymous reads are a repository policy question; anonymous writes never
     // are. Either way the answer carries a fresh nonce, so a native client
     // learns how to sign its retry from the rejection itself.
-    return input.capability === "repo.read" && anonymousReadAllowed(projection)
+    return readOnly(input.capability) && anonymousReadAllowed(projection)
       ? ({
           ok: true,
           authenticated: {
@@ -621,7 +640,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     // credential presented is nonsense: `git` sends whatever a credential
     // helper has for the host, and refusing here would break clones for
     // people whose only mistake was having an unrelated entry.
-    return input.capability === "repo.read" && anonymousReadAllowed(projection)
+    return readOnly(input.capability) && anonymousReadAllowed(projection)
       ? ({
           ok: true,
           authenticated: {
@@ -640,18 +659,30 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
         } as const);
   }
 
-  const authorized = yield* Verify.authorizeKey({
+  // Any one of them: a holder of `source.delete` and a holder of
+  // `source.push` are both entitled to reach receive-pack, and which of the
+  // two a given command needs is settled behind the guard.
+  let authorized = yield* Verify.authorizeKey({
     projection,
     signer: identified.signer,
-    capability: input.capability,
+    capability: input.capability[0] ?? "repo.read",
     at: now,
   });
+  for (const capability of input.capability.slice(1)) {
+    if (authorized.ok) break;
+    authorized = yield* Verify.authorizeKey({
+      projection,
+      signer: identified.signer,
+      capability,
+      at: now,
+    });
+  }
   if (!authorized.ok) {
     // A repository anonymous readers may clone must not become *less*
     // readable because a credential was presented: `git` sends one on every
     // request once it has any, and refusing here would break a clone that
     // works without it.
-    if (input.capability === "repo.read" && anonymousReadAllowed(projection)) {
+    if (readOnly(input.capability) && anonymousReadAllowed(projection)) {
       return {
         ok: true,
         authenticated: {
@@ -678,11 +709,14 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
 
   // `permits`, not an exact match: a credential scoped `repo.admin` covers
   // `repo.read`, and `hub.check:*` covers `hub.check:test`.
-  if ("delegation" in identified && !permits(scoped, input.capability)) {
+  if (
+    "delegation" in identified &&
+    !input.capability.some((capability) => permits(scoped, capability))
+  ) {
     return {
       ok: false,
       status: 403,
-      reason: `this credential is not scoped for ${input.capability}`,
+      reason: `this credential is not scoped for ${input.capability.join(" or ")}`,
     } as const;
   }
 

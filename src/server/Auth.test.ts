@@ -104,57 +104,69 @@ describe("Auth", () => {
 
   describe("what an operation costs", () => {
     it("charges a fetch a read and a push a push", () => {
-      assert.equal(
-        requiredCapability(request("r/git-upload-pack", { method: "POST" })),
+      assert.deepEqual(requiredCapability(request("r/git-upload-pack", { method: "POST" })), [
         "repo.read",
-      );
-      assert.equal(
-        requiredCapability(request("r/git-receive-pack", { method: "POST" })),
+      ]);
+      assert.deepEqual(requiredCapability(request("r/git-receive-pack", { method: "POST" })), [
         "source.push",
+        "source.delete",
+      ]);
+    });
+
+    it("lets a source.delete holder past the guard, since the guard cannot see the commands", () => {
+      // Whether a push is a deletion is a question about its commands, and the
+      // policy boundary is what reads them — it explicitly does *not* require
+      // `source.push` for a deletion. Charging `source.push` at the door made
+      // `source.delete` unusable as a standalone capability: the very holder
+      // the boundary was written to admit was 403'd before it saw them.
+      assert.ok(
+        requiredCapability(request("r/git-receive-pack", { method: "POST" })).includes(
+          "source.delete",
+        ),
       );
     });
 
     it("charges the receive-pack advertisement from the advertisement on", () => {
-      assert.equal(
+      assert.deepEqual(
         requiredCapability(request("r/info/refs?service=git-receive-pack")),
-        "source.push",
+        ["source.push", "source.delete"],
         "a client that cannot push should not learn the ref layout through the push endpoint",
       );
     });
 
     it("charges a read-only verb a read, and a DELETE that ends in one a write", () => {
-      assert.equal(requiredCapability(request("r/diff", { method: "POST" })), "repo.read");
-      assert.equal(requiredCapability(request("r/grep", { method: "POST" })), "repo.read");
+      assert.deepEqual(requiredCapability(request("r/diff", { method: "POST" })), ["repo.read"]);
+      assert.deepEqual(requiredCapability(request("r/grep", { method: "POST" })), ["repo.read"]);
 
       // The last path segment is also a *resource name*. Matching on the word
       // alone charged `DELETE /remotes/diff` and `DELETE /webhooks/grep`
       // `repo.read`, and neither endpoint has a policy gate behind it — so a
       // read-only credential could delete them.
-      assert.equal(
-        requiredCapability(request("r/remotes/diff", { method: "DELETE" })),
+      assert.deepEqual(requiredCapability(request("r/remotes/diff", { method: "DELETE" })), [
         "source.push",
-      );
-      assert.equal(
-        requiredCapability(request("r/webhooks/grep", { method: "DELETE" })),
+        "source.delete",
+      ]);
+      assert.deepEqual(requiredCapability(request("r/webhooks/grep", { method: "DELETE" })), [
         "source.push",
-      );
-      assert.equal(
-        requiredCapability(request("r/branches/fsck", { method: "DELETE" })),
+        "source.delete",
+      ]);
+      assert.deepEqual(requiredCapability(request("r/branches/fsck", { method: "DELETE" })), [
         "source.push",
-      );
+        "source.delete",
+      ]);
     });
 
     it("charges the LFS batch endpoint a read, POST or not", () => {
       // A reader must be able to clone a repository that uses LFS; the upload
       // it may negotiate is a separate PUT, charged separately.
-      assert.equal(
+      assert.deepEqual(
         requiredCapability(request("r/info/lfs/objects/batch", { method: "POST" })),
-        "repo.read",
+        ["repo.read"],
       );
-      assert.equal(
-        requiredCapability(request("r/info/lfs/objects/abc", { method: "PUT" })),
+      assert.deepEqual(requiredCapability(request("r/info/lfs/objects/abc", { method: "PUT" })), [
         "source.push",
-      );
+        "source.delete",
+      ]);
     });
   });
 
@@ -218,6 +230,27 @@ describe("Auth", () => {
   });
 
   describe("delegated credentials", () => {
+    it("admits a credential scoped to source.delete at the push endpoint", async () => {
+      // The end-to-end shape of the same rule: the guard charges either write,
+      // so a deletion-only credential reaches the policy boundary that can
+      // read its commands and hold it to `source.delete` exactly.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.delete"]);
+          const credential = yield* mintDelegation({
+            key: member,
+            repo: genesis.repoId,
+            capabilities: ["source.delete"],
+            ttlSeconds: 300,
+          });
+          return yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
+          );
+        }),
+      );
+      assert.equal(outcome.denied, null, "a deletion must be allowed to reach the boundary");
+    });
+
     it("lets a member present one for what they hold", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {
@@ -576,7 +609,7 @@ describe("Auth", () => {
         });
         return yield* authenticate({
           request: request("r/git-receive-pack", { method: "POST", headers: basic(credential) }),
-          capability: "source.push",
+          capability: ["source.push"],
         });
       }),
     );
