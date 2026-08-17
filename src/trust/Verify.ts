@@ -28,7 +28,7 @@ import type { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { MAX_SIGNATURES, permits } from "./Certificate.ts";
 import * as Log from "./Log.ts";
-import type { Member, Projection } from "./Projection.ts";
+import { type Member, openWindow, type Projection } from "./Projection.ts";
 
 /**
  * When an event was made, for judging a revocation against it.
@@ -104,33 +104,12 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   seen: Ancestry,
   held: Membership,
 ) {
-  const revocation = projection.revoked.get(subject);
-  if (revocation === undefined) return false;
+  const revocations = projection.revoked.get(subject);
+  if (revocations === undefined || revocations.length === 0) return false;
 
   // A live request is held to the current state: revoked is revoked, and a
   // key that has since been granted again is not.
-  if (made === null) return revocation.supersededBy === null;
-
-  // A revocation that a later grant ended still covers its own window. An
-  // event that can show it was made after the key came back is outside it;
-  // one that cannot is inside, which is where every signature made *while*
-  // revoked lives.
-  const ended = revocation.supersededBy;
-  if (ended !== null && made.trustHead !== null && (yield* seen(made.trustHead)).has(ended)) {
-    return false;
-  }
-
-  // A compromise reaches everything the key signed, without consulting the
-  // event's own `issuedAt`. That field is written by whoever holds the key,
-  // and under a compromise that is the attacker — so comparing against it
-  // would let them backdate their way out of the one revocation class meant
-  // to reach backwards. `compromisedFrom` stays on the record as the
-  // operator's account of when it began; it is not a verification input.
-  if (revocation.compromisedFrom !== null) return true;
-
-  // Past the window's end the check above has already answered; what is left
-  // is an event that cannot show it, and it is judged against the revocation
-  // as if the grant that ended it had not happened.
+  if (made === null) return openWindow(revocations) !== null;
 
   // Forward-only. An event that cannot *show* it predates the revocation does
   // not get the benefit of the doubt — and that covers a trust head this
@@ -147,7 +126,31 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // would otherwise be a way out of every forward-only revocation.
   if (!(yield* held(made.trustHead))) return true;
 
-  return (yield* seen(made.trustHead)).has(revocation.commit);
+  // Every window, not merely the latest: a key revoked, let back in and
+  // revoked again was out for two separate intervals, and an event made in the
+  // first is not rescued by the second. It is enough to fall inside one.
+  const visible = yield* seen(made.trustHead);
+  for (const revocation of revocations) {
+    // A revocation that a later grant ended still covers its own window. An
+    // event that can show it was made after the key came back is outside it;
+    // one that cannot is inside, which is where every signature made *while*
+    // revoked lives.
+    if (revocation.supersededBy !== null && visible.has(revocation.supersededBy)) continue;
+
+    // A compromise reaches everything the key signed, without consulting the
+    // event's own `issuedAt`. That field is written by whoever holds the key,
+    // and under a compromise that is the attacker — so comparing against it
+    // would let them backdate their way out of the one revocation class meant
+    // to reach backwards. `compromisedFrom` stays on the record as the
+    // operator's account of when it began; it is not a verification input.
+    if (revocation.compromisedFrom !== null) return true;
+
+    // Past the window's end the check above has already answered; what is left
+    // is an event that cannot show it, and it is judged against the revocation
+    // as if the grant that ended it had not happened.
+    if (visible.has(revocation.commit)) return true;
+  }
+  return false;
 });
 
 /**
@@ -304,6 +307,18 @@ export const authorizeKey = Effect.fn("trust.Verify.authorizeKey")(function* (in
  */
 export type Freshness = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
+/**
+ * How far ahead of us a checkpoint's clock may be and still be believed.
+ *
+ * `at` is written by whoever signed the checkpoint, and `project` keeps the one
+ * with the greatest `at` — so an age allowed to go negative made a single
+ * forward-dated attestation satisfy `maxTrustAgeSeconds` for as long as it was
+ * dated ahead, which is precisely the withheld-view bound this exists to
+ * enforce, defeated by typing a date. Ordinary clock skew between hosts is
+ * seconds, not hours; past this, a checkpoint is not evidence of anything.
+ */
+const SKEW = 300_000;
+
 export const fresh = (
   projection: Projection,
   maxAge: number,
@@ -316,6 +331,12 @@ export const fresh = (
     };
   }
   const age = now.getTime() - projection.checkpoint.at.getTime();
+  if (age < -SKEW) {
+    return {
+      ok: false,
+      reason: `the newest trust checkpoint is dated ${Math.floor(-age / 1000)}s in the future`,
+    };
+  }
   return age <= maxAge
     ? { ok: true }
     : { ok: false, reason: `the newest trust checkpoint is ${Math.floor(age / 1000)}s old` };

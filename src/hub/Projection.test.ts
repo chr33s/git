@@ -535,14 +535,14 @@ describe("hub projection", () => {
   });
 
   describe("an event's declared trust head", () => {
-    it("may not predate one an earlier event in the same pull request named", async () => {
+    it("is raised to one an earlier event in the same pull request named", async () => {
       // The trust head is written by the signer, and a forward-only revocation
       // is judged by whether that head already reached it. Unconstrained, a
       // revoked member could name any pre-revocation commit and have their old
       // capabilities recovered from `former`. What they cannot do is rewrite
       // the events they are building on: an event whose own ancestors were
       // written against a later head is claiming to have seen less than the
-      // conversation it is joining.
+      // conversation it is joining, and is read as having seen what they had.
       const outcome = await scenario(
         Effect.gen(function* () {
           const repository = yield* Repository;
@@ -602,7 +602,9 @@ describe("hub projection", () => {
       );
 
       assert.equal(outcome.reviews.length, 0, "a backdated approval must not count");
-      assert.match(outcome.rejected.at(-1)?.reason ?? "", /predates/);
+      // Refused by the revocation itself, which is the rule doing the work:
+      // held to the floor, the backdated head reaches the revocation after all.
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /revoked/);
     });
 
     it("may match what an earlier event named, which is the honest case", async () => {
@@ -627,6 +629,78 @@ describe("hub projection", () => {
       );
 
       assert.equal(outcome.reviews.length, 1);
+      assert.deepEqual(outcome.rejected, []);
+    });
+
+    it("does not drop an honest event from a replica whose trust log lags", async () => {
+      // Hub refs and the trust log replicate as separate refs, so a client can
+      // hold a conversation that has moved past a grant its own log has not
+      // fetched yet, and it names the older head honestly. Refusing for that
+      // dropped the comment, review or approval *permanently* — the floor
+      // comes from a history that only grows, so re-folding once the log
+      // caught up could not rescue it, and a slow mirror silently lost the
+      // approvals it was replicating.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          // The head the reviewer's client is still on.
+          const behind = yield* repository.resolve(Log.LOG_REF);
+
+          // The log moves — somebody unrelated is granted membership — and an
+          // event in this pull request names the newer head.
+          const newcomer = yield* generate("newcomer@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(newcomer.publicKey),
+              capabilities: ["hub.comment"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "seen the new member",
+            key: where.author,
+          });
+
+          // And only now does the reviewer approve, against the head they had.
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "review.submitted",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: behind,
+            head: Event.qualify(REVISION),
+            decision: "approve",
+            body: "still looks right",
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.reviewer, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "review.submitted lagging\n",
+            }),
+            expected: head,
+          });
+
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(approvals(outcome).length, 1, "a lagging approval must still count");
       assert.deepEqual(outcome.rejected, []);
     });
   });

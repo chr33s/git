@@ -83,6 +83,22 @@ export interface Revocation {
   readonly supersededBy: Oid | null;
 }
 
+/**
+ * The window a key is currently out on, if it is out.
+ *
+ * A key can be revoked, let back in, and revoked again, so what it has is a
+ * *list* of disjoint windows rather than one. Only the last of them can still
+ * be open — a grant closes the open one before another revocation can follow —
+ * so this is the whole of "is this key revoked right now", and every earlier
+ * window stays on the record because it is still true about its own interval.
+ */
+export const openWindow = (
+  revocations: ReadonlyArray<Revocation> | undefined,
+): Revocation | null => {
+  const last = revocations?.at(-1);
+  return last !== undefined && last.supersededBy === null ? last : null;
+};
+
 export interface Attestation {
   readonly commit: Oid;
   readonly at: Date;
@@ -109,7 +125,17 @@ export interface Projection {
    * every past event by anyone who ever left.
    */
   readonly former: ReadonlyMap<Fingerprint, Member>;
-  readonly revoked: ReadonlyMap<Fingerprint, Revocation>;
+  /**
+   * Every window each key has been out on, oldest first.
+   *
+   * A list rather than a record, because a key can be revoked, let back in and
+   * revoked again — and each window is separately true. Kept as one, a second
+   * revocation overwrote the first, and with it the retroactive reach of a
+   * `compromised` one: an attacker who had a key revoked for compromise could
+   * have it revoked again for any ordinary reason and then re-granted, and
+   * every signature they made during the compromise was authorized again.
+   */
+  readonly revoked: ReadonlyMap<Fingerprint, ReadonlyArray<Revocation>>;
   readonly roots: ReadonlyArray<RootKey>;
   readonly threshold: number;
   /** The most recent checkpoint, for callers that bound how stale a view may be. */
@@ -165,13 +191,13 @@ const expired = (member: Member, at: Date): boolean =>
 /** Every signer who may invite members — all of them, not the first found. */
 const inviters = (
   members: ReadonlyMap<Fingerprint, Member>,
-  revoked: ReadonlyMap<Fingerprint, Revocation>,
+  revoked: ReadonlyMap<Fingerprint, ReadonlyArray<Revocation>>,
   signers: ReadonlySet<Fingerprint>,
   at: Date,
 ): ReadonlyArray<Fingerprint> => {
   const found: Fingerprint[] = [];
   for (const signer of signers) {
-    if (revoked.get(signer)?.supersededBy === null) continue;
+    if (openWindow(revoked.get(signer)) !== null) continue;
     const member = members.get(signer);
     if (member === undefined || expired(member, at)) continue;
     if (Certificate.permits(member.capabilities, "member.invite")) found.push(signer);
@@ -182,13 +208,13 @@ const inviters = (
 /** Whether any signer holds a capability *within the fold*. */
 const holds = (
   members: ReadonlyMap<Fingerprint, Member>,
-  revoked: ReadonlyMap<Fingerprint, Revocation>,
+  revoked: ReadonlyMap<Fingerprint, ReadonlyArray<Revocation>>,
   signers: ReadonlySet<Fingerprint>,
   capability: string,
   at: Date,
 ): Fingerprint | null => {
   for (const signer of signers) {
-    if (revoked.get(signer)?.supersededBy === null) continue;
+    if (openWindow(revoked.get(signer)) !== null) continue;
     const member = members.get(signer);
     if (member === undefined || expired(member, at)) continue;
     if (Certificate.permits(member.capabilities, capability)) return signer;
@@ -208,11 +234,11 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
 
   const members = new Map<Fingerprint, Member>();
   const former = new Map<Fingerprint, Member>();
-  const revoked = new Map<Fingerprint, Revocation>();
+  const revoked = new Map<Fingerprint, ReadonlyArray<Revocation>>();
   const rejected: Rejected[] = [];
 
   /**
-   * The record ids already applied, so none is applied twice.
+   * The *statements* already applied, so none is applied twice.
    *
    * The log ref is writable by anybody holding `source.push` — append-only
    * containment is the only thing the policy boundary checks about it — so
@@ -220,10 +246,22 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
    * make. Without this, a replay of a revoked member's original grant passed
    * the re-instatement check below (its signer *is* the original admin) and
    * cleared the revocation; the same trick re-revoked a re-instated member,
-   * restored a narrowed grant and reinstalled a stale checkpoint. The id is
-   * inside the signed bytes, so a replay cannot dodge this by changing it.
+   * restored a narrowed grant and reinstalled a stale checkpoint.
+   *
+   * Keyed on the id *and the bytes*, not the id alone. `winner` already
+   * separates two commits of one record, but a copy carrying an extra junk
+   * signature is a different key there and reaches this check, which is what
+   * this catches. Keyed on the bare id it caught much more than that: any
+   * member holding a trust capability could publish an authorized record —
+   * a grant to a key of their own — re-using the id of a revocation naming
+   * them, grind it below the real one, and burn the id, so the revocation was
+   * discarded as a duplicate on a ref that can never be rewound. Two records
+   * with one id but different content are two different claims, and each is
+   * now answered on its own authority.
    */
   const applied = new Set<string>();
+  const statementOf = (entry: (typeof entries)[number]) =>
+    `${entry.payload.id}\u0000${decoder.decode(entry.bytes)}`;
   let roots: ReadonlyArray<RootKey> = genesis.roots;
   let threshold = genesis.document.threshold;
   let checkpoint: Attestation | null = null;
@@ -265,7 +303,8 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
       continue;
     }
-    if (applied.has(payload.id)) {
+    const statement = statementOf(entry);
+    if (applied.has(statement)) {
       rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
       continue;
     }
@@ -281,7 +320,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       const changed = yield* rootsOf(payload.rootKeys);
       roots = changed;
       threshold = payload.threshold;
-      applied.add(payload.id);
+      applied.add(statement);
       continue;
     }
 
@@ -324,7 +363,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // `revoke` undoable by anybody who could `grant`, retroactive compromise
       // revocations included, and left nothing in `revoked` to say so.
       if (
-        revoked.get(subject)?.supersededBy === null &&
+        openWindow(revoked.get(subject)) !== null &&
         !quorum &&
         holds(members, revoked, signers, "member.revoke", claimedAt) === null
       ) {
@@ -360,15 +399,16 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // named the old end as its trust head — would stop reaching it and be
       // refused: approvals vanishing and protected-branch merges failing for a
       // key that had been a member the whole time.
-      const ending = revoked.get(subject);
-      if (ending !== undefined && ending.supersededBy === null) {
-        revoked.set(subject, { ...ending, supersededBy: entry.commit });
+      const windows = revoked.get(subject) ?? [];
+      const ending = openWindow(windows);
+      if (ending !== null) {
+        revoked.set(subject, [...windows.slice(0, -1), { ...ending, supersededBy: entry.commit }]);
       }
       // `former` is what a forward-only revocation is judged against, and this
       // key is a current member again: leaving a stale entry there would let a
       // later revocation be measured against capabilities they no longer hold.
       former.delete(subject);
-      applied.add(payload.id);
+      applied.add(statement);
       continue;
     }
 
@@ -380,23 +420,29 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // SAFETY: `Certificate.validate` has checked the subject is a fingerprint.
       const subject = payload.subject as Fingerprint;
       const compromised = payload.reason === "compromised";
-      revoked.set(subject, {
-        subject,
-        supersededBy: null,
-        reason: payload.reason,
-        compromisedFrom: !compromised
-          ? null
-          : payload.compromisedAt !== null
-            ? new Date(payload.compromisedAt)
-            : // A compromise of unknown age is not a compromise of no age:
-              // fall back to the grant, so everything the key signed is suspect.
-              (members.get(subject)?.grantedAt ?? new Date(0)),
-        commit: entry.commit,
-      });
+      // Appended, never replacing: a key revoked, re-instated and revoked
+      // again was out for two separate intervals, and the events it signed in
+      // the first are not made authorized by the second ending.
+      revoked.set(subject, [
+        ...(revoked.get(subject) ?? []),
+        {
+          subject,
+          supersededBy: null,
+          reason: payload.reason,
+          compromisedFrom: !compromised
+            ? null
+            : payload.compromisedAt !== null
+              ? new Date(payload.compromisedAt)
+              : // A compromise of unknown age is not a compromise of no age:
+                // fall back to the grant, so everything the key signed is suspect.
+                (members.get(subject)?.grantedAt ?? new Date(0)),
+          commit: entry.commit,
+        },
+      ]);
       const held = members.get(subject);
       if (held !== undefined) former.set(subject, held);
       members.delete(subject);
-      applied.add(payload.id);
+      applied.add(statement);
       continue;
     }
 
@@ -404,7 +450,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       rejected.push({ commit: entry.commit, reason: "issuer may not checkpoint" });
       continue;
     }
-    applied.add(payload.id);
+    applied.add(statement);
 
     // The *newest*, not the last folded. Fold order is topological with an oid
     // tie-break, so two checkpoints made concurrently on two replicas and then
@@ -461,12 +507,11 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
   }
 
   // Grouped by id *and* by the exact bytes. Two records with one id but
-  // different content are two different claims, and which of them counts is a
-  // question about authority — `applied` answers it, by recording an id only
-  // where a record actually took effect. What this decides is the other case:
-  // the same record committed twice, where nothing distinguishes them but the
-  // commit, and the commit is what `grant` and `Revocation.commit` are read
-  // from later.
+  // different content are two different claims, and each is answered on its
+  // own authority rather than by whichever reached the fold first. What this
+  // decides is the other case: the same record committed twice, where nothing
+  // distinguishes them but the commit, and the commit is what `grant` and
+  // `Revocation.commit` are read from later.
   const claimed = new Map<string, Oid[]>();
   // The signatures are part of the record's identity, not decoration. Keyed on
   // the payload alone, a replay that kept the bytes and *dropped* the

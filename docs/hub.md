@@ -462,6 +462,8 @@ A `trust.checkpoint` event is signed by a principal holding `repo.admin` (or a r
 
 Verifiers MAY require a checkpoint newer than a configured maximum age before authorizing high-value operations (merges to protected branches, trust changes). This bounds how stale a split view can be.
 
+`issuedAt` is written by the signer and a projection keeps the checkpoint bearing the greatest one, so a verifier MUST reject a checkpoint dated in the future beyond ordinary clock skew (this implementation allows five minutes). A negative age that counts as fresh means one forward-dated attestation satisfies the bound for as long as it is dated ahead — which is exactly the withheld view the bound exists to catch, defeated by typing a date.
+
 The bound applies to every gated ref write — receive-pack and the JSON verbs alike — and is configured per repository, in the branch-rules document at `refs/meta/policy`, as `maxTrustAgeSeconds`. `0` — the default, and what a rules file written without the field means — is unbounded: a repository that has never checkpointed must keep working, so the bound is something an operator turns on rather than something that arrives with an upgrade. Any positive value refuses every ref update while the newest checkpoint is older than it, including the case of no checkpoint at all.
 
 `refs/meta/policy` replicates with the trust log and for the same reason. A replica that holds the membership but not the rules answers "unprotected" to every question the policy boundary asks, so a mirror sharing one trust graph would let through exactly the pushes its origin refuses.
@@ -528,6 +530,10 @@ Compromise revocation (trust.revoke, reason == "compromised"):
 ```
 
 This makes the answer to "an event signed by a since-revoked key arrives late" deterministic per replica: valid under a default revocation if accepted first, always invalid under a compromise revocation.
+
+A key may be revoked, re-granted and revoked again, so a projection MUST keep **every window a key has been out on**, not merely the latest. A re-grant _closes_ the window it re-opens rather than erasing it, so events signed inside it stay refused; and a later grant to a key already back in — an ordinary renewal, a widened capability, an extended expiry — MUST NOT move a closed window's end forward, or every event signed against the first re-instatement would stop reaching it and be judged as if made while revoked. Collapsing the windows to one record is the same defect from the other side: a compromise revocation's retroactive reach would be erased by any later ordinary revoke and re-grant.
+
+An event's declared trust head is what these questions are asked against, and it is written by the event's own signer. It is therefore held to a **floor**: the newest head any accepted ancestor of the event named in the same pull request. An event whose head falls short of the floor is read as having seen the floor — not refused. Refusing it would be permanent, since the floor comes from an append-only history, and hub refs and the trust log replicate as separate refs, so a client legitimately lagging one of them writes an older head as a matter of course. Raising it costs an honest straggler nothing and still denies a revoked member the escape the floor exists to close.
 
 ---
 
@@ -895,6 +901,8 @@ Pull requests use globally unique IDs generated offline — UUIDv7:
 A host MAY separately display human-friendly numbers such as `#42`, but these are presentation metadata, not canonical identity.
 
 Every event payload carries its own UUIDv7 event ID. Event identity binds ID to content: two objects claiming the same event ID with different content is an integrity conflict that MUST be surfaced, not merged over.
+
+An ID is chosen by whoever writes the record, so "already applied" MUST be keyed on the ID **together with the record's bytes**, and a hub event's ID additionally on its signer. Keyed on the bare ID, re-using one becomes a weapon rather than a mistake: on the trust log, any member holding a trust capability publishes a record they are entitled to make under the ID of a revocation naming them, and the revocation is discarded as a duplicate on a ref that can never be rewound. Two records sharing an ID but not their content are two different claims, and each is answered on its own authority; what the ID check exists for is the same statement committed twice.
 
 ### No mutable PR head ref
 

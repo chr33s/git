@@ -298,6 +298,57 @@ describe("trust projection", () => {
     assert.match(state.projection.rejected.at(-1)?.reason ?? "", /already been applied/);
   });
 
+  it("does not let one record's id burn a different record's", async () => {
+    // Keyed on the bare id, "already applied" was a weapon: any member holding
+    // a trust capability could publish a record they were perfectly entitled
+    // to make — a grant to a key of their own — re-using the id of a
+    // revocation naming them, and the revocation behind it was then discarded
+    // as a duplicate. On an append-only ref that is permanent, and it defeats
+    // the one operation membership exists to be able to perform. Two records
+    // with one id but different content are two different claims, and each is
+    // answered on its own authority.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const mallory = yield* generate("mallory@example.com");
+        const friend = yield* generate("friend@example.com");
+        yield* grantTo(where, mallory, ["member.invite", "source.push"], where.roots.slice(0, 2));
+
+        // The id the roots are about to use, spent first on something Mallory
+        // may legitimately write.
+        const burned = Log.newId();
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: where.genesis.repoId,
+            publicKey: formatPublicKey(friend.publicKey),
+            capabilities: ["source.push"],
+            id: burned,
+          }),
+          [mallory],
+        );
+
+        yield* Log.issue(
+          Certificate.revoke({
+            repo: where.genesis.repoId,
+            subject: yield* print(mallory),
+            reason: "left",
+            id: burned,
+          }),
+          where.roots.slice(0, 2),
+        );
+
+        return { projection: yield* projectionOf(where), mallory: yield* print(mallory) };
+      }),
+    );
+
+    assert.equal(
+      state.projection.members.has(state.mallory),
+      false,
+      "the revocation must apply despite sharing an id",
+    );
+    assert.notEqual(state.projection.revoked.get(state.mallory), undefined);
+  });
+
   it("does not let an unauthorized record burn a legitimate record's id", async () => {
     // Marking the id applied *before* the authority check let a forgery claim
     // it, be refused, and take the genuine record down with it as a duplicate.
@@ -538,8 +589,72 @@ describe("trust projection", () => {
       assert.equal(outcome.projection.members.has(outcome.bob), true);
       // The record survives with its window closed: everything the key signed
       // while it was revoked stays refused.
-      assert.notEqual(outcome.projection.revoked.get(outcome.bob)?.supersededBy, null);
+      assert.notEqual(outcome.projection.revoked.get(outcome.bob)?.at(-1)?.supersededBy, null);
       assert.equal(outcome.projection.former.has(outcome.bob), false, "no stale former entry");
+    });
+
+    it("keeps a compromise's reach when a second revocation follows it", async () => {
+      // Windows are a list, not a field. Kept as one record per key, a second
+      // `trust.revoke` overwrote the first — so the retroactive class, the one
+      // whose whole point is that those signatures were never the subject's,
+      // could be erased by anybody who could revoke: revoke the key again for
+      // any ordinary reason, grant it back, and every signature made during
+      // the compromise was authorized once more.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          // What the attacker signed while holding the key, naming the head
+          // that predates every revocation — the best case they can construct.
+          const stolen = yield* repository.resolve(Log.LOG_REF);
+          const bytes = new TextEncoder().encode("an approval the attacker made");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+          // A second, ordinary revocation, and a second re-instatement.
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* print(bob),
+              reason: "left",
+              id: Log.newId(),
+            }),
+            where.roots.slice(0, 2),
+          );
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          const projection = yield* projectionOf(where);
+          return {
+            windows: projection.revoked.get(yield* print(bob))?.length ?? 0,
+            authorized: yield* Verify.authorize({
+              projection,
+              bytes,
+              signatures: [signature],
+              capability: "hub.review",
+              made: { at: new Date(), trustHead: stolen },
+            }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.windows, 2, "both intervals stay on the record");
+      assert.equal(
+        outcome.authorized.ok,
+        false,
+        "a compromise still reaches everything the key signed",
+      );
     });
 
     it("does not move a closed window's end forward on an ordinary renewal", async () => {
@@ -579,7 +694,7 @@ describe("trust projection", () => {
           const projection = yield* projectionOf(where);
           return {
             back,
-            ended: projection.revoked.get(yield* print(bob))?.supersededBy ?? null,
+            ended: projection.revoked.get(yield* print(bob))?.at(-1)?.supersededBy ?? null,
             authorized: yield* Verify.authorize({
               projection,
               bytes,
@@ -939,7 +1054,7 @@ describe("trust projection", () => {
       // Kept, with its window closed: the record is still true about the
       // period it covers, and only deleting it would make what the key signed
       // while revoked authorized again.
-      assert.notEqual(state.projection.revoked.get(state.bob)?.supersededBy, null);
+      assert.notEqual(state.projection.revoked.get(state.bob)?.at(-1)?.supersededBy, null);
     });
 
     it("still refuses what the key signed while it was revoked", async () => {
@@ -1330,6 +1445,54 @@ describe("trust projection", () => {
 
       assert.equal(Verify.fresh(state, 60_000).ok, true);
       assert.equal(Verify.fresh(state, 10_000).ok, false);
+    });
+
+    it("refuses one dated in the future, which would otherwise never go stale", async () => {
+      // `at` is written by whoever signs the checkpoint, and `project` keeps
+      // the one with the greatest `at`. An age allowed to go negative meant a
+      // single forward-dated attestation satisfied `maxTrustAgeSeconds` for as
+      // long as it was dated ahead — so a replica could withhold every later
+      // revocation and still answer "fresh", which is the exact bound this
+      // check exists to enforce.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          yield* Log.issue(
+            Certificate.checkpoint({
+              repo: where.genesis.repoId,
+              frontier: [],
+              id: Log.newId(),
+              at: new Date(Date.now() + 86_400_000),
+            }),
+            where.roots.slice(0, 2),
+          );
+          return yield* projectionOf(where);
+        }),
+      );
+
+      const freshness = Verify.fresh(state, 60_000);
+      assert.equal(freshness.ok, false);
+      assert.match(freshness.ok ? "" : freshness.reason, /in the future/);
+    });
+
+    it("still allows the seconds of clock skew two honest hosts have", async () => {
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          yield* Log.issue(
+            Certificate.checkpoint({
+              repo: where.genesis.repoId,
+              frontier: [],
+              id: Log.newId(),
+              at: new Date(Date.now() + 2_000),
+            }),
+            where.roots.slice(0, 2),
+          );
+          return yield* projectionOf(where);
+        }),
+      );
+
+      assert.equal(Verify.fresh(state, 60_000).ok, true);
     });
   });
 

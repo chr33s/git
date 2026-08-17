@@ -47,7 +47,7 @@ import {
 import { layer as knownRepos } from "../trust/KnownRepos.node.ts";
 import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
-import { project } from "../trust/Projection.ts";
+import { openWindow, project } from "../trust/Projection.ts";
 import { reconcile } from "../server/Replication.ts";
 import { readPrivateKey, readPublicKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
@@ -267,12 +267,13 @@ const members = Command.make("members", { root: rootFlag, repo: repoArgument }, 
           member.expiresAt === null ? "" : ` (expires ${member.expiresAt.toISOString()})`;
         yield* Console.log(`  ${member.fingerprint}  ${member.capabilities.join(",")}${expiry}`);
       }
-      for (const revoked of projection.revoked.values()) {
+      for (const windows of projection.revoked.values()) {
         // A revocation a later grant ended stays on the record — it is still
         // true about the window it covers — but the key is a member again, and
         // listing it beside the live ones would read as though it were not.
-        if (revoked.supersededBy !== null) continue;
-        yield* Console.log(`  ${revoked.subject}  revoked (${revoked.reason})`);
+        const out = openWindow(windows);
+        if (out === null) continue;
+        yield* Console.log(`  ${out.subject}  revoked (${out.reason})`);
       }
       // Said out loud rather than swallowed: a record that did not count is
       // exactly what somebody will be looking for.

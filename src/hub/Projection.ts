@@ -479,22 +479,26 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     // events they are building on: the pull request's history is hash-linked,
     // so an event whose own ancestors were written against a *later* trust
     // head is claiming to have seen less than the conversation it is joining.
+    //
+    // Held to that floor rather than refused for falling short of it. Hub refs
+    // and the trust log replicate as separate refs, so a client whose log lags
+    // the conversation writes an older head honestly and often — and refusing
+    // dropped those comments, reviews and approvals *permanently*, since the
+    // floor comes from a history that only grows and re-folding after the log
+    // caught up could not rescue them. Reading the event as having seen the
+    // floor keeps the property intact — nobody escapes a revocation their own
+    // ancestors had already seen — and costs an honest straggler nothing.
     const declared = trustHeadOf(payload.trustHead);
     const floor = yield* trustFloor(entry.commit);
-    if (floor !== null && !(yield* reachesTrust(declared, floor))) {
-      rejected.push({
-        commit: entry.commit,
-        reason: `trust head ${payload.trustHead ?? "(none)"} predates ${floor}, which an earlier event in this pull request already named`,
-      });
-      continue;
-    }
+    const behind = floor !== null && !(yield* reachesTrust(declared, floor));
+    const effective = behind ? floor : declared;
 
     const authorized = yield* Verify.authorize({
       projection: trust,
       bytes: entry.bytes,
       signatures: entry.signatures,
       capability: Event.capabilityFor(payload),
-      made: { at: new Date(payload.issuedAt), trustHead: declared },
+      made: { at: new Date(payload.issuedAt), trustHead: effective },
       seen: ancestry,
       contains: inTrustLog,
     });
@@ -509,8 +513,8 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     // would then become the floor for everything after it, which nothing can
     // reach: `Log.ancestry` of a commit nobody has is empty, so every later
     // event is refused forever on a ref that only grows.
-    if (declared !== null && (yield* inTrustLog(declared))) {
-      heads.set(entry.commit, declared);
+    if (effective !== null && (yield* inTrustLog(effective))) {
+      heads.set(entry.commit, effective);
     }
 
     const signer = authorized.principal.fingerprint;
@@ -554,7 +558,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         bytes: entry.bytes,
         signatures: entry.signatures,
         capability,
-        made: { at: issued, trustHead: declared },
+        made: { at: issued, trustHead: effective },
         seen: ancestry,
         contains: inTrustLog,
       });
