@@ -374,7 +374,23 @@ export const writeGenesis = Effect.fn("Genesis.write")(function* (
  * that ever stops being true. Bounded by repositories, like the fold's.
  */
 const GENESES = 256;
-const geneses = new Map<Oid, Stored>();
+/**
+ * `null` where the document is unusable.
+ *
+ * Remembered as well, because a *failure* costs the same reads and the same
+ * per-signature verification as a success. Kept only for the success, a
+ * genesis short of its own threshold re-ran all of it on every request — an
+ * amplifier on exactly the anonymous path this memo was added to protect, and
+ * one that any repository could be left in by a partial write.
+ */
+const geneses = new Map<Oid, Stored | null>();
+
+/** The one failure a remembered `null` stands for. */
+const unusable = (commit: Oid) =>
+  new Invalid({
+    field: "genesis",
+    reason: `this repository's genesis at ${commit} does not meet its own threshold`,
+  });
 
 export const readGenesis = Effect.fn("Genesis.read")(function* () {
   const repository = yield* Repository;
@@ -387,6 +403,7 @@ export const readGenesis = Effect.fn("Genesis.read")(function* () {
     // Re-inserted so iteration order is least-recently-used first.
     geneses.delete(commit);
     geneses.set(commit, remembered);
+    if (remembered === null) return yield* unusable(commit);
     return remembered;
   }
 
@@ -401,6 +418,7 @@ export const readGenesis = Effect.fn("Genesis.read")(function* () {
   // for the first time would not.
   const signers = yield* rootSigners(genesis, record.signatures);
   if (!quorumMet(genesis, signers)) {
+    remember(commit, null);
     return yield* new Invalid({
       field: "genesis",
       reason: `this repository's genesis carries ${signers.length} root signature(s), and its threshold is ${genesis.document.threshold}`,
@@ -408,14 +426,20 @@ export const readGenesis = Effect.fn("Genesis.read")(function* () {
   }
 
   const stored: Stored = { genesis, signatures: record.signatures, commit };
+  remember(commit, stored);
+  return stored;
+});
+
+/** Least-recently-used, bounded by repositories; see `geneses`. */
+const remember = (commit: Oid, stored: Stored | null): void => {
+  geneses.delete(commit);
   geneses.set(commit, stored);
   while (geneses.size > GENESES) {
     const oldest = geneses.keys().next();
     if (oldest.done === true) break;
     geneses.delete(oldest.value);
   }
-  return stored;
-});
+};
 
 /** A genesis as it was stored, with the commit it was read from. */
 export interface Stored {

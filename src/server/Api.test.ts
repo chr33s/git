@@ -15,6 +15,7 @@ import { Effect, FileSystem, Layer, Path } from "effect";
 import { Etag, HttpPlatform, HttpRouter } from "effect/unstable/http";
 import { HttpApiTest } from "effect/unstable/httpapi";
 
+import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Api from "./Api.ts";
@@ -78,6 +79,56 @@ const alice = {
  * reported as a `Cause` with its fiber trace.
  */
 describe("Api", () => {
+  it("charges a rewrite only when the destination would lose commits", async () => {
+    // The charge was "does `into` exist", so `{onto: "main", into: "main"}` —
+    // an ordinary fast-forward — was refused to a member holding only
+    // `source.push`. And for a merge it compared tips by oid, which misses the
+    // destination a side already reaches without being it. The question is
+    // whether the write *contains* what the destination holds, and the write
+    // is not made yet — so it is asked of the bases: a replay lands on top of
+    // `onto`, and a merge commit holds both of its sides.
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const first = yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "first",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+        const second = yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "second",
+          author: { ...alice, at: new Date(1_700_000_001_000) },
+        });
+        yield* git.setRef({ name: "refs/heads/behind", to: first });
+        // A branch that shares no history with `main`.
+        yield* git.commit({
+          branch: "refs/heads/apart",
+          tree: EMPTY_TREE_OID,
+          message: "apart",
+          author: { ...alice, at: new Date(1_700_000_002_000) },
+        });
+        void second;
+
+        return {
+          onto: yield* Api.discards("refs/heads/main", ["refs/heads/main"]),
+          behind: yield* Api.discards("refs/heads/behind", ["refs/heads/main"]),
+          fresh: yield* Api.discards("refs/heads/absent", ["refs/heads/main"]),
+          side: yield* Api.discards("refs/heads/behind", ["refs/heads/apart", "refs/heads/main"]),
+          apart: yield* Api.discards("refs/heads/apart", ["refs/heads/main"]),
+        };
+      }).pipe(Effect.provide(repository)),
+    );
+
+    assert.equal(outcome.onto, false, "landing where you started discards nothing");
+    assert.equal(outcome.behind, false, "nor does a fast-forward");
+    assert.equal(outcome.fresh, false, "nor does creating the destination");
+    assert.equal(outcome.side, false, "nor does a merge whose other side reaches it");
+    assert.equal(outcome.apart, true, "a destination neither base reaches is a rewrite");
+  });
+
   it.live("drives the derived client end to end, typed errors included", () =>
     dispatched(
       Effect.gen(function* () {

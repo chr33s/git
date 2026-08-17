@@ -262,10 +262,48 @@ const requireCapability = Effect.fn("Api.requireCapability")(function* (capabili
 });
 
 /** Whether a ref is there to be rewritten; a create discards nothing. */
-const exists = Effect.fn("Api.exists")(function* (ref: string) {
+/**
+ * Whether landing on `into` would drop commits it already holds.
+ *
+ * Asked before the work, which is why it asks about the *bases* rather than
+ * about the result: a replay lands on top of `onto`, and a merge commit holds
+ * both of its sides, so a destination either side already reaches is one the
+ * write contains. Charged on whether `into` merely exists instead, an ordinary
+ * fast-forward — `{onto: "main", into: "main"}` — was refused to a member
+ * holding `source.push`, and comparing tips by oid missed the case where a
+ * side reaches the destination without being it.
+ */
+export const discards = Effect.fn("Api.discards")(function* (
+  into: string,
+  bases: ReadonlyArray<string>,
+) {
   const repository = yield* Repository;
-  const at = yield* repository.resolve(ref).pipe(Effect.catchTag("StorageFailure", Effect.die));
-  return at !== null;
+  // Resolved exactly as `Repository.merge` resolves them: an oid as itself,
+  // anything else through the ref store, which follows symrefs. Qualifying
+  // first answered `null` for `HEAD`, and a `null` side is a side nothing
+  // matches — so the write was charged a rewrite for the one spelling git
+  // itself uses most.
+  const at = (revision: string) =>
+    isOid(revision)
+      ? Effect.succeed(revision)
+      : repository.resolve(revision).pipe(Effect.catchTag("StorageFailure", Effect.die));
+
+  const tip = yield* at(into);
+  // A destination that does not exist yet holds nothing a write could discard.
+  if (tip === null) return false;
+  for (const base of bases) {
+    const oid = yield* at(base);
+    if (oid === null) continue;
+    if (oid === tip) return false;
+    const reaches = yield* repository.isAncestor(tip, oid).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(false),
+        StorageFailure: Effect.die,
+      }),
+    );
+    if (reaches) return false;
+  }
+  return true;
 });
 
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
@@ -1497,16 +1535,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // symrefs. Qualifying first answered `null` for `HEAD` — and a
           // `null` side is a side nothing matches, so the merge was charged a
           // rewrite again for the one spelling git itself uses most.
-          const at = (revision: string) =>
-            isOid(revision)
-              ? Effect.succeed(revision)
-              : repository.resolve(revision).pipe(Effect.catchTag("StorageFailure", Effect.die));
-          const tip = yield* at(into);
-          const rewrites =
-            tip !== null &&
-            tip !== (yield* at(payload.ours)) &&
-            tip !== (yield* at(payload.theirs));
-          yield* gateWrite(into, rewrites);
+          yield* gateWrite(into, yield* discards(into, [payload.ours, payload.theirs]));
         }
         const outcome = yield* repository
           .merge(request)
@@ -1528,7 +1557,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // contributor set a branch they were creating.
         if (payload.into !== undefined) {
           request.into = refNameOf(payload.into);
-          yield* gateWrite(request.into, yield* exists(request.into));
+          yield* gateWrite(request.into, yield* discards(request.into, [payload.onto]));
         }
         return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
@@ -1541,7 +1570,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // As `cherry-pick` above.
         if (payload.into !== undefined) {
           request.into = refNameOf(payload.into);
-          yield* gateWrite(request.into, yield* exists(request.into));
+          yield* gateWrite(request.into, yield* discards(request.into, [payload.onto]));
         }
         return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),

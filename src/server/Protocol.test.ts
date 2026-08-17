@@ -622,6 +622,38 @@ describe("an atomic push the policy refuses", () => {
 });
 
 describe("what a signed envelope binds", () => {
+  it("does not accuse a clean ref of the refusal that stopped the batch", async () => {
+    // An atomic batch is all-or-nothing, so a ref that was fine still gets an
+    // `ng` line — but the reason belongs to the batch, not to whichever
+    // refusal happened to come first. Borrowed, the report told the client
+    // that `refs/heads/main` had a funny refname: an accusation about a name
+    // that is fine, and the one line they have to debug from.
+    const report = await scenario(
+      Effect.gen(function* () {
+        const response = yield* Protocol.receivePack(
+          new Request("http://git.test/r/git-receive-pack", {
+            method: "POST",
+            body:
+              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/ma..in\0report-status atomic`)}` +
+              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/main`)}` +
+              `0000not a pack at all`,
+          }),
+        ).pipe(
+          Effect.provide(Auth.requester({ ...Auth.anonymous, capabilities: ["source.push"] })),
+        );
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return linesOf(bytes).lines;
+      }),
+    );
+
+    const clean = report.find(
+      (entry) => entry.endsWith("refs/heads/main") || entry.includes("refs/heads/main "),
+    );
+    assert.match(clean ?? "", /^ng /, report.join(" | "));
+    assert.doesNotMatch(clean ?? "", /funny refname/, report.join(" | "));
+    assert.match(clean ?? "", /another command was refused/, report.join(" | "));
+  });
+
   it("refuses a ref it never named before the pack is unpacked", async () => {
     // The envelope names the refs a native client is moving and where to, and
     // checking it needs nothing from the pack — unlike the force-push rule,

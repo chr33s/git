@@ -850,10 +850,11 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // applying the rest would be exactly what the capability promises not to.
     if (refused.length > 0 && (atomic || updates.length === 0)) {
       yield* drain;
-      return respond(
-        allFailed(updates, refused[0]?.reason ?? "atomic push refused: funny refname"),
-        "ok",
-      );
+      // The reason a *clean* ref failed is that the batch was atomic, and not
+      // whatever the first refusal happened to say. Borrowed, the report told
+      // a client that `refs/heads/main` had a funny refname — an accusation
+      // about a name that is fine, and the one line they have to debug from.
+      return respond(allFailed(updates, "atomic push refused: another command was refused"), "ok");
     }
 
     // A refused command may have had a pack behind it even when every command

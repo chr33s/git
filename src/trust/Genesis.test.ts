@@ -7,6 +7,7 @@ import { formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignatu
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
+import { ObjectStore } from "../git/Store.ts";
 import {
   create,
   encodeDocument,
@@ -21,7 +22,7 @@ import {
   writeGenesis,
 } from "./Genesis.ts";
 
-const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
+const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(
@@ -178,6 +179,48 @@ describe("Genesis", () => {
 
       assert.equal(outcome.signers.length, 2);
       assert.ok(quorumMet(outcome.genesis, outcome.signers));
+    });
+
+    it("remembers a genesis it could not use, as well as one it could", async () => {
+      // A failure costs what a success costs: the commit, two blobs, a
+      // SHA-256 and an Ed25519 verification per root signature — on a path
+      // every request takes, twice or three times on a write. Remembered only
+      // on success, a genesis short of its own threshold re-ran all of it
+      // every time, which is an amplifier on exactly the anonymous loop the
+      // memo was added to protect.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const objects = yield* ObjectStore;
+          const roots = yield* keys(3);
+          const genesis = yield* create(linesOf(roots), 2);
+          // One signature against a threshold of two.
+          yield* writeGenesis(genesis, [yield* signGenesis(genesis, roots[0]!)]);
+
+          const first = yield* readGenesis().pipe(
+            Effect.as(null),
+            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          );
+
+          // The bytes go. A second read that still says the same thing is a
+          // second read that did not happen — the answer came from the memo.
+          const commit = yield* repository.resolve(GENESIS_REF);
+          const info = yield* repository.readCommit(commit!);
+          yield* objects.delete(info.tree);
+
+          const second = yield* readGenesis().pipe(
+            Effect.as(null),
+            Effect.catchTags({
+              Invalid: (error) => Effect.succeed(error.reason),
+              ObjectNotFound: () => Effect.succeed("read again"),
+            }),
+          );
+          return { first, second };
+        }),
+      );
+
+      assert.match(outcome.first ?? "", /threshold/);
+      assert.match(outcome.second ?? "", /threshold/);
     });
 
     it("does not let one root sign twice to reach a quorum", async () => {

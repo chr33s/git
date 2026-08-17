@@ -604,6 +604,16 @@ the commands. Charging `source.push` alone at the guard makes `source.delete`
 unusable as a standalone capability: its holder is refused before the boundary
 written to admit them ever sees the request.
 
+The verbs that compute a ref's new value while doing the work — a merge, a
+rebase or a cherry-pick with `into` — are charged before the work, so "does
+this drop commits?" MUST be asked of the **bases** rather than of the result: a
+replay lands on top of `onto`, and a merge commit holds both of its sides, so a
+destination either of those already reaches is one the write contains. Asked as
+"does the destination exist", an ordinary fast-forward is charged
+`source.force-push`; asked by comparing tips, a destination a side reaches
+without being it is charged the same way. Both refuse work a `source.push`
+holder is entitled to do.
+
 ### Verbs that move nothing
 
 A few operations change what a repository _is_ without moving any ref, so the
