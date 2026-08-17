@@ -50,7 +50,7 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
   const repository = yield* Repository;
 
   const found = new Set<Oid>();
-  for (const pr of only ?? (yield* tombstoned())) {
+  for (const pr of only ?? (yield* tombstoned(yield* Event.pullRequests()))) {
     const state = yield* project(genesis, trust, pr);
     if (state.redacted.size === 0) continue;
 
@@ -81,30 +81,32 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
 export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   const repository = yield* Repository;
 
-  // Walked before anything is folded, and the trust log is not folded at all
-  // unless a tombstone turned up. A fold verifies a signature per record and
-  // per event, and this runs on every collection and on every deepening fetch
-  // — which anonymous readers can ask for repeatedly. Any *valid* tombstone is
-  // first of all a decoded `event.redacted` payload, so a walk that finds none
-  // rules the repository out without a single verification. The filter can
-  // produce a false positive, which costs one fold; it cannot produce a false
-  // negative, which is what would matter.
-  const candidates = yield* tombstoned();
-  if (candidates.length === 0) return new Set<Oid>();
-
-  // And once found, remembered against the state it was computed from: the
-  // answer is a pure function of the hub refs and the trust head, so a moved
-  // ref changes the key and a stale one is not possible.
+  // The memo is consulted *before* the walk it exists to save. Keyed on
+  // anything the walk produced, it saved only the fold — and the walk reads
+  // every event of every pull request, on a path (a deepening fetch) an
+  // anonymous reader can drive in a loop. Ref names and their oids are what a
+  // ref store already has, and the answer is a pure function of them, so a
+  // moved ref changes the key and a stale answer is not possible.
+  const refs = yield* Event.pullRequests();
   const key = [
     yield* repository.resolve(LOG_REF),
-    ...(yield* Effect.forEach(candidates, (pr) => repository.resolve(Event.refOf(pr)))),
+    ...(yield* Effect.forEach(refs, (pr) => repository.resolve(Event.refOf(pr)))),
   ].join("\u0000");
   const known = memo.get(key);
   if (known !== undefined) return known;
 
-  const stored = yield* readGenesis();
-  if (stored === null) return new Set<Oid>();
-  const found = yield* blobs(stored.genesis, yield* projectTrust(stored.genesis), candidates);
+  // Walked before anything is folded, and the trust log is not folded at all
+  // unless a tombstone turned up. A fold verifies a signature per record and
+  // per event; any *valid* tombstone is first of all a decoded `event.redacted`
+  // payload, so a walk that finds none rules the repository out without a
+  // single verification. The filter can produce a false positive, which costs
+  // one fold; it cannot produce a false negative, which is what would matter.
+  const candidates = yield* tombstoned(refs);
+  const stored = candidates.length === 0 ? null : yield* readGenesis();
+  const found =
+    stored === null
+      ? new Set<Oid>()
+      : yield* blobs(stored.genesis, yield* projectTrust(stored.genesis), candidates);
 
   memo.set(key, found);
   while (memo.size > MEMO) {
@@ -116,9 +118,9 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
 });
 
 /** The pull requests carrying anything that *might* be a tombstone. */
-const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* () {
+const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: ReadonlyArray<string>) {
   const found: string[] = [];
-  for (const pr of yield* Event.pullRequests()) {
+  for (const pr of refs) {
     const { events } = yield* Event.entries(pr);
     if (events.some((entry) => entry.payload?.type === "event.redacted")) found.push(pr);
   }
@@ -128,8 +130,9 @@ const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* () {
 /**
  * Answers already worked out, by the refs they were worked out from.
  *
- * Small, because it only ever holds repositories that have actually redacted
- * something and only one entry per state of each.
+ * One entry per state of each repository this process has been asked about —
+ * including the "nothing is redacted" answer, which is the one every ordinary
+ * repository gives and the one worth not recomputing.
  */
 const MEMO = 32;
 const memo = new Map<string, ReadonlySet<Oid>>();

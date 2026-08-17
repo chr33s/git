@@ -56,7 +56,6 @@ export interface Comment {
   readonly author: Fingerprint;
   readonly body: string;
   readonly at: Date;
-  readonly redacted: boolean;
 }
 
 export interface Thread {
@@ -267,13 +266,62 @@ const trustReach = () => {
  *
  * `trust` is passed in rather than read here so that a caller projecting fifty
  * pull requests folds the membership log once.
+ *
+ * Two passes when — and only when — something has been redacted, because what a
+ * tombstone removes has to be decided *before* the events are folded and the
+ * decision is itself a fold: a tombstone counts only if its signer held
+ * `hub.redact` and was authorized when they signed it. The first pass answers
+ * that question and the second folds with the answer in hand.
+ *
+ * The first pass reads as absent every commit *named* by any tombstone
+ * payload, authorized or not. That superset is what makes the two passes agree
+ * across replicas: the host that performed the redaction no longer has those
+ * payloads and would otherwise fold fewer events than a replica that does,
+ * reaching a different verdict about which tombstones counted. Tombstones
+ * themselves are never redactable, so every replica sees the same names.
  */
 export const project = Effect.fn("hub.Projection.project")(function* (
   genesis: Genesis,
   trust: TrustProjection,
   pr: string,
 ) {
-  const { events, parents } = yield* Event.entries(pr);
+  const walked = yield* Event.entries(pr);
+
+  const named = new Set<Oid>();
+  for (const entry of walked.events) {
+    if (entry.payload?.type !== "event.redacted") continue;
+    const target = Event.unqualify(entry.payload.targetCommit);
+    if (target !== null) named.add(target);
+  }
+  if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named);
+
+  const claimed = yield* fold(genesis, trust, pr, walked, named);
+  const settled = yield* fold(genesis, trust, pr, walked, claimed.redacted);
+  // The set that governed the second pass, not the one the second pass
+  // recomputed: what `gc` deletes and what the fold read as absent have to be
+  // the same set, or the next fold reads something this one did not.
+  return { ...settled, redacted: claimed.redacted } satisfies PullRequest;
+});
+
+const fold = Effect.fn("hub.Projection.fold")(function* (
+  genesis: Genesis,
+  trust: TrustProjection,
+  pr: string,
+  walked: Event.Walked,
+  /**
+   * Events this fold must read as absent.
+   *
+   * A redaction removes an event's payload from the repository that performed
+   * it, so *that* host folds the event as absent while every replica still
+   * holding the blob folds it in full. Two hosts then reach different verdicts
+   * about the same push — a redacted approval counting on one and not the
+   * other — and the disagreement lands on the policy boundary. So absence is
+   * decided by the tombstone rather than by whether the bytes are still here,
+   * and this is that decision, handed in.
+   */
+  skip: ReadonlySet<Oid>,
+) {
+  const { events, parents } = walked;
   const rejected: Rejected[] = [];
 
   /**
@@ -440,9 +488,6 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   let mergeCommit: Oid | null = null;
   let at = new Date(0);
   let headSetter: { readonly commit: Oid; readonly id: string; readonly head: Oid } | null = null;
-  /** The `pr.opened` event's key, so a tombstone over it blanks what it said. */
-  let openedBy: string | null = null;
-
   const reviews = new Map<string, Review>();
   const dismissed = new Set<string>();
   const threads = new Map<string, Thread>();
@@ -489,13 +534,14 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     const payload = entry.payload;
 
     // A redacted event: the commit and its place in the chain survive, the
-    // content does not. It contributes nothing further — with no payload
-    // there is no thread or review to build — and, importantly, it blanks
-    // nothing else. The id in its commit message is unsigned, so treating it
-    // as a tombstone would let anybody with `source.push` blank another
-    // member's review by pushing a junk event that names it. Redactions come
-    // from `event.redacted` payloads, which are signed and capability-checked.
-    if (payload === null) continue;
+    // content does not. It contributes nothing further — no thread, no review,
+    // no state transition — and, importantly, it blanks nothing else. The id
+    // in its commit message is unsigned, so treating that as a tombstone would
+    // let anybody with `source.push` blank another member's review by pushing
+    // a junk event that names it. Redactions come from `event.redacted`
+    // payloads, which are signed and capability-checked, and `skip` is where
+    // that decision arrives.
+    if (payload === null || skip.has(entry.commit)) continue;
 
     const invalid = yield* Event.validate(payload, genesis.repoId).pipe(
       Effect.as(null),
@@ -638,7 +684,6 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         base = Event.branchRef(payload.base);
         // Authorship is the part a contested opening still does not confer.
         if (!opening.contested) author ??= signer;
-        openedBy = mine;
         const head = Event.unqualify(payload.head);
         if (
           head !== null &&
@@ -765,9 +810,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
           line: payload.line,
           head: payload.head === null ? null : Event.unqualify(payload.head),
           resolved: false,
-          comments: [
-            { id: payload.id, author: signer, body: payload.body, at: issued, redacted: false },
-          ],
+          comments: [{ id: payload.id, author: signer, body: payload.body, at: issued }],
         });
         break;
 
@@ -789,7 +832,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
           ...found.value,
           comments: [
             ...found.value.comments,
-            { id: payload.id, author: signer, body: payload.body, at: issued, redacted: false },
+            { id: payload.id, author: signer, body: payload.body, at: issued },
           ],
         });
         break;
@@ -890,17 +933,10 @@ export const project = Effect.fn("hub.Projection.project")(function* (
 
   const head = headSetter?.head ?? null;
 
-  /** Whether a tombstone reached the event this key names. */
-  const blanked = (key: string): boolean => {
-    const commit = claimed.get(key);
-    return commit !== undefined && redacted.has(commit);
-  };
-  const openingRedacted = openedBy !== null && blanked(openedBy);
-
   return {
     id: pr,
-    title: openingRedacted ? "" : title,
-    description: openingRedacted ? "" : description,
+    title,
+    description,
     base,
     head,
     state,
@@ -911,36 +947,9 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       dismissed: dismissed.has(key),
       // Stale, not gone: the statement stays true about the revision it named.
       stale: head === null || review.head !== head,
-      // A tombstone removes content wherever the content is. Blanking only
-      // comments would leave a redacted review's prose, and a pull request's
-      // title and description, readable on every replica that still holds the
-      // blob — which is most of them, since the object is deleted locally.
-      body: blanked(key) ? "" : review.body,
     })),
-    threads: [...threads.entries()].map(([key, thread]) => {
-      // Where a comment pointed is content too. A redacted inline comment that
-      // still names a file and a line says most of what it said, on every
-      // replica that holds the blob — which is the case redaction exists for.
-      const opener = blanked(key);
-      return {
-        ...thread,
-        path: opener ? null : thread.path,
-        side: opener ? null : thread.side,
-        line: opener ? null : thread.line,
-        head: opener ? null : thread.head,
-        comments: thread.comments.map((comment) =>
-          blanked(keyOf(comment.author, comment.id))
-            ? { ...comment, body: "", redacted: true }
-            : comment,
-        ),
-      };
-    }),
-    checks: [...checks.entries()].map(([name, check]) => {
-      const key = checkKeys.get(name);
-      // A check's `url` points at somebody's build output, which is content a
-      // tombstone is entitled to remove along with the rest.
-      return key !== undefined && blanked(key) ? { ...check, url: null } : check;
-    }),
+    threads: [...threads.values()],
+    checks: [...checks.values()],
     claims: byId,
     openers,
     redacted,

@@ -1096,14 +1096,21 @@ Effect of a valid tombstone for event `E`:
 ```text
 E's event.json blob is deleted from object storage
 E's commit and tree remain — the DAG's hashes stay intact
-projections exclude E's content, showing a redaction marker
+projections read E as absent — on every replica, whether
+  or not the blob is still there
 replicas MUST NOT serve, re-fetch, or re-accept E's blob
 GC excludes E's blob from reachability protection (§27)
 ```
 
 Because Git is content-addressed, absence composes: the commit references the tree, the tree references the blob's hash, and the blob object is simply gone. Verifiers treat a missing blob as valid **only** when a valid tombstone covers that event; a missing blob without a tombstone is corruption.
 
-Redaction removes content, never structure: the event's existence, author, and position in history remain visible. Destroying structure would break the hash chain and is not offered.
+Redaction removes content, never structure: the event's existence and position in history remain visible, and the tombstone naming it is itself a permanent record that something was removed. Destroying structure would break the hash chain and is not offered.
+
+**A redacted event contributes nothing to the projection, and MUST do so everywhere.** The host that performs a redaction deletes the payload at once; every replica keeps it until the tombstone reaches them and their next repack. A projection that decides absence by whether the _bytes_ are present therefore gives two answers to the same question — a redacted approval counting on one host and not on another — and the disagreement lands on the policy boundary, which decides whether a push is allowed. Absence is decided by the tombstone.
+
+That makes the decision itself a fold, since a tombstone counts only if its signer held `hub.redact` and was authorized when they signed it, so a pull request carrying one is folded twice: once to settle which tombstones count, and once with the answer in hand. The first pass reads as absent every commit _named_ by any tombstone payload, authorized or not — tombstones are never themselves redactable, so every replica sees the same names and the two passes agree across hosts. Repositories with no tombstones, which is nearly all of them, fold once.
+
+It also means redaction is a strong operation and not merely a cosmetic one: removing an event removes what it said, so redacting a review removes its approval and redacting a comment removes its thread. `hub.redact` is charged accordingly.
 
 ---
 

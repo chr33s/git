@@ -146,13 +146,18 @@ const lsRefsV2 = (
         },
         body: lines,
       });
-      // A server that does not implement v2 answers 400/404/501 and has no
-      // hub state to offer. Anything else — 5xx, a dropped connection — is a
-      // failure the caller has to see, or a replication run reports success
-      // having fetched nothing, revocations included.
-      if (response.status === 400 || response.status === 404 || response.status === 501) {
-        return [];
-      }
+      // A server with no v2 to offer answers 404 or 501, and has no hub state
+      // either. Anything else is a failure the caller has to see, or a
+      // replication run reports success having fetched nothing, revocations
+      // included — and this is only ever called when the caller *needs* the
+      // hidden namespaces, which no other request can reach.
+      //
+      // 400 is not on that list, deliberately. It is what this project's own
+      // upload-pack answers when the `Git-Protocol` header did not arrive —
+      // a proxy that strips unknown headers is the ordinary cause — so reading
+      // it as "no v2 here" turned the one misconfiguration that breaks hub
+      // replication into a silent success.
+      if (response.status === 404 || response.status === 501) return [];
       if (!response.ok) throw new Error(`ls-refs returned ${response.status}`);
       if (response.body === null) return [];
 

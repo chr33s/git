@@ -1707,12 +1707,19 @@ describe("hub projection", () => {
       assert.equal(redactedEntry?.summary?.type, "comment.created", "what it was survives");
     });
 
-    it("removes where an inline comment pointed, not only what it said", async () => {
-      // On any replica that still holds the blob — which is the case redaction
-      // exists for — a redacted inline comment that still names a file and a
-      // line says most of what it said.
+    it("reads the same on a replica that still holds the payload", async () => {
+      // The determinism that matters most here, and the one that was missing.
+      // The host that performs a redaction deletes the payload at once; every
+      // replica keeps it until the tombstone reaches them and their next
+      // repack. Folded on whether the *bytes* are present, those two hosts
+      // reached different verdicts about the same pull request — a redacted
+      // approval counting on one and not the other, a redacted comment leaving
+      // a thread on one and none on the other — and the disagreement lands on
+      // the policy boundary, which decides whether a push is allowed. Absence
+      // is decided by the tombstone, so the answer is the same either way.
       const outcome = await scenario(
         Effect.gen(function* () {
+          const repository = yield* Repository;
           const where = yield* world();
           const { pr } = yield* opened(where);
           const commit = yield* PullRequest.comment({
@@ -1725,38 +1732,43 @@ describe("hub projection", () => {
             side: "new",
             line: 12,
           });
+          // An approval too, since what a redaction must not silently change
+          // is a decision the merge policy reads.
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            body: "fine",
+            key: where.reviewer,
+          });
           const { events } = yield* Event.entries(pr);
           const entry = events.find((event) => event.commit === commit);
-          const target = entry?.payload?.id ?? "";
 
           yield* PullRequest.redact({
             repo: where.genesis.repoId,
             pr,
-            target,
+            target: entry?.payload?.id ?? "",
             reason: "sensitive-content",
             key: where.reviewer,
           });
+          const host = yield* projectionOf(where, pr);
 
-          // A replica that still holds the payload. This is the case the
-          // blanking exists for: locally the blob is gone and the event simply
-          // reads as absent, but everywhere the tombstone has not yet been
-          // acted on the content is right there to be projected.
-          const repository = yield* Repository;
+          // And now a replica of the same history that still holds the blob.
           yield* repository.writeBlob(entry!.bytes);
-
-          const trust = yield* projectTrust(where.genesis);
-          return yield* project(where.genesis, trust, pr);
+          return { host, replica: yield* projectionOf(where, pr) };
         }),
       );
 
-      const thread = outcome.threads.at(0);
-      assert.notEqual(thread, undefined, "the thread keeps its place in the history");
-      assert.equal(thread?.comments[0]?.body, "");
-      assert.equal(thread?.comments[0]?.redacted, true);
-      assert.equal(thread?.path, null, "the file it pointed at is content too");
-      assert.equal(thread?.side, null);
-      assert.equal(thread?.line, null);
-      assert.equal(thread?.head, null);
+      assert.equal(outcome.host.threads.length, 0, "the redacted comment is gone");
+      assert.deepEqual(
+        outcome.replica.threads,
+        outcome.host.threads,
+        "and a replica holding the payload must read it the same way",
+      );
+      assert.equal(approvals(outcome.host).length, 1, "an untouched approval still counts");
+      assert.equal(approvals(outcome.replica).length, 1, "on both");
+      assert.deepEqual(outcome.replica.redacted, outcome.host.redacted);
     });
 
     it("refuses a redaction from a member without hub.redact, and writes nothing", async () => {

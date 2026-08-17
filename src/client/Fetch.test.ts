@@ -29,6 +29,7 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
+import { HUB_FETCH } from "../git/Refspec.ts";
 import { serve, type Server } from "../host/Node.ts";
 import { hasGit } from "../testing/Git.ts";
 import { fetchRepository, type FetchResult } from "./Fetch.ts";
@@ -205,6 +206,45 @@ afterAll(async () => {
 });
 
 describe("Fetch", () => {
+  it("reports a stripped Git-Protocol header rather than fetching nothing", async () => {
+    // The hidden namespaces are reachable only through a v2 `ls-refs`, and the
+    // version travels in a header. A proxy that drops unknown headers leaves
+    // this server reading a v2 body as a v0 want-list and answering 400 — which
+    // means "your request did not arrive", not "there is nothing here". Read as
+    // the latter, a mirror reported a trust and hub replication it had not
+    // performed, revocations included, which is the one failure this whole
+    // path exists to make visible.
+    const source = path.join(root, "stripped-source");
+    await commitFile(source, "a.txt", "one\n", "one");
+
+    const original = globalThis.fetch;
+    const stripped: typeof globalThis.fetch = async (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.delete("git-protocol");
+      return original(input, { ...init, headers });
+    };
+
+    globalThis.fetch = stripped;
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const target = { objects: yield* ObjectStore, refs: yield* RefStore };
+        return yield* fetchRepository({
+          url: `${server.url}/stripped-source`,
+          stores: target,
+          refspecs: HUB_FETCH,
+        });
+      }).pipe(
+        Effect.provide(stores(path.join(root, "stripped-target"))),
+        Effect.map(() => null),
+        Effect.catchCause((cause: unknown) => Effect.succeed(String(cause))),
+      ),
+    ).finally(() => {
+      globalThis.fetch = original;
+    });
+
+    assert.notEqual(outcome, null, "a replication that fetched nothing must not report success");
+  });
+
   it("clones an empty target whole, and sends no haves doing it", async () => {
     await commitFile(path.join(root, "clone-source"), "a.txt", "one\n", "one");
     await commitFile(path.join(root, "clone-source"), "b.txt", "two\n", "two");

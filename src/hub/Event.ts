@@ -589,6 +589,12 @@ const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
   );
 });
 
+/** A pull request's events and the DAG they were walked from. */
+export interface Walked {
+  readonly events: ReadonlyArray<Entry>;
+  readonly parents: Dag.Parents;
+}
+
 const emptyParents: Dag.Parents = new Map();
 const emptyEvents: ReadonlyArray<Entry> = [];
 
