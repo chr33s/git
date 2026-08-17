@@ -1464,9 +1464,18 @@ protected branch that pull request was the only route to. `hub.review` is
 likewise below `hub.approve`, and letting it dismiss an approval would let the
 lower capability cancel the higher one's word.
 
-An approval by the pull request's own author is recorded but counts toward no
-requirement. Self-approval is not review; it is the thing review exists to be
-independent of, and counting it would let one holder of `hub.approve` satisfy
+An approval by anybody who **proposed** the pull request or the revision under
+review is recorded but counts toward no requirement — its author, every other
+claimant to have opened it, and whoever moved the head. Keyed on the opening
+alone, a `hub.merge` holder could push a revision onto somebody else's pull
+request and then approve it, which is self-approval wearing another event's
+name; and an opening the descent pre-pass refused but the fold accepted — the
+two judge the same event against different heads, the one it declares and the
+floor its ancestors raise it to — left its signer out of the exclusion entirely
+while still supplying the title, description and base.
+
+Self-approval is not review; it is the thing review exists to be independent
+of, and counting it would let one holder of `hub.approve` satisfy
 `requiredApprovals` alone.
 
 Destructive pruning beyond tombstoned blobs is a separate explicit administrative operation, and it is local: it does not replicate, and a pruned replica re-fetching from a peer will get the objects back unless the peer pruned too. Tombstones are the only replicating removal.
