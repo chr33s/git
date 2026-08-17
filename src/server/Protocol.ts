@@ -847,12 +847,6 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       );
     }
 
-    // The body was sent for commands this server has now refused outright, and
-    // the report only reaches the client if it is read first.
-    if (uncovered.size > 0 && !updates.some((update) => !uncovered.has(update.name))) {
-      yield* drain;
-    }
-
     // A refused command may have had a pack behind it even when every command
     // this server accepted was a delete: the client sends one body, and the
     // report only reaches it if that body is read first.
@@ -879,10 +873,20 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         : yield* Policy.mayWrite("source.push").pipe(
             Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
           );
-    if (refusal !== null) {
-      // The body was sent for the creates; the report only reaches the client
-      // if it is read first, whether or not anything else here proceeds.
+    // The body only ever gets read by the object phase below, and that runs
+    // only when there is a write left to unpack for. Every other way out of
+    // here has to read it first, or the report is written while the pack is
+    // still arriving and the client sees a hung-up connection instead: a
+    // refusal, an atomic batch, and — the case this used to miss — a push
+    // whose creates were all refused but whose deletes were not, where
+    // `writes` is empty and nothing downstream would have touched the stream.
+    if (
+      updates.some((update) => update.value !== null) &&
+      (refusal !== null || writes.length === 0)
+    )
       yield* drain;
+
+    if (refusal !== null) {
       if (atomic) return respond(allFailed(updates, refusal), "ok");
       for (const update of writes) {
         refused.push({

@@ -307,6 +307,16 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     // every clone of the repository failed. Any member who can append a hub
     // event could undo somebody else's authorized `hub.redact` this way.
     if (byCommit.get(target)?.payload?.type === "event.redacted") continue;
+    // Signed by somebody this repository knows. The set has to be built before
+    // any capability is checked — that is what makes two hosts agree about
+    // which payloads they can still read — but "anybody who can append a hub
+    // event" is too wide a door: a skipped event drops out of `heads`, so
+    // naming a handful of them lowers the trust floor for the *next* tombstone
+    // and lets one signed against a stale head through, which is how a
+    // narrowed `hub.redact` would come back. Membership is a fact both hosts
+    // fold identically, so requiring it costs nothing in agreement.
+    const signers = yield* Verify.signers(entry.bytes, entry.signatures);
+    if (!signers.some((signer) => trust.members.has(signer) || trust.former.has(signer))) continue;
     named.add(target);
   }
   if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named);

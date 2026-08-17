@@ -679,6 +679,59 @@ describe("what a signed envelope binds", () => {
     );
   });
 
+  it("reports on every command when a covered delete outlives the refused creates", async () => {
+    // The object phase is the only reader of the pack, and it runs only when
+    // there is a write left to unpack for. With every create uncovered and a
+    // covered delete remaining, `writes` is empty and nothing downstream would
+    // have touched the stream — so the report was written while the pack was
+    // still arriving and the client saw a hung-up connection.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const commit = yield* repository.commit({
+          branch: "agreed",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+
+        const response = yield* Protocol.receivePack(
+          new Request("http://git.test/r/git-receive-pack", {
+            method: "POST",
+            body:
+              `${pktLine(`${commit} ${ZERO} refs/heads/agreed\0report-status`)}` +
+              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere`)}0000a pack nobody reads`,
+          }),
+        ).pipe(
+          Effect.provide(
+            Auth.requester({
+              ...Auth.anonymous,
+              capabilities: ["source.push", "source.delete"],
+              envelope: {
+                type: "auth.request",
+                version: 1,
+                repo: Auth.anonymous.projection.repoId,
+                operation: "git-receive-pack",
+                commands: [{ ref: "refs/heads/agreed", from: commit, to: null }],
+                nonce: "n",
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            }),
+          ),
+        );
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return { lines: linesOf(bytes).lines };
+      }),
+    );
+
+    const named = outcome.lines.filter((line) => /^(ok|ng) refs\//.test(line));
+    assert.equal(named.length, 2, `every command needs a line: ${outcome.lines.join(" | ")}`);
+    assert.ok(
+      named.some((line) => line.startsWith("ng ") && line.includes("elsewhere")),
+      `the uncovered create is refused: ${named.join(" | ")}`,
+    );
+  });
+
   it("applies none of an atomic push when one ref was never named", async () => {
     // Atomic is all-or-nothing, and an uncovered ref is part of the all. The
     // covered half was filtered out of what the gate saw and then landed on

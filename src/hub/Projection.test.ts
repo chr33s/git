@@ -2109,6 +2109,64 @@ describe("hub projection", () => {
       );
     });
 
+    it("does not let a stranger's tombstone decide what the first pass reads", async () => {
+      // The set of commits the first pass reads as absent has to be built
+      // before any capability is checked — that is what makes two hosts agree
+      // about which payloads they can still read — but "anybody who can append
+      // a hub event" is too wide a door: a skipped event drops out of the
+      // trust floor, so naming a few of them lowers it for the next tombstone.
+      // Membership is a fact both hosts fold identically, so it is required.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "ordinary",
+            key: where.author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          // Signed by a key this repository never granted anything to.
+          const stranger = yield* generate("stranger@example.com");
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "event.redacted",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: yield* repository.resolve(Log.LOG_REF),
+            target,
+            targetCommit: Event.qualify(commit),
+            reason: "no",
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(stranger, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "event.redacted from nobody\n",
+            }),
+            expected: head,
+          });
+
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(outcome.redacted.size, 0, "a stranger's tombstone redacts nothing");
+      // And the comment it named is still folded, rather than read as absent.
+      assert.equal(outcome.threads[0]?.comments[0]?.body, "ordinary");
+    });
+
     it("refuses a redaction from a member without hub.redact, and writes nothing", async () => {
       // Writing the tombstone and deleting the payload are two different
       // authorities. Treating the first as implying the second let anybody who
