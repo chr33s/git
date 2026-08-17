@@ -793,6 +793,121 @@ describe("hub projection", () => {
     });
   });
 
+  describe("retargeting a pull request", () => {
+    it("is refused to somebody who is neither its author nor a merger", async () => {
+      // Moving the head stales every approval of the revision it replaces, so
+      // charging it `hub.create-pr` let any hub writer retarget somebody
+      // else's approved pull request and block the protected branch that pull
+      // request was the only route to.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+
+          const meddler = yield* generate("meddler@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(meddler.publicKey),
+              capabilities: ["hub.create-pr"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+
+          yield* PullRequest.update({
+            repo: where.genesis.repoId,
+            pr,
+            head: NEXT,
+            key: meddler,
+          });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.head, REVISION, "the head must not have moved");
+      assert.equal(approvals(outcome).length, 1, "and the approval must still count");
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /needs hub\.merge/);
+    });
+  });
+
+  describe("an approval", () => {
+    it("does not count when it is the pull request author's own", async () => {
+      // Self-approval is not review — it is the thing review exists to be
+      // independent of. Counted, one member holding `hub.approve` opened a
+      // pull request for their own commit, approved it, and cleared
+      // `requiredApprovals` on a protected branch alone.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "mine",
+            base: "refs/heads/main",
+            head: REVISION,
+            key: where.reviewer,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      // The review is on the record — it is a true statement about what its
+      // author thinks — it simply satisfies no requirement.
+      assert.equal(outcome.reviews.length, 1);
+      assert.equal(approvals(outcome).length, 0);
+      assert.deepEqual(outcome.rejected, []);
+    });
+
+    it("cannot be dismissed by somebody who could not have made it", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          const { events } = yield* Event.entries(pr);
+          const review =
+            events.find((entry) => entry.payload?.type === "review.submitted")?.payload?.id ?? "";
+
+          // The author holds `hub.review` but not `hub.approve`.
+          yield* PullRequest.dismissReview({
+            repo: where.genesis.repoId,
+            pr,
+            review,
+            reason: "no",
+            key: where.author,
+          });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(approvals(outcome).length, 1, "the approval must still count");
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /needs hub\.approve/);
+    });
+  });
+
   describe("closing a pull request", () => {
     it("is refused to somebody who is neither its author nor a merger", async () => {
       // `hub.create-pr` is the lowest-privileged hub capability, and charging

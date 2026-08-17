@@ -480,6 +480,21 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   }
 
   const rules = yield* rulesOf();
+
+  // The same staleness bound `gate` applies. Left only on receive-pack, a
+  // repository that had asked for one still accepted `commit`, `branch`,
+  // `tagCreate`, `merge`, `rebase`, `cherry-pick`, `pull` and commit-pack
+  // against a membership view of any age — which is most of the ways a ref
+  // moves.
+  if (rules.maxTrustAgeSeconds > 0) {
+    const trust =
+      who.projection.repoId === stored.genesis.repoId
+        ? who.projection
+        : yield* project(stored.genesis);
+    const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
+    if (!stale.ok) return stale.reason;
+  }
+
   return isProtected(rules, ref)
     ? `${ref} is protected and may only be moved by an approved pull request`
     : null;

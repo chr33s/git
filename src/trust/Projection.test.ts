@@ -163,6 +163,66 @@ describe("trust projection", () => {
     assert.notEqual(state.projection.members.get(state.bob), undefined);
   });
 
+  it("refuses a grant issued by a member whose own grant had expired", async () => {
+    // The fold still has no clock — expiry is compared against the record's
+    // own `issuedAt`, so the answer stays a pure function of the log. Ignoring
+    // it entirely meant an expired `member.invite` holder's pre-signed grants
+    // took effect on every replica forever, which is an expiry that expires
+    // nothing.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const alice = yield* generate("alice@example.com");
+        const bob = yield* generate("bob@example.com");
+
+        yield* grantTo(where, alice, ["member.invite", "source.push"], where.roots.slice(0, 2), {
+          expiresAt: new Date(1_600_000_000_000),
+        });
+        // Alice signs *after* her own grant lapsed, and says so.
+        const payload = yield* Certificate.grant({
+          repo: where.genesis.repoId,
+          publicKey: formatPublicKey(bob.publicKey),
+          capabilities: ["source.push"],
+          id: Log.newId(),
+          at: new Date(1_700_000_000_000),
+        });
+        yield* Log.issue(payload, [alice]);
+
+        return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+      }),
+    );
+
+    assert.equal(state.projection.members.get(state.bob), undefined);
+    assert.match(state.projection.rejected.at(-1)?.reason ?? "", /may not invite/);
+  });
+
+  it("accepts one an issuer signed while their grant was still live", async () => {
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const alice = yield* generate("alice@example.com");
+        const bob = yield* generate("bob@example.com");
+
+        yield* grantTo(where, alice, ["member.invite", "source.push"], where.roots.slice(0, 2), {
+          expiresAt: new Date(1_800_000_000_000),
+        });
+        const payload = yield* Certificate.grant({
+          repo: where.genesis.repoId,
+          publicKey: formatPublicKey(bob.publicKey),
+          capabilities: ["source.push"],
+          id: Log.newId(),
+          at: new Date(1_700_000_000_000),
+        });
+        yield* Log.issue(payload, [alice]);
+
+        return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+      }),
+    );
+
+    assert.notEqual(state.projection.members.get(state.bob), undefined);
+    assert.deepEqual(state.projection.rejected, []);
+  });
+
   describe("revocation", () => {
     it("removes a member and keeps what they held", async () => {
       const state = await scenario(

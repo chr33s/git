@@ -18,7 +18,7 @@
  * handler lives elsewhere — the server-as-client machinery in `Sync.ts`, the
  * algorithms in `git/`.
  */
-import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
+import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
 import { Etag, HttpPlatform } from "effect/unstable/http";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 
@@ -33,6 +33,9 @@ import { cherryPick, rebase } from "../git/Rebase.ts";
 import * as Redaction from "../hub/Redaction.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import * as Policy from "./Policy.ts";
+import * as Auth from "./Auth.ts";
+import { permits } from "../trust/Certificate.ts";
+import { readGenesis } from "../trust/Genesis.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
@@ -174,6 +177,29 @@ const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = 
  * this is not that conversation. Holding a JSON verb to commands it never
  * claimed would read silence as a denial.
  */
+/**
+ * The requester may read this repository.
+ *
+ * Every ordinary read is charged `repo.read` by the guard before a handler
+ * runs. The exceptions are the verbs whose *primary* effect is a write but
+ * whose work involves sending content elsewhere, which the guard charges
+ * `source.push` — a capability that does not carry `repo.read`, deliberately,
+ * because a contributor who may push need not be able to read everything.
+ */
+const requireRead = Effect.fn("Api.requireRead")(function* () {
+  const stored = yield* readGenesis().pipe(Effect.orElseSucceed(() => null));
+  if (stored === null) return;
+
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  const who = Option.getOrElse(requester, () => Auth.anonymous);
+  if (who.principal !== null && permits(who.capabilities, "repo.read")) return;
+
+  return yield* new Invalid({
+    field: "capability",
+    reason: "sending this repository's objects elsewhere needs repo.read",
+  });
+});
+
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
   // Fail closed, for the reason `gateWrite` gives.
   const judged = yield* Policy.gate([update], true, false).pipe(Effect.orElseSucceed(() => null));
@@ -1726,6 +1752,11 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("push", ({ payload }) =>
       Effect.gen(function* () {
+        // Sending this repository's objects to a URL of the caller's choosing
+        // is a *read* of everything named, and `source.push` does not imply
+        // `repo.read`: a credential scoped exactly as the readme shows for a
+        // contributor could otherwise copy a read-restricted repository out.
+        yield* requireRead();
         const target = yield* remoteFor(payload);
         const request: PushRequest = {
           url: target.url,

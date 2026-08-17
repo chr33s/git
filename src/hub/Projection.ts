@@ -410,8 +410,39 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     const issued = new Date(payload.issuedAt);
     if (issued > at) at = issued;
 
+    /**
+     * Whether this event's signer also holds a second capability.
+     *
+     * Several events cost one capability to *make* and a higher one to make
+     * about somebody else's work: retargeting a pull request, closing it,
+     * dismissing a review. `capabilityFor` sees only the payload, so the
+     * author comparison and this second check are what the difference is made
+     * of. Judged against the same trust head, so it is ordered like everything
+     * else here.
+     */
+    const alsoHolds = (capability: string) =>
+      Verify.authorize({
+        projection: trust,
+        bytes: entry.bytes,
+        signatures: entry.signatures,
+        capability,
+        made: { at: issued, trustHead: declared },
+        seen: ancestry,
+      });
+
     switch (payload.type) {
       case "pr.opened": {
+        // A second `pr.opened` rewrites the title, description and base of a
+        // pull request somebody else may have opened, so it is held to the
+        // same rule as `pr.updated` below.
+        if (author !== null && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
+          rejected.push({
+            commit: entry.commit,
+            reason: "re-opening somebody else's pull request needs hub.merge",
+          });
+          break;
+        }
+
         title = payload.title;
         description = payload.description;
         base = payload.base;
@@ -428,6 +459,19 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       }
 
       case "pr.updated": {
+        // Moving the head stales every approval of the revision it replaces.
+        // Charged only `hub.create-pr`, that let any hub writer retarget
+        // somebody else's approved pull request and, with it, block the
+        // protected branch that pull request was the route to — the same
+        // denial `pr.closed` is defended against.
+        if (author !== null && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
+          rejected.push({
+            commit: entry.commit,
+            reason: "retargeting somebody else's pull request needs hub.merge",
+          });
+          break;
+        }
+
         const head = Event.unqualify(payload.head);
         if (
           head !== null &&
@@ -447,22 +491,12 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         // the branch it was approved for cannot be moved at all. Its own
         // author may always close it; anybody else needs `hub.merge`, which is
         // the capability for settling a pull request.
-        if (author !== null && signer !== author) {
-          const settles = yield* Verify.authorize({
-            projection: trust,
-            bytes: entry.bytes,
-            signatures: entry.signatures,
-            capability: "hub.merge",
-            made: { at: issued, trustHead: declared },
-            seen: ancestry,
+        if (author !== null && signer !== author && !(yield* alsoHolds("hub.merge")).ok) {
+          rejected.push({
+            commit: entry.commit,
+            reason: `${payload.type} by somebody other than the author needs hub.merge`,
           });
-          if (!settles.ok) {
-            rejected.push({
-              commit: entry.commit,
-              reason: `${payload.type} by somebody other than the author needs hub.merge`,
-            });
-            break;
-          }
+          break;
         }
         // A merge is final; closing or reopening after it would be a later
         // event undoing a state that has already landed in the branch.
@@ -503,6 +537,18 @@ export const project = Effect.fn("hub.Projection.project")(function* (
             commit: entry.commit,
             reason:
               found === null ? `no review ${payload.review}` : `ambiguous review ${payload.review}`,
+          });
+          break;
+        }
+        // Nullifying somebody else's approval costs what making one costs.
+        // Charged `hub.review`, the lower capability could cancel the higher
+        // one's word — and a repository requiring two approvals could be held
+        // at one by anybody who may review. A reviewer may always withdraw
+        // their own.
+        if (found.value.author !== signer && !(yield* alsoHolds("hub.approve")).ok) {
+          rejected.push({
+            commit: entry.commit,
+            reason: "dismissing somebody else's review needs hub.approve",
           });
           break;
         }
@@ -647,9 +693,10 @@ export const project = Effect.fn("hub.Projection.project")(function* (
  * The approvals a merge policy may count.
  *
  * Not merely "approve" events: an approval of a revision that has since been
- * replaced says nothing about the revision being merged, and a dismissed one
- * has been withdrawn. Both are excluded here so that no caller has to remember
- * to exclude them.
+ * replaced says nothing about the revision being merged, a dismissed one has
+ * been withdrawn, and a pull request's own author approving their own work is
+ * not review at all — it is the thing review exists to be independent of.
+ * All three are excluded here so that no caller has to remember to.
  */
 export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
   // One per approver, not one per event — counting events would let a single
@@ -659,6 +706,10 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
   const latest = new Map<Fingerprint, Review>();
   for (const review of pullRequest.reviews) {
     if (review.stale || review.dismissed) continue;
+    // Self-approval satisfies nothing. Without this, one member holding
+    // `hub.approve` opened a pull request for their own commit, approved it,
+    // and cleared `requiredApprovals` on a protected branch alone.
+    if (pullRequest.author !== null && review.author === pullRequest.author) continue;
     const existing = latest.get(review.author);
     if (existing === undefined || existing.at <= review.at) latest.set(review.author, review);
   }

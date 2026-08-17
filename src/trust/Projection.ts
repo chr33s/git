@@ -130,40 +130,53 @@ const rootQuorum = (
   return met >= threshold;
 };
 
+/**
+ * Whether a member's grant had expired by the time a record claims to have
+ * been issued.
+ *
+ * The fold still has no *clock* — the comparison is against the record's own
+ * `issuedAt`, so the answer is a pure function of the log and two hosts folding
+ * the same history reach the same state. Ignoring expiry here entirely meant an
+ * expired `member.invite` holder's pre-signed grants took effect on every
+ * replica forever, which is an expiry that expires nothing.
+ *
+ * `issuedAt` is written by the issuer, so a determined one can backdate it —
+ * but only into a window in which they genuinely held the capability, which is
+ * the same bound `Verify` accepts for every other stored statement.
+ */
+const expired = (member: Member, at: Date): boolean =>
+  member.expiresAt !== null && member.expiresAt.getTime() <= at.getTime();
+
 /** Every signer who may invite members — all of them, not the first found. */
 const inviters = (
   members: ReadonlyMap<Fingerprint, Member>,
   revoked: ReadonlyMap<Fingerprint, Revocation>,
   signers: ReadonlySet<Fingerprint>,
+  at: Date,
 ): ReadonlyArray<Fingerprint> => {
   const found: Fingerprint[] = [];
   for (const signer of signers) {
     if (revoked.has(signer)) continue;
     const member = members.get(signer);
-    if (member !== undefined && Certificate.permits(member.capabilities, "member.invite")) {
-      found.push(signer);
-    }
+    if (member === undefined || expired(member, at)) continue;
+    if (Certificate.permits(member.capabilities, "member.invite")) found.push(signer);
   }
   return found;
 };
 
-/**
- * Whether any signer holds a capability *within the fold*.
- *
- * Deliberately ignores expiry: the fold has no clock, and a projection whose
- * contents depended on when it was built could not be compared between two
- * hosts. Expiry is applied at authorization time, in `authorize`.
- */
+/** Whether any signer holds a capability *within the fold*. */
 const holds = (
   members: ReadonlyMap<Fingerprint, Member>,
   revoked: ReadonlyMap<Fingerprint, Revocation>,
   signers: ReadonlySet<Fingerprint>,
   capability: string,
+  at: Date,
 ): Fingerprint | null => {
   for (const signer of signers) {
     if (revoked.has(signer)) continue;
     const member = members.get(signer);
-    if (member !== undefined && Certificate.permits(member.capabilities, capability)) return signer;
+    if (member === undefined || expired(member, at)) continue;
+    if (Certificate.permits(member.capabilities, capability)) return signer;
   }
   return null;
 };
@@ -202,6 +215,9 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     const signers = yield* signersOf(entry.bytes, entry.signatures);
     const quorum = rootQuorum(signers, roots, threshold);
     const payload = entry.payload;
+    // What the record says about when it was made, which is what every
+    // expiry below is judged against.
+    const claimedAt = new Date(payload.issuedAt);
 
     if (payload.type === "trust.root-change") {
       // Only the current roots may replace themselves. A member with
@@ -221,7 +237,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // Every signer who may invite, not merely the first one found: a record
       // co-signed by an inviter and an admin must not be accepted or refused
       // on the order the signatures happen to be in.
-      const issuers = quorum ? [] : inviters(members, revoked, signers);
+      const issuers = quorum ? [] : inviters(members, revoked, signers, claimedAt);
       if (!quorum && issuers.length === 0) {
         rejected.push({ commit: entry.commit, reason: "issuer may not invite members" });
         continue;
@@ -258,7 +274,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       if (
         revoked.has(subject) &&
         !quorum &&
-        holds(members, revoked, signers, "member.revoke") === null
+        holds(members, revoked, signers, "member.revoke", claimedAt) === null
       ) {
         rejected.push({
           commit: entry.commit,
@@ -293,7 +309,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     }
 
     if (payload.type === "trust.revoke") {
-      if (!quorum && holds(members, revoked, signers, "member.revoke") === null) {
+      if (!quorum && holds(members, revoked, signers, "member.revoke", claimedAt) === null) {
         rejected.push({ commit: entry.commit, reason: "issuer may not revoke members" });
         continue;
       }
@@ -318,7 +334,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       continue;
     }
 
-    if (!quorum && holds(members, revoked, signers, "repo.admin") === null) {
+    if (!quorum && holds(members, revoked, signers, "repo.admin", claimedAt) === null) {
       rejected.push({ commit: entry.commit, reason: "issuer may not checkpoint" });
       continue;
     }

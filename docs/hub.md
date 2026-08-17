@@ -454,7 +454,7 @@ A `trust.checkpoint` event is signed by a principal holding `repo.admin` (or a r
 
 Verifiers MAY require a checkpoint newer than a configured maximum age before authorizing high-value operations (merges to protected branches, trust changes). This bounds how stale a split view can be.
 
-The bound is configured per repository, in the branch-rules document at `refs/meta/policy`, as `maxTrustAgeSeconds`. `0` — the default, and what a rules file written without the field means — is unbounded: a repository that has never checkpointed must keep working, so the bound is something an operator turns on rather than something that arrives with an upgrade. Any positive value refuses every ref update while the newest checkpoint is older than it, including the case of no checkpoint at all.
+The bound applies to every gated ref write — receive-pack and the JSON verbs alike — and is configured per repository, in the branch-rules document at `refs/meta/policy`, as `maxTrustAgeSeconds`. `0` — the default, and what a rules file written without the field means — is unbounded: a repository that has never checkpointed must keep working, so the bound is something an operator turns on rather than something that arrives with an upgrade. Any positive value refuses every ref update while the newest checkpoint is older than it, including the case of no checkpoint at all.
 
 `refs/meta/policy` replicates with the trust log and for the same reason. A replica that holds the membership but not the rules answers "unprotected" to every question the policy boundary asks, so a mirror sharing one trust graph would let through exactly the pushes its origin refuses.
 
@@ -1241,13 +1241,29 @@ refs/meta/trust/*
 
 MUST protect the Git objects they reference from GC — with one exception: blobs covered by a valid redaction tombstone (§21) are excluded from protection and pruned.
 
-Closing a PR means creating `pr.closed`, not deleting its history. A `pr.closed`
-or `pr.reopened` from the pull request's own author always counts; from anybody
-else it needs `hub.merge`. `hub.create-pr` is the lowest-privileged hub
-capability, and settling somebody else's approved pull request is not the same
-authority as opening one — a projection that treated it as such would let any
-hub writer close an approved pull request and, with it, block every push to the
-protected branch that pull request was the only route to.
+Closing a PR means creating `pr.closed`, not deleting its history.
+
+Several events cost one capability to make and a higher one to make about
+somebody else's work. The pull request's own author may always do these; anybody
+else needs the capability named:
+
+```text
+pr.closed / pr.reopened / pr.updated / a second pr.opened   hub.merge
+review.dismissed (of a review one did not write)            hub.approve
+```
+
+`hub.create-pr` is the lowest-privileged hub capability, and settling or
+retargeting somebody else's approved pull request is not the same authority as
+opening one: a projection that treated it as such would let any hub writer close
+or re-point an approved pull request and, with it, block every push to the
+protected branch that pull request was the only route to. `hub.review` is
+likewise below `hub.approve`, and letting it dismiss an approval would let the
+lower capability cancel the higher one's word.
+
+An approval by the pull request's own author is recorded but counts toward no
+requirement. Self-approval is not review; it is the thing review exists to be
+independent of, and counting it would let one holder of `hub.approve` satisfy
+`requiredApprovals` alone.
 
 Destructive pruning beyond tombstoned blobs is a separate explicit administrative operation, and it is local: it does not replicate, and a pruned replica re-fetching from a peer will get the objects back unless the peer pruned too. Tombstones are the only replicating removal.
 

@@ -24,7 +24,7 @@ import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { serve } from "../host/Node.ts";
-import { enableHubUnder, shortOfQuorum, writeKeyPair } from "../testing/Hub.ts";
+import { enableHubUnder, grantMemberUnder, shortOfQuorum, writeKeyPair } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "bin.ts");
@@ -474,6 +474,44 @@ describe("cli hub", () => {
       assert.match(status, /not trusted/);
     } finally {
       await remote.close();
+    }
+  });
+
+  it("refuses to send a repository's objects elsewhere on a push-only credential", async () => {
+    // `POST /push` sends every named ref to a URL the caller chooses, which is
+    // a read of everything named — and `source.push` does not imply
+    // `repo.read`, deliberately, so a contributor credential could otherwise
+    // copy a read-restricted repository out.
+    const serverRoot = path.join(root, "exfil");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "private"]);
+    const owner = await enableHubUnder(serverRoot, "private", ["repo.read", "source.push"]);
+    const pusher = await grantMemberUnder(serverRoot, "private", owner.root, owner.repoId, [
+      "source.push",
+    ]);
+
+    const server = await serve({ root: serverRoot });
+    try {
+      const send = (credential: string) =>
+        fetch(`${server.url}/private/push`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${credential}` },
+          body: JSON.stringify({ url: "http://127.0.0.1:1/elsewhere", refs: [{ local: "main" }] }),
+        });
+
+      const refused = await send(pusher.credential);
+      const body = await refused.text();
+      assert.equal(refused.status, 400, body);
+      assert.match(body, /repo\.read/);
+
+      // The owner holds `repo.read`, so they get past the capability check and
+      // fail on the unreachable remote instead — which is the point: the
+      // refusal above is about authority, not about the URL.
+      const allowed = await send(owner.credential);
+      const answered = await allowed.text();
+      assert.ok(!answered.includes("repo.read"), answered);
+    } finally {
+      await server.close();
     }
   });
 

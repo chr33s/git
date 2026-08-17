@@ -6,7 +6,7 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
+import { fingerprint, formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import { stores as nodeStores } from "../git/Node.ts";
@@ -60,33 +60,42 @@ interface World {
   readonly genesis: Genesis;
   readonly root: PrivateKey;
   readonly dev: PrivateKey;
+  /** A second member, so an approval can come from somebody else. */
+  readonly reviewer: PrivateKey;
   readonly principal: Principal;
 }
 
 const world = Effect.fn("test.world")(function* (capabilities: ReadonlyArray<string>) {
   const root = yield* generate("root@example.com");
   const dev = yield* generate("dev@example.com");
+  const reviewer = yield* generate("reviewer@example.com");
 
   const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
   yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
-  yield* Log.issue(
-    yield* Certificate.grant({
-      repo: genesis.repoId,
-      publicKey: formatPublicKey(dev.publicKey),
-      capabilities,
-      id: Log.newId(),
-    }),
-    [root],
-  );
+  const grant = (key: PrivateKey, held: ReadonlyArray<string>) =>
+    Effect.flatMap(
+      Certificate.grant({
+        repo: genesis.repoId,
+        publicKey: formatPublicKey(key.publicKey),
+        capabilities: held,
+        id: Log.newId(),
+      }),
+      (payload) => Log.issue(payload, [root]),
+    );
+  yield* grant(dev, capabilities);
+  // A pull request's own author cannot approve it, so anything that needs an
+  // approval needs a second member to give one.
+  yield* grant(reviewer, ["hub.review", "hub.approve"]);
 
   const trust = yield* projectTrust(genesis);
-  // SAFETY: the grant above is the only one in this repository, so the
-  // projection holds exactly one member.
-  const member = [...trust.members.values()].at(0) as Member;
+  const print = yield* fingerprint(dev.publicKey);
+  // SAFETY: `dev` was granted above, so the fold holds them.
+  const member = trust.members.get(print) as Member;
   return {
     genesis,
     root,
     dev,
+    reviewer,
     principal: { member, capabilities },
   } satisfies World;
 });
@@ -120,6 +129,20 @@ const history = Effect.fn("test.history")(function* (branch: string) {
  */
 const gateAs = (where: World | null, updates: ReadonlyArray<RefUpdate>, atomic = true) =>
   Policy.gate(updates, atomic).pipe(
+    Effect.provide(
+      Auth.requester({
+        principal: where?.principal.member ?? null,
+        signer: null,
+        capabilities: where?.principal.capabilities ?? [],
+        projection: EMPTY_PROJECTION,
+        envelope: null,
+      }),
+    ),
+  );
+
+/** The JSON verbs' pre-check, as a request from one principal. */
+const gateWriteAs = (where: World | null, ref: string, rewrites = false) =>
+  Policy.gateWrite(ref, rewrites).pipe(
     Effect.provide(
       Auth.requester({
         principal: where?.principal.member ?? null,
@@ -350,7 +373,7 @@ describe("Policy", () => {
             pr,
             head: second,
             decision: "approve",
-            key: where.dev,
+            key: where.reviewer,
           });
           return yield* judge(where, { name: "refs/heads/main", value: second }, guarded);
         }),
@@ -375,7 +398,7 @@ describe("Policy", () => {
             pr,
             head: first,
             decision: "approve",
-            key: where.dev,
+            key: where.reviewer,
           });
           // The proposal moves on; the approval stays true about `first`.
           yield* PullRequest.update({
@@ -415,7 +438,7 @@ describe("Policy", () => {
             pr,
             head: second,
             decision: "approve",
-            key: where.dev,
+            key: where.reviewer,
           });
           yield* PullRequest.merged({
             repo: where.genesis.repoId,
@@ -461,7 +484,7 @@ describe("Policy", () => {
             pr,
             head: second,
             decision: "approve",
-            key: where.dev,
+            key: where.reviewer,
           });
 
           // Any content at all, with the approved head hung off it as a parent.
@@ -505,7 +528,7 @@ describe("Policy", () => {
             pr: approved.pr,
             head: second,
             decision: "approve",
-            key: where.dev,
+            key: where.reviewer,
           });
 
           return yield* judge(where, { name: "refs/heads/main", value: second }, guarded);
@@ -531,7 +554,7 @@ describe("Policy", () => {
             pr,
             head: second,
             decision: "approve",
-            key: where.dev,
+            key: where.reviewer,
           });
           return yield* judge(
             where,
@@ -567,7 +590,7 @@ describe("Policy", () => {
             pr,
             head: second,
             decision: "approve",
-            key: where.dev,
+            key: where.reviewer,
           });
           yield* PullRequest.comment({
             repo: where.genesis.repoId,
@@ -673,6 +696,21 @@ describe("Policy", () => {
       assert.equal(outcome.updates.length, 1);
     });
 
+    it("bounds the JSON verbs too, not only receive-pack", async () => {
+      // Applied only in `gate`, the bound covered receive-pack and left
+      // `commit`, `branch`, `tagCreate`, `merge`, `rebase`, `cherry-pick`,
+      // `pull` and commit-pack accepting a membership view of any age — which
+      // is most of the ways a ref moves.
+      const refusal = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          yield* withMaxAge(3600);
+          return yield* gateWriteAs(where, "refs/heads/topic");
+        }),
+      );
+      assert.match(refusal ?? "", /checkpoint/);
+    });
+
     it("leaves a repository that set no bound alone", async () => {
       // The default, and it has to stay the default: a bound nobody configured
       // would refuse every push on every repository that has never checkpointed.
@@ -689,19 +727,6 @@ describe("Policy", () => {
 
   describe("writing a ref whose value is not known yet", () => {
     /** The JSON verbs that compute the new value while doing the work. */
-    const gateWriteAs = (where: World | null, ref: string, rewrites = false) =>
-      Policy.gateWrite(ref, rewrites).pipe(
-        Effect.provide(
-          Auth.requester({
-            principal: where?.principal.member ?? null,
-            signer: null,
-            capabilities: where?.principal.capabilities ?? [],
-            projection: EMPTY_PROJECTION,
-            envelope: null,
-          }),
-        ),
-      );
-
     it("lets a member write an ordinary branch", async () => {
       // The regression this guards: gating without providing the requester
       // refused *every* caller, admins included.
