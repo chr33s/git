@@ -26,6 +26,7 @@ import type { Fingerprint } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
+import { permits } from "../trust/Certificate.ts";
 import type { Genesis } from "../trust/Genesis.ts";
 import type { Projection as TrustProjection } from "../trust/Projection.ts";
 import * as Log from "../trust/Log.ts";
@@ -262,6 +263,26 @@ const trustReach = () => {
 };
 
 /**
+ * Whether a key holds `hub.redact` right now.
+ *
+ * Asked against the *live* projection, which is a fact both hosts fold
+ * identically — the set the first pass reads as absent has to be built before
+ * any per-event capability check, since that is what makes two hosts agree
+ * about which payloads they can still read at all.
+ *
+ * Membership alone was not enough. A skipped event drops out of `heads`, so a
+ * member could push decoy tombstones naming events that had named late trust
+ * heads, lower the floor for the *next* tombstone, and have one signed under a
+ * stale head accepted — which is how a `hub.redact` that had been narrowed
+ * away would come back. Asking for the capability makes the decoys cost the
+ * very thing they were being used to recover.
+ */
+const holdsRedact = (trust: TrustProjection, signer: Fingerprint): boolean => {
+  const member = trust.members.get(signer);
+  return member !== undefined && permits(member.capabilities, "hub.redact");
+};
+
+/**
  * Fold one pull request.
  *
  * `trust` is passed in rather than read here so that a caller projecting fifty
@@ -316,7 +337,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     // narrowed `hub.redact` would come back. Membership is a fact both hosts
     // fold identically, so requiring it costs nothing in agreement.
     const signers = yield* Verify.signers(entry.bytes, entry.signatures);
-    if (!signers.some((signer) => trust.members.has(signer) || trust.former.has(signer))) continue;
+    if (!signers.some((signer) => holdsRedact(trust, signer))) continue;
     named.add(target);
   }
   if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named);

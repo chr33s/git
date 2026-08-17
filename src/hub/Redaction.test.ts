@@ -8,6 +8,7 @@ import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid } from "../git/Store.ts";
+import { fingerprint } from "../crypto/SshSignature.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
@@ -31,6 +32,7 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =
 
 interface World {
   readonly genesis: Genesis;
+  readonly root: PrivateKey;
   readonly author: PrivateKey;
 }
 
@@ -50,7 +52,7 @@ const world = Effect.fn("test.world")(function* () {
     }),
     [root],
   );
-  return { genesis, author } satisfies World;
+  return { genesis, root, author } satisfies World;
 });
 
 /** SAFETY: forty lowercase hex characters by construction. */
@@ -361,6 +363,67 @@ describe("hub redaction", () => {
 
     assert.equal(outcome.actual, true, "the real run removes it");
     assert.equal(outcome.predicted, outcome.actual, "and the dry run says so");
+  });
+
+  it("still explains an absence once the redactor's grant has lapsed", async () => {
+    // A removal is irreversible and its authorization is not: expiry is judged
+    // against the clock and a compromise reaches backwards, so a tombstone
+    // valid on Monday can be invalid on Friday. Judged by the strict set, the
+    // bytes stay gone while nothing accounts for them — and every fetch of
+    // `refs/hub/*` fails from then on, permanently. What a fetch asks is
+    // whether an absence is *explained*, and a tombstone on the record
+    // explains it.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+        yield* repository.gc({ repack: true, exclude: yield* Redaction.excluded() });
+
+        // And now the redactor is revoked, so the tombstone stops counting.
+        yield* Log.issue(
+          Certificate.revoke({
+            repo: where.genesis.repoId,
+            subject: yield* fingerprint(where.author.publicKey),
+            reason: "compromised",
+            id: Log.newId(),
+          }),
+          [where.root],
+        );
+
+        const head = yield* repository.resolve(Event.refOf(pr));
+        return {
+          gone: !(yield* objects.has(blob!)),
+          strict: (yield* Redaction.excluded()).size,
+          explained: (yield* Redaction.covered()).has(blob!),
+          planned: yield* Protocol.planFor({
+            wants: [head!],
+            haves: [],
+            clientShallow: [],
+            depth: undefined,
+            since: undefined,
+            notRefs: [],
+          }).pipe(
+            Effect.as(true),
+            Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+          ),
+        };
+      }),
+    );
+
+    assert.equal(outcome.gone, true, "the bytes really are gone");
+    assert.equal(outcome.strict, 0, "and the tombstone no longer counts");
+    assert.equal(outcome.explained, true, "but it still explains the absence");
+    assert.equal(outcome.planned, true, "so a fetch of the pull request still plans");
   });
 
   it("excludes nothing in a repository that has no genesis", async () => {

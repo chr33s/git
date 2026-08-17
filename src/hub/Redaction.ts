@@ -132,6 +132,41 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   return found;
 });
 
+/**
+ * Every payload blob a tombstone *names*, whether or not it still counts.
+ *
+ * A different question from `excluded`, and the one a fetch asks: "is this
+ * absence explained?" rather than "may this be removed?". Authorization
+ * decides whether a removal happens; it must not decide whether a removal that
+ * already happened is explicable, because the removal is irreversible and the
+ * answer moves. `Verify.authorize` judges expiry against the clock, and a
+ * `compromised` revocation reaches backwards — so a tombstone valid on Monday
+ * can be invalid on Friday, and with the strict set the bytes stay gone while
+ * nothing accounts for them: every fetch of `refs/hub/*` fails from then on,
+ * permanently, and two hosts whose memos turned over at different moments
+ * disagree about the same request.
+ */
+export const covered = Effect.fn("hub.Redaction.covered")(function* () {
+  const repository = yield* Repository;
+
+  const found = new Set<Oid>();
+  for (const pr of yield* tombstoned(yield* Event.pullRequests())) {
+    const { events } = yield* Event.entries(pr);
+    for (const entry of events) {
+      if (entry.payload?.type !== "event.redacted" || entry.payload.pr !== pr) continue;
+      const target = Event.unqualify(entry.payload.targetCommit);
+      if (target === null) continue;
+      const info = yield* repository
+        .readCommit(target)
+        .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+      if (info === null) continue;
+      const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
+      if (path !== null) found.add(path.oid);
+    }
+  }
+  return found;
+});
+
 /** The pull requests carrying anything that *might* be a tombstone. */
 const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: ReadonlyArray<string>) {
   const found: string[] = [];

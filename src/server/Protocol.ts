@@ -100,7 +100,12 @@ export const planFor = (request: {
  */
 const missing = Effect.fn("Protocol.missing")(function* () {
   const repository = yield* Repository;
-  const covered = yield* Redaction.excluded();
+  // Every payload a tombstone *names*, not only those a tombstone that still
+  // counts names. A removal is irreversible and its authorization is not:
+  // expiry is judged against the clock and a compromise reaches backwards, so
+  // the strict set can empty while the bytes stay gone, and every fetch of
+  // `refs/hub/*` then fails forever with nothing to explain the absence.
+  const covered = yield* Redaction.covered();
 
   const gone = new Set<Oid>();
   for (const oid of covered) if (!(yield* repository.contains(oid))) gone.add(oid);

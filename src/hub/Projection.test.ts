@@ -2167,6 +2167,62 @@ describe("hub projection", () => {
       assert.equal(outcome.threads[0]?.comments[0]?.body, "ordinary");
     });
 
+    it("does not let a member without hub.redact decide it either", async () => {
+      // Membership alone was not enough. A skipped event drops out of `heads`,
+      // so a member could push decoy tombstones naming events that had named
+      // late trust heads, lower the floor for the *next* tombstone, and have
+      // one signed under a stale head accepted — which is how a `hub.redact`
+      // that had been narrowed away would come back. The capability is what
+      // the decoys were being used to recover, so it is what they cost.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "ordinary",
+            key: where.author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          // The author holds `hub.comment` and `hub.review`, never `hub.redact`.
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "event.redacted",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: yield* repository.resolve(Log.LOG_REF),
+            target,
+            targetCommit: Event.qualify(commit),
+            reason: "no",
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "event.redacted without the capability\n",
+            }),
+            expected: head,
+          });
+
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(outcome.redacted.size, 0);
+      assert.equal(outcome.threads[0]?.comments[0]?.body, "ordinary");
+    });
+
     it("refuses a redaction from a member without hub.redact, and writes nothing", async () => {
       // Writing the tombstone and deleting the payload are two different
       // authorities. Treating the first as implying the second let anybody who
