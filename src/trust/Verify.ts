@@ -137,20 +137,26 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
 const held = Effect.fn("trust.Verify.held")(function* (
   member: Member,
   capability: string,
-  made: Made | null,
+  made: Made,
   seen: Ancestry,
 ) {
-  if (made === null || made.trustHead === null) return true;
+  // No trust head recorded is "they had seen everything", the reading that
+  // field gets everywhere else — so the question falls back to what they hold.
+  if (made.trustHead === null) return permits(member.capabilities, capability);
 
-  // *Any* grant that conferred it and was already visible, not merely the
-  // latest one. A member's `grant` field is overwritten by every later grant,
-  // so checking that alone meant an ordinary renewal — a second `hub grant` to
-  // the same key — retroactively un-authorized every event they had ever
-  // signed, since the only grant on record post-dated all of them.
-  for (const record of member.history) {
-    if (!permits(record.capabilities, capability)) continue;
-    if (record.commit === made.trustHead) return true;
-    if ((yield* seen(made.trustHead)).has(record.commit)) return true;
+  // The *latest* grant visible from that head, which is what they held then.
+  //
+  // Not "any grant that ever conferred it": that would make capabilities
+  // impossible to narrow, since the superseded grant stays in the history
+  // forever. And not `member.capabilities`, which is the latest grant full
+  // stop — that made a renewal un-authorize everything signed before it, and
+  // a downgrade stricter than a revocation. `history` is in log order, so the
+  // last reachable entry is the one in force.
+  const ancestors = yield* seen(made.trustHead);
+  for (let at = member.history.length - 1; at >= 0; at--) {
+    const record = member.history[at]!;
+    if (record.commit !== made.trustHead && !ancestors.has(record.commit)) continue;
+    return permits(record.capabilities, capability);
   }
   return false;
 });
@@ -207,19 +213,20 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
       continue;
     }
 
-    if (!permits(member.capabilities, input.capability)) {
-      closest = `${signer} does not hold ${input.capability}`;
-      continue;
-    }
-
-    // And they had to hold it *then*. Revocation was already ordered by
-    // ancestry; grants were not, so a stored event was judged against whatever
-    // its signer holds now — which let a member with `hub.comment` pre-plant
-    // approvals and have them start counting the moment somebody granted them
-    // `hub.approve`, on a revision they never reviewed. The grant that carries
-    // the capability has to be something the author could already see.
-    if (!(yield* held(member, input.capability, made, ancestry))) {
-      closest = `${signer} did not yet hold ${input.capability} when this was signed`;
+    // A live request is judged against what they hold now; a stored event
+    // against what they held *then*, and only `held` can answer that. Asking
+    // the current capabilities first — as this did — meant a *narrowing* grant
+    // retroactively un-authorized every event its subject had already signed,
+    // which made a downgrade stricter than a revocation: a full revocation
+    // preserves those events through `former` and ancestry, and losing one
+    // capability erased them.
+    if (made === null) {
+      if (!permits(member.capabilities, input.capability)) {
+        closest = `${signer} does not hold ${input.capability}`;
+        continue;
+      }
+    } else if (!(yield* held(member, input.capability, made, ancestry))) {
+      closest = `${signer} did not hold ${input.capability} when this was signed`;
       continue;
     }
 

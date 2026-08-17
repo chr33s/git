@@ -1570,9 +1570,14 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         }
         // Redaction's other half: a tombstoned payload is still named by its
         // own event's tree, so it survives reachability unless excluded here.
-        request.exclude = yield* Redaction.excluded().pipe(
-          Effect.catchTag("StorageFailure", Effect.die),
-        );
+        // Skipped for a dry run, which deletes nothing and so has nothing to
+        // exclude from — the set costs a trust fold and a walk per pull
+        // request, which is a steep price for a report.
+        if (payload.dry_run !== true) {
+          request.exclude = yield* Redaction.excluded().pipe(
+            Effect.catchTag("StorageFailure", Effect.die),
+          );
+        }
         const report = yield* repository
           .gc(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));

@@ -1241,7 +1241,13 @@ refs/meta/trust/*
 
 MUST protect the Git objects they reference from GC — with one exception: blobs covered by a valid redaction tombstone (§21) are excluded from protection and pruned.
 
-Closing a PR means creating `pr.closed`, not deleting its history.
+Closing a PR means creating `pr.closed`, not deleting its history. A `pr.closed`
+or `pr.reopened` from the pull request's own author always counts; from anybody
+else it needs `hub.merge`. `hub.create-pr` is the lowest-privileged hub
+capability, and settling somebody else's approved pull request is not the same
+authority as opening one — a projection that treated it as such would let any
+hub writer close an approved pull request and, with it, block every push to the
+protected branch that pull request was the only route to.
 
 Destructive pruning beyond tombstoned blobs is a separate explicit administrative operation, and it is local: it does not replicate, and a pruned replica re-fetching from a peer will get the objects back unless the peer pruned too. Tombstones are the only replicating removal.
 

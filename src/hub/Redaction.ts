@@ -49,6 +49,15 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
 
   const found = new Set<Oid>();
   for (const pr of yield* Event.pullRequests()) {
+    // Walked before it is folded. A fold verifies a signature per event, and
+    // most pull requests have never been redacted at all — but any *valid*
+    // tombstone is first of all a decoded `event.redacted` payload, so a walk
+    // that finds none rules the whole pull request out without a single
+    // verification. The filter can produce a false positive, which costs one
+    // fold; it cannot produce a false negative, which is what would matter.
+    const { events } = yield* Event.entries(pr);
+    if (!events.some((entry) => entry.payload?.type === "event.redacted")) continue;
+
     const state = yield* project(genesis, trust, pr);
     if (state.redacted.size === 0) continue;
 

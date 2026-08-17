@@ -48,6 +48,7 @@ import { layer as knownRepos } from "../trust/KnownRepos.node.ts";
 import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
 import { project } from "../trust/Projection.ts";
+import { reconcile } from "../server/Replication.ts";
 import { readPrivateKey, readPublicKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
 /**
@@ -470,6 +471,7 @@ const enable = Command.make(
       const fetched = yield* Effect.gen(function* () {
         const target = { objects: yield* ObjectStore, refs: yield* RefStore };
         const all: string[] = [];
+        const joined: string[] = [];
         for (const spec of Refspec.HUB_FETCH) {
           const result = yield* fetchRepository({
             url,
@@ -478,13 +480,29 @@ const enable = Command.make(
             refspecs: [spec],
           });
           all.push(...result.refs.map((update) => update.name));
+
+          // A fetch refuses a ref that is not a fast-forward, which is right
+          // for a branch and only half an answer for a history meant to grow.
+          // Dropping the refusals here meant a trust log this replica had also
+          // appended to was silently skipped — so freshly published
+          // revocations simply never arrived, and nothing said so.
+          for (const ref of result.rejected) {
+            const divergence = yield* reconcile(ref.name, ref.oid);
+            if (divergence.joined !== null) joined.push(ref.name);
+            else if (divergence.ours !== divergence.theirs) {
+              yield* Console.error(`! ${ref.name} diverged and was left alone`);
+            }
+          }
         }
-        return all;
+        return { all, joined };
       }).pipe(Effect.provide(localRepository(directory)));
 
       yield* Console.log(`${key}`);
       yield* Console.log(`  ${identity}`);
-      yield* Console.log(`  ${fetched.length} hub/trust ref(s) fetched into ${directory}`);
+      yield* Console.log(`  ${fetched.all.length} hub/trust ref(s) fetched into ${directory}`);
+      if (fetched.joined.length > 0) {
+        yield* Console.log(`  ${fetched.joined.length} divergent ref(s) joined`);
+      }
     }).pipe(Effect.provide(knownRepos)),
 );
 

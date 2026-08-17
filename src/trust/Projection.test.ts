@@ -446,9 +446,52 @@ describe("trust projection", () => {
       assert.equal(outcome.planted.ok, false);
       assert.match(
         outcome.planted.ok === false ? outcome.planted.reason : "",
-        /did not yet hold hub\.approve/,
+        /did not hold hub\.approve/,
       );
       assert.equal(outcome.now.ok, true, "the grant is visible from a later head");
+    });
+
+    it("keeps past events valid when a member's grant is narrowed", async () => {
+      // The sharper version of a renewal: a *downgrade*. Asking the current
+      // capabilities before consulting the history made losing one capability
+      // stricter than losing membership outright — a full revocation preserves
+      // what its subject signed beforehand, and a narrowing grant erased it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.approve", "hub.review"], where.roots.slice(0, 2));
+
+          const when = yield* repository.resolve(Log.LOG_REF);
+          const bytes = new TextEncoder().encode("an approval made while he held it");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          // Downgraded: `hub.approve` taken away, `hub.review` kept.
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          return {
+            before: yield* Verify.authorize({
+              projection: yield* projectionOf(where),
+              bytes,
+              signatures: [signature],
+              capability: "hub.approve",
+              made: { at: new Date(), trustHead: when },
+            }),
+            // And going forward they genuinely no longer hold it.
+            now: yield* Verify.authorize({
+              projection: yield* projectionOf(where),
+              bytes,
+              signatures: [signature],
+              capability: "hub.approve",
+              made: { at: new Date(), trustHead: yield* repository.resolve(Log.LOG_REF) },
+            }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.before.ok, true, "what they signed while holding it still counts");
+      assert.equal(outcome.now.ok, false, "and they cannot sign a new one");
     });
 
     it("keeps past events valid when a member's grant is renewed", async () => {

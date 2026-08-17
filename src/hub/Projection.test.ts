@@ -793,6 +793,70 @@ describe("hub projection", () => {
     });
   });
 
+  describe("closing a pull request", () => {
+    it("is refused to somebody who is neither its author nor a merger", async () => {
+      // `hub.create-pr` is the lowest-privileged hub capability, and charging
+      // closing to it let anyone holding it close somebody else's approved
+      // pull request — after which `protectedBranch` skips it and the branch
+      // it was approved for cannot be moved at all.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          const meddler = yield* generate("meddler@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(meddler.publicKey),
+              capabilities: ["hub.create-pr"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+
+          yield* PullRequest.close({ repo: where.genesis.repoId, pr, key: meddler });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.state, "open", "somebody else's pull request stays open");
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /needs hub\.merge/);
+    });
+
+    it("is allowed to its own author", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.close({ repo: where.genesis.repoId, pr, key: where.author });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.state, "closed");
+      assert.deepEqual(outcome.rejected, []);
+    });
+
+    it("is allowed to somebody who may merge it", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          // The reviewer holds `hub.merge`.
+          yield* PullRequest.close({ repo: where.genesis.repoId, pr, key: where.reviewer });
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.state, "closed");
+      assert.deepEqual(outcome.rejected, []);
+    });
+  });
+
   describe("a review dismissal", () => {
     it("drops only the review its author claimed", async () => {
       // `review.dismissed` resolved by bare event id while ids are scoped to

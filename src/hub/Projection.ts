@@ -439,14 +439,37 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       }
 
       case "pr.closed":
-        // A merge is final; closing after it would be a later event undoing a
-        // state that has already landed in the branch.
-        if (state !== "merged") state = "closed";
+      case "pr.reopened": {
+        // Deciding a pull request's fate is not the same authority as opening
+        // one. `hub.create-pr` is the lowest-privileged hub capability, and
+        // charging closing to it let anybody holding it close somebody else's
+        // approved pull request — after which `protectedBranch` skips it and
+        // the branch it was approved for cannot be moved at all. Its own
+        // author may always close it; anybody else needs `hub.merge`, which is
+        // the capability for settling a pull request.
+        if (author !== null && signer !== author) {
+          const settles = yield* Verify.authorize({
+            projection: trust,
+            bytes: entry.bytes,
+            signatures: entry.signatures,
+            capability: "hub.merge",
+            made: { at: issued, trustHead: declared },
+            seen: ancestry,
+          });
+          if (!settles.ok) {
+            rejected.push({
+              commit: entry.commit,
+              reason: `${payload.type} by somebody other than the author needs hub.merge`,
+            });
+            break;
+          }
+        }
+        // A merge is final; closing or reopening after it would be a later
+        // event undoing a state that has already landed in the branch.
+        if (state === "merged") break;
+        state = payload.type === "pr.closed" ? "closed" : "open";
         break;
-
-      case "pr.reopened":
-        if (state !== "merged") state = "open";
-        break;
+      }
 
       case "pr.merged":
         state = "merged";
