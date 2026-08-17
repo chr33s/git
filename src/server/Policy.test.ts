@@ -689,8 +689,8 @@ describe("Policy", () => {
 
   describe("writing a ref whose value is not known yet", () => {
     /** The JSON verbs that compute the new value while doing the work. */
-    const gateWriteAs = (where: World | null, ref: string) =>
-      Policy.gateWrite(ref).pipe(
+    const gateWriteAs = (where: World | null, ref: string, rewrites = false) =>
+      Policy.gateWrite(ref, rewrites).pipe(
         Effect.provide(
           Auth.requester({
             principal: where?.principal.member ?? null,
@@ -832,6 +832,31 @@ describe("Policy", () => {
         }),
       );
       assert.equal(refusal, null);
+    });
+
+    it("charges a force-push for the writes that behave like one", async () => {
+      // Two JSON verbs move a ref to a value that need not contain what it
+      // currently holds: `tagCreate --force`, which drops the create-only
+      // compare-and-swap, and a merge whose `into` is a third branch, whose
+      // result is a commit over `ours` and `theirs` and nothing else. Both
+      // were gated as ordinary writes, so `source.push` alone did what
+      // receive-pack charges `source.force-push` for.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          return {
+            plain: yield* gateWriteAs(where, "refs/tags/v1"),
+            forced: yield* gateWriteAs(where, "refs/tags/v1", true),
+            branch: yield* gateWriteAs(where, "refs/heads/main"),
+            rewrite: yield* gateWriteAs(where, "refs/heads/main", true),
+          };
+        }),
+      );
+
+      assert.equal(outcome.plain, null, "an ordinary tag needs only source.push");
+      assert.match(outcome.forced ?? "", /source\.force-push/);
+      assert.equal(outcome.branch, null);
+      assert.match(outcome.rewrite ?? "", /source\.force-push/);
     });
 
     it("refuses a hub ref, which is appended to and never written", async () => {

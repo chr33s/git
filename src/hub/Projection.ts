@@ -98,6 +98,15 @@ export interface PullRequest {
   readonly threads: ReadonlyArray<Thread>;
   readonly checks: ReadonlyArray<Check>;
   /**
+   * Which commits claimed each event id, among the events that counted.
+   *
+   * Exposed because a caller naming an id — `redact` is the one — has to
+   * resolve it exactly as the fold does. Resolving it independently, over the
+   * raw walk, meant a rejected event could be picked as the target while the
+   * projection redacted a different one.
+   */
+  readonly claims: ReadonlyMap<string, ReadonlyArray<Oid>>;
+  /**
    * The commits whose payloads a valid tombstone reached.
    *
    * Commits rather than event ids, because an id is scoped to its author here
@@ -205,18 +214,25 @@ const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
 const trustReach = () => {
   const walked = new Map<Oid, ReadonlySet<Oid>>();
 
+  /** The memo itself, which `Verify.authorize` takes so it walks the log once too. */
+  const ancestry: Verify.Ancestry = Effect.fnUntraced(function* (head: Oid) {
+    const seen = walked.get(head) ?? (yield* Log.ancestry(head));
+    walked.set(head, seen);
+    return seen;
+  });
+
   /**
    * `null` — an event that recorded no trust head — reaches everything, which
    * is the same conservative reading `Verify.reaches` gives it: an author who
    * cannot show what they had seen is treated as having seen everything, and
    * here that means they cannot be behind their own ancestors either.
    */
-  return Effect.fnUntraced(function* (head: Oid | null, target: Oid) {
+  const reaches = Effect.fnUntraced(function* (head: Oid | null, target: Oid) {
     if (head === null || head === target) return true;
-    const seen = walked.get(head) ?? (yield* Log.ancestry(head));
-    walked.set(head, seen);
-    return seen.has(target);
+    return (yield* ancestry(head)).has(target);
   });
+
+  return { ancestry, reaches };
 };
 
 /**
@@ -290,7 +306,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
 
   /** The trust head each accepted event named, for the monotonicity check. */
   const heads = new Map<Oid, Oid>();
-  const reachesTrust = trustReach();
+  const { ancestry, reaches: reachesTrust } = trustReach();
 
   /**
    * The newest trust head any accepted ancestor of this commit named.
@@ -358,6 +374,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       signatures: entry.signatures,
       capability: Event.capabilityFor(payload),
       made: { at: new Date(payload.issuedAt), trustHead: declared },
+      seen: ancestry,
     });
     if (!authorized.ok) {
       rejected.push({ commit: entry.commit, reason: authorized.reason });
@@ -452,9 +469,23 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         break;
       }
 
-      case "review.dismissed":
-        dismissed.add(payload.review);
+      case "review.dismissed": {
+        // By claimant, like every other cross-reference. Resolved by bare id
+        // this dropped every review sharing it, so a `hub.review` holder could
+        // nullify an `hub.approve` holder's approval by posting a review that
+        // re-used its id and then dismissing that.
+        const found = byEventId(reviews, payload.review);
+        if (found === null || found === "ambiguous") {
+          rejected.push({
+            commit: entry.commit,
+            reason:
+              found === null ? `no review ${payload.review}` : `ambiguous review ${payload.review}`,
+          });
+          break;
+        }
+        dismissed.add(found.key);
         break;
+      }
 
       case "comment.created":
         threads.set(mine, {
@@ -564,7 +595,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     mergeCommit,
     reviews: [...reviews.entries()].map(([key, review]) => ({
       ...review,
-      dismissed: dismissed.has(review.id),
+      dismissed: dismissed.has(key),
       // Stale, not gone: the statement stays true about the revision it named.
       stale: head === null || review.head !== head,
       // A tombstone removes content wherever the content is. Blanking only
@@ -582,6 +613,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       ),
     })),
     checks: [...checks.values()],
+    claims: byId,
     redacted,
     rejected,
     at,

@@ -24,6 +24,7 @@ import { Effect } from "effect";
 
 import { type Fingerprint, fingerprint, NAMESPACE, verify } from "../crypto/SshSignature.ts";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import type { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { permits } from "./Certificate.ts";
 import * as Log from "./Log.ts";
@@ -41,6 +42,14 @@ export interface Made {
   readonly at: Date;
   readonly trustHead: Oid | null;
 }
+
+/**
+ * "Everything this trust-log commit reaches", however the caller wants it
+ * computed — `Log.ancestry`, or a memo over it.
+ */
+export type Ancestry = (
+  head: Oid,
+) => Effect.Effect<ReadonlySet<Oid>, Invalid | ObjectNotFound | StorageFailure, Repository>;
 
 export type Authorization =
   | { readonly ok: true; readonly principal: Member }
@@ -81,6 +90,7 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   projection: Projection,
   subject: Fingerprint,
   made: Made | null,
+  seen: Ancestry,
 ) {
   const revocation = projection.revoked.get(subject);
   if (revocation === undefined) return false;
@@ -111,8 +121,7 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // would otherwise be a way out of every forward-only revocation.
   if (!(yield* Log.contains(made.trustHead))) return true;
 
-  const seen = yield* Log.ancestry(made.trustHead);
-  return seen.has(revocation.commit);
+  return (yield* seen(made.trustHead)).has(revocation.commit);
 });
 
 /**
@@ -125,10 +134,25 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
  * no trust head is treated as having seen everything, which is the reading
  * that field gets everywhere else.
  */
-const held = Effect.fn("trust.Verify.held")(function* (grant: Oid, made: Made | null) {
+const held = Effect.fn("trust.Verify.held")(function* (
+  member: Member,
+  capability: string,
+  made: Made | null,
+  seen: Ancestry,
+) {
   if (made === null || made.trustHead === null) return true;
-  if (made.trustHead === grant) return true;
-  return (yield* Log.ancestry(made.trustHead)).has(grant);
+
+  // *Any* grant that conferred it and was already visible, not merely the
+  // latest one. A member's `grant` field is overwritten by every later grant,
+  // so checking that alone meant an ordinary renewal — a second `hub grant` to
+  // the same key — retroactively un-authorized every event they had ever
+  // signed, since the only grant on record post-dated all of them.
+  for (const record of member.history) {
+    if (!permits(record.capabilities, capability)) continue;
+    if (record.commit === made.trustHead) return true;
+    if ((yield* seen(made.trustHead)).has(record.commit)) return true;
+  }
+  return false;
 });
 
 /**
@@ -145,14 +169,24 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
   readonly capability: string;
   /** Absent for a live request; present when judging a stored event. */
   readonly made?: Made;
+  /**
+   * Trust-log ancestry, memoised by the caller.
+   *
+   * `Log.ancestry` walks the log — a read per commit — and a fold judging a
+   * hundred events asks about the same handful of heads every time. The log
+   * does not move while a projection is being built, so a caller folding one
+   * hands its own memo in; a one-off caller gets the plain walk.
+   */
+  readonly seen?: Ancestry;
 }) {
   const made = input.made ?? null;
+  const ancestry = input.seen ?? Log.ancestry;
   const found = yield* signers(input.bytes, input.signatures);
   if (found.length === 0) return denied("no valid signature");
 
   let closest = "signer is not a member of this repository";
   for (const signer of found) {
-    if (yield* reaches(input.projection, signer, made)) {
+    if (yield* reaches(input.projection, signer, made, ancestry)) {
       closest = `${signer} has been revoked`;
       continue;
     }
@@ -184,7 +218,7 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
     // approvals and have them start counting the moment somebody granted them
     // `hub.approve`, on a revision they never reviewed. The grant that carries
     // the capability has to be something the author could already see.
-    if (!(yield* held(member.grant, made))) {
+    if (!(yield* held(member, input.capability, made, ancestry))) {
       closest = `${signer} did not yet hold ${input.capability} when this was signed`;
       continue;
     }
@@ -206,7 +240,7 @@ export const authorizeKey = Effect.fn("trust.Verify.authorizeKey")(function* (in
   readonly capability: string;
   readonly at?: Date;
 }) {
-  if (yield* reaches(input.projection, input.signer, null)) {
+  if (yield* reaches(input.projection, input.signer, null, Log.ancestry)) {
     return denied(`${input.signer} has been revoked`);
   }
 

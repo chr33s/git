@@ -37,6 +37,22 @@ export interface Member {
   readonly expiresAt: Date | null;
   /** The log commit that granted this, for an operator tracing authority. */
   readonly grant: Oid;
+  /**
+   * Every grant this key has been given, oldest first.
+   *
+   * Kept because `grant` alone answers "where do their capabilities come from
+   * *now*", and judging a stored event needs "where did they come from *then*".
+   * Collapsing the two meant an ordinary renewal — a second `hub grant` to the
+   * same key — retroactively un-authorized every event that member had ever
+   * signed, since the only grant on record post-dated all of them.
+   */
+  readonly history: ReadonlyArray<GrantRecord>;
+}
+
+/** One grant, as the fold recorded it. */
+export interface GrantRecord {
+  readonly commit: Oid;
+  readonly capabilities: ReadonlyArray<string>;
 }
 
 export interface Revocation {
@@ -251,6 +267,11 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
         continue;
       }
 
+      // Appended to whatever this key already had — including what it held
+      // before a revocation, since re-instating is a continuation rather than
+      // a fresh start, and the events signed under the old grant were
+      // authorized when they were made.
+      const previous = members.get(subject) ?? former.get(subject);
       members.set(subject, {
         fingerprint: subject,
         publicKey: payload.publicKey,
@@ -258,6 +279,10 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
         grantedAt: new Date(payload.issuedAt),
         expiresAt: payload.expiresAt === null ? null : new Date(payload.expiresAt),
         grant: entry.commit,
+        history: [
+          ...(previous?.history ?? []),
+          { commit: entry.commit, capabilities: payload.capabilities },
+        ],
       });
       revoked.delete(subject);
       // `former` is what a forward-only revocation is judged against, and this

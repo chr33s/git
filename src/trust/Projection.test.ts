@@ -451,6 +451,38 @@ describe("trust projection", () => {
       assert.equal(outcome.now.ok, true, "the grant is visible from a later head");
     });
 
+    it("keeps past events valid when a member's grant is renewed", async () => {
+      // The other half of the ordering rule, and the one an ordinary
+      // repository hits every day: a member's `grant` is overwritten by each
+      // later grant, so checking only that one made a routine renewal
+      // retroactively un-authorize every event they had ever signed.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.approve"], where.roots.slice(0, 2));
+
+          const when = yield* repository.resolve(Log.LOG_REF);
+          const bytes = new TextEncoder().encode("an approval made in good time");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          // A renewal: same key, same capability, a later commit.
+          yield* grantTo(where, bob, ["hub.approve"], where.roots.slice(0, 2));
+
+          return yield* Verify.authorize({
+            projection: yield* projectionOf(where),
+            bytes,
+            signatures: [signature],
+            capability: "hub.approve",
+            made: { at: new Date(), trustHead: when },
+          });
+        }),
+      );
+
+      assert.equal(outcome.ok, true, "a renewal must not unmake what came before it");
+    });
+
     it("refuses an event whose trust head is a commit outside the trust log", async () => {
       // The sharper version of the test above: an oid this replica genuinely
       // holds, but that is not a trust record — the tip of `main`, say. An

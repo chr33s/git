@@ -793,6 +793,78 @@ describe("hub projection", () => {
     });
   });
 
+  describe("a review dismissal", () => {
+    it("drops only the review its author claimed", async () => {
+      // `review.dismissed` resolved by bare event id while ids are scoped to
+      // their author, so one dismissal could drop two authors' reviews — and
+      // `hub.review` alone sufficed to nullify an `hub.approve` holder's
+      // approval by re-using its id and dismissing that.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const ref = Event.refOf(pr);
+          const root = yield* repository.resolve(ref);
+
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            body: "looks right",
+            key: where.reviewer,
+          });
+          const approval = yield* repository.resolve(ref);
+          const { events } = yield* Event.entries(pr);
+          const id = events.find((entry) => entry.commit === approval)?.payload?.id ?? "";
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          // The author holds `hub.review`, so their own review is authorized —
+          // and it re-uses the approval's id.
+          const bytes = Event.encode({
+            version: 1,
+            type: "review.submitted",
+            repo: where.genesis.repoId,
+            pr,
+            id,
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead,
+            head: Event.qualify(REVISION),
+            decision: "comment",
+            body: "a decoy",
+          });
+          const decoy = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+            parents: [root!],
+            message: `review.submitted ${id}\n`,
+          });
+          const joined = yield* Event.join(pr, [approval!, decoy]);
+          yield* repository.setRef({ name: ref, to: joined });
+
+          // Dismissing by that id now names two reviews, so it names neither.
+          yield* PullRequest.dismissReview({
+            repo: where.genesis.repoId,
+            pr,
+            review: id,
+            reason: "no longer relevant",
+            key: where.author,
+          });
+
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      const approval = outcome.reviews.find((review) => review.decision === "approve");
+      assert.notEqual(approval, undefined, "the approval must still be there");
+      assert.equal(approval?.dismissed, false, "and must not have been dismissed by proxy");
+      assert.match(outcome.rejected.map((entry) => entry.reason).join(" "), /ambiguous review/);
+    });
+  });
+
   describe("a tombstone", () => {
     it("reaches only the event its author claimed, not every event sharing an id", async () => {
       // Ids are scoped to their author everywhere else in the fold, and a
@@ -848,27 +920,26 @@ describe("hub projection", () => {
           yield* repository.setRef({ name: ref, to: joined });
 
           // The reviewer holds `hub.redact` and names that id. Two events
-          // answer to it, so the tombstone identifies neither.
-          yield* PullRequest.redact({
+          // answer to it, so the tombstone identifies neither — and `redact`
+          // says so rather than writing one and hoping.
+          const failure = yield* PullRequest.redact({
             repo: where.genesis.repoId,
             pr,
             target: id,
             reason: "sensitive-content",
             key: where.reviewer,
-          }).pipe(Effect.ignore);
+          }).pipe(Effect.flip);
 
           const trust = yield* projectTrust(where.genesis);
-          return yield* project(where.genesis, trust, pr);
+          return { failure, state: yield* project(where.genesis, trust, pr) };
         }),
       );
 
-      assert.equal(outcome.reviews.length, 1, "the approval must survive");
-      assert.equal(outcome.reviews[0]?.body, "looks right", "and keep its content");
-      assert.equal(outcome.redacted.size, 0, "an ambiguous target redacts nothing");
-      assert.match(
-        outcome.rejected.map((entry) => entry.reason).join(" "),
-        /ambiguous redaction target/,
-      );
+      assert.equal(outcome.failure._tag, "Invalid");
+      assert.match(outcome.failure.reason, /2 events claiming/);
+      assert.equal(outcome.state.reviews.length, 1, "the approval must survive");
+      assert.equal(outcome.state.reviews[0]?.body, "looks right", "and keep its content");
+      assert.equal(outcome.state.redacted.size, 0, "an ambiguous target redacts nothing");
     });
   });
 

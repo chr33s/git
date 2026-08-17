@@ -1188,7 +1188,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("tagCreate", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        yield* gateWrite(`refs/tags/${payload.name}`);
+        // `force` drops `Repository.tag`'s create-only compare-and-swap, which
+        // is re-pointing a published tag at an arbitrary commit — the thing
+        // receive-pack charges `source.force-push` for. Gating it as an
+        // ordinary write let a member with `source.push` do it here instead.
+        yield* gateWrite(`refs/tags/${payload.name}`, payload.force === true);
         const request: TagRequest = { name: payload.name, target: payload.target };
         if (payload.message !== undefined) request.message = payload.message;
         if (payload.tagger !== undefined) request.tagger = signatureFrom(payload.tagger);
@@ -1235,7 +1239,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
             reason: outcome.reason ?? `refs/tags/${params.name} moved while it was being deleted`,
           });
         }
-        return { deleted: outcome?.from !== null };
+        // `undefined` is "the store returned no result for a command we
+        // submitted", which is not "it was deleted": reading it as `true`
+        // would report a removal that never happened.
+        return { deleted: outcome !== undefined && outcome.from !== null };
       }),
     )
     .handle("fsck", () =>
@@ -1267,7 +1274,8 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
             reason: outcome.reason ?? `refs/heads/${params.name} moved while it was being deleted`,
           });
         }
-        return { deleted: outcome?.from !== null };
+        // As in `tagRemove`: a missing result is not a deletion.
+        return { deleted: outcome !== undefined && outcome.from !== null };
       }),
     )
     .handle("reset", ({ payload }) =>
@@ -1321,7 +1329,15 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         if (payload.strategy !== undefined) request.strategy = payload.strategy;
         if (payload.into !== undefined) request.into = payload.into;
         if (payload.no_fast_forward !== undefined) request.noFastForward = payload.no_fast_forward;
-        if (payload.into !== undefined) yield* gateWrite(refNameOf(payload.into));
+        // A merge *into a third branch* is a rewrite: the result is a commit
+        // over `ours` and `theirs`, and nothing makes it contain what `into`
+        // currently holds. Only merging into one of its own sides is the
+        // fast-forward-or-descend transition an ordinary push is.
+        if (payload.into !== undefined) {
+          const into = refNameOf(payload.into);
+          const rewrites = into !== refNameOf(payload.ours) && into !== refNameOf(payload.theirs);
+          yield* gateWrite(into, rewrites);
+        }
         const outcome = yield* repository
           .merge(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));

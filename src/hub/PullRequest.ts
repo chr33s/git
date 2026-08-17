@@ -305,15 +305,36 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
 }) {
   const repository = yield* Repository;
 
-  const { events } = yield* Event.entries(input.pr);
-  const target = events.find((entry) => entry.payload?.id === input.target);
-  if (target === undefined) {
+  const stored = yield* readGenesis();
+  if (stored === null) {
+    return yield* new Invalid({ field: "repo", reason: "this repository has no genesis" });
+  }
+  const trust = yield* projectTrust(stored.genesis);
+
+  // The target is resolved through the projection, not over the raw walk.
+  // Those two disagree: the walk includes events the fold rejected, so a
+  // pre-planted unsigned event re-using an id could be picked here while the
+  // fold redacted a different one — leaving `redact` reporting failure forever
+  // over a payload `gc` had already been told to prune.
+  const before = yield* project(stored.genesis, trust, input.pr);
+  const claimants = before.claims.get(input.target) ?? [];
+  if (claimants.length === 0) {
     return yield* new Invalid({
       field: "target",
       reason: `${input.pr} has no event ${input.target}`,
     });
   }
-  if (target.payload?.type === "event.redacted") {
+  if (claimants.length > 1) {
+    return yield* new Invalid({
+      field: "target",
+      reason: `${input.pr} has ${claimants.length} events claiming ${input.target}`,
+    });
+  }
+  const targetCommit = claimants[0]!;
+
+  const { events } = yield* Event.entries(input.pr);
+  const target = events.find((entry) => entry.commit === targetCommit);
+  if (target?.payload?.type === "event.redacted") {
     return yield* new Invalid({
       field: "target",
       reason: "a tombstone is the record of a removal and is not itself removable",
@@ -336,12 +357,8 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   // become an unreadable event that stopped counting toward a merge. So the
   // projection is rebuilt and asked, and a refused tombstone is reported as
   // the failure it is rather than performed anyway.
-  const stored = yield* readGenesis();
-  if (stored === null) {
-    return yield* new Invalid({ field: "repo", reason: "this repository has no genesis" });
-  }
-  const state = yield* project(stored.genesis, yield* projectTrust(stored.genesis), input.pr);
-  if (!state.redacted.has(target.commit)) {
+  const state = yield* project(stored.genesis, trust, input.pr);
+  if (!state.redacted.has(targetCommit)) {
     const refused = state.rejected.find((entry) => entry.commit === commit);
     return yield* new Invalid({
       field: "target",
