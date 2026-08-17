@@ -52,7 +52,7 @@ describe("Git LFS", () => {
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-lfs-"));
-    server = await serve({ root });
+    server = await serve({ root, allowAnonymousWrites: true });
   });
 
   afterAll(async () => {

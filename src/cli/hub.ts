@@ -493,7 +493,7 @@ const enable = Command.make(
           for (const ref of result.rejected) {
             const divergence = yield* reconcile(ref.name, ref.oid);
             if (divergence.joined !== null) joined.push(ref.name);
-            else if (divergence.ours !== divergence.theirs) {
+            else if (divergence.diverged) {
               yield* Console.error(`! ${ref.name} diverged and was left alone`);
             }
           }

@@ -18,6 +18,7 @@ import { HttpApiTest } from "effect/unstable/httpapi";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Api from "./Api.ts";
+import * as Policy from "./Policy.ts";
 import * as Subscribers from "./Subscribers.ts";
 
 const repository = GitRepository.layer.pipe(
@@ -31,7 +32,13 @@ const live = Layer.mergeAll(
   Etag.layerWeak,
   FileSystem.layerNoop({}),
   Path.layer,
-).pipe(Layer.provideMerge(repository), Layer.provideMerge(Subscribers.memory));
+).pipe(
+  Layer.provideMerge(repository),
+  Layer.provideMerge(Subscribers.memory),
+  // These repositories have no genesis, so the policy boundary refuses writes
+  // to them unless the host says otherwise — `serve --open`'s choice.
+  Layer.provideMerge(Policy.anonymousWrites(true)),
+);
 
 /**
  * The handlers reach `Repository` and `Subscribers` through the request

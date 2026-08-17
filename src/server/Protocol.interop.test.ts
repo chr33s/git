@@ -73,7 +73,7 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-protocol-interop-"));
-    server = await serve({ root });
+    server = await serve({ root, allowAnonymousWrites: true });
     base = server.url;
   });
 

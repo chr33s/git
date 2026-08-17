@@ -404,7 +404,7 @@ describe("Artifacts local provider", () => {
 
   it("imports a repository over smart HTTP from the node host", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-artifacts-import-"));
-    const server = await serve({ root });
+    const server = await serve({ root, allowAnonymousWrites: true });
 
     // Seed the remote the same way the interop suite does.
     const seededHead = await Effect.runPromise(

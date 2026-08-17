@@ -27,11 +27,16 @@ import { DELIM, FLUSH, pkt } from "../git/Pkt.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { RefStore, type Oid } from "../git/Store.ts";
+import * as Policy from "./Policy.ts";
 import * as Protocol from "./Protocol.ts";
 
+// These repositories have no genesis, so the policy boundary refuses writes to
+// them unless the host says otherwise — which is the choice `serve --open`
+// makes, and which every scratch repository in this file relies on.
 const live = GitRepository.layer.pipe(
   Layer.provide(GitRepository.hooksNoop),
   Layer.provideMerge(stores),
+  Layer.provideMerge(Policy.anonymousWrites(true)),
 );
 
 const decoder = new TextDecoder();
@@ -386,6 +391,7 @@ describe("receive-pack", () => {
       const onDisk = GitRepository.layer.pipe(
         Layer.provide(GitRepository.hooksNoop),
         Layer.provideMerge(nodeStores(root)),
+        Layer.provideMerge(Policy.anonymousWrites(true)),
       );
 
       const advertised = await Effect.runPromise(
@@ -437,6 +443,7 @@ describe("receive-pack", () => {
       const onDisk = GitRepository.layer.pipe(
         Layer.provide(GitRepository.hooksNoop),
         Layer.provideMerge(nodeStores(root)),
+        Layer.provideMerge(Policy.anonymousWrites(true)),
       );
 
       const reports = await Effect.runPromise(
@@ -485,6 +492,7 @@ describe("receive-pack", () => {
       const onDisk = GitRepository.layer.pipe(
         Layer.provide(GitRepository.hooksNoop),
         Layer.provideMerge(nodeStores(root)),
+        Layer.provideMerge(Policy.anonymousWrites(true)),
       );
 
       const report = await Effect.runPromise(

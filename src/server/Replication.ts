@@ -37,6 +37,15 @@ export interface Divergence {
   readonly theirs: Oid;
   /** The join that reconciled it, for an append-only ref. */
   readonly joined: Oid | null;
+  /**
+   * Whether this needs a person.
+   *
+   * `ours !== theirs` is not the question: a replica that pushed last is ahead
+   * of its peer, which is the ordinary state of things and not something to
+   * report. This is true only for a branch that genuinely went two ways, which
+   * automatic synchronization refuses to resolve.
+   */
+  readonly diverged: boolean;
 }
 
 export interface Outcome {
@@ -121,22 +130,29 @@ export const reconcile = Effect.fn("Replication.reconcile")(function* (ref: stri
   const ours = yield* repository.resolve(ref);
   if (ours === null) {
     yield* repository.setRef({ name: ref, to: theirs, expected: null });
-    return { ref, ours: theirs, theirs, joined: null } satisfies Divergence;
+    return { ref, ours: theirs, theirs, joined: null, diverged: false } satisfies Divergence;
   }
-  if (ours === theirs) return { ref, ours, theirs, joined: null } satisfies Divergence;
+  if (ours === theirs) {
+    return { ref, ours, theirs, joined: null, diverged: false } satisfies Divergence;
+  }
 
   if (!Refspec.isAppendOnly(ref)) {
     // Reported, never resolved: automatic synchronization must not invent a
     // merge, a rebase or a force push on a branch.
-    return { ref, ours, theirs, joined: null } satisfies Divergence;
+    return { ref, ours, theirs, joined: null, diverged: true } satisfies Divergence;
   }
 
   // Already ahead of them, or already behind: a fast-forward either way, and
-  // no join to record.
-  if (yield* ancestorOf(theirs, ours)) return { ref, ours, theirs, joined: null };
+  // no join to record — and *not* a divergence, which is what a caller reports
+  // to a person. Being ahead of a peer is the ordinary state of the replica
+  // that pushed last, and announcing it as a stuck trust log is a false alarm
+  // in the one flow whose purpose is surfacing a real one.
+  if (yield* ancestorOf(theirs, ours)) {
+    return { ref, ours, theirs, joined: null, diverged: false } satisfies Divergence;
+  }
   if (yield* ancestorOf(ours, theirs)) {
     yield* repository.setRef({ name: ref, to: theirs, expected: ours });
-    return { ref, ours, theirs, joined: null } satisfies Divergence;
+    return { ref, ours, theirs, joined: null, diverged: false } satisfies Divergence;
   }
 
   // Which ref this is decides where the join goes. Sending anything that is
@@ -147,7 +163,7 @@ export const reconcile = Effect.fn("Replication.reconcile")(function* (ref: stri
   const joined =
     pr !== null ? yield* Event.join(pr, [ours, theirs]) : yield* joinInto(ref, [ours, theirs]);
 
-  return { ref, ours, theirs, joined } satisfies Divergence;
+  return { ref, ours, theirs, joined, diverged: false } satisfies Divergence;
 });
 
 const ancestorOf = Effect.fn("Replication.ancestorOf")(function* (ancestor: Oid, descendant: Oid) {

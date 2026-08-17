@@ -25,7 +25,7 @@
  * is a race with a name: the approvals counted a moment ago were for a head
  * that has since moved.
  */
-import { Effect, Option, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { Invalid } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
@@ -245,6 +245,27 @@ const isProtected = (rules: Rules, ref: string): boolean => {
   });
 };
 
+/**
+ * Whether this host serves writes to repositories that have no identity.
+ *
+ * §14 is unconditional that anonymous does not get `source.push`, and a
+ * repository with no genesis has no membership to grant it — so the default is
+ * to refuse, which is also what every stock git host does with an unconfigured
+ * bare repository. It is a *host* decision rather than a repository one for the
+ * only reason a host ever gets to decide anything here: a repository with no
+ * identity has no way to state a policy of its own.
+ *
+ * The escape hatch exists because a scratch server on a laptop is a real thing
+ * to want, and making it say so out loud is the difference between a choice and
+ * an accident.
+ */
+export class AnonymousWrites extends Context.Service<AnonymousWrites, boolean>()(
+  "server/AnonymousWrites",
+) {}
+
+export const anonymousWrites = (allowed: boolean): Layer.Layer<AnonymousWrites> =>
+  Layer.succeed(AnonymousWrites)(allowed);
+
 export interface Principal {
   /** `null` for an anonymous request, which may never write. */
   readonly member: Member | null;
@@ -301,16 +322,32 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     return refused(update.name, "the genesis is written once and never moves");
   }
 
-  // Not hub-enabled: no genesis, no members, and nothing here to enforce
-  // beyond what the namespaces themselves mean — with one exception. A
-  // repository with no identity must not acquire one by push: whoever got
-  // there first would own it, and the owner would be locked out of their own
-  // repository by a stranger. Identity is established locally, by `hub init`.
+  // Not hub-enabled: no genesis, so no members, so nobody holds `source.push`
+  // — and §14 is unconditional that anonymous does not get it. A repository
+  // with no identity is readable by anyone who can reach it, exactly as a
+  // plain git repository has always been, and writable over the network by
+  // nobody: there is no membership graph for it to be judged against, and
+  // "no policy" must not read as "no protection". `hub init` is what gives a
+  // repository something to say about who may write to it.
+  //
+  // That also stops a repository acquiring an identity by push. Whoever got
+  // there first would own it, and its actual owner would be locked out of
+  // their own repository by a stranger.
   if (input.genesis === null || input.trust === null) {
+    // Identity is never acquired by push, whatever the host allows: whoever
+    // got there first would own the repository, and its actual owner would be
+    // locked out of it by a stranger.
     if (update.name.startsWith("refs/meta/trust/")) {
       return refused(
         update.name,
         "a repository's identity is established by `hub init`, not by a push",
+      );
+    }
+    const open = yield* Effect.serviceOption(AnonymousWrites);
+    if (!Option.getOrElse(open, () => false)) {
+      return refused(
+        update.name,
+        "this repository has no membership to authorize a write; run `hub init` to give it one",
       );
     }
     return yield* namespaceRules(update, current, stored);

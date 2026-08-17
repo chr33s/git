@@ -758,6 +758,13 @@ anonymous
 source.push ✗
 ```
 
+A repository with **no genesis** has no membership to grant anything, so nobody
+holds `source.push` on it: it is readable by anyone who can reach it, exactly as
+a plain Git repository has always been, and writable over the network by nobody.
+Hosts MAY offer an explicit opt-in for scratch servers (`serve --open`), and it
+MUST be off by default — "no policy" is not "no protection", and the operator
+who wants an open write endpoint should have to say so.
+
 A **private** repository requires `repo.read` even for fetch. Stock git clients satisfy this with a delegated credential (§12) scoped to `repo.read`; native clients use either path.
 
 ---

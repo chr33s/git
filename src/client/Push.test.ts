@@ -159,7 +159,7 @@ const serverRef = (repo: string, name: string): Promise<Oid | null> =>
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "client-push-"));
-  server = await serve({ root });
+  server = await serve({ root, allowAnonymousWrites: true });
 });
 
 afterAll(async () => {

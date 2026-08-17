@@ -637,6 +637,46 @@ describe("Policy", () => {
     });
   });
 
+  describe("a repository with no identity", () => {
+    it("refuses a write unless the host says otherwise", async () => {
+      // §14 is unconditional that anonymous does not get `source.push`, and a
+      // repository with no genesis has no membership to grant it. The previous
+      // model required a server secret, so deploying this over an existing
+      // installation would otherwise have made every repository accept
+      // unauthenticated pushes, force-pushes and deletes included.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { second } = yield* history("refs/heads/topic");
+          const closed = yield* gateAs(null, [{ name: "refs/heads/other", value: second }]);
+          const open = yield* gateAs(null, [{ name: "refs/heads/other", value: second }]).pipe(
+            Effect.provide(Policy.anonymousWrites(true)),
+          );
+          return { closed, open };
+        }),
+      );
+
+      assert.equal(outcome.closed.updates.length, 0);
+      assert.match(outcome.closed.refused.at(0)?.reason ?? "", /hub init/);
+      assert.equal(outcome.open.updates.length, 1, "--open is what serves them anyway");
+    });
+
+    it("never lets a push establish an identity, open or not", async () => {
+      // Whoever got there first would own the repository, and its actual owner
+      // would be locked out of it by a stranger.
+      const refused = await scenario(
+        Effect.gen(function* () {
+          const { second } = yield* history("refs/heads/topic");
+          return yield* gateAs(null, [{ name: "refs/meta/trust/genesis", value: second }]).pipe(
+            Effect.provide(Policy.anonymousWrites(true)),
+          );
+        }),
+      );
+
+      assert.equal(refused.updates.length, 0);
+      assert.match(refused.refused.at(0)?.reason ?? "", /not by a push/);
+    });
+  });
+
   describe("how stale a membership view may be", () => {
     /** Publish rules with a checkpoint age bound. */
     const withMaxAge = Effect.fn("test.withMaxAge")(function* (seconds: number) {
@@ -1002,7 +1042,9 @@ describe("Policy", () => {
         Effect.gen(function* () {
           const repository = yield* Repository;
           const { second } = yield* history("refs/heads/topic");
-          const gated = yield* gateAs(null, [{ name: "refs/heads/other", value: second }]);
+          const gated = yield* gateAs(null, [{ name: "refs/heads/other", value: second }]).pipe(
+            Effect.provide(Policy.anonymousWrites(true)),
+          );
           yield* repository.receive(gated.updates);
           return { gated, landed: yield* repository.resolve("refs/heads/other") };
         }),

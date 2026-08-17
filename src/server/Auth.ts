@@ -43,7 +43,8 @@ import {
 } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
-import { readGenesis, type RepoId } from "../trust/Genesis.ts";
+import { type Genesis, readGenesis, type RepoId } from "../trust/Genesis.ts";
+import { LOG_REF } from "../trust/Log.ts";
 import { type Member, project, type Projection } from "../trust/Projection.ts";
 import { permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
@@ -563,7 +564,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     } as const;
   }
 
-  const projection = yield* project(stored.genesis);
+  const projection = yield* folded(stored.genesis);
   const presented = credentialOf(input.request);
   const nonces = yield* Nonces;
 
@@ -709,6 +710,39 @@ const EMPTY: Projection = {
  */
 export class Requester extends Context.Service<Requester, Authenticated>()("server/Requester") {}
 
+/**
+ * The trust fold, remembered by the log head it was folded from.
+ *
+ * Every request runs it, and it is an Ed25519 verification per signature per
+ * record — so an anonymous `GET /info/refs` loop is an amplifier without this,
+ * paying nothing to make the server pay for a full fold each time. The result
+ * is a pure function of the log head, which the memo is keyed by, so a stale
+ * answer is not possible: the moment anything appends, the key changes.
+ *
+ * Bounded, and small: a host serves many repositories and this holds one entry
+ * per *state* of each, so the oldest is evicted rather than kept forever.
+ */
+const FOLDS = 64;
+const folds = new Map<string, Projection>();
+
+const folded = Effect.fn("Auth.folded")(function* (genesis: Genesis) {
+  const repository = yield* Repository;
+  const head = yield* repository.resolve(LOG_REF);
+  const key = `${genesis.repoId}\u0000${head ?? ""}`;
+
+  const known = folds.get(key);
+  if (known !== undefined) return known;
+
+  const projection = yield* project(genesis);
+  folds.set(key, projection);
+  while (folds.size > FOLDS) {
+    const oldest = folds.keys().next();
+    if (oldest.done === true) break;
+    folds.delete(oldest.value);
+  }
+  return projection;
+});
+
 /** Anonymous, for the paths that never authenticated anybody. */
 export const anonymous: Authenticated = {
   principal: null,
@@ -772,7 +806,7 @@ const permitsCapability = (member: Member, capability: string): boolean =>
  * exist to *restrict*, and a repository with no read grants has restricted
  * nothing.
  */
-const anonymousReadAllowed = (projection: Projection): boolean => {
+export const anonymousReadAllowed = (projection: Projection): boolean => {
   // `former` as well as `members`: revocation moves a member out of the one
   // and into the other, so looking only at current members would make a
   // private repository world-readable the moment its last reader was revoked

@@ -107,7 +107,7 @@ describe("cli", () => {
   it("clones over smart HTTP, with and without a credential", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-clone-"));
     const serverRoot = path.join(root, "server");
-    const server = await serve({ root: serverRoot });
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
     try {
       await seed(path.join(serverRoot, "origin"), "published");
       // Granting `repo.read` to somebody is what makes the repository private.
@@ -336,7 +336,7 @@ describe("cli", () => {
   it("pushes to a server and exports an archive", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-push-"));
     const serverRoot = path.join(root, "server");
-    const server = await serve({ root: serverRoot });
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
     try {
       await seed(path.join(root, "local"), "pushed");
 

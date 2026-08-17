@@ -73,8 +73,8 @@ let guarded: Server;
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "server-remotes-"));
-  server = await serve({ root: path.join(root, "open") });
-  guarded = await serve({ root: path.join(root, "guarded") });
+  server = await serve({ root: path.join(root, "open"), allowAnonymousWrites: true });
+  guarded = await serve({ root: path.join(root, "guarded"), allowAnonymousWrites: true });
   const member = await enableHubUnder(path.join(root, "guarded"), "received", [
     "repo.read",
     "source.push",

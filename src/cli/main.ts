@@ -219,19 +219,28 @@ const serveCommand = Command.make(
     root: rootFlag,
     port: Flag.integer("port").pipe(Flag.withDefault(8080), Flag.withAlias("p")),
     hostname: Flag.string("hostname").pipe(Flag.withDefault("127.0.0.1")),
+    open: Flag.boolean("open").pipe(
+      Flag.withDescription("Serve writes to repositories that have no genesis"),
+    ),
   },
-  ({ hostname, port, root }) =>
+  ({ hostname, open, port, root }) =>
     Effect.gen(function* () {
-      // There is no `--secret` any more, and no `--open` either, because
-      // neither is the server's decision to make. A repository with a genesis
-      // is guarded by its own membership; one without is a plain git
-      // repository, and serving it openly is what it has always meant.
-      const server = yield* Effect.promise(() => serve({ root, port, hostname }));
+      // There is no `--secret` any more: a repository with a genesis is
+      // guarded by its own membership, and no server secret enters into it.
+      // `--open` survives for the one case the repository cannot speak to —
+      // it has no membership at all — where the choice really is the host's,
+      // and the safe answer is the one you have to ask for.
+      const server = yield* Effect.promise(() =>
+        serve({ root, port, hostname, allowAnonymousWrites: open }),
+      );
       yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
       yield* Console.error(
-        "repositories with no genesis are served to anyone who can reach the port; " +
-          "run `chr33s-git hub init <repo> --key <key>` to require membership. " +
-          "A repository whose members hold no read capability is still public: " +
+        (open
+          ? "--open: repositories with no genesis accept writes from anyone who can reach the port. "
+          : "repositories with no genesis are readable by anyone who can reach the port and " +
+            "writable by nobody; pass --open to serve writes to them anyway. ") +
+          "run `chr33s-git hub init <repo> --key <key>` to give a repository a membership " +
+          "of its own. A repository whose members hold no read capability is still public: " +
           "membership restricts, so restricting nothing restricts nobody",
       );
       return yield* Effect.never;

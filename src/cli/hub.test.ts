@@ -411,7 +411,7 @@ describe("cli hub", () => {
     await cli(["init", "--root", serverRoot, "bulk"]);
     const { credential } = await enableHubUnder(serverRoot, "bulk", ["repo.read", "source.push"]);
 
-    const server = await serve({ root: serverRoot });
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
     try {
       const body = [
         JSON.stringify({
@@ -490,7 +490,7 @@ describe("cli hub", () => {
       "source.push",
     ]);
 
-    const server = await serve({ root: serverRoot });
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
     try {
       const send = (credential: string) =>
         fetch(`${server.url}/private/push`, {
@@ -510,6 +510,55 @@ describe("cli hub", () => {
       const allowed = await send(owner.credential);
       const answered = await allowed.text();
       assert.ok(!answered.includes("repo.read"), answered);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("walks the readme's quickstart: init, hub init, credential, clone", async () => {
+    // The documented sequence, verbatim in effect. It used to end in a 403:
+    // `hub init` seeds `repo.admin`, which makes the repository private, and
+    // the credential the readme minted was scoped to `source.push` alone —
+    // which does not carry `repo.read`, so the clone at the end could not run.
+    const serverRoot = path.join(root, "quickstart");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "my-repo"]);
+    await writeKeyPair(path.join(root, "hub"), "me@example.com");
+    await cli(["hub", "init", "--root", serverRoot, "--key", path.join(root, "hub"), "my-repo"]);
+
+    const minted = await cli([
+      "credential",
+      "--root",
+      serverRoot,
+      "--key",
+      path.join(root, "hub"),
+      "--capability",
+      "repo.read,source.push",
+      "my-repo",
+    ]);
+    const credential = minted.trim().split(/\s+/).at(-1) ?? "";
+
+    const server = await serve({ root: serverRoot });
+    try {
+      const cloned = await cli([
+        "clone",
+        "--root",
+        root,
+        "--token",
+        credential,
+        `${server.url}/my-repo`,
+        "my-copy",
+      ]);
+      assert.match(cloned, /Cloned/);
+
+      // And without it the repository really is private, which is what makes
+      // the credential's `repo.read` necessary rather than decorative.
+      const denied = await cli(["clone", "--root", root, `${server.url}/my-repo`, "no-copy"]).then(
+        () => null,
+        (error: { stderr?: string; stdout?: string }) =>
+          `${error.stdout ?? ""}${error.stderr ?? ""}`,
+      );
+      assert.notEqual(denied, null, "an anonymous clone must be refused");
     } finally {
       await server.close();
     }

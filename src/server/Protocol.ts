@@ -60,6 +60,20 @@ const planFor = (request: {
 }) =>
   Effect.gen(function* () {
     const repository = yield* Repository;
+
+    // A deepening fetch assembles its object set without reading blobs, so it
+    // cannot notice a redacted one and would succeed with it in the plan — and
+    // the failure would then land in `packOids`, after the 200 and the
+    // boundary lines had gone out. There is nothing to retry from there, so
+    // that path pays for the exclusion up front. It is also the rare one:
+    // ordinary clones and fetches take the strict walk below and pay nothing.
+    const deepening =
+      request.depth !== undefined || request.since !== undefined || request.notRefs.length > 0;
+    if (deepening) {
+      const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
+      return yield* repository.fetch({ ...request, exclude });
+    }
+
     // Only a *missing object* is worth a second look; a storage fault is not
     // something tombstones explain, and retrying it would pay for a trust fold
     // to fail the same way twice.

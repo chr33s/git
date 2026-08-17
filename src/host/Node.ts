@@ -25,6 +25,7 @@ import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
+import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
 import { file as lfsFile } from "../server/Lfs.node.ts";
@@ -41,6 +42,14 @@ export interface ServeOptions {
   /** Defaults to an ephemeral port; the return value carries the real one. */
   readonly port?: number;
   readonly hostname?: string;
+  /**
+   * Serve writes to repositories that have no genesis.
+   *
+   * Off by default: such a repository has no membership to authorize anybody,
+   * and "no policy" must not read as "no protection". On for a scratch server
+   * where saying so out loud is the point.
+   */
+  readonly allowAnonymousWrites?: boolean;
 }
 
 export interface Server {
@@ -96,6 +105,9 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
    * even though the pool is common.
    */
   const nonces = Auth.noncesInMemory();
+
+  /** One value for the process; see `Policy.AnonymousWrites`. */
+  const openWrites = Policy.anonymousWrites(options.allowAnonymousWrites === true);
 
   /**
    * How many repositories keep a built layer.
@@ -154,7 +166,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     // ever closes, and one built with the requester baked in would answer
     // every later request as whoever made the first.
     const router = HttpRouter.toWebHandler(
-      Api.layer(remotes).pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
+      Api.layer(remotes).pipe(
+        Layer.provideMerge(layer),
+        Layer.provideMerge(subscribers),
+        Layer.provideMerge(openWrites),
+      ),
       { disableLogger: true },
     );
 
@@ -220,7 +236,9 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // Also ahead of the API: a bulk commit body is arbitrarily large and is
       // consumed as a stream, so nothing that would buffer it may see it first.
       const bulk = await Effect.runPromise(
-        CommitPack.handle(request).pipe(Effect.provide(Layer.merge(state.layer, requester))),
+        CommitPack.handle(request).pipe(
+          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites)),
+        ),
       );
       if (bulk !== null) return bulk;
 
@@ -234,7 +252,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           Effect.catch((error) =>
             Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
           ),
-          Effect.provide(Layer.merge(state.layer, requester)),
+          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites)),
         ),
       );
       return matched ?? (await state.api(request, asked));

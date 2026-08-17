@@ -44,7 +44,7 @@ const post = async (url: string, body: PostBody) => {
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "host-node-"));
-  server = await serve({ root });
+  server = await serve({ root, allowAnonymousWrites: true });
 });
 
 afterAll(async () => {

@@ -78,13 +78,20 @@ npx chr33s-git init my-repo && npx chr33s-git serve &
 npx chr33s-git clone http://127.0.0.1:8080/my-repo my-copy
 ```
 
+A repository with no genesis is readable by anyone who can reach the port and
+writable by nobody — it has no membership to authorize a write with. `--open`
+serves writes to those repositories anyway, which is what a scratch server on a
+laptop wants and what a shared one should not have.
+
 To require membership, give the repository an identity and mint a credential
-for the key that holds it:
+for the key that holds it. `hub init` seeds that key as `repo.admin`, which
+makes the repository private — so the credential needs `repo.read` to clone it
+as well as `source.push` to write:
 
 ```sh
 ssh-keygen -t ed25519 -f ~/.ssh/hub -N ""
 npx chr33s-git hub init my-repo --key ~/.ssh/hub
-npx chr33s-git credential my-repo --key ~/.ssh/hub --capability source.push
+npx chr33s-git credential my-repo --key ~/.ssh/hub --capability repo.read,source.push
 npx chr33s-git clone --token <credential> http://127.0.0.1:8080/my-repo my-copy
 ```
 

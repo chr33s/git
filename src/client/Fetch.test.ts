@@ -196,7 +196,7 @@ const capturing = async <A>(
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "client-fetch-"));
-  server = await serve({ root });
+  server = await serve({ root, allowAnonymousWrites: true });
 });
 
 afterAll(async () => {

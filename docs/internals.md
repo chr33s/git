@@ -335,6 +335,11 @@ authority is its own: `refs/meta/trust/genesis` names the root keys,
 the same membership state to decide what a request may do. A repository with no
 genesis is a plain git repository and is served as one.
 
+A repository with no genesis is readable by anyone who can reach the host and
+writable by nobody — it has no membership to authorize a write with. `serve
+--open` (`allowAnonymousWrites`) serves writes to those repositories anyway,
+which is what a scratch server wants and what a shared one should not have.
+
 Clients present one of two things. A _delegated credential_ is a short-lived
 token the holder signs with their own SSH key and `git` carries as
 `http://<credential>@host/repo` — `chr33s-git credential` mints it, and it can

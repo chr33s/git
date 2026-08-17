@@ -187,12 +187,24 @@ const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = 
  * because a contributor who may push need not be able to read everything.
  */
 const requireRead = Effect.fn("Api.requireRead")(function* () {
-  const stored = yield* readGenesis().pipe(Effect.orElseSucceed(() => null));
+  // Fail closed. Reading an unreadable genesis as "not hub-enabled" would let
+  // the copy through at the moment storage was least trustworthy — the exact
+  // fail-open `Auth.authenticate` and `Policy.gate` each refuse.
+  const stored = yield* readGenesis().pipe(
+    Effect.mapError(
+      () => new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+    ),
+  );
   if (stored === null) return;
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);
-  if (who.principal !== null && permits(who.capabilities, "repo.read")) return;
+  if (permits(who.capabilities, "repo.read")) return;
+
+  // A repository the world may already clone has nothing to protect here: a
+  // member scoped to `source.push` could copy it out by cloning it themselves,
+  // and refusing them the verb would only be theatre.
+  if (Auth.anonymousReadAllowed(who.projection)) return;
 
   return yield* new Invalid({
     field: "capability",

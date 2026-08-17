@@ -40,7 +40,7 @@ describe("Client", () => {
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "client-"));
-    server = await serve({ root });
+    server = await serve({ root, allowAnonymousWrites: true });
     head = await Effect.runPromise(
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -106,7 +106,7 @@ describe("Client", () => {
 
   it("sends its credential on every derived-client request", async () => {
     const authRoot = await fs.mkdtemp(path.join(os.tmpdir(), "client-auth-"));
-    const authed = await serve({ root: authRoot });
+    const authed = await serve({ root: authRoot, allowAnonymousWrites: true });
     try {
       // A repository with a genesis and one member who may read: that is what
       // makes it private, and there is no server secret involved anywhere.
