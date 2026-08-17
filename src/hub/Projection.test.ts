@@ -2167,6 +2167,58 @@ describe("hub projection", () => {
       assert.equal(outcome.threads[0]?.comments[0]?.body, "ordinary");
     });
 
+    it("keeps deciding it the same way once the redactor has been revoked", async () => {
+      // The set the first pass reads as absent has to be *monotone*: once a
+      // tombstone names a target, some host may already have deleted the
+      // payload, and an answer that later shrinks leaves that host folding a
+      // history no replica agrees with — the divergence the two passes exist
+      // to remove. So the question is whether the signer *ever* held
+      // `hub.redact`, over a grant history that only grows.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "here is a password: hunter2",
+            key: where.author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          yield* PullRequest.redact({
+            repo: where.genesis.repoId,
+            pr,
+            target,
+            reason: "sensitive-content",
+            key: where.reviewer,
+          });
+          const before = yield* projectionOf(where, pr);
+
+          // And now the redactor is revoked outright.
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "left",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          return { before, after: yield* projectionOf(where, pr) };
+        }),
+      );
+
+      assert.equal(outcome.before.threads.length, 0, "the comment was read as absent");
+      assert.equal(
+        outcome.after.threads.length,
+        outcome.before.threads.length,
+        "and still is, whatever has since become of the key that said so",
+      );
+    });
+
     it("does not let a member without hub.redact decide it either", async () => {
       // Membership alone was not enough. A skipped event drops out of `heads`,
       // so a member could push decoy tombstones naming events that had named

@@ -89,16 +89,20 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   // moved ref changes the key and a stale answer is not possible.
   const refs = yield* Event.pullRequests();
   const identity = yield* repository.resolve(GENESIS_REF);
+  // Names as well as oids. A repository with no genesis keys under `null`
+  // along with every other one, so the state is all that separates them — and
+  // oids alone made a fork and its parent, whose pull requests point at the
+  // same commits under different names, one entry.
+  // The repository's own identity keys the entry. Left out, the key was the
+  // hub and trust refs alone: two repositories on one host whose heads happen
+  // to match — the same trust log under a *different* genesis, which is a
+  // different membership and so a different answer — shared an entry, and one
+  // of them collected with an exclusion set computed for the other.
   const state = [
-    // The repository's own identity leads the key. Left out, the key was the
-    // hub and trust refs alone: two repositories on one host whose heads
-    // happen to match — the same trust log under a *different* genesis, which
-    // is a different membership and so a different answer — shared an entry,
-    // and one of them collected with an exclusion set computed for the other.
-    // A tombstoned payload the operator believes is gone is then re-protected
-    // by reachability and stays in the pack.
     yield* repository.resolve(LOG_REF),
-    ...(yield* Effect.forEach(refs, (pr) => repository.resolve(Event.refOf(pr)))),
+    ...(yield* Effect.forEach(refs, (pr) =>
+      repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
+    )),
   ].join("\u0000");
 
   const known = memo.get(identity);

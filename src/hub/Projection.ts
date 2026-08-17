@@ -278,8 +278,17 @@ const trustReach = () => {
  * very thing they were being used to recover.
  */
 const holdsRedact = (trust: TrustProjection, signer: Fingerprint): boolean => {
-  const member = trust.members.get(signer);
-  return member !== undefined && permits(member.capabilities, "hub.redact");
+  const member = trust.members.get(signer) ?? trust.former.get(signer);
+  // *Ever* held, over the whole grant history, not "holds now". This set has to
+  // be monotone: once a tombstone names a target, some host may already have
+  // deleted the payload, and an answer that later shrinks leaves that host
+  // folding a history no replica agrees with — the divergence the two passes
+  // exist to remove. Membership and grant history only ever grow, so asking
+  // them is safe; asking the live capability was not.
+  return (
+    member !== undefined &&
+    member.history.some((grant) => permits(grant.capabilities, "hub.redact"))
+  );
 };
 
 /**
@@ -766,8 +775,13 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         title = payload.title;
         description = payload.description;
         base = Event.branchRef(payload.base);
-        // Authorship is the part a contested opening still does not confer.
-        if (!opening.contested) author ??= signer;
+        // Authorship comes from the opening that *won*, and from nothing else.
+        // Applied to every accepted `pr.opened`, a second one the pre-pass had
+        // refused but the loop accepted — the floor raises the head it is
+        // judged against, which can reach a broader grant — claimed authorship
+        // of somebody else's pull request by folding first. And a contested
+        // opening still confers none at all.
+        if (opens && !opening.contested) author ??= signer;
         const head = Event.unqualify(payload.head);
         if (
           head !== null &&

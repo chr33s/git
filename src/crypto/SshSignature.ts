@@ -498,6 +498,9 @@ const PKCS8_ED25519_PREFIX = new Uint8Array([
   0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ]);
 
+/** An Ed25519 private key is a 32-byte seed, whatever wraps it. */
+const SEED_BYTES = 32;
+
 /**
  * Sign a message, producing the armor `ssh-keygen -Y verify` accepts.
  *
@@ -645,7 +648,11 @@ export const generate = (comment: string): Effect.Effect<PrivateKey> =>
         application: null,
         comment,
       },
-      // The seed is what PKCS#8 wraps, and the wrapper is fixed-width.
-      seed: pkcs8.subarray(PKCS8_ED25519_PREFIX.length),
+      // The last 32 bytes, not "everything after the prefix". The wrapper is
+      // fixed-width only for the minimal export; a longer one — a version that
+      // carries the public key alongside, which the spec permits — left a seed
+      // wider than 32 bytes, and `sign` then died inside `Effect.promise` as a
+      // defect rather than as anything a caller could see.
+      seed: pkcs8.subarray(pkcs8.length - SEED_BYTES),
     };
   });

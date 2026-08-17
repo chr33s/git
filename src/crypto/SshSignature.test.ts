@@ -111,6 +111,23 @@ const rfcKey = (): PrivateKey =>
   expectSuccess(parsePrivateKey(opensshPrivateKey(RFC8032.seed, RFC8032.point, "rfc8032@test")));
 
 describe("SshSignature", () => {
+  it("takes a 32-byte seed however wide the PKCS#8 export is", async () => {
+    // The wrapper is fixed-width only for the minimal export. A runtime that
+    // emits the longer form — the public key alongside the seed, which the
+    // encoding permits — left a seed wider than 32 bytes, and signing then
+    // died inside `Effect.promise` as a defect rather than as anything a
+    // caller could see. So the seed is the *last* 32 bytes, not everything
+    // after the prefix.
+    const key = await Effect.runPromise(generate("wide@example.com"));
+    assert.equal(key.seed.length, 32);
+
+    const bytes = new TextEncoder().encode("something to sign");
+    const armored = await Effect.runPromise(sign(key, bytes, NAMESPACE));
+    const back = await Effect.runPromise(verify(armored, bytes, NAMESPACE));
+    assert.notEqual(back, null, "a key that signs must verify");
+    assert.equal(back?.point.length, key.publicKey.point.length);
+  });
+
   describe("public keys", () => {
     it("round-trips an authorized_keys line", async () => {
       const key = await Effect.runPromise(generate("alice@example.com"));
