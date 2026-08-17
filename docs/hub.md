@@ -1333,7 +1333,11 @@ branch and leaves that branch unpushable.
 Which of a reviewer's several statements counts is decided by fold order —
 ancestry with a deterministic tie-break — and never by `issuedAt`, which the
 reviewer writes: ordered on that, a back-dated "request changes" fails to
-withdraw the approval it was meant to withdraw.
+withdraw the approval it was meant to withdraw. Only a _verdict_ supersedes:
+a `comment` review takes no position and costs `hub.review` rather than
+`hub.approve`, so letting one supersede would be the lower capability
+cancelling an approval — the very thing `review.dismissed` charges
+`hub.approve` to stop.
 
 Descent is measured over _events_, weighted by how many distinct members made
 them — not over raw commits. Counted over the walked DAG, a forger grafts an

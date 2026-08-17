@@ -1016,6 +1016,12 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
     // claimed opener, not merely `author`: a contested opening establishes no
     // author, and an approval from either claimant is still their own.
     if (pullRequest.openers.has(review.author)) continue;
+    // A verdict, and only a verdict. A `comment` review takes no position —
+    // it costs `hub.review` rather than `hub.approve`, which is the whole
+    // difference — so letting one supersede was the lower capability
+    // cancelling an approval, the very thing `review.dismissed` charges
+    // `hub.approve` to stop.
+    if (review.decision === "comment") continue;
     // Last in *fold* order, not by the date the review claims. `issuedAt` is
     // written by whoever signed it, so ordering on it let a reviewer withdraw
     // an approval in a way that did not withdraw it: back-date the "request

@@ -244,6 +244,41 @@ describe("hub projection", () => {
       assert.equal(state.reviews.length, 2, "both statements are still on the record");
     });
 
+    it("does not let a comment-review cancel the same author's approval", async () => {
+      // A `comment` review takes no position, and it costs `hub.review` rather
+      // than `hub.approve` — which is the whole difference between them. Read
+      // as the reviewer's latest word, one cancelled their own approval: a
+      // reviewer who approved and then said something in passing lost the
+      // approval, and a `hub.review` holder could cancel a `hub.approve`
+      // holder's word, which is what `review.dismissed` charges `hub.approve`
+      // to prevent.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "comment",
+            body: "one more thought",
+            key: where.reviewer,
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(state.reviews.length, 2, "both statements are on the record");
+      assert.equal(approvals(state).length, 1, "and the approval still stands");
+    });
+
     it("withdraws an approval with a back-dated rejection too", async () => {
       // Which of a reviewer's statements counts was decided by the date the
       // statement claimed, and `issuedAt` is written by whoever signed it — so
