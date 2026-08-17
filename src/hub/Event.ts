@@ -640,6 +640,46 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
 });
 
 /**
+ * The trust heads the events a push is adding declare.
+ *
+ * Walked from the new value and stopped at the current one, so an ordinary
+ * push — one event on the tip — reads one commit. The boundary asks this
+ * because a hub event's trust head is written by its own signer, and the only
+ * thing the *fold* holds it to is the floor its ancestors raise it to: a pull
+ * request that has just been opened has no ancestors, and so no floor.
+ */
+export const declaredHeads = Effect.fn("hub.Event.declaredHeads")(function* (
+  from: Oid,
+  boundary: Oid | null,
+) {
+  const parents = yield* Dag.reachable(from, boundary, (commit) => isHubCommit(commit));
+
+  const found = new Set<Oid>();
+  for (const oid of parents.keys()) {
+    if (!(yield* Record.carries(oid, RECORD))) continue;
+    // Unreadable is not a declaration. A redacted payload is gone by design,
+    // and a malformed one is refused by the fold on its own merits; neither is
+    // a head this may invent a claim about.
+    const record = yield* Record.read(oid, RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    if (record === null) continue;
+    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    // A bare oid, not a qualified one: `trustHead` names a commit in this
+    // repository's own trust log rather than a revision a payload is about.
+    const head = payload?.trustHead ?? null;
+    if (head === null || !/^[0-9a-f]{40}$/.test(head)) continue;
+    // SAFETY: the pattern above is exactly the forty lowercase hex characters
+    // the `Oid` brand names.
+    found.add(head as Oid);
+  }
+  return found;
+});
+
+/**
  * Whether a value stays inside the fold's ceiling.
  *
  * Asked by the policy boundary before a hub ref is allowed to move, so that a
@@ -665,7 +705,16 @@ const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
     .readCommit(commit)
     .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   if (info === null) return false;
-  if ((yield* repository.findPath(info.tree, `${RECORD}.json`)) !== null) return true;
+  // The tree, not only the commit. `fetchRepository` applies refs without a
+  // connectivity check, so a replica can hold a commit whose tree object never
+  // arrived — and this walk is what every protected-branch push, collection
+  // and deepening fetch runs first. Read as a failure, one missing tree took
+  // all of them out; read as "not part of this history", it is one commit the
+  // walk steps over.
+  const found = yield* repository
+    .findPath(info.tree, `${RECORD}.json`)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  if (found !== null) return true;
   return (
     (yield* repository.readTree(info.tree).pipe(Effect.orElseSucceed(() => null)))?.length === 0
   );

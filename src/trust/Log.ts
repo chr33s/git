@@ -219,7 +219,16 @@ const isTrustCommit = Effect.fn("trust.Log.isTrustCommit")(function* (commit: Oi
     .readCommit(commit)
     .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   if (info === null) return false;
-  if ((yield* repository.findPath(info.tree, `${RECORD}.json`)) !== null) return true;
+  // The tree, not only the commit. `fetchRepository` applies refs without a
+  // connectivity check, so a replica can hold a commit whose tree object never
+  // arrived — and this walk is what every protected-branch push, collection
+  // and deepening fetch runs first. Read as a failure, one missing tree took
+  // all of them out; read as "not part of this history", it is one commit the
+  // walk steps over.
+  const found = yield* repository
+    .findPath(info.tree, `${RECORD}.json`)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  if (found !== null) return true;
   // A join carries an empty tree; anything else is not part of this history.
   return (
     (yield* repository.readTree(info.tree).pipe(Effect.orElseSucceed(() => null)))?.length === 0
@@ -250,8 +259,14 @@ const ceilingOf = Effect.fnUntraced(function* () {
 /**
  * Whether a value stays inside that ceiling.
  *
- * Asked by the policy boundary before the log is allowed to move, so the log
- * can never *become* unfoldable — which on this ref would be unrecoverable.
+ * Asked by the policy boundary, and *only* there. A pull request past its
+ * ceiling is one candidate missing, which every caller can carry on without;
+ * a membership log past its ceiling has no such reading — refusing to fold it
+ * leaves a repository nothing can be authorized against, on a ref nothing can
+ * shorten, and replication writes refs without passing this boundary at all.
+ * So the fold walks whatever it is given, and the bound is applied where it
+ * can be applied without turning an unreadable log into an unusable
+ * repository: the push that would grow one.
  */
 export const withinCeiling = Effect.fn("trust.Log.withinCeiling")(function* (head: Oid) {
   const repository = yield* Repository;
@@ -271,18 +286,6 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
   // the log at a branch.
   const genesis = yield* repository.resolve(GENESIS_REF);
   const parents = yield* Dag.reachable(head, genesis, (commit) => isTrustCommit(commit));
-  // Bounded in size. The log is append-only and needs only `source.push` to
-  // grow, and every duplicate statement in it is ranked by a reach walk per
-  // copy — quadratic in the log's length, on a ref nothing can ever shorten.
-  // Read on every membership fold, every push and every collection, an
-  // unbounded one is a repository that gets slower for good.
-  const ceiling = yield* ceilingOf();
-  if (parents.size > ceiling) {
-    return yield* new Invalid({
-      field: "log",
-      reason: `the trust log holds more than ${ceiling} records and cannot be folded`,
-    });
-  }
   const ordered = Dag.topological(parents);
 
   const records: Entry[] = [];

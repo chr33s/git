@@ -569,6 +569,42 @@ describe("hub redaction", () => {
     assert.deepEqual(outcome.sizes, [1, 2], "and a moved ref must not be answered from the memo");
   });
 
+  it("steps over a commit whose tree never arrived", async () => {
+    // `fetchRepository` applies refs with no connectivity check, so a replica
+    // can hold a hub commit whose tree object is simply absent. This walk is
+    // what every protected-branch push, collection and deepening fetch runs
+    // first, and it guarded the commit read but not the tree read — so one
+    // missing object took all of them out at once. Read as "not part of this
+    // history", it is one commit the walk steps over.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const head = yield* repository.resolve(Event.refOf(pr));
+        const info = yield* repository.readCommit(head!);
+        yield* objects.delete(info.tree);
+
+        return {
+          strict: (yield* Redaction.excluded()).size,
+          explained: (yield* Redaction.covered()).has(blob!),
+        };
+      }),
+    );
+
+    assert.equal(outcome.strict, 0, "the tombstone was on the commit the walk can no longer read");
+    assert.equal(outcome.explained, false, "but nothing failed: gc and fetch both still answer");
+  });
+
   it("passes over a pull request this replica cannot walk", async () => {
     // The fold's ceiling is enforced where a *push* crosses it, so a history
     // that arrived by replication may sit above it. This walk visits every

@@ -38,6 +38,8 @@ export interface Review {
   readonly author: Fingerprint;
   /** The exact revision reviewed. An approval is of a revision, never of a PR. */
   readonly head: Oid;
+  /** The branch it was reviewed *for*; retargeting the pull request stales it. */
+  readonly base: string;
   readonly decision: "approve" | "reject" | "comment";
   readonly body: string;
   readonly at: Date;
@@ -46,8 +48,9 @@ export interface Review {
    * Whether the revision reviewed is still the one proposed.
    *
    * A stale approval is not an invalid one — it remains a true statement about
-   * the revision it named — so it is marked rather than removed, and the merge
-   * policy is what decides that stale approvals do not count.
+   * the revision it named, for the branch it named it for — so it is marked
+   * rather than removed, and the merge policy is what decides that stale
+   * approvals do not count.
    */
   readonly stale: boolean;
 }
@@ -922,6 +925,13 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
           id: payload.id,
           author: signer,
           head,
+          // The base in force when the review was made. A reviewer approves a
+          // revision *for a destination*, and the destination can be rewritten
+          // afterwards by a second `pr.opened` from the pull request's own
+          // author — which passes every capability check there is. Compared
+          // only on `head`, an approval given for `refs/heads/docs` then
+          // authorized pushing that same revision to `refs/heads/main`.
+          base,
           decision: payload.decision,
           body: payload.body,
           at: issued,
@@ -1107,8 +1117,9 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     reviews: [...reviews.entries()].map(([key, review]) => ({
       ...review,
       dismissed: dismissed.has(key),
-      // Stale, not gone: the statement stays true about the revision it named.
-      stale: head === null || review.head !== head,
+      // Stale, not gone: the statement stays true about the revision it named,
+      // and about the branch it named it for.
+      stale: head === null || review.head !== head || review.base !== base,
     })),
     threads: [...threads.values()],
     checks: [...checks.values()],

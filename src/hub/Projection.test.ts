@@ -319,6 +319,51 @@ describe("hub projection", () => {
       assert.equal(state.reviews[0]?.head, REVISION);
     });
 
+    it("makes an approval stale when the base moves, not only the head", async () => {
+      // A reviewer approves a revision *for a destination*. The destination is
+      // rewritten by a second `pr.opened`, which the pull request's own author
+      // may make without any further capability — and staleness was computed
+      // from `head` alone, so an approval given for `refs/heads/docs`
+      // authorized pushing that same revision to `refs/heads/main`.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "Add a thing",
+            description: "It does the thing.",
+            base: "refs/heads/docs",
+            head: REVISION,
+            key: where.author,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          // The same author, re-opening their own pull request at another
+          // branch: no capability beyond the one that opened it.
+          yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            id: pr,
+            title: "Add a thing",
+            description: "It does the thing.",
+            base: "refs/heads/main",
+            head: REVISION,
+            key: where.author,
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(state.base, "refs/heads/main", "the retargeting took effect");
+      assert.equal(state.reviews[0]?.base, "refs/heads/docs", "and the review remembers its own");
+      assert.equal(state.reviews[0]?.stale, true);
+      assert.equal(approvals(state).length, 0, "so it authorizes nothing on the new branch");
+    });
+
     it("counts approvers, not approval events", async () => {
       const state = await scenario(
         Effect.gen(function* () {

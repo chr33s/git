@@ -328,6 +328,76 @@ describe("Policy", () => {
       assert.match(outcome.ok === false ? outcome.reason : "", /a fold will walk/);
     });
 
+    it("refuses a hub event signed against a head that predates a revocation", async () => {
+      // A hub event's trust head is written by its own signer, and the only
+      // thing the fold holds it to is the floor its ancestors raise it to — so
+      // a pull request that has just been opened has no floor at all. Name a
+      // pre-revocation head on the `pr.opened` and it becomes the floor for an
+      // approval signed by the revoked key against the same head: the
+      // revocation is unreachable from there, `former` supplies the
+      // capabilities it had, and the approval satisfies a protected branch.
+      // Revocation had no effect on new pull requests.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const before = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "and another thing",
+            key: where.dev,
+          });
+          const after = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          // Rewound, so the comment reads as new to the boundary — and it was
+          // signed against the head the log had before the revocation below.
+          yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: before! });
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+          const trust = yield* projectTrust(where.genesis);
+
+          // The history already on the ref was judged when it arrived and is
+          // not re-judged; only what this push adds is.
+          const settled = yield* evaluate({
+            update: { name: `refs/hub/pr/${pr}`, value: before },
+            principal: where.principal,
+            genesis: where.genesis,
+            trust,
+            rules: OPEN,
+          });
+
+          const added = yield* evaluate({
+            update: { name: `refs/hub/pr/${pr}`, value: after },
+            principal: where.principal,
+            genesis: where.genesis,
+            trust,
+            rules: OPEN,
+          });
+
+          return { settled: settled.ok, added };
+        }),
+      );
+
+      assert.equal(outcome.settled, true, "what the ref already held is left alone");
+      assert.equal(outcome.added.ok, false);
+      assert.match(outcome.added.ok === false ? outcome.added.reason : "", /predates a revocation/);
+    });
+
     it("holds the trust log to a ceiling of its own", async () => {
       // The log is append-only and needs only `source.push` to grow, and every
       // duplicate statement in it is ranked by a reach walk per copy. Bounded

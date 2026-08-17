@@ -396,6 +396,27 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   const namespace = yield* namespaceRules(update, current, stored);
   if (!namespace.ok) return namespace;
 
+  // An event's trust head is written by its own signer, and the only thing the
+  // fold holds it to is the floor its ancestors raise it to. A pull request
+  // that has just been opened has no ancestors and so no floor, which made a
+  // revocation have no effect on new pull requests at all: name a
+  // pre-revocation head on the `pr.opened`, and it becomes the floor for an
+  // approval signed by the revoked key against that same head — `reaches` sees
+  // the revocation as unreachable, `former` supplies the capabilities it had,
+  // and the approval satisfies a protected branch. Nothing in the events says
+  // when they were written, but the boundary knows what the log holds *now*,
+  // and a push arriving now has no claim to have been made before a revocation
+  // this repository already has.
+  if (update.name.startsWith("refs/hub/") && update.value !== null) {
+    const behind = yield* namesRevokedHead(update.value, current, input.trust);
+    if (behind !== null) {
+      return refused(
+        update.name,
+        `an event names trust head ${behind}, which predates a revocation this repository holds`,
+      );
+    }
+  }
+
   if (!isProtected(input.rules, update.name)) return namespace;
 
   if (deleting) return refused(update.name, `${update.name} is protected and may not be deleted`);
@@ -496,6 +517,45 @@ const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string,
       : `${name} would hold more records than a fold will walk`;
   }
 
+  return null;
+});
+
+/**
+ * A trust head the push declares that does not reach every revocation on
+ * record, or `null` when every one of them does.
+ *
+ * Only the events the push is *adding* are asked, so an ordinary push reads
+ * one commit, and a history already on the ref is left alone — it was judged
+ * when it arrived, and re-judging it would make every later push to a pull
+ * request fail because of an event written before the revocation legitimately
+ * was.
+ *
+ * A client genuinely lagging the trust log is asked to fetch it before
+ * pushing, which the replication ordering already requires of it: trust refs
+ * before hub refs, for exactly this reason.
+ */
+const namesRevokedHead = Effect.fn("Policy.namesRevokedHead")(function* (
+  to: Oid,
+  current: Oid | null,
+  trust: TrustProjection,
+) {
+  const revocations = new Set<Oid>();
+  for (const entries of trust.revoked.values()) {
+    for (const revocation of entries) revocations.add(revocation.commit);
+  }
+  if (revocations.size === 0) return null;
+
+  const declared = yield* Event.declaredHeads(to, current).pipe(
+    // An unreadable history is not a claim about trust heads. It is refused,
+    // or passed over, by the walks that own that question.
+    Effect.catchTag("ObjectNotFound", () => Effect.succeed(new Set<Oid>())),
+  );
+  for (const head of declared) {
+    const seen = yield* Log.ancestry(head);
+    for (const revocation of revocations) {
+      if (revocation !== head && !seen.has(revocation)) return head;
+    }
+  }
   return null;
 });
 
