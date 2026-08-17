@@ -149,6 +149,12 @@ describe("hub redaction", () => {
           key: where.author,
         });
 
+        // Collected, which is where a redaction's bytes actually go: the
+        // tombstone replicates at once, and `gc` is what stops protecting the
+        // payload it covers.
+        const exclusion = yield* Redaction.excluded();
+        yield* repository.gc({ repack: true, exclude: exclusion });
+
         const head = yield* repository.resolve(Event.refOf(pr));
         const wants = [head!];
         // Recomputed from scratch, which is the case that used to come back
@@ -225,6 +231,51 @@ describe("hub redaction", () => {
 
     assert.equal(outcome.same, true, "the fixture must actually collide");
     assert.equal(outcome.held, true, "a branch still reaches it, so it must survive");
+  });
+
+  it("keeps one the source history reaches only through a reflog", async () => {
+    // The protective walk has to start from the same roots the collecting one
+    // does. Built from ref names alone it lost `HEAD` and the reflog entries,
+    // so a blob reachable only through a branch somebody had just deleted was
+    // collected anyway — the same dangling tree, by a quieter route.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+
+        const payload = yield* objects.read(blob!);
+        const copy = yield* repository.writeBlob(payload.data);
+        const tree = yield* repository.writeTree([
+          { mode: "100644", name: "leaked.json", oid: copy },
+        ]);
+        const commit = yield* repository.commitTree({
+          tree,
+          parents: [],
+          message: "the same bytes\n",
+          author: Record.identityAt(new Date(1_700_000_000_000)),
+        });
+        // On a branch, and then off it: the reflog is what still leads back.
+        yield* repository.setRef({ name: "refs/heads/gone", to: commit });
+        yield* repository.receive([{ name: "refs/heads/gone", value: null, expected: commit }]);
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const exclude = yield* Redaction.excluded();
+        yield* repository.gc({ repack: true, exclude });
+        return { same: copy === blob, held: yield* objects.has(blob!) };
+      }),
+    );
+
+    assert.equal(outcome.same, true, "the fixture must actually collide");
+    assert.equal(outcome.held, true, "the reflog still leads back to it");
   });
 
   it("excludes nothing in a repository that has no genesis", async () => {

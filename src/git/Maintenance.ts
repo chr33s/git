@@ -412,10 +412,23 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   /** Only refs gate the walk below; a reflog may name what a purge collected. */
   const refRoots = named.map(([, oid]) => oid);
   const roots = [...refRoots];
+  /**
+   * The same roots, less the hub's own.
+   *
+   * An exclusion says the *hub* must not keep a payload alive; it does not say
+   * a branch may not. So the refs the exclusion is not about are walked a
+   * second time without it, and this is that root set — kept in step with
+   * `roots` rather than rebuilt from ref names, so it carries `HEAD` and the
+   * reflog entries too.
+   */
+  const sourceRoots = named
+    .filter(([name]) => !Refspec.hiddenFromAdvertisement(name))
+    .map(([, oid]) => oid);
   const head = yield* refs.resolve("HEAD");
   if (head !== null) {
     refRoots.push(head);
     roots.push(head);
+    sourceRoots.push(head);
   }
 
   // Where a ref has been, not only where it is. Without these, a reset or a
@@ -437,6 +450,9 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
       if (Number.isNaN(at) || at <= cutoff) continue;
       if (entry.from !== null) roots.push(entry.from);
       if (entry.to !== null) roots.push(entry.to);
+      if (Refspec.hiddenFromAdvertisement(name)) continue;
+      if (entry.from !== null) sourceRoots.push(entry.from);
+      if (entry.to !== null) sourceRoots.push(entry.to);
     }
   }
 
@@ -466,11 +482,7 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   const source =
     (options?.exclude?.size ?? 0) === 0
       ? null
-      : yield* reachable(
-          objects,
-          named.filter(([name]) => !Refspec.hiddenFromAdvertisement(name)).map(([, oid]) => oid),
-          { ignoreMissing: true, classify: willRepack },
-        );
+      : yield* reachable(objects, sourceRoots, { ignoreMissing: true, classify: willRepack });
   const keep = source === null ? walked.seen : new Set([...walked.seen, ...source.seen]);
   const classified =
     source === null

@@ -488,6 +488,15 @@ describe("Remotes, over HTTP", () => {
       // `source.push` holder could create a ref inside a fully protected
       // `refs/heads/*` namespace without the branch rules ever seeing it.
       const api = yield* remote(server.url);
+      // `HEAD` too: the gate leaves it alone — it is already a full ref name —
+      // while the write qualified it to `refs/heads/HEAD`, so a ref landed
+      // inside a namespace the branch rules were judging under another name.
+      const head = yield* api.remotes
+        .pull({ params: { repo: "down" }, payload: { name: "up", branch: "HEAD" } })
+        .pipe(Effect.flip);
+      assert.equal(head._tag, "Invalid");
+      assert.match(head.reason, /is not a branch/);
+
       const failed = yield* api.remotes
         .pull({ params: { repo: "down" }, payload: { name: "up", branch: "refs/tags/x" } })
         .pipe(Effect.flip);

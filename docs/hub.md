@@ -1151,7 +1151,7 @@ signed by a principal holding `hub.redact` (or `repo.admin`), appended to the sa
 Effect of a valid tombstone for event `E`:
 
 ```text
-E's event.json blob is deleted from object storage
+E's event.json blob is deleted from object storage by `gc`
 E's commit and tree remain — the DAG's hashes stay intact
 projections read E as absent — on every replica, whether
   or not the blob is still there
@@ -1163,8 +1163,11 @@ A tombstone excludes a payload from _the hub's_ reachability, not from the
 repository's. Git dedupes by content, so a redacted payload can be the very
 object a branch names — post the comment, commit the same bytes as a file,
 then have the comment redacted — and treating the exclusion as "delete this"
-leaves the source history dangling. Both the immediate removal and `gc` walk
-the refs the exclusion is not about, and what those reach survives.
+leaves the source history dangling. The removal happens in one place — `gc`, which walks the refs the
+exclusion is not about, `HEAD` and the reflogs included, and keeps what those
+reach. Deleting the loose copy the moment a tombstone is written cannot answer
+that question without reproducing the walk, and a packed copy needed `gc`
+anyway, since a pack cannot give up one object without being rewritten.
 
 Because Git is content-addressed, absence composes: the commit references the tree, the tree references the blob's hash, and the blob object is simply gone. Verifiers treat a missing blob as valid **only** when a valid tombstone covers that event; a missing blob without a tombstone is corruption.
 

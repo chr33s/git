@@ -17,7 +17,6 @@ import { Effect } from "effect";
 
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
-import { hiddenFromAdvertisement } from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { readGenesis, type RepoId } from "../trust/Genesis.ts";
@@ -311,8 +310,6 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   readonly reason: string;
   readonly key: PrivateKey;
 }) {
-  const repository = yield* Repository;
-
   const stored = yield* readGenesis();
   if (stored === null) {
     return yield* new Invalid({ field: "repo", reason: "this repository has no genesis" });
@@ -401,42 +398,16 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
     });
   }
 
-  // What the rest of the repository still reaches, which a redaction may not
-  // take with it. Git dedupes by content, so a redacted payload can be the
-  // very object a branch names — post the comment, commit the same bytes as a
-  // file, then have the comment redacted — and deleting it outright left the
-  // source history dangling. A walk that fails leaves everything alone: `gc`
-  // applies the same rule with the same exclusion set, so nothing is lost by
-  // waiting, and something is lost by guessing.
-  const outside = (yield* repository.refs)
-    .filter(([name]) => !hiddenFromAdvertisement(name))
-    .map(([, oid]) => oid);
-  const reachable =
-    outside.length === 0
-      ? new Set<Oid>()
-      : yield* repository.fetch({ wants: outside, haves: [] }).pipe(
-          Effect.map((plan) => new Set(plan.oids)),
-          Effect.orElseSucceed(() => null),
-        );
-
-  // The blob, by the name its own tree entry gives it.
+  // The tombstone is written; the bytes go where every other removal happens.
   //
-  // This drops the loose copy only. A packed object cannot be removed without
-  // rewriting its pack, so the rest of the removal happens in `gc`, which
-  // takes `Redaction.excluded()` and so declines to protect what a tombstone
-  // covers. Doing the repack here would turn one redaction into rewriting a
-  // gigabyte, and doing nothing here would leave the bytes loose until the
-  // next collection — the loose copy is the one that can go now, so it goes.
-  //
-  // Exactly the commits the projection redacted, which is what makes this
-  // aimable at one event rather than at every event sharing an id.
-  for (const entry of state.redacted) {
-    if (reachable === null) break;
-    const info = yield* repository.readCommit(entry);
-    const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
-    if (path !== null && !reachable.has(path.oid)) yield* repository.deleteObject(path.oid);
-  }
-
+  // Not here, and that is the whole point of `gc` taking `Redaction.excluded()`.
+  // A packed object needed `gc` anyway — a pack cannot give up one object
+  // without being rewritten — and the loose copy needs the same question
+  // answered before it goes: git dedupes by content, so a redacted payload can
+  // be the very object a branch names, or one a reflog still leads back to.
+  // Deleting it here left the source history dangling, and answering it here
+  // would mean reproducing the reachability walk `gc` *is*. One place decides,
+  // and it is the one that can see the whole repository.
   return commit;
 });
 

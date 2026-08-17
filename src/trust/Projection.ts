@@ -22,7 +22,6 @@ import {
   parsePublicKey,
   verify,
 } from "../crypto/SshSignature.ts";
-import * as Dag from "../git/Dag.ts";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -592,33 +591,41 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
     endorsed.set(id, [signatures.get(commits[0]!) ?? []]);
   }
 
-  // The transitive ancestor closure, built only when something needs it.
+  // The reverse edges, so "how much descends from this commit?" is a walk from
+  // it rather than a lookup into a closure.
   //
-  // It is quadratic in the log's length — a set per commit holding every
-  // commit before it — and the log only grows, on a ref that cannot be
-  // rewound. Built unconditionally, a repository checkpointing hourly reached
-  // tens of millions of set entries within a year, on a path (`Policy.gate`,
-  // `Redaction.excluded`, every `gc`) that runs it un-memoised and inside a
-  // 128 MiB worker. Nothing reads it unless two commits carry one statement,
-  // which is a replay, and a log without one pays nothing.
-  const ancestors = new Map<Oid, Set<Oid>>();
+  // A transitive ancestor closure — a set per commit holding every commit
+  // before it — is quadratic in the log's length, and the log only grows on a
+  // ref that cannot be rewound. Building it only when a statement is disputed
+  // was not the guard it looked like: appending one duplicate record is a push
+  // anybody holding `source.push` can make, and it would have made every fold
+  // afterwards quadratic forever, on a path (`Policy.gate`,
+  // `Redaction.excluded`, every `gc`) that runs un-memoised inside a 128 MiB
+  // worker. Counted per candidate instead, the cost is one walk each and the
+  // memory is one set at a time.
+  const children = new Map<Oid, Oid[]>();
   if (disputed.length > 0) {
-    for (const oid of Dag.topological(parents)) {
-      const set = new Set<Oid>();
-      for (const parent of parents.get(oid) ?? []) {
-        set.add(parent);
-        for (const older of ancestors.get(parent) ?? []) set.add(older);
-      }
-      ancestors.set(oid, set);
+    for (const [oid, of] of parents) {
+      for (const parent of of) children.set(parent, [...(children.get(parent) ?? []), oid]);
     }
   }
 
+  /** How many commits this one reaches, following `edges`; itself excluded. */
+  const reach = (start: Oid, edges: ReadonlyMap<Oid, ReadonlyArray<Oid>>): number => {
+    const seen = new Set<Oid>();
+    const stack = [start];
+    while (stack.length > 0) {
+      for (const next of edges.get(stack.pop()!) ?? []) {
+        if (seen.has(next)) continue;
+        seen.add(next);
+        stack.push(next);
+      }
+    }
+    return seen.size;
+  };
+
   for (const [id, commits] of disputed) {
-    const descendants = (commit: Oid) => {
-      let count = 0;
-      for (const seen of ancestors.values()) if (seen.has(commit)) count++;
-      return count;
-    };
+    const descendants = (commit: Oid) => reach(commit, children);
     // Depth breaks what descent cannot. Append-only containment forces a replay
     // to be published as a join over both copies, and a join descends from
     // both — so where the targeted record is the current head, the counts came
@@ -628,7 +635,7 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
     // being made a descendant of the record it is trying to displace.
     const rank = (commit: Oid): readonly [number, number, Oid] => [
       descendants(commit),
-      ancestors.get(commit)?.size ?? 0,
+      reach(commit, parents),
       commit,
     ];
     let best = rank(commits[0]!);

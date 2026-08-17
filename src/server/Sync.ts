@@ -231,7 +231,10 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
   // `source.push` holder could create a ref inside a fully protected
   // `refs/heads/*` namespace without the protected-branch rules ever seeing
   // it. A pull moves a branch; anything else is a request this cannot serve.
-  const branch = input.branch.startsWith("refs/") ? input.branch : `refs/heads/${input.branch}`;
+  const branch =
+    input.branch === "HEAD" || input.branch.startsWith("refs/")
+      ? input.branch
+      : `refs/heads/${input.branch}`;
   if (!branch.startsWith("refs/heads/") || branch === "refs/heads/") {
     return yield* new Invalid({
       field: "branch",

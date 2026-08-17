@@ -23,6 +23,7 @@ import { project as projectTrust } from "../trust/Projection.ts";
 import * as Event from "./Event.ts";
 import { approvals, checksPassed, project } from "./Projection.ts";
 import * as PullRequest from "./PullRequest.ts";
+import * as Redaction from "./Redaction.ts";
 
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
   Effect.runPromise(
@@ -1885,6 +1886,11 @@ describe("hub projection", () => {
             reason: "sensitive-content",
             key: where.reviewer,
           });
+          // Collected: a redaction's bytes go when the pack is next rewritten,
+          // which is the one place that can tell whether anything else still
+          // reaches them.
+          const repository = yield* Repository;
+          yield* repository.gc({ repack: true, exclude: yield* Redaction.excluded() });
           const after = yield* projectionOf(where, pr);
           const { events: walked } = yield* Event.entries(pr);
 
