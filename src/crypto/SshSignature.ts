@@ -90,6 +90,10 @@ export interface PrivateKey {
  * too short — every caller is a parser that turns `null` into its own
  * message, which reads better than one shared "truncated" for six fields.
  */
+/** Whether two byte runs are identical. Not constant-time; neither side is secret. */
+const sameBytes = (left: Uint8Array, right: Uint8Array): boolean =>
+  left.length === right.length && left.every((byte, at) => byte === right[at]);
+
 const readString = (bytes: Uint8Array, offset: number): readonly [Uint8Array, number] | null => {
   if (offset + 4 > bytes.length) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -643,6 +647,20 @@ export const parsePrivateKey = (pem: string): Result.Result<PrivateKey, Invalid>
   if (material === null) return invalid("privateKey", "private section missing key material");
   if (material[0].length !== 64) {
     return invalid("privateKey", `expected 64 bytes of key material, got ${material[0].length}`);
+  }
+
+  // The point the private section carries, the point in the public blob, and
+  // the point the key material repeats all have to be the same one. Read and
+  // discarded, a key whose halves disagree loaded happily and then signed with
+  // one seed while advertising another key: every signature it made verified
+  // nowhere, and the failure surfaced as "the grant did not take effect" —
+  // pointing at the trust log rather than at the key file it came from. The
+  // key type two lines above is already held to exactly this rule.
+  if (!sameBytes(point[0], publicKey.success.point)) {
+    return invalid("privateKey", "private section disagrees about the public key");
+  }
+  if (!sameBytes(material[0].subarray(32), publicKey.success.point)) {
+    return invalid("privateKey", "the key material does not match the public key");
   }
 
   const comment = readString(section, material[1]);

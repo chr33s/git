@@ -23,7 +23,7 @@
  * old view, up to the age a verifier is willing to accept. That is inherent to
  * anything verifiable offline, and it is written down rather than papered over.
  */
-import { Effect, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
@@ -226,6 +226,40 @@ const isTrustCommit = Effect.fn("trust.Log.isTrustCommit")(function* (commit: Oi
   );
 });
 
+/**
+ * How many commits one trust log fold will walk.
+ *
+ * Larger than a pull request's ceiling because a repository's membership
+ * history is meant to outlive its pull requests: at a checkpoint an hour this
+ * is a couple of years, and at the daily cadence most repositories will want,
+ * decades. It is a ceiling all the same, because the log is append-only and
+ * nothing can shorten it — a host expecting to outgrow this raises it rather
+ * than discovering it.
+ */
+export const MAX_RECORDS = 16_384;
+
+/** The ceiling in force, when a host wants a different one; see `MAX_RECORDS`. */
+export class Ceiling extends Context.Service<Ceiling, number>()("trust/Log/Ceiling") {}
+
+export const ceiling = (records: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(records);
+
+const ceilingOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
+});
+
+/**
+ * Whether a value stays inside that ceiling.
+ *
+ * Asked by the policy boundary before the log is allowed to move, so the log
+ * can never *become* unfoldable — which on this ref would be unrecoverable.
+ */
+export const withinCeiling = Effect.fn("trust.Log.withinCeiling")(function* (head: Oid) {
+  const repository = yield* Repository;
+  const genesis = yield* repository.resolve(GENESIS_REF);
+  const parents = yield* Dag.reachable(head, genesis, (commit) => isTrustCommit(commit));
+  return parents.size <= (yield* ceilingOf());
+});
+
 export const entries = Effect.fn("trust.Log.entries")(function* () {
   const repository = yield* Repository;
 
@@ -237,6 +271,18 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
   // the log at a branch.
   const genesis = yield* repository.resolve(GENESIS_REF);
   const parents = yield* Dag.reachable(head, genesis, (commit) => isTrustCommit(commit));
+  // Bounded in size. The log is append-only and needs only `source.push` to
+  // grow, and every duplicate statement in it is ranked by a reach walk per
+  // copy — quadratic in the log's length, on a ref nothing can ever shorten.
+  // Read on every membership fold, every push and every collection, an
+  // unbounded one is a repository that gets slower for good.
+  const ceiling = yield* ceilingOf();
+  if (parents.size > ceiling) {
+    return yield* new Invalid({
+      field: "log",
+      reason: `the trust log holds more than ${ceiling} records and cannot be folded`,
+    });
+  }
   const ordered = Dag.topological(parents);
 
   const records: Entry[] = [];

@@ -42,6 +42,7 @@ import {
   type PullRequest as PullRequestState,
 } from "../hub/Projection.ts";
 import { permits } from "../trust/Certificate.ts";
+import * as Log from "../trust/Log.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Auth from "./Auth.ts";
 
@@ -438,6 +439,13 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   if (update.value === null) {
     return refused(update.name, `${update.name} is append-only and may not be deleted`);
   }
+  // Asked before the ref exists as well as after. Returning early on a create
+  // let the first push of `refs/hub/pr/<new-id>` bring a history of any size
+  // at all — onto a namespace nothing can delete, so every later fold, every
+  // protected-branch push and every collection paid for it forever.
+  const oversized = yield* beyondCeiling(update.name, update.value);
+  if (oversized !== null) return refused(update.name, oversized);
+
   if (current === null) return allowed;
   if (!(yield* contains(current, update.value))) {
     return refused(
@@ -463,17 +471,32 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     );
   }
 
-  // And it stays within what a fold will walk. The fold builds an ancestor set
-  // per commit, and how many commits a pull request has is chosen by whoever
-  // may append to it. Bounded only where the fold runs, the ceiling would turn
-  // a slow push into a bricked pull request — anybody holding the lowest hub
-  // capability could take somebody else's *approved* one past the line and
-  // freeze the protected branch it was the only route to. Bounded here, the
-  // ref never gets there.
-  if (update.name.startsWith("refs/hub/") && !(yield* Event.withinCeiling(update.value))) {
-    return refused(update.name, `${update.name} would hold more events than a fold will walk`);
-  }
   return allowed;
+});
+
+/**
+ * Why an append-only ref may not hold this value, or `null`.
+ *
+ * Both namespaces are folded on paths that cannot wait — a protected-branch
+ * push, a membership check, a collection — and both are bounded in what a fold
+ * will walk. The bound belongs here as well as at the fold: applied only
+ * there, it converts a slow push into a ref that can never be read again, on a
+ * namespace with no way to shorten it. So the ref is never allowed to get
+ * there in the first place.
+ */
+const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string, to: Oid) {
+  if (name.startsWith("refs/hub/")) {
+    return (yield* Event.withinCeiling(to))
+      ? null
+      : `${name} would hold more events than a fold will walk`;
+  }
+  if (name === Refspec.TRUST_LOG || name.startsWith("refs/meta/trust/log/")) {
+    return (yield* Log.withinCeiling(to))
+      ? null
+      : `${name} would hold more records than a fold will walk`;
+  }
+
+  return null;
 });
 
 /**

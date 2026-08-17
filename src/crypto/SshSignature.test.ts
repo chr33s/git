@@ -77,15 +77,23 @@ const RFC8032 = {
  * test — a parser checked against bytes its own writer produced would agree
  * with itself about a format it had got wrong.
  */
-const opensshPrivateKey = (seed: Uint8Array, point: Uint8Array, comment: string): string => {
-  const publicBlob = concatBytes([text("ssh-ed25519"), string(point)]);
+const opensshPrivateKey = (
+  seed: Uint8Array,
+  point: Uint8Array,
+  comment: string,
+  /** What the outer blob advertises, when a test wants it to disagree. */
+  advertised: Uint8Array = point,
+  /** The point repeated inside the 64-byte key material, likewise. */
+  paired: Uint8Array = point,
+): string => {
+  const publicBlob = concatBytes([text("ssh-ed25519"), string(advertised)]);
   const check = uint32(0x01020304);
   const unpadded = concatBytes([
     check,
     check,
     text("ssh-ed25519"),
     string(point),
-    string(concatBytes([seed, point])),
+    string(concatBytes([seed, paired])),
     text(comment),
   ]);
   // The private section is padded to the cipher's block size with 1, 2, 3…
@@ -182,6 +190,28 @@ describe("SshSignature", () => {
       assert.deepEqual(key.seed, RFC8032.seed);
       assert.deepEqual(key.publicKey.point, RFC8032.point);
       assert.equal(key.publicKey.comment, "rfc8032@test");
+    });
+
+    it("refuses a key whose halves disagree about the public point", () => {
+      // The private section repeats the type and the point, and the 64-byte
+      // key material repeats the point again. Read and discarded, a key whose
+      // halves disagree loaded happily and then signed with one seed while
+      // advertising another key: every signature verified nowhere, and the
+      // failure surfaced as "the grant did not take effect", pointing at the
+      // trust log rather than at the key file. The key *type* was already held
+      // to exactly this rule one field earlier.
+      const other = new Uint8Array(RFC8032.point);
+      other[0] = other[0]! ^ 0xff;
+
+      const advertised = parsePrivateKey(
+        opensshPrivateKey(RFC8032.seed, RFC8032.point, "mismatch@test", other),
+      );
+      const paired = parsePrivateKey(
+        opensshPrivateKey(RFC8032.seed, RFC8032.point, "mismatch@test", RFC8032.point, other),
+      );
+
+      assert.match(expectFailure(advertised).reason, /disagrees about the public key/);
+      assert.match(expectFailure(paired).reason, /does not match the public key/);
     });
 
     it("says so when the key is passphrase-protected", () => {

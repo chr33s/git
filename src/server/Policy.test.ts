@@ -293,6 +293,68 @@ describe("Policy", () => {
       assert.match(decision.ok === false ? decision.reason : "", /must contain/);
     });
 
+    it("holds a hub ref to the fold ceiling when the push creates it", async () => {
+      // Asked only once the ref existed, the ceiling missed the push that
+      // matters most: the *first* one. A create could bring a history of any
+      // size onto a namespace nothing can ever delete, so every later fold,
+      // protected-branch push and collection paid for it forever.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "more",
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // Judged as a create of a ref this repository does not have, which is
+          // what a first push of somebody else's oversized history looks like.
+          return yield* judge(where, { name: "refs/hub/pr/elsewhere", value: head }).pipe(
+            Effect.provide(Event.ceiling(1)),
+          );
+        }),
+      );
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /a fold will walk/);
+    });
+
+    it("holds the trust log to a ceiling of its own", async () => {
+      // The log is append-only and needs only `source.push` to grow, and every
+      // duplicate statement in it is ranked by a reach walk per copy. Bounded
+      // for `refs/hub/` alone, the one ref that is read on every membership
+      // check, every push and every collection was the one with no bound.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const head = yield* repository.resolve(Log.LOG_REF);
+          // The membership fold is read first and at the ordinary ceiling: the
+          // question here is what the *boundary* does with a value it would
+          // not be able to fold, not what a host with no readable log does.
+          const trust = yield* trustOf(where);
+          return yield* evaluate({
+            update: { name: Log.LOG_REF, value: head },
+            principal: where.principal,
+            genesis: where.genesis,
+            trust,
+            rules: OPEN,
+          }).pipe(Effect.provide(Log.ceiling(0)));
+        }),
+      );
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /a fold will walk/);
+    });
+
     it("refuses a hub update that grafts a second beginning onto the history", async () => {
       // Every hub event is written onto the ref's current head, so the history
       // has exactly one parentless commit: the `pr.opened` that started it.
