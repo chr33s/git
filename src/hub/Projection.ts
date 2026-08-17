@@ -112,11 +112,14 @@ export interface PullRequest {
    */
   readonly claims: ReadonlyMap<string, ReadonlyArray<Oid>>;
   /**
-   * Everybody who claimed to have opened this pull request.
+   * Everybody who proposed this pull request or a revision of it.
    *
    * `author` alone is not enough to exclude self-approval: a contested opening
    * deliberately establishes no author, and an approval from either claimant
-   * is still somebody approving their own proposal.
+   * is still somebody approving their own proposal. Nor is "everybody who
+   * opened it": whoever moved the head proposed the revision under review, and
+   * approving your own revision is the thing review exists to be independent
+   * of, whichever event you used to propose it.
    */
   readonly openers: ReadonlySet<Fingerprint>;
   /**
@@ -250,7 +253,7 @@ const byEventId = <A extends { readonly id: string }>(
  * The trust head an event recorded, as an oid.
  *
  * SAFETY: a trust head is a commit oid, and a value that is not one simply
- * fails to resolve — `Dag.ancestry` treats an unknown commit as unreachable
+ * fails to resolve — an ancestry walk treats an unknown commit as unreachable
  * rather than as an error, so a malformed one denies rather than throws.
  */
 const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
@@ -858,6 +861,16 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // so the approval is then recorded against the base the sibling chose
         // and is not stale: an approval given for `refs/heads/docs` satisfied
         // a protected `refs/heads/main`.
+        // Recorded here as well as in the pre-pass. The two judge the same
+        // event against different heads — the pre-pass against the one it
+        // declares, the loop against the floor its ancestors raise it to — so
+        // an opening the pre-pass refused can be accepted here, supply the
+        // title, description and base, and leave its signer out of the set
+        // `approvals` excludes. A `hub.create-pr` holder who also holds
+        // `hub.approve` could then satisfy a protected branch's one required
+        // approval on their own by declaring a stale head on a second
+        // `pr.opened`.
+        openers.add(signer);
         openings.push({ commit: entry.commit, base: Event.branchRef(payload.base) });
         if (supersedes({ commit: entry.commit, id: payload.id }, opened, ancestors)) {
           opened = { commit: entry.commit, id: payload.id };
@@ -903,6 +916,12 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         }
 
         const head = Event.unqualify(payload.head);
+        if (head !== null) openers.add(signer);
+        // Whoever moved the head proposed the revision under review, which is
+        // the thing `approvals` excludes. Keyed on the opening alone, a member
+        // holding `hub.merge` could push a revision onto somebody else's pull
+        // request and then approve it — self-approval wearing another event's
+        // name.
         if (
           head !== null &&
           supersedes({ commit: entry.commit, id: payload.id }, headSetter, ancestors)

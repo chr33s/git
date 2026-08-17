@@ -1384,6 +1384,121 @@ describe("hub projection", () => {
       assert.equal(approvals(outcome).length, 0, "self-approval must still count for nothing");
     });
 
+    it("cannot escape the self-approval exclusion with a stale trust head", async () => {
+      // `openers` was filled only by the pre-pass, which judges each
+      // `pr.opened` against the head it *declares*; the loop judges the
+      // non-winning ones against the floor their ancestors raise them to. So
+      // an opening the pre-pass refused — signed against a head where its
+      // signer was not yet a member — is accepted by the loop once its
+      // ancestors have raised the floor past that grant, supplies the title,
+      // description and base, and leaves its signer out of the set `approvals`
+      // excludes. One member could then satisfy a protected branch's required
+      // approval on their own.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const latecomer = yield* generate("latecomer@example.com");
+
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "Add a thing",
+            base: "refs/heads/main",
+            head: REVISION,
+            key: where.author,
+          });
+          // The head the opening was signed against, and the one the
+          // latecomer's grant lands after.
+          const stale = yield* repository.resolve(Log.LOG_REF);
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(latecomer.publicKey),
+              capabilities: ["hub.create-pr", "hub.review", "hub.approve", "hub.merge"],
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          // Their approval, signed against the head that carries their grant.
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: latecomer,
+          });
+
+          // And their own `pr.opened`, signed against the *stale* head — where
+          // they were not a member at all — appended on top of the approval,
+          // whose trust head is what raises the floor that lets the loop take
+          // it.
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.opened",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: stale,
+            title: "mine now",
+            description: "",
+            base: "refs/heads/main",
+            head: Event.qualify(REVISION),
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(latecomer, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "pr.opened stale\n",
+            }),
+          });
+
+          const state = yield* projectionOf(where, pr);
+          return { title: state.title, approvals: approvals(state).length };
+        }),
+      );
+
+      assert.equal(outcome.title, "mine now", "the loop did accept the second opening");
+      assert.equal(outcome.approvals, 0, "so its signer approves nothing");
+    });
+
+    it("cannot approve a revision it pushed itself", async () => {
+      // `approvals` excluded the openers and the author, and never whoever set
+      // the head being reviewed. A `hub.merge` holder could push a revision
+      // onto somebody else's pull request and then approve it — self-approval
+      // wearing another event's name.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          // The reviewer holds `hub.merge`, so retargeting is theirs to do.
+          yield* PullRequest.update({
+            repo: where.genesis.repoId,
+            pr,
+            head: NEXT,
+            key: where.reviewer,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: NEXT,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(outcome.head, NEXT, "the revision under review is the one they pushed");
+      assert.equal(approvals(outcome).length, 0, "and approving it is not review");
+    });
+
     it("cannot become the author by folding first", async () => {
       // Which `pr.opened` opens a pull request is decided by descent, not by
       // fold order: every honest event descends from the genuine opening, and

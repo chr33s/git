@@ -135,31 +135,4 @@ export const topological = (parents: Parents): ReadonlyArray<Oid> => {
   return ordered;
 };
 
-/**
- * Everything `from` can reach, itself included.
- *
- * A commit this replica has not fetched is skipped rather than failing: the
- * caller is asking what *we* can see — "had this author already seen that
- * revocation?" — and a partial answer to that is the honest one. Events whose
- * history has not arrived are handled by quarantine, not by this walk.
- */
-export const ancestry = Effect.fn("Dag.ancestry")(function* (from: Oid) {
-  const repository = yield* Repository;
-
-  const seen = new Set<Oid>();
-  const pending: Oid[] = [from];
-  while (pending.length > 0) {
-    const oid = pending.pop()!;
-    if (seen.has(oid)) continue;
-    seen.add(oid);
-
-    const commit = yield* repository
-      .readCommit(oid)
-      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-    if (commit === null) continue;
-    for (const parent of commit.parents) pending.push(parent);
-  }
-  return seen;
-});
-
 export type DagError = ObjectNotFound | StorageFailure;

@@ -15,9 +15,7 @@
  * streaming digest is the one primitive that differs per platform
  * (`node:crypto` on node, `crypto.DigestStream` on Workers).
  */
-import { Context, Effect, Predicate, Schema, Stream } from "effect";
-
-import { Option } from "effect";
+import { Context, Effect, Option, Predicate, Schema, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { permits } from "../trust/Certificate.ts";
