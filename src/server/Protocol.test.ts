@@ -669,6 +669,69 @@ describe("what a signed envelope binds", () => {
       !report.some((entry) => entry.includes("unpacker")),
       `refused before the unpack: ${report.join(" | ")}`,
     );
+    // One line per ref. `respond` concatenates the refusals it accumulated
+    // with whatever `allFailed` produced, so a ref refused before that point
+    // used to get an `ng` here as well — twice, with two different reasons.
+    assert.equal(
+      report.filter((entry) => entry.includes("refs/heads/elsewhere")).length,
+      1,
+      report.join(" | "),
+    );
+  });
+
+  it("applies none of an atomic push when one ref was never named", async () => {
+    // Atomic is all-or-nothing, and an uncovered ref is part of the all. The
+    // covered half was filtered out of what the gate saw and then landed on
+    // its own, which is the one thing the capability promises will not happen.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const commit = yield* repository.commit({
+          branch: "agreed",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+
+        const response = yield* Protocol.receivePack(
+          new Request("http://git.test/r/git-receive-pack", {
+            method: "POST",
+            body:
+              `${pktLine(`${commit} ${ZERO} refs/heads/agreed\0report-status atomic`)}` +
+              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere`)}0000`,
+          }),
+        ).pipe(
+          Effect.provide(
+            Auth.requester({
+              ...Auth.anonymous,
+              capabilities: ["source.push", "source.delete"],
+              envelope: {
+                type: "auth.request",
+                version: 1,
+                repo: Auth.anonymous.projection.repoId,
+                operation: "git-receive-pack",
+                commands: [{ ref: "refs/heads/agreed", from: commit, to: null }],
+                nonce: "n",
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            }),
+          ),
+        );
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return {
+          lines: linesOf(bytes).lines,
+          still: yield* repository.resolve("refs/heads/agreed"),
+        };
+      }),
+    );
+
+    const named = outcome.lines.filter((line) => /^(ok|ng) refs\//.test(line));
+    assert.equal(named.length, 2, `every command needs a line: ${outcome.lines.join(" | ")}`);
+    assert.ok(
+      named.every((line) => line.startsWith("ng ")),
+      `atomic means none of them applied: ${named.join(" | ")}`,
+    );
+    assert.notEqual(outcome.still, null, "and the covered half did not land on its own");
   });
 });
 

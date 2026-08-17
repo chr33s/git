@@ -801,19 +801,56 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       commands: ReadonlyArray<RefUpdate>,
       reason: string,
     ): ReadonlyArray<ReceiveResult> =>
-      commands.map((update) => ({
-        ref: update.name,
-        from: update.expected ?? null,
-        to: null,
+      commands
+        // And never a ref `refused` already carries: `respond` concatenates
+        // the two, so a command refused before this point would otherwise get
+        // an `ng` line here as well — twice, with two different reasons.
+        .filter((update) => !refused.some((entry) => entry.ref === update.name))
+        .map((update) => ({
+          ref: update.name,
+          from: update.expected ?? null,
+          to: null,
+          ok: false,
+          reason,
+        }));
+
+    // The envelope binds *every* command, delete or not, and checking it needs
+    // nothing from the pack — so it is asked with the other refusals that need
+    // nothing from it. Left to `gate`, a push naming refs the signed request
+    // never covered had its whole pack unpacked and persisted first.
+    //
+    // Recorded here rather than after the atomic and drain handling below,
+    // because those are what every refusal in this function shares: an atomic
+    // batch with one uncovered ref applies none of it, and a body sent for
+    // commands now all refused still has to be read before the report can
+    // reach the client.
+    const uncovered = new Set<string>();
+    for (const entry of yield* Policy.uncovered(updates).pipe(Effect.orElseSucceed(() => []))) {
+      const command = updates.find((update) => update.name === entry.ref);
+      uncovered.add(entry.ref);
+      refused.push({
+        ref: entry.ref,
+        from: command?.expected ?? null,
+        to: command?.value ?? null,
         ok: false,
-        reason,
-      }));
+        reason: entry.reason,
+      });
+    }
 
     // An atomic push is all-or-nothing, and a refused name is part of the all:
     // applying the rest would be exactly what the capability promises not to.
     if (refused.length > 0 && (atomic || updates.length === 0)) {
       yield* drain;
-      return respond(allFailed(updates, "atomic push refused: funny refname"), "ok");
+      return respond(
+        allFailed(updates, refused[0]?.reason ?? "atomic push refused: funny refname"),
+        "ok",
+      );
+    }
+
+    // The body was sent for commands this server has now refused outright, and
+    // the report only reaches the client if it is read first.
+    if (uncovered.size > 0 && !updates.some((update) => !uncovered.has(update.name))) {
+      yield* drain;
     }
 
     // A refused command may have had a pack behind it even when every command
@@ -835,22 +872,6 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // *delete* down with the create in a mixed push, and the delete is the one
     // thing this principal was entitled to do — `Policy.gate` would have
     // refused the create alone.
-    // The envelope binds *every* command, delete or not, and checking it needs
-    // nothing from the pack — so it is asked here too. Left to `gate`, a push
-    // naming refs the signed request never covered had its whole pack unpacked
-    // and persisted before being refused.
-    for (const entry of yield* Policy.uncovered(updates).pipe(Effect.orElseSucceed(() => []))) {
-      const command = updates.find((update) => update.name === entry.ref);
-      refused.push({
-        ref: entry.ref,
-        from: command?.expected ?? null,
-        to: command?.value ?? null,
-        ok: false,
-        reason: entry.reason,
-      });
-    }
-    const uncovered = new Set(refused.map((entry) => entry.ref));
-
     const writes = updates.filter((update) => update.value !== null && !uncovered.has(update.name));
     const refusal =
       writes.length === 0
