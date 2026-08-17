@@ -26,7 +26,7 @@
  * already seen that revocation?" is a question about ancestry, which everyone
  * computes identically, rather than about clocks, which nobody should trust.
  */
-import { Effect, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
@@ -47,11 +47,34 @@ export const RECORD = "event";
 /**
  * How many commits one pull request's fold will walk.
  *
- * Not a limit on the feature — a pull request with twenty thousand events is
- * not a conversation — but a ceiling on what an append to a hub ref can make
- * every later protected-branch push pay for.
+ * Not a limit on the feature — a pull request with four thousand events is not
+ * a conversation — but a ceiling on what an append to a hub ref can make every
+ * later protected-branch push pay for. The fold relates every commit to every
+ * other, which is quadratic however it is stored, and it runs synchronously on
+ * the receive-pack path inside a worker with a fixed memory ceiling. At this
+ * bound the ancestor bitsets are 512 bytes per commit and two megabytes in
+ * all; an order of magnitude higher and the push dies where it was meant to be
+ * refused, which is the failure this number exists to make impossible.
  */
-export const MAX_EVENTS = 20_000;
+export const MAX_EVENTS = 4096;
+
+/**
+ * The ceiling in force, when a host wants a different one.
+ *
+ * A tuning number, not an authority: the default is what every caller gets,
+ * and lowering it only narrows what this host will fold. It is a service so
+ * that "how big may a pull request be here" is answerable per deployment —
+ * a worker with less memory than the one this bound was chosen for wants a
+ * smaller one — rather than being a constant a rebuild has to change.
+ */
+export class Ceiling extends Context.Service<Ceiling, number>()("hub/Event/Ceiling") {}
+
+export const ceiling = (events: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(events);
+
+/** The ceiling this fold is held to. */
+export const ceilingOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_EVENTS);
+});
 
 /** Where a pull request's history lives. */
 export const refOf = (pr: string): string => `refs/hub/pr/${pr}`;
@@ -515,7 +538,7 @@ const summaryOf = Effect.fn("hub.Event.summaryOf")(function* (commit: Oid) {
  * deciding *which* of them is the impostor needs the trust state this walk
  * does not have, so both are handed on and `hub/Projection.ts` rules on them.
  */
-export const entries = Effect.fn("hub.Event.entries")(function* (pr: string, ceiling = MAX_EVENTS) {
+export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(refOf(pr));
@@ -534,6 +557,7 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string, cei
   // unbounded one is a push that never returns rather than a push that is
   // refused. The bound is far above any conversation: a pull request with
   // more events than this is not one a person is having.
+  const ceiling = yield* ceilingOf();
   if (parents.size > ceiling) {
     return yield* new Invalid({
       field: "pr",
@@ -624,12 +648,9 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string, cei
  * append could take somebody else's approved one past the line and, with it,
  * every approval the protected branch behind it was counting on.
  */
-export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (
-  head: Oid,
-  ceiling = MAX_EVENTS,
-) {
+export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (head: Oid) {
   const parents = yield* Dag.reachable(head, null, (commit) => isHubCommit(commit));
-  return parents.size <= ceiling;
+  return parents.size <= (yield* ceilingOf());
 });
 
 /**

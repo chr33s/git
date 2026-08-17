@@ -13,6 +13,7 @@ import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid, RefUpdate } from "../git/Store.ts";
+import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
@@ -443,6 +444,47 @@ describe("Policy", () => {
       );
       assert.equal(decision.ok, false);
       assert.match(decision.ok === false ? decision.reason : "", /0 approvals/);
+    });
+
+    it("passes over a pull request this replica cannot fold", async () => {
+      // The fold's ceiling is enforced where a *push* crosses it, so a history
+      // that arrived by replication may sit above it. Left uncaught in the
+      // cheap pre-filter that runs in front of the fold, one such pull request
+      // refused every push to every protected branch on that replica,
+      // permanently — the denial the ceiling exists to prevent, reached
+      // through the ceiling itself.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "hub.create-pr", "hub.review", "hub.approve"]);
+          const { second } = yield* history("refs/heads/main");
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "please",
+            base: "refs/heads/main",
+            head: second,
+            key: where.dev,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: second,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          // Two events, and a ceiling of one: the same shape as a replicated
+          // pull request larger than this host will walk.
+          return yield* judge(where, { name: "refs/heads/main", value: second }, guarded).pipe(
+            Effect.provide(Event.ceiling(1)),
+          );
+        }),
+      );
+
+      assert.equal(outcome.ok, false, "it cannot approve anything this host cannot read");
+      assert.match(
+        outcome.ok === false ? outcome.reason : "",
+        /approved pull request/,
+        "and the refusal is the ordinary one, not a failure",
+      );
     });
 
     it("allows it once the current revision is approved", async () => {

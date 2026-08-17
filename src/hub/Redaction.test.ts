@@ -569,6 +569,42 @@ describe("hub redaction", () => {
     assert.deepEqual(outcome.sizes, [1, 2], "and a moved ref must not be answered from the memo");
   });
 
+  it("passes over a pull request this replica cannot walk", async () => {
+    // The fold's ceiling is enforced where a *push* crosses it, so a history
+    // that arrived by replication may sit above it. This walk visits every
+    // pull request — including ones with nothing redacted in them — so an
+    // uncaught failure here took out `gc` for the whole repository and every
+    // deepening fetch of it, on account of a pull request that has nothing to
+    // do with either.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        // Three events, and a ceiling of one: the same shape as a replicated
+        // pull request larger than this host will walk.
+        const blind = Event.ceiling(1);
+        return {
+          strict: (yield* Redaction.excluded().pipe(Effect.provide(blind))).size,
+          explained: (yield* Redaction.covered().pipe(Effect.provide(blind))).has(blob!),
+          // And with the ordinary ceiling nothing has changed.
+          seen: (yield* Redaction.excluded()).size,
+        };
+      }),
+    );
+
+    assert.equal(outcome.strict, 0, "gc keeps running, protecting what it cannot read about");
+    assert.equal(outcome.explained, false);
+    assert.equal(outcome.seen, 1, "and a host that can walk it still honours the tombstone");
+  });
+
   it("excludes nothing in a repository that has no genesis", async () => {
     const excluded = await scenario(Redaction.excluded());
     assert.equal(excluded.size, 0);

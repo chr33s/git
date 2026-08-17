@@ -201,7 +201,20 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
   const known = cache.get(pr);
   if (known !== undefined) return known.has(to);
 
-  const { events } = yield* Event.entries(pr);
+  // A pull request this replica cannot walk proposes nothing it can act on.
+  // The ceiling is enforced where a *push* crosses it, so a history that
+  // arrived by replication may sit above it — and failing here would refuse
+  // every push to every protected branch on that replica, permanently, which
+  // is the denial the ceiling exists to prevent rather than a second way to
+  // reach it. Skipped as one candidate, exactly as the fold below is.
+  const walked = yield* Event.entries(pr).pipe(
+    Effect.catchTag("Invalid", () => Effect.succeed(null)),
+  );
+  if (walked === null) {
+    cache.set(pr, new Set());
+    return false;
+  }
+  const { events } = walked;
   const heads = new Set<string>();
   for (const entry of events) {
     const payload = entry.payload;

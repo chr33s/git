@@ -99,6 +99,11 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   // different membership and so a different answer — shared an entry, and one
   // of them collected with an exclusion set computed for the other.
   const state = [
+    // The ceiling is part of the answer, not of the repository: a host that
+    // will not walk a pull request that size reports nothing redacted in it,
+    // so two hosts with the same refs and different ceilings hold two
+    // different answers under what would otherwise be one key.
+    `ceiling ${yield* Event.ceilingOf()}`,
     yield* repository.resolve(LOG_REF),
     ...(yield* Effect.forEach(refs, (pr) =>
       repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
@@ -165,9 +170,13 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
   // enters it, and a moved ref changes the key.
   const refs = yield* Event.pullRequests();
   const identity = yield* repository.resolve(GENESIS_REF);
-  const state = (yield* Effect.forEach(refs, (pr) =>
-    repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
-  )).join(" ");
+  const state = [
+    // As above: the ceiling decides which pull requests were walked at all.
+    `ceiling ${yield* Event.ceilingOf()}`,
+    ...(yield* Effect.forEach(refs, (pr) =>
+      repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
+    )),
+  ].join(" ");
 
   const known = names.get(identity);
   if (known !== undefined && known.state === state) {
@@ -206,8 +215,17 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
 const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: ReadonlyArray<string>) {
   const found: string[] = [];
   for (const pr of refs) {
-    const { events } = yield* Event.entries(pr);
-    if (events.some((entry) => entry.payload?.type === "event.redacted")) found.push(pr);
+    // One pull request this cannot walk is one pull request, not a broken
+    // repository. The fold's ceiling is enforced where a push crosses it, so a
+    // history that arrived by replication may sit above it — and failing here
+    // would take out `gc` for every repository on the host and every deepening
+    // fetch of this one, on a walk that visits pull requests with nothing
+    // redacted in them at all.
+    const walked = yield* Event.entries(pr).pipe(
+      Effect.catchTag("Invalid", () => Effect.succeed(null)),
+    );
+    if (walked === null) continue;
+    if (walked.events.some((entry) => entry.payload?.type === "event.redacted")) found.push(pr);
   }
   return found;
 });

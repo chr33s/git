@@ -187,13 +187,14 @@ describe("hub projection", () => {
         });
         const head = yield* repository.resolve(Event.refOf(pr));
         return {
-          under: (yield* Event.entries(pr, 8)).events.length,
-          over: yield* Event.entries(pr, 1).pipe(
+          under: (yield* Event.entries(pr)).events.length,
+          over: yield* Event.entries(pr).pipe(
             Effect.as(null),
             Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+            Effect.provide(Event.ceiling(1)),
           ),
-          admits: yield* Event.withinCeiling(head!, 8),
-          refuses: yield* Event.withinCeiling(head!, 1),
+          admits: yield* Event.withinCeiling(head!),
+          refuses: yield* Event.withinCeiling(head!).pipe(Effect.provide(Event.ceiling(1))),
         };
       }),
     );

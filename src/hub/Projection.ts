@@ -136,7 +136,7 @@ export interface PullRequest {
 const supersedes = (
   candidate: { readonly commit: Oid; readonly id: string },
   current: { readonly commit: Oid; readonly id: string } | null,
-  ancestors: ReadonlyMap<Oid, ReadonlySet<Oid>>,
+  ancestors: ReadonlyMap<Oid, Ancestors>,
 ): boolean => {
   if (current === null) return true;
   if (ancestors.get(candidate.commit)?.has(current.commit) === true) return true;
@@ -144,26 +144,60 @@ const supersedes = (
   return candidate.id > current.id;
 };
 
+/** One commit's ancestors: asked about one, or walked through. */
+interface Ancestors {
+  readonly has: (commit: Oid) => boolean;
+  readonly [Symbol.iterator]: () => Iterator<Oid>;
+}
+
 /**
  * Ancestor sets for every commit in the walked history.
  *
  * Built in topological order so each commit's set is the union of its parents'
- * — the parents are already done. Quadratic in the worst case, which is fine
- * for the size a pull request reaches and would not be for a source history;
- * this only ever walks `refs/hub/pr/<id>`.
+ * — the parents are already done — and held as bits rather than as sets of
+ * oids. The relation is quadratic whatever the representation, and this fold
+ * runs synchronously on the receive-pack path inside a worker with a fixed
+ * memory ceiling: a `Set` of forty-character oids costs tens of bytes per
+ * entry, so a pull request of a few thousand events was hundreds of megabytes
+ * and the push died rather than being refused. One bit per pair is 512 bytes
+ * per commit at `Event.MAX_EVENTS`, which is what makes the ceiling a bound
+ * this can actually be held to.
  */
 const ancestorSets = (
   parents: Dag.Parents,
   ordered: ReadonlyArray<Oid>,
-): ReadonlyMap<Oid, ReadonlySet<Oid>> => {
-  const sets = new Map<Oid, Set<Oid>>();
-  for (const oid of ordered) {
-    const set = new Set<Oid>();
+): ReadonlyMap<Oid, Ancestors> => {
+  const index = new Map<Oid, number>();
+  for (const [at, oid] of ordered.entries()) index.set(oid, at);
+
+  const words = Math.max(1, Math.ceil(ordered.length / 32));
+  const bits = new Uint32Array(ordered.length * words);
+  const held = (base: number, at: number): boolean =>
+    ((bits[base + (at >>> 5)] ?? 0) & (1 << (at & 31))) !== 0;
+
+  const sets = new Map<Oid, Ancestors>();
+  for (const [at, oid] of ordered.entries()) {
+    const base = at * words;
     for (const parent of parents.get(oid) ?? []) {
-      set.add(parent);
-      for (const older of sets.get(parent) ?? []) set.add(older);
+      // A parent outside the walk is the boundary, and has no row to union.
+      const from = index.get(parent);
+      if (from === undefined) continue;
+      bits[base + (from >>> 5)] = (bits[base + (from >>> 5)] ?? 0) | (1 << (from & 31));
+      for (let word = 0; word < words; word++) {
+        bits[base + word] = (bits[base + word] ?? 0) | (bits[from * words + word] ?? 0);
+      }
     }
-    sets.set(oid, set);
+    sets.set(oid, {
+      has: (commit) => {
+        const found = index.get(commit);
+        return found !== undefined && held(base, found);
+      },
+      *[Symbol.iterator]() {
+        for (const [older, candidate] of ordered.entries()) {
+          if (held(base, older)) yield candidate;
+        }
+      },
+    });
   }
   return sets;
 };
