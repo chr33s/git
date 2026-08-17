@@ -127,7 +127,15 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // The router holds a `Scope`: the layers it built — stores, hooks, the
       // webhook registry — have finalizers, and dropping the entry without
       // running them leaks a file handle per evicted repository.
-      void state.disposeApi();
+      //
+      // Caught, not merely detached. A finalizer that rejects becomes an
+      // unhandled rejection, and node's default is to turn that into a throw
+      // that takes the whole server down — so a file handle this host could
+      // not close would stop it serving every repository it holds. Eviction is
+      // housekeeping; it says so and carries on.
+      state.disposeApi().catch((cause: unknown) => {
+        console.error(`could not release ${name}: ${String(cause)}`);
+      });
       if (repos.size <= REPO_CACHE) return;
     }
   };

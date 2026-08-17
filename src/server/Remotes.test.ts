@@ -479,6 +479,33 @@ describe("Remotes, over HTTP", () => {
       assert.equal(tip.message, "ours");
     }).pipe(Effect.scoped),
   );
+
+  it.live("refuses a branch that is not one, rather than nesting it under heads", () =>
+    Effect.gen(function* () {
+      // The gate judged what `refNameOf` made of the name and the write used
+      // what `Sync.pull` made of it, and the two disagreed: `refs/tags/x` was
+      // judged as `refs/tags/x` and written as `refs/heads/refs/tags/x`, so a
+      // `source.push` holder could create a ref inside a fully protected
+      // `refs/heads/*` namespace without the branch rules ever seeing it.
+      const api = yield* remote(server.url);
+      const failed = yield* api.remotes
+        .pull({ params: { repo: "down" }, payload: { name: "up", branch: "refs/tags/x" } })
+        .pipe(Effect.flip);
+      // Refused for being the wrong *shape*, before anything is fetched — not
+      // for the remote happening not to have `refs/heads/refs/tags/x`, which
+      // is what the nesting bug produced and is indistinguishable from success
+      // on a remote that does.
+      assert.equal(failed._tag, "Invalid");
+      assert.match(failed.reason, /is not a branch/);
+
+      const { refs } = yield* api.repo.refs({ params: { repo: "down" } });
+      assert.equal(
+        refs.find((ref) => ref.name.startsWith("refs/heads/refs/")),
+        undefined,
+        `nothing nested under heads: ${refs.map((ref) => ref.name).join(", ")}`,
+      );
+    }).pipe(Effect.scoped),
+  );
 });
 
 describe.skipIf(!hasGit)("Remotes, read back by the git binary", () => {

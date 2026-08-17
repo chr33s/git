@@ -215,10 +215,20 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
 }) {
   const repository = yield* Repository;
 
-  const short = input.branch.startsWith("refs/heads/")
-    ? input.branch.slice("refs/heads/".length)
-    : input.branch;
-  const branch = `refs/heads/${short}`;
+  // The same normalization the policy gate applied, and then a check that the
+  // two agree. Stripping only a `refs/heads/` prefix meant `refs/tags/x` was
+  // *judged* as `refs/tags/x` and *written* as `refs/heads/refs/tags/x` — so a
+  // `source.push` holder could create a ref inside a fully protected
+  // `refs/heads/*` namespace without the protected-branch rules ever seeing
+  // it. A pull moves a branch; anything else is a request this cannot serve.
+  const branch = input.branch.startsWith("refs/") ? input.branch : `refs/heads/${input.branch}`;
+  if (!branch.startsWith("refs/heads/") || branch === "refs/heads/") {
+    return yield* new Invalid({
+      field: "branch",
+      reason: `'${input.branch}' is not a branch; a pull moves refs/heads/*`,
+    });
+  }
+  const short = branch.slice("refs/heads/".length);
   const tracking = `refs/remotes/${input.target.name}/${short}`;
 
   const fetched = yield* fetchFrom({
