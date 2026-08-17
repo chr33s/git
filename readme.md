@@ -104,9 +104,8 @@ npx chr33s-git commit --work . --message "first"
 npx chr33s-git switch --work . --create topic
 ```
 
-29 commands in all: repositories (`init`, `clone`, `serve`, `hub`,
-`credential`), the
-working tree (`add`, `rm`, `mv`, `restore`, `status`, `switch`, `commit`),
+30 commands in all: repositories (`init`, `clone`, `serve`, `hub`,
+`credential`), the working tree (`add`, `rm`, `mv`, `restore`, `status`, `switch`, `commit`),
 history (`log`, `history`, `show`, `diff`, `grep`, `bisect`, `files`), refs
 (`branch`, `tag`, `refs`, `reset`), rewriting (`merge`, `cherry-pick`,
 `rebase`), transport (`push`, `archive`), and maintenance (`fsck`, `gc`).

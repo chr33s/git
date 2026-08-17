@@ -229,7 +229,12 @@ const HAVES_PER_ROUND = 32;
 const requestedCapabilities = (offered: ReadonlySet<string>): ReadonlyArray<string> =>
   offered.has("multi_ack_detailed") ? ["multi_ack_detailed"] : [];
 
-const pktLine = (line: string) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
+// The length is of the bytes on the wire, not of the string's code units: a
+// pkt-line's four hex digits are a byte count, and a ref prefix carrying
+// anything outside ASCII would declare a frame shorter than it sent, leaving
+// the server to read the tail of one line as the header of the next.
+const pktLine = (line: string) =>
+  `${(encoder.encode(line).length + 4).toString(16).padStart(4, "0")}${line}`;
 
 /**
  * One request body: the wants, then the haves offered so far.

@@ -726,8 +726,11 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     // anybody able to write a hub ref can grind — evict a stranger's event
     // that happened to share it. Scoped to the signer, a duplicate can only
     // ever displace its own author's earlier event, which is a mistake rather
-    // than an attack, and every collection below is keyed the same way so that
-    // no author can overwrite another's entry either.
+    // than an attack. Every collection below that an author owns is keyed the
+    // same way, so no author can overwrite another's entry either; `checks`
+    // is deliberately not — a check is keyed by its name and revision because
+    // a re-run is meant to replace the last result, and the capability that
+    // charges for it is scoped per check name.
     const mine = keyOf(signer, payload.id);
     const previous = claimed.get(mine);
     if (previous !== undefined) {

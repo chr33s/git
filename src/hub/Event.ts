@@ -32,7 +32,7 @@ import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { checkRefName, type Oid } from "../git/Store.ts";
 import { checkCapability } from "../trust/Certificate.ts";
 import type { RepoId } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
@@ -59,15 +59,13 @@ export const refOf = (pr: string): string => `refs/hub/pr/${pr}`;
  */
 export const isPullRequestId = (id: string): boolean => {
   if (id.length === 0 || id.length > 128 || id.includes("/")) return false;
-  // The characters a ref name may not carry, and the control range with them:
-  // an id is a path component of `refs/hub/pr/<id>`, so anything git refuses
-  // there is an id this cannot store.
-  for (const character of id) {
-    const code = character.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return false;
-    if ("~^: ?*[\\".includes(character)) return false;
-  }
-  return true;
+  // Asked of the ref this would actually write, rather than restated here. A
+  // second list of the characters git refuses drifts from the first: this one
+  // was missing `..`, a leading or trailing `.`, a `.lock` suffix and `@{`, so
+  // `open` validated the id, wrote the payload blob, the tree and the commit,
+  // and only then failed at `setRef` — leaving the objects behind and
+  // reporting a ref-name error from a call that was given no ref.
+  return checkRefName(refOf(id)) === null;
 };
 
 /** The pull request a hub ref names, or `null` when it names something else. */

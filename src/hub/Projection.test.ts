@@ -126,6 +126,15 @@ describe("hub projection", () => {
           nested: yield* attempt("team/42"),
           empty: yield* attempt(""),
           wild: yield* attempt("a*b"),
+          // The shapes a hand-written list of reserved characters missed.
+          // Each of these validated, wrote a payload blob, a tree and a
+          // commit, and only then failed at `setRef` with a ref-name error —
+          // objects left behind, from a call that was given no ref.
+          traversal: yield* attempt("a..b"),
+          dotted: yield* attempt(".hidden"),
+          trailing: yield* attempt("42."),
+          locked: yield* attempt("42.lock"),
+          reflog: yield* attempt("42@{0}"),
           plain: yield* attempt("42"),
         };
       }),
@@ -134,6 +143,23 @@ describe("hub projection", () => {
     assert.match(failures.nested ?? "", /one ref path component/);
     assert.notEqual(failures.empty, null);
     assert.notEqual(failures.wild, null);
+    // Refused by the *id* check, before anything was written. Matched on the
+    // message rather than on failure alone: each of these failed either way,
+    // one at validation and one at `setRef` after three objects had been
+    // committed, and only the first is this feature working.
+    for (const [spelling, reason] of [
+      ["'..'", failures.traversal],
+      ["a leading '.'", failures.dotted],
+      ["a trailing '.'", failures.trailing],
+      ["'.lock'", failures.locked],
+      ["'@{'", failures.reflog],
+    ] as const) {
+      assert.match(
+        reason ?? "",
+        /cannot name a pull request/,
+        `${spelling} must be refused as an id`,
+      );
+    }
     assert.equal(failures.plain, null, "an ordinary id still opens");
   });
 
