@@ -503,23 +503,27 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     }
   }
 
-  if (current === null) return allowed;
-  if (!(yield* contains(current, update.value))) {
+  // And it may not graft a second beginning onto the history, or an edge out
+  // of it. Every event a hub ref carries is written onto the ref's current
+  // head, so an append-only history has exactly one parentless commit: a pull
+  // request's `pr.opened`, a trust log's first record. A push that brings a
+  // *new* one is not adding to this history, it is adding another one beside
+  // it — and a fold with two roots has to choose between them by something,
+  // which on a pull request with no activity yet can only be the oid, which
+  // whoever wrote the commit ground. That is how a `hub.create-pr` holder took
+  // the authorship, the title and the base of a pull request they had no part
+  // in opening. Asked before the ref exists as well as after: the create is
+  // where a first push could otherwise hang an event off a source commit, or
+  // bring several competing openings at once.
+  // Containment first: an update that drops what the ref held is refused for
+  // that, and reporting it as a graft would be true but unhelpful.
+  if (current !== null && !(yield* contains(current, update.value))) {
     return refused(
       update.name,
       `${update.name} is append-only: the update must contain ${current}`,
     );
   }
 
-  // And it may not graft a second beginning onto the history. Every event a
-  // hub ref carries is written onto the ref's current head, so an append-only
-  // history has exactly one parentless commit: a pull request's `pr.opened`,
-  // a trust log's first record. A push that brings a *new* one is not adding
-  // to this history, it is adding another one beside it — and a fold with two
-  // roots has to choose between them by something, which on a pull request
-  // with no activity yet can only be the oid, which whoever wrote the commit
-  // ground. That is how a `hub.create-pr` holder took the authorship, the
-  // title and the base of a pull request they had no part in opening.
   const grafted = yield* orphanBeyond(update.name, current, update.value);
   if (grafted !== null) {
     return refused(
@@ -631,7 +635,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
  */
 const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   name: string,
-  current: Oid,
+  current: Oid | null,
   to: Oid,
 ) {
   // Bounded to the namespace's own commits, like every other walk of them. An
@@ -643,17 +647,35 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   // Stopped at everything the ref already reaches, and not at the tip alone:
   // the boundary oid cuts only the chain running through it, and a join has a
   // second parent, so an ordinary reconciling push walked back to the root.
-  const belongs = name.startsWith("refs/hub/") ? Event.isHubCommit : Log.isTrustCommit;
+  //
+  // Asked on a *create* as well, which is where the same hole reopened: only
+  // the tip was inspected there, and the ceiling walk is itself bounded to the
+  // namespace, so a first push of `refs/hub/pr/<fresh-uuid>` could hang one
+  // event commit off a source commit and pin everything behind it out of
+  // reach of `gc` for good.
+  const hub = name.startsWith("refs/hub/");
+  const belongs = hub ? Event.isHubCommit : Log.isTrustCommit;
+  // The commit a trust log hangs off is not a record and never will be: it is
+  // the genesis, the one legitimate edge out of that namespace. On every push
+  // but the log's first it is already reachable from `current`; on the first
+  // there is nothing else for the first record to name.
+  const repository = yield* Repository;
+  const anchor = hub ? null : yield* repository.resolve(Refspec.TRUST_GENESIS);
   const parents = yield* Dag.reachable(to, current, (commit) =>
     Effect.gen(function* () {
       if (!(yield* belongs(commit))) return false;
-      return !(yield* contains(commit, current));
+      return current === null ? true : !(yield* contains(commit, current));
     }),
   ).pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   // Unreadable is not "no second root": the objects arrived with this push, so
   // a missing one is a push this cannot judge rather than one it may wave on.
   if (parents === null) return { commit: to, reason: "could not be read" } as const;
-  for (const [commit, of] of parents) {
+
+  // Collected rather than reported as they are found: which of several roots
+  // is named would otherwise depend on the walk's order, and the answer to
+  // "is there more than one" does not.
+  const roots: Oid[] = [];
+  for (const [commit, of] of [...parents].sort(([left], [right]) => (left < right ? -1 : 1))) {
     // A root of *this* history, which is not the same as a commit with no
     // parents at all. The walk holds only what the push adds, so a parent is
     // an edge of this DAG when the walk kept it or when the ref already
@@ -666,7 +688,11 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
     // branch behind an approved pull request the boundary could no longer see.
     let attached = false;
     for (const parent of of) {
-      if (parents.has(parent) || (yield* contains(parent, current))) {
+      if (parents.has(parent) || parent === anchor) {
+        attached = true;
+        continue;
+      }
+      if (current !== null && (yield* contains(parent, current))) {
         attached = true;
         continue;
       }
@@ -678,8 +704,17 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
       // from `current` on every push that is not the log's first.
       return { commit: parent, reason: "is not part of this history" } as const;
     }
-    if (!attached) return { commit, reason: "begins a second history" } as const;
+    if (!attached) roots.push(commit);
   }
+
+  // One beginning, and only when there was none before. An existing ref
+  // already has its own, so any root a push brings is a second; a create is
+  // allowed exactly one, and a second is the same graft arriving a step
+  // earlier — several competing parentless `pr.opened` commits in the very
+  // push that makes the pull request.
+  const allowance = current === null ? 1 : 0;
+  const extra = roots[allowance];
+  if (extra !== undefined) return { commit: extra, reason: "begins a second history" } as const;
   return null;
 });
 

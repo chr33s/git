@@ -526,6 +526,84 @@ describe("Policy", () => {
       assert.match(outcome.ok === false ? outcome.reason : "", /is not part of/);
     });
 
+    it("refuses a first push that hangs a pull request off the source history", async () => {
+      // The edge rule ran only once the ref existed, so the push that matters
+      // most went unchecked. On a create only the tip was inspected, and the
+      // ceiling walk is itself bounded to the namespace and steps straight
+      // over a foreign parent — so a `source.push` holder with no hub
+      // capability at all could hang one event commit off the commit holding
+      // a secret and create `refs/hub/pr/<fresh-uuid>` at it. `refs/hub/*` can
+      // never be deleted and `gc` treats every ref as a root, so the secret
+      // stayed reachable and clonable for good.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const repository = yield* Repository;
+
+          const secret = yield* repository.writeBlob(new TextEncoder().encode("hunter2\n"));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "secret.txt", oid: secret },
+          ]);
+          const source = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "source\n",
+            author,
+          });
+
+          // A commit that reads as a hub event — an empty tree is a join —
+          // hanging off the source commit rather than off a history of its
+          // own.
+          const grafted = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [source],
+            message: "join\n",
+            author,
+          });
+          return yield* judge(where, { name: "refs/hub/pr/borrowed", value: grafted });
+        }),
+      );
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /is not part of this history/);
+    });
+
+    it("refuses a first push bringing two competing openings at once", async () => {
+      // The same rule, a step earlier: several parentless `pr.opened` commits
+      // in the very push that makes the pull request. Refused on every later
+      // push and, before this, allowed on the one that creates it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const repository = yield* Repository;
+          const one = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "pr.opened one\n",
+            author,
+          });
+          const two = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "pr.opened two\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [one, two],
+            message: "join\n",
+            author,
+          });
+          return {
+            two: yield* judge(where, { name: "refs/hub/pr/twinned", value: joined }),
+            one: yield* judge(where, { name: "refs/hub/pr/single", value: one }),
+          };
+        }),
+      );
+      assert.equal(outcome.two.ok, false);
+      assert.match(outcome.two.ok === false ? outcome.two.reason : "", /second history/);
+      assert.equal(outcome.one.ok, true, "one beginning is what a create is");
+    });
+
     it("refuses a hub ref that does not name a pull request", async () => {
       // `refs/hub/` as a whole is undeletable, and only `refs/hub/pr/<id>` is
       // ever counted, folded or listed as a pull request. A name outside that
