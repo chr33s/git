@@ -31,7 +31,7 @@
  * command names the exact new oid, and the pack is checked against those oids
  * on the way in, so the body is bound transitively by content addressing.
  */
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import {
   type Fingerprint,
@@ -551,13 +551,27 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     Effect.catchTag("Invalid", (error) => Effect.fail(error)),
   );
   if (stored === null) {
-    // Not hub-enabled: no identity, no membership, nothing to check against.
+    // Not hub-enabled: no identity, and so no membership to grant anything.
+    // Reads are served as a plain git repository's always have been; writes
+    // are not, unless the host has said otherwise — and this is the one place
+    // that covers *every* write, not only the ones that move a ref. Checked at
+    // the ref boundary alone, it left webhook and remote registration, the
+    // remote-push verb and LFS uploads reachable by anybody.
+    const open = yield* Effect.serviceOption(AnonymousWrites);
+    if (input.capability !== "repo.read" && !Option.getOrElse(open, () => false)) {
+      return {
+        ok: false,
+        status: 403,
+        reason:
+          "this repository has no membership to authorize a write; run `hub init` to give it one",
+      } as const;
+    }
     return {
       ok: true,
       authenticated: {
         principal: null,
         signer: null,
-        capabilities: [],
+        capabilities: [input.capability],
         projection: EMPTY,
         envelope: null,
       },
@@ -742,6 +756,28 @@ const folded = Effect.fn("Auth.folded")(function* (genesis: Genesis) {
   }
   return projection;
 });
+
+/**
+ * Whether this host serves writes to repositories that have no identity.
+ *
+ * §14 is unconditional that anonymous does not get `source.push`, and a
+ * repository with no genesis has no membership to grant it — so the default is
+ * to refuse, which is also what every stock git host does with an unconfigured
+ * bare repository. It is a *host* decision rather than a repository one for the
+ * only reason a host ever gets to decide anything here: a repository with no
+ * identity has no way to state a policy of its own.
+ *
+ * It lives beside the guard rather than beside the policy boundary because the
+ * guard is what every surface passes through — smart-HTTP, the JSON verbs, LFS
+ * uploads and webhook and remote registration alike. Checked only at the ref
+ * boundary, it left every write that does not move a ref wide open.
+ */
+export class AnonymousWrites extends Context.Service<AnonymousWrites, boolean>()(
+  "server/AnonymousWrites",
+) {}
+
+export const anonymousWrites = (allowed: boolean): Layer.Layer<AnonymousWrites> =>
+  Layer.succeed(AnonymousWrites)(allowed);
 
 /** Anonymous, for the paths that never authenticated anybody. */
 export const anonymous: Authenticated = {

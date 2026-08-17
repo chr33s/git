@@ -76,6 +76,17 @@ export const ObjectFormat = Schema.Literals(["sha1", "sha256"]);
 export const GenesisDocument = Schema.Struct({
   version: Schema.Literal(1),
   objectFormat: ObjectFormat,
+  /**
+   * What makes this repository *this* repository and not another like it.
+   *
+   * The `RepoID` is the hash of these bytes, and without a unique field two
+   * repositories created from the same key with the same threshold — which is
+   * exactly what one person setting up two projects does — hashed to the same
+   * identity. That breaks `known_repos` on both, and lets a certificate or a
+   * hub event bound to one repository verify against the other, which is what
+   * binding them by `repo` was for.
+   */
+  uuid: Schema.String,
   /** `authorized_keys` lines: the keys that hold root authority. */
   rootKeys: Schema.Array(Schema.String),
   /** How many distinct root keys an authority operation needs. */
@@ -119,6 +130,7 @@ export const encodeDocument = (document: GenesisDocument): Uint8Array =>
       {
         version: document.version,
         objectFormat: document.objectFormat,
+        uuid: document.uuid,
         rootKeys: document.rootKeys,
         threshold: document.threshold,
       },
@@ -156,6 +168,9 @@ export const validateDocument = Effect.fn("Genesis.validateDocument")(function* 
       field: "objectFormat",
       reason: `'${document.objectFormat}' repositories are not supported in this version`,
     });
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(document.uuid)) {
+    return yield* new Invalid({ field: "uuid", reason: "a repository's uuid must be a UUID" });
   }
   if (document.rootKeys.length === 0) {
     return yield* new Invalid({ field: "rootKeys", reason: "a repository needs a root key" });
@@ -230,10 +245,13 @@ export const load = Effect.fn("Genesis.load")(function* (bytes: Uint8Array) {
 export const create = Effect.fn("Genesis.create")(function* (
   rootKeys: ReadonlyArray<string>,
   threshold: number,
+  /** Supplied only when reproducing a known repository. */
+  uuid: string = crypto.randomUUID(),
 ) {
   const document = {
     version: 1,
     objectFormat: "sha1",
+    uuid,
     rootKeys,
     threshold,
   } satisfies GenesisDocument;

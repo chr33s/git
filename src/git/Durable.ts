@@ -96,7 +96,7 @@ export class GitRepo extends DurableObject<TestEnv> {
    * failure worth persisting through.
    */
   /** Whether this host serves writes to repositories with no genesis. */
-  #openWrites(): Layer.Layer<Policy.AnonymousWrites> {
+  #openWrites(): Layer.Layer<Auth.AnonymousWrites> {
     return Policy.anonymousWrites(this.env.ALLOW_ANONYMOUS_WRITES === "1");
   }
 
@@ -189,7 +189,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     // which is what every repository that predates this was.
     const guarded = await Effect.runPromise(
       Auth.guard(request).pipe(
-        Effect.provide(Layer.merge(this.#live(repo), this.#nonces())),
+        Effect.provide(Layer.mergeAll(this.#live(repo), this.#nonces(), this.#openWrites())),
         // As the other two hosts do: a repository whose identity cannot be
         // read is unavailable, not open, and not an exception out of `fetch`.
         Effect.orElseSucceed(() => ({

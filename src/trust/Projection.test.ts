@@ -223,6 +223,40 @@ describe("trust projection", () => {
     assert.deepEqual(state.projection.rejected, []);
   });
 
+  it("does not let an unsigned copy of a record displace the signed one", async () => {
+    // Keyed on the payload alone, a replay that kept the bytes and *dropped*
+    // the signatures counted as the same record — so an unsigned copy with a
+    // lower oid won the tie-break and the signed original was discarded as its
+    // duplicate, and the revocation never applied.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const bob = yield* generate("bob@example.com");
+        yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+
+        const payload = Certificate.revoke({
+          repo: where.genesis.repoId,
+          subject: yield* print(bob),
+          reason: "compromised",
+          id: Log.newId(),
+        });
+        const bytes = Certificate.encode(payload);
+        // The same bytes with no signatures at all, then the real one.
+        yield* Log.append(payload, bytes, []);
+        yield* Log.append(
+          payload,
+          bytes,
+          yield* Effect.forEach(where.roots.slice(0, 2), (key) => sign(key, bytes, NAMESPACE)),
+        );
+
+        return { projection: yield* projectionOf(where), bob: yield* print(bob) };
+      }),
+    );
+
+    assert.equal(state.projection.members.get(state.bob), undefined, "the revocation must apply");
+    assert.notEqual(state.projection.revoked.get(state.bob), undefined);
+  });
+
   it("refuses a record whose id has already been applied", async () => {
     // The log ref is writable by anybody holding `source.push` — append-only
     // containment is all the policy boundary checks about it — so

@@ -141,7 +141,13 @@ describe("Genesis", () => {
 
     it("says so when the object format is one this version cannot serve", async () => {
       const document = new TextEncoder().encode(
-        JSON.stringify({ version: 1, objectFormat: "sha256", rootKeys: [], threshold: 1 }),
+        JSON.stringify({
+          version: 1,
+          objectFormat: "sha256",
+          uuid: "00000000-0000-7000-8000-000000000000",
+          rootKeys: [],
+          threshold: 1,
+        }),
       );
       const failure = await Effect.runPromise(load(document).pipe(Effect.flip));
       assert.match(failure.reason, /not supported in this version/);
@@ -219,6 +225,36 @@ describe("Genesis", () => {
       );
       assert.equal(signers.length, 0);
     });
+  });
+
+  it("gives two repositories built from the same key distinct identities", async () => {
+    // One person setting up two projects uses the same key and the same
+    // threshold for both. Hashing only those, the two shared a `RepoID` —
+    // which breaks `known_repos` on both and lets a certificate or a hub event
+    // bound to one verify against the other.
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const roots = yield* keys(1);
+        const first = yield* create(linesOf(roots), 1);
+        const second = yield* create(linesOf(roots), 1);
+        return { first: first.repoId, second: second.repoId };
+      }),
+    );
+
+    assert.notEqual(outcome.first, outcome.second);
+  });
+
+  it("keeps an identity stable when the same document is loaded again", async () => {
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const roots = yield* keys(1);
+        const made = yield* create(linesOf(roots), 1);
+        const read = yield* load(made.bytes);
+        return { made: made.repoId, read: read.repoId };
+      }),
+    );
+
+    assert.equal(outcome.read, outcome.made);
   });
 
   describe("storage", () => {

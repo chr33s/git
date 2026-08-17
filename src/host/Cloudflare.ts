@@ -217,7 +217,7 @@ export default Repo.make(
           // Worker in front of this is a router and holds no secret — there is
           // nothing for it to authenticate with.
           const guarded = yield* Auth.guard(request).pipe(
-            Effect.provide(Layer.merge(live(repo), nonces)),
+            Effect.provide(Layer.mergeAll(live(repo), nonces, openWrites)),
             Effect.orElseSucceed(() => ({
               denied: new Response("authentication unavailable", { status: 503 }),
               authenticated: Auth.anonymous,

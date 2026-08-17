@@ -15,6 +15,7 @@ import {
   credentialOf,
   encodeDelegation,
   guard,
+  anonymousWrites,
   MAX_DELEGATION_SECONDS,
   mintDelegation,
   Nonces,
@@ -196,8 +197,22 @@ describe("Auth", () => {
       assert.equal(denied.denied, null);
     });
 
-    it("serves a push anonymously too — nothing has claimed it", async () => {
+    it("refuses a push, because nothing can authorize one", async () => {
+      // Every write goes through here — smart-HTTP, the JSON verbs, LFS
+      // uploads, webhook and remote registration — so this is the one check
+      // that covers them all. Left to the ref boundary, the writes that move
+      // no ref stayed open.
       const denied = await scenario(guard(request("r/git-receive-pack", { method: "POST" })));
+      assert.equal(denied.denied?.status, 403);
+      assert.match(await (denied.denied?.text() ?? Promise.resolve("")), /hub init/);
+    });
+
+    it("serves one when the host has said to", async () => {
+      const denied = await scenario(
+        guard(request("r/git-receive-pack", { method: "POST" })).pipe(
+          Effect.provide(anonymousWrites(true)),
+        ),
+      );
       assert.equal(denied.denied, null);
     });
   });

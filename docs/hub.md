@@ -132,12 +132,20 @@ Conceptual genesis document:
 {
   "version": 1,
   "objectFormat": "sha1",
+  "uuid": "0195a1b2-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
   "rootKeys": ["ssh-ed25519 AAAA... alice", "ssh-ed25519 AAAA... bob", "ssh-ed25519 AAAA... carol"],
   "threshold": 2
 }
 ```
 
-The genesis is stored as a Git object: `refs/meta/trust/genesis` points at a commit whose tree contains a single `genesis.json` blob. The genesis SHOULD carry SSH signatures from at least `threshold` root keys, proving key possession at creation time.
+`uuid` is generated once, at creation, and is what makes this repository _this_
+repository rather than another one like it. Without it, two repositories created
+from the same root key with the same threshold — which is exactly what one
+person setting up two projects does — hash to the same `RepoID`: `known_repos`
+pins the wrong thing on both, and a certificate or hub event bound to one
+verifies against the other, which is what binding them by `repo` was for.
+
+The genesis is stored as a Git object: `refs/meta/trust/genesis` points at a commit whose tree contains a single `genesis.json` blob. The genesis MUST carry SSH signatures from at least `threshold` root keys, proving key possession at creation time; a verifier that cannot meet the threshold MUST refuse the document rather than treat it as an unsigned but usable identity.
 
 The corresponding private keys remain independently controlled by their owners.
 

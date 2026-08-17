@@ -51,6 +51,17 @@ export type Ancestry = (
   head: Oid,
 ) => Effect.Effect<ReadonlySet<Oid>, Invalid | ObjectNotFound | StorageFailure, Repository>;
 
+/**
+ * "Is this a trust-log commit at all?", however the caller computes it.
+ *
+ * `Log.contains` walks the log, and a fold asks it once per event per revoked
+ * signer on the protected-branch push path — about a head that cannot move
+ * while the fold runs. The caller that has a memo hands it in.
+ */
+export type Membership = (
+  commit: Oid,
+) => Effect.Effect<boolean, Invalid | ObjectNotFound | StorageFailure, Repository>;
+
 export type Authorization =
   | { readonly ok: true; readonly principal: Member }
   | { readonly ok: false; readonly reason: string };
@@ -91,6 +102,7 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   subject: Fingerprint,
   made: Made | null,
   seen: Ancestry,
+  held: Membership,
 ) {
   const revocation = projection.revoked.get(subject);
   if (revocation === undefined) return false;
@@ -133,7 +145,7 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // the tip of `main`, reaches no trust record and so matches no revocation —
   // indistinguishable from an event that genuinely predates it. Naming any oid
   // would otherwise be a way out of every forward-only revocation.
-  if (!(yield* Log.contains(made.trustHead))) return true;
+  if (!(yield* held(made.trustHead))) return true;
 
   return (yield* seen(made.trustHead)).has(revocation.commit);
 });
@@ -198,15 +210,18 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
    * hands its own memo in; a one-off caller gets the plain walk.
    */
   readonly seen?: Ancestry;
+  /** As `seen`, for "is this a trust-log commit?"; see `Membership`. */
+  readonly contains?: Membership;
 }) {
   const made = input.made ?? null;
   const ancestry = input.seen ?? Log.ancestry;
+  const membership = input.contains ?? Log.contains;
   const found = yield* signers(input.bytes, input.signatures);
   if (found.length === 0) return denied("no valid signature");
 
   let closest = "signer is not a member of this repository";
   for (const signer of found) {
-    if (yield* reaches(input.projection, signer, made, ancestry)) {
+    if (yield* reaches(input.projection, signer, made, ancestry, membership)) {
       closest = `${signer} has been revoked`;
       continue;
     }
@@ -261,7 +276,7 @@ export const authorizeKey = Effect.fn("trust.Verify.authorizeKey")(function* (in
   readonly capability: string;
   readonly at?: Date;
 }) {
-  if (yield* reaches(input.projection, input.signer, null, Log.ancestry)) {
+  if (yield* reaches(input.projection, input.signer, null, Log.ancestry, Log.contains)) {
     return denied(`${input.signer} has been revoked`);
   }
 

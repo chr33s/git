@@ -354,6 +354,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         capability: Event.capabilityFor(payload),
         made: { at: new Date(payload.issuedAt), trustHead: trustHeadOf(payload.trustHead) },
         seen: ancestry,
+        contains: inTrustLog,
       });
       if (authorized.ok) {
         candidates.push(entry.commit);
@@ -495,6 +496,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       capability: Event.capabilityFor(payload),
       made: { at: new Date(payload.issuedAt), trustHead: declared },
       seen: ancestry,
+      contains: inTrustLog,
     });
     if (!authorized.ok) {
       rejected.push({ commit: entry.commit, reason: authorized.reason });
@@ -554,6 +556,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         capability,
         made: { at: issued, trustHead: declared },
         seen: ancestry,
+        contains: inTrustLog,
       });
 
     switch (payload.type) {
@@ -572,11 +575,17 @@ export const project = Effect.fn("hub.Projection.project")(function* (
           break;
         }
 
-        title = payload.title;
-        description = payload.description;
-        base = payload.base;
-        // Only an uncontested opening says who the author is; see above.
-        if (!opening.contested) author ??= signer;
+        // A contested opening does not get to say what the pull request *is*
+        // either. Its `base` is what `protectedBranch` matches against, so an
+        // impostor that won a tie could point an approved pull request at
+        // another branch and make the boundary skip it — the freeze this
+        // whole rule exists to prevent, entered through the back door.
+        if (!opening.contested) {
+          title = payload.title;
+          description = payload.description;
+          base = payload.base;
+          author ??= signer;
+        }
         openedBy = mine;
         const head = Event.unqualify(payload.head);
         if (
@@ -804,6 +813,21 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         }
         if (targetCommit === entry.commit) {
           rejected.push({ commit: entry.commit, reason: "a tombstone cannot remove itself" });
+          break;
+        }
+        // Nor another tombstone. A tombstone is the *record* of a removal, and
+        // removing it would take its target's blob back out of the excluded
+        // set — so the redaction would quietly undo itself the next time
+        // anything packed or collected. `PullRequest.redact` already refuses
+        // to write one; the fold has to refuse to honour one, because a
+        // replica sees the event and never the command.
+        if (
+          events.find((event) => event.commit === targetCommit)?.payload?.type === "event.redacted"
+        ) {
+          rejected.push({
+            commit: entry.commit,
+            reason: "a tombstone is the record of a removal and is not itself removable",
+          });
           break;
         }
         redacted.add(targetCommit);

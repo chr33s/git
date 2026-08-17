@@ -460,8 +460,13 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
   // commit, and the commit is what `grant` and `Revocation.commit` are read
   // from later.
   const claimed = new Map<string, Oid[]>();
+  // The signatures are part of the record's identity, not decoration. Keyed on
+  // the payload alone, a replay that kept the bytes and *dropped* the
+  // signatures counted as the same record — so grinding a lower oid onto an
+  // unsigned copy of a revocation won the tie-break and dropped the signed
+  // original as its duplicate.
   const keyOf = (entry: (typeof records)[number]) =>
-    `${entry.payload.id}\u0000${decoder.decode(entry.bytes)}`;
+    [entry.payload.id, decoder.decode(entry.bytes), ...entry.signatures].join("\u0000");
   for (const entry of records) {
     const key = keyOf(entry);
     claimed.set(key, [...(claimed.get(key) ?? []), entry.commit]);

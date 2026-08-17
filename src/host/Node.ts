@@ -340,7 +340,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // secret to configure any more, so there is nothing to leave off.
       const denied = await Effect.runPromise(
         Auth.guard(request).pipe(
-          Effect.provide(Layer.merge(stateFor(repo).layer, nonces)),
+          Effect.provide(Layer.mergeAll(stateFor(repo).layer, nonces, openWrites)),
           // A repository whose identity cannot be read is not a repository
           // with no members: it is one nobody can be checked against, and the
           // honest answer is that the service is unavailable.

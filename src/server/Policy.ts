@@ -25,7 +25,7 @@
  * is a race with a name: the approvals counted a moment ago were for a head
  * that has since moved.
  */
-import { Context, Effect, Layer, Option, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 
 import { Invalid } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
@@ -80,6 +80,10 @@ export interface Rules {
    */
   readonly maxTrustAgeSeconds: number;
 }
+
+/** Re-exported where the boundary reads it; defined beside the guard. */
+export const anonymousWrites = Auth.anonymousWrites;
+export type AnonymousWrites = Auth.AnonymousWrites;
 
 export const OPEN: Rules = {
   protected: [],
@@ -245,27 +249,6 @@ const isProtected = (rules: Rules, ref: string): boolean => {
   });
 };
 
-/**
- * Whether this host serves writes to repositories that have no identity.
- *
- * §14 is unconditional that anonymous does not get `source.push`, and a
- * repository with no genesis has no membership to grant it — so the default is
- * to refuse, which is also what every stock git host does with an unconfigured
- * bare repository. It is a *host* decision rather than a repository one for the
- * only reason a host ever gets to decide anything here: a repository with no
- * identity has no way to state a policy of its own.
- *
- * The escape hatch exists because a scratch server on a laptop is a real thing
- * to want, and making it say so out loud is the difference between a choice and
- * an accident.
- */
-export class AnonymousWrites extends Context.Service<AnonymousWrites, boolean>()(
-  "server/AnonymousWrites",
-) {}
-
-export const anonymousWrites = (allowed: boolean): Layer.Layer<AnonymousWrites> =>
-  Layer.succeed(AnonymousWrites)(allowed);
-
 export interface Principal {
   /** `null` for an anonymous request, which may never write. */
   readonly member: Member | null;
@@ -343,7 +326,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
         "a repository's identity is established by `hub init`, not by a push",
       );
     }
-    const open = yield* Effect.serviceOption(AnonymousWrites);
+    const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
     if (!Option.getOrElse(open, () => false)) {
       return refused(
         update.name,
@@ -570,7 +553,7 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     // `POST /commit`, `/branch`, `/tags`, a merge or rebase with `into`, a
     // pull and commit-pack all still wrote refs — every door but the one that
     // was locked.
-    const open = yield* Effect.serviceOption(AnonymousWrites);
+    const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
     return Option.getOrElse(open, () => false)
       ? null
       : "this repository has no membership to authorize a write; run `hub init` to give it one";
