@@ -32,8 +32,21 @@ import * as Log from "./Log.ts";
 
 const decoder = new TextDecoder();
 
-/** How many checkpoints a projection carries, newest first. */
+/** How many checkpoints a projection carries from each end; see `project`. */
 const CHECKPOINTS = 32;
+
+/** How many copies of one statement contribute signatures; see `readLog`. */
+const COPIES = 8;
+
+/**
+ * Newest first, ties to the greater oid so every replica agrees.
+ */
+const byRecency = (left: Attestation, right: Attestation): number =>
+  left.at.getTime() !== right.at.getTime()
+    ? right.at.getTime() - left.at.getTime()
+    : right.commit < left.commit
+      ? -1
+      : 1;
 
 export interface Member {
   readonly fingerprint: Fingerprint;
@@ -260,38 +273,13 @@ const holds = (
  * without its identity — which is over the genesis bytes — ever changing.
  */
 export const project = Effect.fn("trust.Projection.project")(function* (genesis: Genesis) {
-  const { entries, keyOf, winner } = yield* readLog();
+  const { endorsed, entries, keyOf, winner } = yield* readLog();
 
   const members = new Map<Fingerprint, Member>();
   const former = new Map<Fingerprint, Member>();
   const revoked = new Map<Fingerprint, ReadonlyArray<Revocation>>();
   const rejected: Rejected[] = [];
 
-  /**
-   * The *statements* already applied, so none is applied twice.
-   *
-   * The log ref is writable by anybody holding `source.push` — append-only
-   * containment is the only thing the policy boundary checks about it — so
-   * re-committing an existing record's bytes at the head is a push anyone can
-   * make. Without this, a replay of a revoked member's original grant passed
-   * the re-instatement check below (its signer *is* the original admin) and
-   * cleared the revocation; the same trick re-revoked a re-instated member,
-   * restored a narrowed grant and reinstalled a stale checkpoint.
-   *
-   * Keyed on the id *and the bytes*, not the id alone. `winner` already
-   * separates two commits of one record, but a copy carrying an extra junk
-   * signature is a different key there and reaches this check, which is what
-   * this catches. Keyed on the bare id it caught much more than that: any
-   * member holding a trust capability could publish an authorized record —
-   * a grant to a key of their own — re-using the id of a revocation naming
-   * them, grind it below the real one, and burn the id, so the revocation was
-   * discarded as a duplicate on a ref that can never be rewound. Two records
-   * with one id but different content are two different claims, and each is
-   * now answered on its own authority.
-   */
-  const applied = new Set<string>();
-  const statementOf = (entry: (typeof entries)[number]) =>
-    `${entry.payload.id}\u0000${decoder.decode(entry.bytes)}`;
   let roots: ReadonlyArray<RootKey> = genesis.roots;
   let threshold = genesis.document.threshold;
   const checkpoints: Attestation[] = [];
@@ -309,7 +297,17 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       continue;
     }
 
-    const signers = yield* signersOf(entry.bytes, entry.signatures);
+    const key = keyOf(entry);
+    // Every signature any copy of this statement carried. They all sign the
+    // same bytes, so they are all endorsements of the same thing, and which
+    // commit one arrived in says nothing about it. Requiring them to be in the
+    // winning copy would hand a replay that *drops* the signatures a way to
+    // strip a revocation's authority simply by winning descent.
+    const endorsements = endorsed.get(key) ?? [entry.signatures];
+    const signers = new Set<Fingerprint>();
+    for (const copy of endorsements) {
+      for (const signer of yield* signersOf(entry.bytes, copy)) signers.add(signer);
+    }
     const quorum = rootQuorum(signers, roots, threshold);
     const payload = entry.payload;
     // What the record says about when it was made, which is what every
@@ -329,12 +327,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     // race moved `grant`, `history[].commit` and `Revocation.commit` onto a
     // commit honest trust heads cannot reach, which stops every stored event
     // by that member counting and stops a revocation applying at all.
-    if (winner.get(keyOf(entry)) !== entry.commit) {
-      rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
-      continue;
-    }
-    const statement = statementOf(entry);
-    if (applied.has(statement)) {
+    if (winner.get(key) !== entry.commit) {
       rejected.push({ commit: entry.commit, reason: `${payload.id} has already been applied` });
       continue;
     }
@@ -350,7 +343,6 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       const changed = yield* rootsOf(payload.rootKeys);
       roots = changed;
       threshold = payload.threshold;
-      applied.add(statement);
       continue;
     }
 
@@ -438,7 +430,6 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // key is a current member again: leaving a stale entry there would let a
       // later revocation be measured against capabilities they no longer hold.
       former.delete(subject);
-      applied.add(statement);
       continue;
     }
 
@@ -488,7 +479,6 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       const held = members.get(subject);
       if (held !== undefined) former.set(subject, held);
       members.delete(subject);
-      applied.add(statement);
       continue;
     }
 
@@ -497,32 +487,35 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       continue;
     }
 
-    // Sorted by `at`, not by fold order. Fold order is topological with an oid
-    // tie-break, so two checkpoints made concurrently on two replicas and then
-    // joined could leave the older one in force — and a repository that had
-    // set `maxTrustAgeSeconds` would then refuse every push against an
-    // attestation it already had a fresher replacement for. Ties go to the
-    // greater oid, so every replica still agrees.
+    // Kept in fold order here and sorted by `at` below. Taking simply the last
+    // one folded would let two checkpoints made concurrently on two replicas
+    // and then joined leave the older in force — and a repository that had set
+    // `maxTrustAgeSeconds` would then refuse every push against an attestation
+    // it already had a fresher replacement for.
     checkpoints.push({
       commit: entry.commit,
       at: new Date(payload.issuedAt),
       frontier: payload.frontier,
     });
-    applied.add(statement);
   }
 
-  // Newest first, and bounded: a checkpoint costs a commit to write and this
-  // list is walked on every gated write, so an unbounded one is a cost anybody
-  // holding `repo.admin` could impose. Deep enough that a run of bad-clock
-  // attestations does not bury the honest one behind them.
-  checkpoints.sort((left, right) =>
-    left.at.getTime() !== right.at.getTime()
-      ? right.at.getTime() - left.at.getTime()
-      : right.commit < left.commit
-        ? -1
-        : 1,
+  // Bounded, because a checkpoint costs one commit to write and this list is
+  // walked on every gated write, so an unbounded one is a cost anybody holding
+  // `repo.admin` could impose.
+  //
+  // Kept from *both* ends: the newest few by `at`, and the last few the fold
+  // reached. `at` alone is written by the signer, so a run of forward-dated
+  // attestations — one admin host with a fast clock, checkpointing hourly —
+  // filled the whole list and evicted every credible one, and `Verify.fresh`
+  // skipping past them then found nothing behind. Keeping the tail of the log
+  // as well means the recovery is the obvious one: push a checkpoint. A new
+  // one lands at the head, so it is always retained however it is dated.
+  const newest = [...checkpoints].sort(byRecency).slice(0, CHECKPOINTS);
+  const latest = checkpoints.slice(-CHECKPOINTS);
+  const kept = new Map(
+    [...newest, ...latest].map((attestation) => [attestation.commit, attestation]),
   );
-  checkpoints.length = Math.min(checkpoints.length, CHECKPOINTS);
+  const retained = [...kept.values()].sort(byRecency);
 
   return {
     repoId: genesis.repoId,
@@ -532,8 +525,8 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     revoked,
     roots,
     threshold,
-    checkpoint: checkpoints[0] ?? null,
-    checkpoints,
+    checkpoint: retained[0] ?? null,
+    checkpoints: retained,
     rejected,
   };
 });
@@ -559,23 +552,36 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
     ancestors.set(oid, set);
   }
 
-  // Grouped by id *and* by the exact bytes. Two records with one id but
-  // different content are two different claims, and each is answered on its
-  // own authority rather than by whichever reached the fold first. What this
-  // decides is the other case: the same record committed twice, where nothing
-  // distinguishes them but the commit, and the commit is what `grant` and
+  // Grouped by id *and* by the exact bytes — the *statement*, and nothing else.
+  // Two records with one id but different content are two different claims,
+  // and each is answered on its own authority rather than by whichever reached
+  // the fold first. What this decides is the other case: the same statement
+  // committed more than once, where the commit is what `grant` and
   // `Revocation.commit` are read from later.
+  //
+  // One key, not two. An earlier version put the signatures in the key here
+  // and left the duplicate check keyed on the payload alone — so a copy
+  // carrying one extra junk signature was a group of its own, escaped this
+  // resolution entirely, and was decided by fold order, whose tie-break for
+  // parentless commits is a grindable oid. That is the exact failure this
+  // mechanism exists to prevent, walked around by appending a byte.
   const claimed = new Map<string, Oid[]>();
-  // The signatures are part of the record's identity, not decoration. Keyed on
-  // the payload alone, a replay that kept the bytes and *dropped* the
-  // signatures counted as the same record — so grinding a lower oid onto an
-  // unsigned copy of a revocation won the tie-break and dropped the signed
-  // original as its duplicate.
+  // Every signature any copy of the statement carried, since they are all
+  // signatures over the same bytes and so all endorsements of the same thing.
+  // Which copy an endorsement was committed in says nothing about it — and
+  // requiring them to be in the *winning* copy would let a replay that drops
+  // the signatures strip a revocation's authority by winning descent.
+  const endorsed = new Map<string, ReadonlyArray<ReadonlyArray<string>>>();
   const keyOf = (entry: (typeof records)[number]) =>
-    [entry.payload.id, decoder.decode(entry.bytes), ...entry.signatures].join("\u0000");
+    `${entry.payload.id}\u0000${decoder.decode(entry.bytes)}`;
   for (const entry of records) {
     const key = keyOf(entry);
     claimed.set(key, [...(claimed.get(key) ?? []), entry.commit]);
+    // Bounded: verifying every copy's signatures is what the union costs, and
+    // the copies are written by whoever may push. Past this many the record is
+    // being spammed, not endorsed.
+    const seen = endorsed.get(key) ?? [];
+    if (seen.length < COPIES) endorsed.set(key, [...seen, entry.signatures]);
   }
 
   const winner = new Map<string, Oid>();
@@ -615,7 +621,7 @@ const readLog = Effect.fn("trust.Projection.readLog")(function* () {
     winner.set(id, best[2]);
   }
 
-  return { entries: records, winner, keyOf };
+  return { entries: records, winner, keyOf, endorsed };
 });
 
 /**

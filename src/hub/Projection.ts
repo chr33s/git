@@ -328,6 +328,9 @@ export const project = Effect.fn("hub.Projection.project")(function* (
    */
   const openers = new Set<Fingerprint>();
 
+  /** Which members signed each event, for the contested-opening ranking. */
+  const members = new Map<Oid, ReadonlySet<Fingerprint>>();
+
   const opening = yield* Effect.gen(function* () {
     // Only openings that would actually be *accepted* compete. Computed over
     // the raw walk, an unsigned second `pr.opened` — pushable by any
@@ -366,31 +369,67 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       return { commit: candidates[0] ?? null, contested: false } satisfies Opening;
     }
 
-    const descendants = (commit: Oid) => {
-      let count = 0;
-      for (const oid of parents.keys()) {
-        if (ancestors.get(oid)?.has(commit) === true) count++;
+    // Who signed each event, memoised across candidates, and only members: a
+    // fresh key costs nothing to generate, so counting *distinct signers* only
+    // means anything if the keys have to be ones this repository granted.
+    const signersOf = Effect.fnUntraced(function* (entry: (typeof events)[number]) {
+      const cached = members.get(entry.commit);
+      if (cached !== undefined) return cached;
+      const found = new Set<Fingerprint>();
+      for (const signer of yield* Verify.signers(entry.bytes, entry.signatures)) {
+        if (trust.members.has(signer) || trust.former.has(signer)) found.add(signer);
       }
-      return count;
-    };
+      members.set(entry.commit, found);
+      return found;
+    });
 
-    let best = candidates[0]!;
-    let reach = descendants(best);
-    for (const commit of candidates.slice(1)) {
-      const count = descendants(commit);
-      if (count > reach || (count === reach && commit < best)) {
-        best = commit;
-        reach = count;
+    /**
+     * How much of the pull request stands behind an opening.
+     *
+     * Raw descendant count is manufactured, not earned: a forger grafts their
+     * own opening and chains commits under it, and — since the count was taken
+     * over the walked DAG rather than over events — the commits did not even
+     * have to carry a payload. Winning handed them `base`, and a pull request
+     * whose base no longer names its branch is one `Policy.protectedBranch`
+     * skips, which freezes the branch behind an approved change.
+     *
+     * Counted over *events*, weighted by how many distinct members made them.
+     * Every honest event in a pull request descends from its genuine opening,
+     * and they come from the people taking part; a graft descends only from
+     * what its author wrote, so displacing a real conversation costs one
+     * member key per participant rather than one commit per event.
+     */
+    const rank = Effect.fnUntraced(function* (commit: Oid) {
+      const signers = new Set<Fingerprint>();
+      let count = 0;
+      for (const entry of events) {
+        if (entry.commit === commit || entry.payload === null) continue;
+        if (ancestors.get(entry.commit)?.has(commit) !== true) continue;
+        count++;
+        for (const signer of yield* signersOf(entry)) signers.add(signer);
       }
+      return [signers.size, count, commit] as const;
+    });
+
+    let best = yield* rank(candidates[0]!);
+    for (const commit of candidates.slice(1)) {
+      const candidate = yield* rank(commit);
+      const better =
+        candidate[0] !== best[0]
+          ? candidate[0] > best[0]
+          : candidate[1] !== best[1]
+            ? candidate[1] > best[1]
+            : candidate[2] < best[2];
+      if (better) best = candidate;
     }
 
     // A *legitimate* second opening — the author retargeting their own pull
     // request — descends from the first. One that does not is a competing
     // claim to have started it.
     const contested = candidates.some(
-      (commit) => commit !== best && ancestors.get(commit)?.has(best) !== true,
+      (commit) => commit !== best[2] && ancestors.get(commit)?.has(best[2]) !== true,
     );
-    return { commit: best, contested } satisfies Opening;
+    return { commit: best[2], contested } satisfies Opening;
   });
 
   let title = "";

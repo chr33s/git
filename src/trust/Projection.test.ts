@@ -12,9 +12,11 @@ import {
   type PrivateKey,
   sign,
 } from "../crypto/SshSignature.ts";
+import type { Invalid, StorageFailure } from "../git/Error.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
+import type { Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "./Genesis.ts";
 import * as Log from "./Log.ts";
@@ -75,6 +77,54 @@ const grantTo = Effect.fn("test.grantTo")(function* (
 const print = (key: PrivateKey): Effect.Effect<Fingerprint> => fingerprint(key.publicKey);
 
 const projectionOf = (where: World) => project(where.genesis);
+
+/**
+ * A record appended so that its commit oid sits in the upper half of the space.
+ *
+ * The tests below need a *lower* oid than this one, and searching for one is
+ * only a bounded search if the target is not already near the bottom — a
+ * near-minimal target turns 64 tries into a coin that lands heads once in
+ * millions, which is a flake rather than a test. The id is inside the signed
+ * bytes and chosen freely, so varying it is the honest issuer's own grinding
+ * room, and two tries suffice on average.
+ */
+const highRecord = Effect.fn("test.highRecord")(function* (
+  where: World,
+  make: (id: string) => Certificate.TrustPayload,
+) {
+  const repository = yield* Repository;
+  const parent = yield* repository.resolve(Log.LOG_REF);
+
+  for (let attempt = 0; ; attempt++) {
+    const payload = make(Log.newId());
+    const bytes = Certificate.encode(payload);
+    const signatures = yield* Effect.forEach(where.roots.slice(0, 2), (key) =>
+      sign(key, bytes, NAMESPACE),
+    );
+    const commit = yield* Record.write({
+      name: Log.RECORD,
+      payload: bytes,
+      signatures,
+      parents: parent === null ? [] : [parent],
+      message: `${payload.type} ${payload.id}\n`,
+    });
+    if (commit < "8".padEnd(40, "0") && attempt < 64) continue;
+    yield* repository.setRef({ name: Log.LOG_REF, to: commit, expected: parent });
+    return { payload, bytes, signatures, commit };
+  }
+});
+
+/** The first commit a builder produces that sorts below `target`, or `null`. */
+const below = Effect.fn("test.below")(function* (
+  target: Oid,
+  build: (attempt: number) => Effect.Effect<Oid, Invalid | StorageFailure, Repository>,
+) {
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const commit = yield* build(attempt);
+    if (commit < target) return commit;
+  }
+  return null;
+});
 
 describe("trust projection", () => {
   it("folds a grant signed by the root quorum into a member", async () => {
@@ -315,31 +365,25 @@ describe("trust projection", () => {
         const bob = yield* generate("bob@example.com");
         yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
 
-        const payload = Certificate.revoke({
-          repo: where.genesis.repoId,
-          subject: yield* print(bob),
-          reason: "left",
-          id: Log.newId(),
-        });
-        const bytes = Certificate.encode(payload);
-        const signatures = yield* Effect.forEach(where.roots.slice(0, 2), (key) =>
-          sign(key, bytes, NAMESPACE),
+        const subject = yield* print(bob);
+        const record = yield* highRecord(where, (id) =>
+          Certificate.revoke({ repo: where.genesis.repoId, subject, reason: "left", id }),
         );
-        const genuine = yield* Log.append(payload, bytes, signatures);
+        const genuine = record.commit;
 
         // The same record, byte for byte, grafted in with no history behind
         // it. The message is not part of the record's identity, so varying it
         // is free oid grinding — which is exactly the attacker's position.
-        let replay = genuine;
-        for (let attempt = 0; attempt < 64 && replay >= genuine; attempt++) {
-          replay = yield* Record.write({
+        const replay = yield* below(genuine, (attempt) =>
+          Record.write({
             name: Log.RECORD,
-            payload: bytes,
-            signatures,
+            payload: record.bytes,
+            signatures: record.signatures,
             parents: [],
-            message: `${payload.type} ${payload.id} ${attempt}\n`,
-          });
-        }
+            message: `${record.payload.type} ${record.payload.id} ${attempt}\n`,
+          }),
+        );
+        if (replay === null) return { ground: false, genuine, owner: null };
         yield* repository.setRef({
           name: Log.LOG_REF,
           to: yield* Log.join([genuine, replay]),
@@ -347,15 +391,69 @@ describe("trust projection", () => {
 
         const projection = yield* projectionOf(where);
         return {
-          ground: replay < genuine,
+          ground: true,
           genuine,
-          owner: projection.revoked.get(yield* print(bob))?.[0]?.commit ?? null,
+          owner: projection.revoked.get(subject)?.[0]?.commit ?? null,
         };
       }),
     );
 
     assert.equal(outcome.ground, true, "the fixture must actually grind a lower oid");
     assert.equal(outcome.owner, outcome.genuine, "the record in the log's history owns it");
+  });
+
+  it("does not let an extra junk signature escape the duplicate resolution", async () => {
+    // Two keys that had to agree, and did not. `winner` grouped on the id, the
+    // bytes *and the signatures*; the duplicate check grouped on the id and
+    // the bytes. A copy carrying one extra unparseable signature was therefore
+    // a group of its own — the only member of it, so it won its own descent —
+    // and reached the fold on order alone, whose tie-break for parentless
+    // commits is a grindable oid. The graft then owned the record: `grant`,
+    // `history[].commit` and `Revocation.commit` moved onto a commit honest
+    // trust heads cannot reach, which is the exact failure descent resolution
+    // was added to prevent, walked around by appending a byte.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const bob = yield* generate("bob@example.com");
+        yield* grantTo(where, bob, ["source.push"], where.roots.slice(0, 2));
+
+        const subject = yield* print(bob);
+        const record = yield* highRecord(where, (id) =>
+          Certificate.revoke({ repo: where.genesis.repoId, subject, reason: "left", id }),
+        );
+        const genuine = record.commit;
+
+        const replay = yield* below(genuine, (attempt) =>
+          Record.write({
+            name: Log.RECORD,
+            payload: record.bytes,
+            // The one byte that used to be enough.
+            signatures: [...record.signatures, `not a signature ${attempt}`],
+            parents: [],
+            message: `${record.payload.type} ${record.payload.id}\n`,
+          }),
+        );
+        if (replay === null) return { ground: false, genuine, applied: false, owner: null };
+        yield* repository.setRef({
+          name: Log.LOG_REF,
+          to: yield* Log.join([genuine, replay]),
+        });
+
+        const projection = yield* projectionOf(where);
+        return {
+          ground: true,
+          genuine,
+          applied: projection.members.has(subject) === false,
+          owner: projection.revoked.get(subject)?.[0]?.commit ?? null,
+        };
+      }),
+    );
+
+    assert.equal(outcome.ground, true, "the fixture must actually grind a lower oid");
+    assert.equal(outcome.applied, true, "the revocation still applies");
+    assert.equal(outcome.owner, outcome.genuine, "and the record in the log's history owns it");
   });
 
   it("does not let one record's id burn a different record's", async () => {
@@ -1628,6 +1726,40 @@ describe("trust projection", () => {
       assert.equal(state.checkpoints.length, 2, "both stay on the record");
       assert.equal(Verify.fresh(state, 60_000).ok, true, "the honest one still answers");
       assert.equal(Verify.fresh(state, 10_000).ok, false, "and it is still judged on its age");
+    });
+
+    it("keeps a newly pushed one however many future-dated ones precede it", async () => {
+      // The list is bounded, so sorting by `at` and truncating handed a host
+      // with a fast clock a way to evict every credible checkpoint simply by
+      // checkpointing on a schedule — and `fresh` skipping past them then found
+      // nothing behind, refusing every write on a repository with
+      // `maxTrustAgeSeconds` set, the write to `refs/meta/policy` that would
+      // lift the bound included. Keeping the tail of the log as well makes the
+      // recovery the obvious one: push a checkpoint.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const checkpoint = (at: Date) =>
+            Log.issue(
+              Certificate.checkpoint({
+                repo: where.genesis.repoId,
+                frontier: [],
+                id: Log.newId(),
+                at,
+              }),
+              where.roots.slice(0, 2),
+            );
+          // More forward-dated attestations than the list holds from one end.
+          for (let index = 0; index < 40; index++) {
+            yield* checkpoint(new Date(Date.now() + 86_400_000 + index));
+          }
+          // …and then the operator notices and checkpoints honestly.
+          yield* checkpoint(new Date(Date.now() - 5_000));
+          return yield* projectionOf(where);
+        }),
+      );
+
+      assert.equal(Verify.fresh(state, 60_000).ok, true, "the recovery must actually recover");
     });
 
     it("still allows the seconds of clock skew two honest hosts have", async () => {

@@ -1088,6 +1088,89 @@ describe("hub projection", () => {
       assert.equal(outcome.author, null, "and confer no authorship on the forgery");
     });
 
+    it("cannot win descent by chaining filler commits under a graft", async () => {
+      // Raw descendant count is manufactured, not earned: the count was taken
+      // over the walked DAG, so the commits chained under a grafted opening
+      // did not even have to carry an event. Winning handed the forger `base`,
+      // and a pull request whose base no longer names its branch is one
+      // `Policy.protectedBranch` skips — the branch behind an approved change,
+      // frozen by a member holding nothing but `hub.create-pr`.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "looks right",
+            key: where.reviewer,
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+
+          const meddler = yield* generate("meddler@example.com");
+          yield* Effect.flatMap(
+            Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(meddler.publicKey),
+              capabilities: ["hub.create-pr"],
+              id: Log.newId(),
+            }),
+            (payload) => Log.issue(payload, [where.root]),
+          );
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.opened",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead,
+            title: "not yours any more",
+            description: "",
+            base: "refs/heads/elsewhere",
+            head: Event.qualify(NEXT),
+          });
+          const forged = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [yield* sign(meddler, bytes, NAMESPACE)],
+            parents: [],
+            message: "pr.opened forged\n",
+          });
+
+          // Ballast: commits carrying nothing at all, chained under the graft
+          // so that it outnumbers the real conversation.
+          const tree = yield* repository.writeTree([]);
+          let filler = forged;
+          for (let index = 0; index < 12; index++) {
+            filler = yield* repository.commitTree({
+              tree,
+              parents: [filler],
+              message: `filler ${index}\n`,
+              author: Record.identityAt(new Date(1_700_000_000_000)),
+            });
+          }
+
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Event.join(pr, [head!, filler]),
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(
+        outcome.base,
+        "refs/heads/main",
+        "padding must not take the base off the real opening",
+      );
+      assert.equal(outcome.title, "Add a thing");
+    });
+
     it("gets no authority from there being no author yet", async () => {
       // `Dag.topological` orders parentless commits by oid, so grinding a low
       // one folds it before the `pr.opened` that establishes the author — and
