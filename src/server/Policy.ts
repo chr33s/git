@@ -463,6 +463,28 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   if (update.value === null) {
     return refused(update.name, `${update.name} is append-only and may not be deleted`);
   }
+
+  // A ref in this namespace is a pull request, and nothing else. `refs/hub/`
+  // as a whole is undeletable, so a name outside that shape is a permanent
+  // entry nothing counts, nothing folds and nothing can ever remove — one
+  // more object graph pinned into every ref listing, every advertisement,
+  // every collection root and every memo key for the life of the repository.
+
+  if (update.name.startsWith("refs/hub/") && Event.prOf(update.name) === null) {
+    return refused(update.name, `${update.name} does not name a pull request`);
+  }
+
+  // And its value is a commit of this namespace's own kind. Nothing else here
+  // asks: the ceiling walk steps over a foreign head and reports an empty
+  // history, and the graft check steps over it too — so a `source.push`
+  // holder could point a hub ref at any source commit at all, on a name that
+  // can never be deleted, pinning whatever it reaches out of reach of `gc`
+  // for good.
+  const belongs = update.name.startsWith("refs/hub/") ? Event.isHubCommit : Log.isTrustCommit;
+  if (!(yield* belongs(update.value))) {
+    return refused(update.name, `${update.value} is not part of ${update.name}'s history`);
+  }
+
   // Asked before the ref exists as well as after. Returning early on a create
   // let the first push of `refs/hub/pr/<new-id>` bring a history of any size
   // at all — onto a namespace nothing can delete, so every later fold, every
@@ -474,7 +496,7 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   // per-pull-request ceiling bounds one fold; this bounds how many folds a
   // protected-branch push, a collection and a deepening fetch each have to
   // make, which is otherwise chosen by anybody holding `hub.create-pr`.
-  if (current === null && Event.prOf(update.name) !== null) {
+  if (current === null && update.name.startsWith("refs/hub/")) {
     const held = (yield* Event.pullRequests()).length;
     if (held >= (yield* Event.populationOf())) {
       return refused(update.name, `this repository already holds ${held} pull requests`);
@@ -502,7 +524,7 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   if (grafted !== null) {
     return refused(
       update.name,
-      `${update.name} is append-only: ${grafted} begins a second history`,
+      `${update.name} is append-only: ${grafted.commit} ${grafted.reason}`,
     );
   }
 
@@ -630,7 +652,7 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   ).pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   // Unreadable is not "no second root": the objects arrived with this push, so
   // a missing one is a push this cannot judge rather than one it may wave on.
-  if (parents === null) return to;
+  if (parents === null) return { commit: to, reason: "could not be read" } as const;
   for (const [commit, of] of parents) {
     // A root of *this* history, which is not the same as a commit with no
     // parents at all. The walk holds only what the push adds, so a parent is
@@ -646,10 +668,17 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
     for (const parent of of) {
       if (parents.has(parent) || (yield* contains(parent, current))) {
         attached = true;
-        break;
+        continue;
       }
+      // A parent this DAG does not have. `gc` treats every ref as a root, so a
+      // source commit named as a hub commit's second parent is a whole object
+      // graph pinned out of reach of collection through a name that can never
+      // be deleted — a purged secret among them. The anchor a trust log hangs
+      // off is the one legitimate outside edge, and it is already reachable
+      // from `current` on every push that is not the log's first.
+      return { commit: parent, reason: "is not part of this history" } as const;
     }
-    if (!attached) return commit;
+    if (!attached) return { commit, reason: "begins a second history" } as const;
   }
   return null;
 });

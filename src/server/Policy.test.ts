@@ -499,6 +499,64 @@ describe("Policy", () => {
       assert.match(outcome.ok === false ? outcome.reason : "", /a fold will walk/);
     });
 
+    it("refuses a hub ref pointed at a commit from outside the namespace", async () => {
+      // Nothing else asks. The ceiling walk steps over a foreign head and
+      // reports an empty history; the graft walk steps over it too. So a
+      // `source.push` holder could create `refs/hub/pr/<uuid>` at any source
+      // commit at all — on a name that can never be deleted, pinning
+      // everything it reaches out of reach of `gc` for good.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const blob = yield* repository.writeBlob(new TextEncoder().encode("source\n"));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "file.txt", oid: blob },
+          ]);
+          const source = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "source\n",
+            author,
+          });
+          return yield* judge(where, { name: "refs/hub/pr/borrowed", value: source });
+        }),
+      );
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /is not part of/);
+    });
+
+    it("refuses a hub ref that does not name a pull request", async () => {
+      // `refs/hub/` as a whole is undeletable, and only `refs/hub/pr/<id>` is
+      // ever counted, folded or listed as a pull request. A name outside that
+      // shape is a permanent entry the population bound does not see, in every
+      // ref listing, advertisement, collection root and memo key for the life
+      // of the repository.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          return {
+            nested: yield* judge(where, { name: "refs/hub/pr/team/42", value: head }),
+            beside: yield* judge(where, { name: "refs/hub/index", value: head }),
+            proper: yield* judge(where, { name: `refs/hub/pr/${pr}`, value: head }),
+          };
+        }),
+      );
+      assert.equal(outcome.nested.ok, false);
+      assert.match(outcome.nested.ok === false ? outcome.nested.reason : "", /pull request/);
+      assert.equal(outcome.beside.ok, false);
+      assert.equal(outcome.proper.ok, true, "a pull request still moves");
+    });
+
     it("refuses a hub update that grafts a second beginning onto the history", async () => {
       // Every hub event is written onto the ref's current head, so the history
       // has exactly one parentless commit: the `pr.opened` that started it.
@@ -543,13 +601,14 @@ describe("Policy", () => {
       assert.match(decision.ok === false ? decision.reason : "", /second history/);
     });
 
-    it("does not follow a hub commit into the source history", async () => {
-      // The graft walk had no `belongs` predicate, so a hub commit naming a
-      // *source* commit as a second parent turned one tiny push into a walk of
-      // the whole repository, synchronously, on the receive-pack path — and
-      // repeatably. The ceiling check does not catch it: that walk *is*
-      // bounded to hub commits, so it steps over the foreign parent and finds
-      // nothing to refuse.
+    it("refuses a hub commit that reaches into the source history", async () => {
+      // Two problems, one shape. The graft walk had no namespace predicate, so
+      // a hub commit naming a *source* commit as a second parent turned one
+      // tiny push into a walk of the whole repository, synchronously, on the
+      // receive-pack path. Bounding that walk fixed the cost and left the
+      // permission: `gc` treats every ref as a root, so the source commit and
+      // everything it reaches were pinned out of reach of collection through a
+      // name that can never be deleted — a purged secret among them.
       const outcome = await scenario(
         Effect.gen(function* () {
           const where = yield* world(["repo.admin"]);
@@ -584,11 +643,8 @@ describe("Policy", () => {
         }),
       );
 
-      // The source commit is not a hub commit, so the walk steps over it
-      // rather than reading everything behind it — and the push is allowed on
-      // its own merits, which is what makes this about cost and not about
-      // permission.
-      assert.equal(outcome.ok === false ? outcome.reason : "allowed", "allowed");
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /is not part of this history/);
     });
 
     it("counts a graft as a second beginning even when it names a parent", async () => {
@@ -633,7 +689,7 @@ describe("Policy", () => {
         }),
       );
       assert.equal(outcome.ok, false);
-      assert.match(outcome.ok === false ? outcome.reason : "", /second history/);
+      assert.match(outcome.ok === false ? outcome.reason : "", /is not part of this history/);
     });
 
     it("refuses to open more pull requests than a push will walk", async () => {
