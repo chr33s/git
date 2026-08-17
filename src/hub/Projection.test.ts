@@ -722,6 +722,79 @@ describe("hub projection", () => {
       assert.match(outcome.rejected.at(-1)?.reason ?? "", /revoked/);
     });
 
+    it("holds a retargeting pr.opened to the floor, like every other event", async () => {
+      // The *winning* opening keeps the pre-pass verdict, so the two passes
+      // cannot disagree and leave the pull request unreadable. Extending that
+      // to every `pr.opened` was too much: a revoked author could land a
+      // second one by back-dating its trust head, rewrite `base`, and freeze
+      // the protected branch the approved pull request was the route to — the
+      // same event as `pr.updated`, which the floor does catch.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          // The head the author's own opening named, before anything moved.
+          const early = yield* repository.resolve(Log.LOG_REF);
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.author.publicKey),
+              reason: "left",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+          // An honest event that names the new head, so the conversation has
+          // visibly moved past the revocation.
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "still here",
+            key: where.reviewer,
+          });
+
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.opened",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: early,
+            title: "Add a thing",
+            description: "",
+            base: "refs/heads/elsewhere",
+            head: Event.qualify(REVISION),
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "pr.opened backdated retarget\n",
+            }),
+            expected: head,
+          });
+
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(
+        outcome.base,
+        "refs/heads/main",
+        "a back-dated retarget must not move the branch this proposes to",
+      );
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /revoked/);
+    });
+
     it("may match what an earlier event named, which is the honest case", async () => {
       // Two events written against the same head is what an ordinary
       // conversation looks like; the rule bounds going *backwards*, not

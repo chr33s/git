@@ -615,10 +615,20 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     // `MAX_SIGNATURES` attacker-supplied signatures to ask a second question
     // about the same bytes doubles the work on the synchronous push path.
     const signed = yield* Verify.signers(entry.bytes, entry.signatures);
-    // A `pr.opened` is judged once, by the pass that decided which opening
-    // won; see `settled`. Everything else is judged here, against the floor.
+    // The *winning* `pr.opened` is judged once, by the pass that decided which
+    // opening won; see `settled`. Everything else — a second `pr.opened`
+    // included — is judged here, against the floor.
+    //
+    // Narrowed to the winner deliberately. Skipping the floor for every
+    // `pr.opened` let a revoked or narrowed author land a *retargeting* one by
+    // back-dating its trust head, rewriting `base` and freezing the protected
+    // branch the approved pull request was the route to — the same event as
+    // `pr.updated`, which the floor does catch. The opening itself keeps the
+    // pre-pass verdict, which is what stops the two passes disagreeing and
+    // leaving the pull request with a winner it can read no `base` from.
+    const decided = entry.commit === opening.commit ? settled.get(entry.commit) : undefined;
     const authorized =
-      settled.get(entry.commit) ??
+      decided ??
       (yield* Verify.authorize({
         projection: trust,
         bytes: entry.bytes,

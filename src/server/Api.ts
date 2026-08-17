@@ -1826,6 +1826,13 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("fetch", ({ payload }) =>
       Effect.gen(function* () {
+        // Negotiation is a disclosure. `Sync.fetchFrom` offers a `have` line
+        // for every local ref, so pointing this at a URL of the caller's
+        // choosing hands that URL the commit oids of a read-restricted
+        // repository — and `source.push` does not carry `repo.read`. The
+        // remote need not even be registered, so `remoteAdd`'s own charge is
+        // not the one standing behind this.
+        yield* requireRead();
         const target = yield* remoteFor(payload);
         // A fetch writes this repository's tracking refs, so it is a write.
         // Both namespaces it can reach, not only the tracking one: `Sync`
@@ -1878,6 +1885,9 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("pull", ({ payload }) =>
       Effect.gen(function* () {
+        // A pull is a fetch with a branch move on the end; the disclosure
+        // `fetch` above describes is the same one.
+        yield* requireRead();
         const target = yield* remoteFor(payload);
         // A pull moves a local branch, which is the same transition a push
         // makes and has to meet the same rules — a protected branch is not

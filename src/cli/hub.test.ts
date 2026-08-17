@@ -562,6 +562,48 @@ describe("cli hub", () => {
     }
   });
 
+  it("refuses to negotiate with a remote on a push-only credential", async () => {
+    // Negotiation is a disclosure: a fetch offers a `have` line for every
+    // local ref, so pointing one at a URL of the caller's choosing hands that
+    // URL a read-restricted repository's commit oids. The remote need not be
+    // registered, so `remoteAdd`'s own charge is not what stands behind this,
+    // and `source.push` does not carry `repo.read`.
+    const serverRoot = path.join(root, "negotiate");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "private"]);
+    const owner = await enableHubUnder(serverRoot, "private", ["repo.admin"]);
+    const pusher = await grantMemberUnder(serverRoot, "private", owner.root, owner.repoId, [
+      "source.push",
+    ]);
+
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
+    try {
+      const negotiate = (
+        verb: string,
+        credential: string,
+        body: { readonly url: string; readonly branch?: string },
+      ) =>
+        fetch(`${server.url}/private/${verb}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${credential}` },
+          body: JSON.stringify(body),
+        });
+
+      const url = "http://127.0.0.1:1/elsewhere";
+      for (const [verb, body] of [
+        ["fetch", { url }],
+        ["pull", { url, branch: "main" }],
+      ] as const) {
+        const refused = await negotiate(verb, pusher.credential, body);
+        const text = await refused.text();
+        assert.equal(refused.status, 400, `${verb}: ${text}`);
+        assert.match(text, /repo\.read/, verb);
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
   it("refuses to register a webhook on a push-only credential", async () => {
     // A webhook is a destination this repository will send every push to, and
     // nothing about registering one moves a ref — so the policy boundary has

@@ -88,7 +88,8 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   // ref store already has, and the answer is a pure function of them, so a
   // moved ref changes the key and a stale answer is not possible.
   const refs = yield* Event.pullRequests();
-  const key = [
+  const identity = yield* repository.resolve(GENESIS_REF);
+  const state = [
     // The repository's own identity leads the key. Left out, the key was the
     // hub and trust refs alone: two repositories on one host whose heads
     // happen to match — the same trust log under a *different* genesis, which
@@ -96,12 +97,17 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
     // and one of them collected with an exclusion set computed for the other.
     // A tombstoned payload the operator believes is gone is then re-protected
     // by reachability and stays in the pack.
-    yield* repository.resolve(GENESIS_REF),
     yield* repository.resolve(LOG_REF),
     ...(yield* Effect.forEach(refs, (pr) => repository.resolve(Event.refOf(pr)))),
   ].join("\u0000");
-  const known = memo.get(key);
-  if (known !== undefined) return known;
+
+  const known = memo.get(identity);
+  if (known !== undefined && known.state === state) {
+    // Re-inserted so iteration order is least-recently-used first.
+    memo.delete(identity);
+    memo.set(identity, known);
+    return known.found;
+  }
 
   // Walked before anything is folded, and the trust log is not folded at all
   // unless a tombstone turned up. A fold verifies a signature per record and
@@ -116,7 +122,8 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
       ? new Set<Oid>()
       : yield* blobs(stored.genesis, yield* projectTrust(stored.genesis), candidates);
 
-  memo.set(key, found);
+  memo.delete(identity);
+  memo.set(identity, { state, found });
   while (memo.size > MEMO) {
     const oldest = memo.keys().next();
     if (oldest.done === true) break;
@@ -136,19 +143,21 @@ const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: Readon
 });
 
 /**
- * Answers already worked out, by the refs they were worked out from.
+ * Answers already worked out, one per repository.
  *
- * One entry per state of each repository this process has been asked about —
- * including the "nothing is redacted" answer, which is the one every ordinary
- * repository gives and the one worth not recomputing.
+ * Keyed by the repository and *validated* against the refs the answer was
+ * worked out from, rather than keyed by those refs. Keyed by them, every hub
+ * event minted a new entry: one busy repository filled the whole map with its
+ * own history and evicted every other repository the host serves, reinstating
+ * the walk-every-pull-request cost this exists to remove — the same defect
+ * `Auth.folds` was reshaped to avoid, for the same reason. Nothing ever wants
+ * two answers for one repository, so a moved ref replaces rather than adds.
  *
- * Process-wide rather than per repository, so the bound has to hold every
- * repository a host serves at once: at 32 a host with more hub repositories
- * than that thrashed the map and paid for the whole walk on every deepening
- * fetch, which is the cost this exists to remove. The entries are sets of
- * oids, and almost all of them are empty.
+ * Least-recently-used, not first-in: a host with more repositories than the
+ * bound serves them in some order, and evicting by insertion evicts whichever
+ * happens to be oldest rather than whichever is idle.
  */
 const MEMO = 256;
-const memo = new Map<string, ReadonlySet<Oid>>();
+const memo = new Map<Oid | null, { readonly state: string; readonly found: ReadonlySet<Oid> }>();
 
 export type RedactionError = Invalid | ObjectNotFound | StorageFailure;

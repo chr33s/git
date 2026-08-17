@@ -537,6 +537,8 @@ A key may be revoked, re-granted and revoked again, so a projection MUST keep **
 
 An event's declared trust head is what these questions are asked against, and it is written by the event's own signer. It is therefore held to a **floor**: the newest head any accepted ancestor of the event named in the same pull request. An event whose head falls short of the floor is read as having seen the floor — not refused. Refusing it would be permanent, since the floor comes from an append-only history, and hub refs and the trust log replicate as separate refs, so a client legitimately lagging one of them writes an older head as a matter of course. Raising it costs an honest straggler nothing and still denies a revoked member the escape the floor exists to close.
 
+The one event judged without the floor is the `pr.opened` that _wins_ the opening, and only that one: which opening won has to be settled before the events are folded, so asking twice would mean asking two different questions and could leave a pull request with a winner it can read no `base` from — the branch freeze this rule exists to prevent, arriving by the other door. Every other `pr.opened`, a retargeting one included, is held to the floor like anything else.
+
 ---
 
 ## 11. Capabilities
@@ -597,6 +599,26 @@ also needs `source.force-push`, is settled at the policy boundary, which reads
 the commands. Charging `source.push` alone at the guard makes `source.delete`
 unusable as a standalone capability: its holder is refused before the boundary
 written to admit them ever sees the request.
+
+### Verbs that move nothing
+
+A few operations change what a repository _is_ without moving any ref, so the
+policy boundary has nothing to judge and the guard's charge — a write being
+`source.push` **or** `source.delete`, since it cannot see a push's commands —
+is all that stands behind them. Registering a webhook or a remote (a
+destination this repository will send to) and collecting the object store are
+charged `repo.admin` at the handler; left at the guard's charge, a bot scoped
+to delete a branch could register a receiver for every push the repository
+ever accepts, or throw the objects away.
+
+Fetching and pulling from an inline remote URL are charged `repo.read` for a
+related reason: negotiation offers a `have` line for every local ref, so
+pointing one at a URL of the caller's choosing discloses a read-restricted
+repository's commit oids, and `source.push` does not carry `repo.read`.
+
+A repository with no genesis has no membership to charge anything against and
+is left exactly as a plain git repository has always been: whether it accepts
+writes at all is the host's decision, made once.
 
 ### Scoped check capability
 
