@@ -95,9 +95,17 @@ export class GitRepo extends DurableObject<TestEnv> {
    * is no longer recognised is told to ask for another — a retry, not a
    * failure worth persisting through.
    */
-  /** Whether this host serves writes to repositories with no genesis. */
+  /**
+   * Whether this host serves writes to repositories with no genesis.
+   *
+   * The spellings `Config.boolean` accepts, because that is what the Worker
+   * beside this reads the very same variable with: `=true` opened one host and
+   * silently did nothing on the other, which is the worst shape a security
+   * switch can have.
+   */
   #openWrites(): Layer.Layer<Auth.AnonymousWrites> {
-    return Policy.anonymousWrites(this.env.ALLOW_ANONYMOUS_WRITES === "1");
+    const value = (this.env.ALLOW_ANONYMOUS_WRITES ?? "").trim().toLowerCase();
+    return Policy.anonymousWrites(["1", "true", "yes", "on"].includes(value));
   }
 
   #nonces(): Layer.Layer<Auth.Nonces> {

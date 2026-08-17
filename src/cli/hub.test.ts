@@ -562,6 +562,52 @@ describe("cli hub", () => {
     }
   });
 
+  it("refuses to register a webhook on a push-only credential", async () => {
+    // A webhook is a destination this repository will send every push to, and
+    // nothing about registering one moves a ref — so the policy boundary has
+    // nothing to judge and the guard's charge is deliberately coarse, a write
+    // being `source.push` *or* `source.delete` because it cannot see a push's
+    // commands. Left at that, a bot scoped to delete a branch could register a
+    // receiver for everything the repository ever accepts.
+    const serverRoot = path.join(root, "hookless");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "private"]);
+    const owner = await enableHubUnder(serverRoot, "private", ["repo.admin"]);
+    const pusher = await grantMemberUnder(serverRoot, "private", owner.root, owner.repoId, [
+      "source.push",
+    ]);
+
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
+    try {
+      const register = (credential: string) =>
+        fetch(`${server.url}/private/webhooks`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${credential}` },
+          body: JSON.stringify({
+            url: "http://localhost:1/hook",
+            secret: "a-secret-of-sufficient-length",
+          }),
+        });
+
+      const refused = await register(pusher.credential);
+      assert.notEqual(refused.status, 200, await refused.text());
+
+      // The owner holds it, so the same request goes through — which is what
+      // makes the refusal above about authority rather than about the payload.
+      const allowed = await register(owner.credential);
+      assert.equal(allowed.status, 200, await allowed.text());
+      const listed = await fetch(`${server.url}/private/webhooks`, {
+        headers: { authorization: `Bearer ${owner.credential}` },
+      });
+      // SAFETY: the endpoint's success schema is `{ webhooks: [...] }`, and a
+      // 200 is what the assertion above established this response is.
+      const body = (await listed.json()) as { readonly webhooks: ReadonlyArray<unknown> };
+      assert.equal(body.webhooks.length, 1, "exactly the one the owner registered");
+    } finally {
+      await server.close();
+    }
+  });
+
   it("refuses to send a repository's objects elsewhere on a push-only credential", async () => {
     // `POST /push` sends every named ref to a URL the caller chooses, which is
     // a read of everything named — and `source.push` does not imply

@@ -465,7 +465,15 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       const record: Revocation = {
         subject,
         supersededBy: null,
-        reason: payload.reason,
+        // The *stronger* reason survives, as the dates do. Overwritten, a
+        // compromise relabelled itself the moment anybody revoked the same key
+        // again for an ordinary reason: `compromisedFrom` still reached
+        // backwards, so authorization was unaffected, but `hub members` told
+        // an operator the key had merely left.
+        reason:
+          already?.reason === "compromised" || payload.reason === "compromised"
+            ? "compromised"
+            : payload.reason,
         compromisedFrom: earliest(already?.compromisedFrom ?? null, from),
         commit: already?.commit ?? entry.commit,
       };

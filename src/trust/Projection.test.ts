@@ -928,6 +928,41 @@ describe("trust projection", () => {
       );
     });
 
+    it("keeps the stronger reason when a weaker revocation follows it", async () => {
+      // The window a key is out on is strengthened, never relabelled. Written
+      // over, a compromise became "left" the moment anybody revoked the same
+      // key again for an ordinary reason: `compromisedFrom` still reached
+      // backwards so authorization was unaffected, but `hub members` told an
+      // operator the key had merely walked away.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          const subject = yield* print(bob);
+          const revoke = (reason: "left" | "compromised") =>
+            Log.issue(
+              Certificate.revoke({
+                repo: where.genesis.repoId,
+                subject,
+                reason,
+                id: Log.newId(),
+              }),
+              where.roots.slice(0, 2),
+            );
+          yield* revoke("compromised");
+          yield* revoke("left");
+
+          const projection = yield* projectionOf(where);
+          return projection.revoked.get(subject)?.at(-1) ?? null;
+        }),
+      );
+
+      assert.equal(outcome?.reason, "compromised");
+      assert.notEqual(outcome?.compromisedFrom, null, "and it still reaches backwards");
+    });
+
     it("does not move a closed window's end forward on an ordinary renewal", async () => {
       // The window ends where the key came *back*, and nowhere later. Written
       // as an unconditional overwrite, every subsequent grant to the same key

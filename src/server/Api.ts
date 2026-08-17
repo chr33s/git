@@ -224,6 +224,35 @@ const requireRead = Effect.fn("Api.requireRead")(function* () {
   });
 });
 
+/**
+ * The requester holds a capability, for verbs the ref gates never see.
+ *
+ * A webhook or a remote is a *destination* this repository will send to, and
+ * `gc` is an irreversible rewrite of the object store. None of them moves a
+ * ref, so `Policy.gateWrite` has nothing to judge — and the guard's charge is
+ * deliberately coarse there, `source.push` *or* `source.delete`, because it
+ * cannot see a push's commands. Left at that, a bot scoped to delete a branch
+ * could register a webhook receiving every push, or collect the repository.
+ *
+ * Fails closed on a missing requester for the reason `requireRead` gives: an
+ * absent context is a host that did not say who is asking.
+ */
+const requireCapability = Effect.fn("Api.requireCapability")(function* (capability: string) {
+  // A repository with no genesis has no membership to charge anything against,
+  // and the guard has already refused the request unless the host opened it —
+  // so it is left exactly as a plain git repository has always been.
+  const stored = yield* readGenesis().pipe(
+    Effect.mapError(
+      () => new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+    ),
+  );
+  if (stored === null) return;
+
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  if (Option.isSome(requester) && permits(requester.value.capabilities, capability)) return;
+  return yield* new Invalid({ field: "capability", reason: `this needs ${capability}` });
+});
+
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
   // Fail closed, for the reason `gateWrite` gives.
   const judged = yield* Policy.gate([update], true, false).pipe(Effect.orElseSucceed(() => null));
@@ -878,6 +907,9 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.delete("webhookRemove", "/webhooks/:id", {
       params: { ...RepoParam, id: Schema.String },
       success: Schema.Struct({ deleted: Schema.Boolean }),
+      // Where this repository sends what it holds is administrative, and
+      // "you may not" is an answer this has to be able to give.
+      error: Invalid,
     }),
   )
   .add(
@@ -959,6 +991,7 @@ const remotes = HttpApiGroup.make("remotes")
     HttpApiEndpoint.delete("remoteRemove", "/remotes/:name", {
       params: { ...RepoParam, name: Schema.String },
       success: Schema.Struct({ deleted: Schema.Boolean }),
+      error: Invalid,
     }),
   )
   .add(
@@ -1631,6 +1664,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("gc", ({ payload }) =>
       Effect.gen(function* () {
+        // Irreversible, and charged accordingly: this deletes objects and
+        // rewrites packs, and a `--reflog-grace 0` collection takes the record
+        // of where a branch was with them. Every other verb that reaches the
+        // object store this hard is behind a ref gate; this one has no ref.
+        yield* requireCapability("repo.admin");
         const repository = yield* Repository;
         const request: GcRequest = {};
         if (payload.dry_run !== undefined) request.dryRun = payload.dry_run;
@@ -1665,6 +1703,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("webhookAdd", ({ payload }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const subscribers = yield* Subscribers;
         const added = yield* subscribers
           .add(payload)
@@ -1681,6 +1722,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("webhookRemove", ({ params }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const subscribers = yield* Subscribers;
         const deleted = yield* subscribers
           .remove(params.id)
@@ -1751,6 +1795,9 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
   group
     .handle("remoteAdd", ({ payload }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const registry = yield* Remotes;
         const added = yield* registry
           .add(payload)
@@ -1767,6 +1814,9 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("remoteRemove", ({ params }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const registry = yield* Remotes;
         const deleted = yield* registry
           .remove(params.name)
