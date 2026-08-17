@@ -365,14 +365,14 @@ describe("hub redaction", () => {
     assert.equal(outcome.predicted, outcome.actual, "and the dry run says so");
   });
 
-  it("still explains an absence once the redactor's grant has lapsed", async () => {
-    // A removal is irreversible and its authorization is not: expiry is judged
-    // against the clock and a compromise reaches backwards, so a tombstone
-    // valid on Monday can be invalid on Friday. Judged by the strict set, the
-    // bytes stay gone while nothing accounts for them — and every fetch of
-    // `refs/hub/*` fails from then on, permanently. What a fetch asks is
-    // whether an absence is *explained*, and a tombstone on the record
-    // explains it.
+  it("keeps honouring a tombstone after the redactor is revoked", async () => {
+    // A removal is irreversible, so the verdict behind it has to be too.
+    // Judged like every other event, a tombstone valid on Monday was invalid
+    // on Friday — expiry is read off the clock and a compromise reaches
+    // backwards — and then `gc` went back to protecting and serving a payload
+    // the operator had been told was gone, the fold stopped reading the target
+    // as absent, and the host that had already deleted the blob folded a pull
+    // request no replica agreed with.
     const outcome = await scenario(
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -389,7 +389,8 @@ describe("hub redaction", () => {
         });
         yield* repository.gc({ repack: true, exclude: yield* Redaction.excluded() });
 
-        // And now the redactor is revoked, so the tombstone stops counting.
+        // And now the redactor is revoked as compromised, which reaches
+        // backwards everywhere else.
         yield* Log.issue(
           Certificate.revoke({
             repo: where.genesis.repoId,
@@ -421,9 +422,151 @@ describe("hub redaction", () => {
     );
 
     assert.equal(outcome.gone, true, "the bytes really are gone");
-    assert.equal(outcome.strict, 0, "and the tombstone no longer counts");
+    assert.equal(outcome.strict, 1, "and the tombstone still counts, so gc keeps excluding it");
+    assert.equal(outcome.explained, true, "the absence is still explained");
+    assert.equal(outcome.planned, true, "so a fetch of the pull request still plans");
+  });
+
+  it("keeps honouring a tombstone after the redactor's grant has expired", async () => {
+    // The other half of the same rule, and the one that needs no attacker at
+    // all: a grant with an expiry lapses on its own, and with it — before this
+    // — went the tombstone, the exclusion `gc` takes, and the agreement
+    // between a host that had deleted the payload and a replica that had not.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+        yield* repository.gc({ repack: true, exclude: yield* Redaction.excluded() });
+
+        // Re-granted with an expiry already behind us, which is what a lapsed
+        // membership looks like without waiting for one.
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: where.genesis.repoId,
+            publicKey: formatPublicKey(where.author.publicKey),
+            capabilities: ["hub.create-pr", "hub.comment", "hub.redact"],
+            expiresAt: new Date(1_700_000_000_000),
+            id: Log.newId(),
+          }),
+          [where.root],
+        );
+
+        return {
+          gone: !(yield* objects.has(blob!)),
+          strict: (yield* Redaction.excluded()).size,
+        };
+      }),
+    );
+
+    assert.equal(outcome.gone, true, "the bytes really are gone");
+    assert.equal(outcome.strict, 1, "and the tombstone still counts");
+  });
+
+  it("explains an absence a replica cannot yet authorize", async () => {
+    // The permissive set is not redundant once the strict one stops moving.
+    // Replication is per-ref and arrives in no fixed order, so a replica can
+    // hold `refs/hub/*` — trees naming payloads its source already deleted —
+    // before it holds the trust log entry that granted `hub.redact`. Asked the
+    // strict question there, nothing accounts for the missing bytes and every
+    // fetch of that pull request fails until the log catches up. What a fetch
+    // asks is whether an absence is *explained*, and a tombstone on the record
+    // explains it whoever signed it.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+        yield* repository.gc({ repack: true, exclude: yield* Redaction.excluded() });
+
+        // The log this replica has stops short of the grant, which is what
+        // being behind looks like from here.
+        yield* repository.deleteRef(Log.LOG_REF);
+
+        const head = yield* repository.resolve(Event.refOf(pr));
+        return {
+          gone: !(yield* objects.has(blob!)),
+          strict: (yield* Redaction.excluded()).size,
+          explained: (yield* Redaction.covered()).has(blob!),
+          planned: yield* Protocol.planFor({
+            wants: [head!],
+            haves: [],
+            clientShallow: [],
+            depth: undefined,
+            since: undefined,
+            notRefs: [],
+          }).pipe(
+            Effect.as(true),
+            Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+          ),
+        };
+      }),
+    );
+
+    assert.equal(outcome.gone, true, "the bytes really are gone");
+    assert.equal(outcome.strict, 0, "and this replica cannot authorize the tombstone");
     assert.equal(outcome.explained, true, "but it still explains the absence");
     assert.equal(outcome.planned, true, "so a fetch of the pull request still plans");
+  });
+
+  it("works the covered set out once per repository state", async () => {
+    // This is the set a *deepening* fetch takes, and a deepening fetch is a
+    // request an anonymous reader makes. Unmemoised it walked every pull
+    // request's event DAG twice per request — once to find the tombstones and
+    // once to read them — which is the whole hub history, driveable in a loop
+    // by anybody who can reach the repository. Sound to memoise because it
+    // asks only what a tombstone *names*: no trust state and no clock enter
+    // it, so a moved ref is the only thing that can change the answer.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const first = yield* withASecret(where);
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr: first.pr,
+          target: first.target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const once = yield* Redaction.covered();
+        const again = yield* Redaction.covered();
+
+        // A second pull request moves a ref, which is what the memo is
+        // validated against.
+        const second = yield* withASecret(where);
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr: second.pr,
+          target: second.target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+        const after = yield* Redaction.covered();
+        return { reused: once === again, sizes: [once.size, after.size] as const };
+      }),
+    );
+
+    assert.equal(outcome.reused, true, "the same state must not be walked twice");
+    assert.deepEqual(outcome.sizes, [1, 2], "and a moved ref must not be answered from the memo");
   });
 
   it("excludes nothing in a repository that has no genesis", async () => {

@@ -153,8 +153,31 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
 export const covered = Effect.fn("hub.Redaction.covered")(function* () {
   const repository = yield* Repository;
 
+  // Memoised for the same reason `excluded` is, and more urgently: this is the
+  // set a *deepening fetch* takes, and a deepening fetch is a request an
+  // anonymous reader makes. Unmemoised, every one of them walked every pull
+  // request's event DAG twice — once to find the tombstones and once to read
+  // them — which is a walk of the whole hub history per request, driveable in
+  // a loop by anybody who can reach the repository.
+  //
+  // Sound because the answer is a pure function of the refs in the key: this
+  // set asks only what a tombstone *names*, so no trust state and no clock
+  // enters it, and a moved ref changes the key.
+  const refs = yield* Event.pullRequests();
+  const identity = yield* repository.resolve(GENESIS_REF);
+  const state = (yield* Effect.forEach(refs, (pr) =>
+    repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
+  )).join(" ");
+
+  const known = names.get(identity);
+  if (known !== undefined && known.state === state) {
+    names.delete(identity);
+    names.set(identity, known);
+    return known.found;
+  }
+
   const found = new Set<Oid>();
-  for (const pr of yield* tombstoned(yield* Event.pullRequests())) {
+  for (const pr of yield* tombstoned(refs)) {
     const { events } = yield* Event.entries(pr);
     for (const entry of events) {
       if (entry.payload?.type !== "event.redacted" || entry.payload.pr !== pr) continue;
@@ -167,6 +190,14 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
       const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
       if (path !== null) found.add(path.oid);
     }
+  }
+
+  names.delete(identity);
+  names.set(identity, { state, found });
+  while (names.size > MEMO) {
+    const oldest = names.keys().next();
+    if (oldest.done === true) break;
+    names.delete(oldest.value);
   }
   return found;
 });
@@ -197,6 +228,16 @@ const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: Readon
  * happens to be oldest rather than whichever is idle.
  */
 const MEMO = 256;
-const memo = new Map<Oid | null, { readonly state: string; readonly found: ReadonlySet<Oid> }>();
+type Memo = Map<Oid | null, { readonly state: string; readonly found: ReadonlySet<Oid> }>;
+const memo: Memo = new Map();
+
+/**
+ * The same, for `covered`.
+ *
+ * A separate map rather than a wider value, because the two are asked on
+ * different paths — `excluded` by `gc`, `covered` by every deepening fetch —
+ * and sharing one entry would make either question pay for the other's walk.
+ */
+const names: Memo = new Map();
 
 export type RedactionError = Invalid | ObjectNotFound | StorageFailure;

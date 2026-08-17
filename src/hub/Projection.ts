@@ -693,6 +693,15 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         made: { at: new Date(payload.issuedAt), trustHead: effective },
         seen: ancestry,
         contains: inTrustLog,
+        // A tombstone is the one event this repository acts on irreversibly,
+        // so its verdict must not move afterwards. Judged like the rest, an
+        // expiring grant made `redacted` shrink on a wall clock: `gc` stopped
+        // excluding a payload the operator had been told was gone and went
+        // back to protecting and serving it, the second pass stopped reading
+        // the target as absent, and the host that had already deleted the
+        // blob folded a pull request no replica agreed with — on the boundary
+        // that decides whether the branch behind it may move.
+        permanent: payload.type === "event.redacted",
       }));
     if (!authorized.ok) {
       rejected.push({ commit: entry.commit, reason: authorized.reason });

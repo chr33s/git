@@ -333,7 +333,25 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
         "this repository has no membership to authorize a write; run `hub init` to give it one",
       );
     }
-    return yield* namespaceRules(update, current, stored);
+    const namespace = yield* namespaceRules(update, current, stored);
+    if (!namespace.ok || !isProtected(input.rules, update.name)) return namespace;
+
+    // Branch protection still applies to a repository with no identity. The
+    // *approval* half of it cannot — there is no membership for a review to
+    // come from — but "this branch may not be deleted or force-pushed" asks
+    // nothing of trust, and returning before the rules were consulted made a
+    // published `refs/meta/policy` inert on exactly the repositories that have
+    // no other protection at all. On an open repository the rules ref is
+    // itself writable, so this guards a mistake rather than an adversary; that
+    // is still the difference between a protected branch and no branch
+    // protection whatsoever.
+    if (update.value === null) {
+      return refused(update.name, `${update.name} is protected and may not be deleted`);
+    }
+    if (current !== null && !(yield* contains(current, update.value))) {
+      return refused(update.name, `${update.name} is protected and may not be force-pushed`);
+    }
+    return namespace;
   }
 
   if (input.principal.member === null) {

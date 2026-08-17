@@ -103,6 +103,7 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   made: Made | null,
   seen: Ancestry,
   held: Membership,
+  permanent = false,
 ) {
   const revocations = projection.revoked.get(subject);
   if (revocations === undefined || revocations.length === 0) return false;
@@ -143,7 +144,14 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
     // would let them backdate their way out of the one revocation class meant
     // to reach backwards. `compromisedFrom` stays on the record as the
     // operator's account of when it began; it is not a verification input.
-    if (revocation.compromisedFrom !== null) return true;
+    // Except where the verdict has to be permanent. Reaching backwards moves
+    // an answer that has already been acted on irreversibly: the host that
+    // honoured a tombstone deleted the payload, and a later `compromised`
+    // revocation that un-honours it leaves that host folding an event every
+    // replica still holding the blob folds in full — a disagreement about the
+    // same protected-branch push, arrived at from the same log. Forward reach
+    // still applies below, so the key stops being able to make new ones.
+    if (revocation.compromisedFrom !== null && !permanent) return true;
 
     // Past the window's end the check above has already answered; what is left
     // is an event that cannot show it, and it is judged against the revocation
@@ -225,6 +233,26 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
    * bytes, up to `MAX_SIGNATURES` of them per extra ask.
    */
   readonly signed?: ReadonlyArray<Fingerprint>;
+  /**
+   * Whether this verdict has to hold for good.
+   *
+   * An answer that moves is fine for a statement that is only ever re-read —
+   * an approval that stops counting when its author's grant expires is the
+   * conservative reading, and nothing was destroyed to reach it. It is not
+   * fine for one the repository *acts* on irreversibly. A redaction tombstone
+   * is the only such statement: honouring it deletes bytes, and a verdict that
+   * can be withdrawn afterwards leaves the host that acted folding a history
+   * no replica agrees with, and `gc` re-protecting a payload the operator was
+   * told was gone.
+   *
+   * So a permanent verdict is judged against facts that only ever accumulate:
+   * the capabilities the signer held at the trust head the event names, and
+   * the revocations reachable from it. Wall-clock expiry is not consulted, and
+   * a `compromised` revocation does not reach backwards past it. The live gate
+   * still refuses an expired or revoked member a *new* tombstone; what this
+   * fixes is the reading of one already on the record.
+   */
+  readonly permanent?: boolean;
 }) {
   const made = input.made ?? null;
   const ancestry = input.seen ?? Log.ancestry;
@@ -234,7 +262,9 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
 
   let closest = "signer is not a member of this repository";
   for (const signer of found) {
-    if (yield* reaches(input.projection, signer, made, ancestry, membership)) {
+    if (
+      yield* reaches(input.projection, signer, made, ancestry, membership, input.permanent === true)
+    ) {
       closest = `${signer} has been revoked`;
       continue;
     }
@@ -250,7 +280,11 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
     // expired grant. The cost is that an expired member's past events stop
     // counting, which is the conservative reading and the one an attacker
     // cannot arrange.
-    if (member.expiresAt !== null && member.expiresAt.getTime() <= Date.now()) {
+    if (
+      input.permanent !== true &&
+      member.expiresAt !== null &&
+      member.expiresAt.getTime() <= Date.now()
+    ) {
       closest = `${signer}'s membership expired on ${member.expiresAt.toISOString()}`;
       continue;
     }

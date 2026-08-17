@@ -830,7 +830,11 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // commands now all refused still has to be read before the report can
     // reach the client.
     const uncovered = new Set<string>();
-    for (const entry of yield* Policy.uncovered(updates).pipe(Effect.orElseSucceed(() => []))) {
+    // Not swallowed. Every other gate in this function fails closed, and this
+    // one decides whether a signed request covers the commands sent under it —
+    // so reading a failure as "all of them" is the one answer it must never
+    // give by accident.
+    for (const entry of yield* Policy.uncovered(updates)) {
       const command = updates.find((update) => update.name === entry.ref);
       uncovered.add(entry.ref);
       refused.push({

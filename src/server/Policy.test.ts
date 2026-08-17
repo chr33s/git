@@ -696,6 +696,64 @@ describe("Policy", () => {
       assert.equal(refused.updates.length, 0);
       assert.match(refused.refused.at(0)?.reason ?? "", /not by a push/);
     });
+
+    it("still honours the branch protection it publishes", async () => {
+      // The genesis-less branch returned before `input.rules` was ever
+      // consulted, so a published `refs/meta/policy` was inert on exactly the
+      // repositories with no other protection at all: `--open` served the
+      // delete and the force-push the file refused. The approval half of
+      // protection genuinely cannot apply here — there is no membership for a
+      // review to come from — but "may not be deleted" and "may not be
+      // force-pushed" ask nothing of trust.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { first, second } = yield* history("refs/heads/main");
+
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({ ...OPEN, protected: ["refs/heads/main"] }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "policy\n",
+            author,
+          });
+          yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+
+          // Built on the tip without moving it, so the fast-forward below is
+          // a real one rather than a write of the value already there.
+          const third = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [second],
+            message: "third\n",
+            author,
+          });
+
+          const open = Policy.anonymousWrites(true);
+          return {
+            deleted: yield* gateAs(null, [{ name: "refs/heads/main", value: null }]).pipe(
+              Effect.provide(open),
+            ),
+            forced: yield* gateAs(null, [{ name: "refs/heads/main", value: first }]).pipe(
+              Effect.provide(open),
+            ),
+            ahead: yield* gateAs(null, [{ name: "refs/heads/main", value: third }]).pipe(
+              Effect.provide(open),
+            ),
+          };
+        }),
+      );
+
+      assert.equal(outcome.deleted.updates.length, 0);
+      assert.match(outcome.deleted.refused.at(0)?.reason ?? "", /may not be deleted/);
+      assert.equal(outcome.forced.updates.length, 0);
+      assert.match(outcome.forced.refused.at(0)?.reason ?? "", /may not be force-pushed/);
+      assert.equal(outcome.ahead.updates.length, 1, "an ordinary push still lands");
+    });
   });
 
   describe("how stale a membership view may be", () => {

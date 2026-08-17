@@ -846,6 +846,16 @@ Hosts MAY offer an explicit opt-in for scratch servers (`serve --open`), and it
 MUST be off by default — "no policy" is not "no protection", and the operator
 who wants an open write endpoint should have to say so.
 
+An open repository is still subject to the branch rules it publishes. The
+approval half of protection cannot apply — there is no membership for a review
+to come from — but "this branch may not be deleted" and "this branch may not be
+force-pushed" ask nothing of trust, and a boundary that stops consulting
+`refs/meta/policy` the moment the repository has no genesis leaves the file
+inert on exactly the repositories that have no other protection at all. The
+rules ref is itself writable there, so this guards a mistake rather than an
+adversary; that is still the difference between a protected branch and no branch
+protection whatsoever.
+
 A **private** repository requires `repo.read` even for fetch. Stock git clients satisfy this with a delegated credential (§12) scoped to `repo.read`; native clients use either path.
 
 ---
@@ -1193,6 +1203,12 @@ Redaction removes content, never structure: the event's existence and position i
 **A redacted event contributes nothing to the projection, and MUST do so everywhere.** The host that performs a redaction deletes the payload at once; every replica keeps it until the tombstone reaches them and their next repack. A projection that decides absence by whether the _bytes_ are present therefore gives two answers to the same question — a redacted approval counting on one host and not on another — and the disagreement lands on the policy boundary, which decides whether a push is allowed. Absence is decided by the tombstone.
 
 That makes the decision itself a fold, since a tombstone counts only if its signer held `hub.redact` and was authorized when they signed it, so a pull request carrying one is folded twice: once to settle which tombstones count, and once with the answer in hand. The first pass reads as absent every commit _named_ by a tombstone payload of this pull request whose signer has _ever_ held `hub.redact`, over a grant history that only grows — the _event's_ own authorization is what the second pass settles, but the signer's capability is a fact both hosts fold identically, so requiring it costs nothing in agreement. _Ever_ rather than _now_, because this set must be monotone: once a tombstone names a target, some host may already have deleted the payload, and an answer that later shrinks — because the redactor was revoked, or their grant lapsed — leaves that host folding a history no replica agrees with. Requiring nothing was too wide a door: a skipped event drops out of the trust floor, so decoy tombstones lower it for the next one and let a tombstone signed under a stale head through, which is how a narrowed `hub.redact` would come back. A commit that is itself a tombstone is excepted, and that exception is load-bearing rather than tidy: without it an event could name a valid tombstone, have it read as absent in the first pass, and undo the redaction entirely — putting a payload the operator believes is gone back under `gc`'s protection. Since tombstones are never redactable, every replica sees the same names and the two passes agree across hosts. Repositories with no tombstones, which is nearly all of them, fold once.
+
+**A tombstone's verdict MUST hold for good.** Every other event is re-judged on each fold, and an answer that moves is the conservative reading there: an approval whose author's grant has lapsed stops counting, and nothing was destroyed to reach that. A tombstone is the one statement this repository acts on irreversibly, so the same rule breaks it — `gc` goes back to protecting and serving a payload the operator was told was gone, the fold stops reading the target as absent, and the host that already deleted the blob folds a pull request no replica agrees with, on the boundary that decides whether the branch behind it may move.
+
+So a tombstone is judged against facts that only ever accumulate: the capabilities its signer held at the trust head the event names, and the revocations reachable from that head. Membership **expiry MUST NOT be consulted** — it is read off a wall clock, and two hosts asking at different moments would answer differently about the same repository — and a `compromised` revocation, which reaches backwards everywhere else (§10), MUST NOT un-honour a tombstone already on the record. Forward reach still applies, so a revoked key writes no new ones, and the live gate still refuses an expired or revoked member a tombstone at the moment they ask for it. A compromised redactor's past removals stand; the recourse is to rebuild the repository from a trusted point, which is the same recourse as for any other byte they destroyed.
+
+Because the verdict is now a pure function of the genesis, the trust log and the pull request's own events, both exclusion sets MAY be memoised against those refs. The permissive set still differs from the strict one, and not only in the clock: replication is per-ref and arrives in no order, so a replica can hold `refs/hub/*` — trees naming payloads its source already deleted — before it holds the log entry that granted `hub.redact`. Asked the strict question there, nothing accounts for the missing bytes and every fetch of that pull request fails until the log catches up.
 
 It also means redaction is a strong operation and not merely a cosmetic one: removing an event removes what it said, so redacting a review removes its approval and redacting a comment removes its thread. `hub.redact` is charged accordingly.
 
