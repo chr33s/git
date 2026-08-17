@@ -177,12 +177,15 @@ export const hiddenFromAdvertisement = (ref: string): boolean =>
  * client could never discover them at all, and a mirror reported a successful
  * replication having fetched nothing.
  *
- * `refs/` and anything shorter is what "everything" looks like, and answering
- * it with hub state is the default the hiding exists to avoid.
+ * The prefix has to *name* the namespace, though, not merely start the same
+ * way. Accepting anything the namespace begins with let `ls-remote 'refs/h*'`
+ * — three characters, naming nothing — return the whole of `refs/hub/`, which
+ * is the state the hiding exists to withhold from a client that did not ask
+ * for it. The one shortfall allowed is the trailing slash, because that is the
+ * one git itself writes.
  */
 export const namesHiddenNamespace = (prefix: string): boolean =>
-  HIDDEN.some((namespace) => prefix.startsWith(namespace) || namespace.startsWith(prefix)) &&
-  prefix.length > "refs/".length;
+  HIDDEN.some((namespace) => prefix.startsWith(namespace) || `${prefix}/` === namespace);
 
 const HIDDEN = ["refs/hub/", "refs/meta/"];
 

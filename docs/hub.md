@@ -1304,6 +1304,11 @@ review.dismissed (of a review one did not write)            hub.approve
 The author is the signer of the opening event, and which event opened a pull
 request is decided by descent rather than by walk order: every honest event
 descends from `pr.opened`, so a forged parentless one is an ancestor of nothing.
+A pull request's `base` MAY be written unqualified (`main`) and MUST be read as
+a full ref name (`refs/heads/main`); the protected-branch check matches on it,
+so an unnormalised base makes the pull request stop counting toward its own
+branch and leaves that branch unpushable.
+
 Descent is measured over _events_, weighted by how many distinct members made
 them — not over raw commits. Counted over the walked DAG, a forger grafts an
 opening and chains empty commits under it until it outnumbers the real

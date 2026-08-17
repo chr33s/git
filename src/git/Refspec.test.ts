@@ -91,10 +91,12 @@ describe("Refspec", () => {
     assert.equal(Refspec.namesHiddenNamespace("refs/hub/pr/1"), true);
     assert.equal(Refspec.namesHiddenNamespace("refs/meta"), true);
     assert.equal(Refspec.namesHiddenNamespace("refs/meta/trust/"), true);
-    // A prefix on the way to one counts, since the client walking down to it
-    // asks with each: `refs/h` reaches `refs/hub`.
-    assert.equal(Refspec.namesHiddenNamespace("refs/h"), true);
 
+    // A prefix that merely starts the same way names nothing, and answering it
+    // hands `ls-remote 'refs/h*'` the whole namespace for three characters.
+    assert.equal(Refspec.namesHiddenNamespace("refs/h"), false);
+    assert.equal(Refspec.namesHiddenNamespace("refs/hu"), false);
+    assert.equal(Refspec.namesHiddenNamespace("refs/m"), false);
     // "Everything" is what the hiding exists to answer with less.
     assert.equal(Refspec.namesHiddenNamespace("refs/"), false);
     assert.equal(Refspec.namesHiddenNamespace(""), false);

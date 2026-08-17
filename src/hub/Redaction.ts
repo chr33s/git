@@ -27,6 +27,7 @@ import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { type Genesis, readGenesis } from "../trust/Genesis.ts";
+import { LOG_REF } from "../trust/Log.ts";
 import {
   project as projectTrust,
   type Projection as TrustProjection,
@@ -44,20 +45,12 @@ import { project } from "./Projection.ts";
 export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
   genesis: Genesis,
   trust: TrustProjection,
+  only?: ReadonlyArray<string>,
 ) {
   const repository = yield* Repository;
 
   const found = new Set<Oid>();
-  for (const pr of yield* Event.pullRequests()) {
-    // Walked before it is folded. A fold verifies a signature per event, and
-    // most pull requests have never been redacted at all — but any *valid*
-    // tombstone is first of all a decoded `event.redacted` payload, so a walk
-    // that finds none rules the whole pull request out without a single
-    // verification. The filter can produce a false positive, which costs one
-    // fold; it cannot produce a false negative, which is what would matter.
-    const { events } = yield* Event.entries(pr);
-    if (!events.some((entry) => entry.payload?.type === "event.redacted")) continue;
-
+  for (const pr of only ?? (yield* tombstoned())) {
     const state = yield* project(genesis, trust, pr);
     if (state.redacted.size === 0) continue;
 
@@ -86,9 +79,59 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
  * points want exactly this one line.
  */
 export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
+  const repository = yield* Repository;
+
+  // Walked before anything is folded, and the trust log is not folded at all
+  // unless a tombstone turned up. A fold verifies a signature per record and
+  // per event, and this runs on every collection and on every deepening fetch
+  // — which anonymous readers can ask for repeatedly. Any *valid* tombstone is
+  // first of all a decoded `event.redacted` payload, so a walk that finds none
+  // rules the repository out without a single verification. The filter can
+  // produce a false positive, which costs one fold; it cannot produce a false
+  // negative, which is what would matter.
+  const candidates = yield* tombstoned();
+  if (candidates.length === 0) return new Set<Oid>();
+
+  // And once found, remembered against the state it was computed from: the
+  // answer is a pure function of the hub refs and the trust head, so a moved
+  // ref changes the key and a stale one is not possible.
+  const key = [
+    yield* repository.resolve(LOG_REF),
+    ...(yield* Effect.forEach(candidates, (pr) => repository.resolve(Event.refOf(pr)))),
+  ].join("\u0000");
+  const known = memo.get(key);
+  if (known !== undefined) return known;
+
   const stored = yield* readGenesis();
   if (stored === null) return new Set<Oid>();
-  return yield* blobs(stored.genesis, yield* projectTrust(stored.genesis));
+  const found = yield* blobs(stored.genesis, yield* projectTrust(stored.genesis), candidates);
+
+  memo.set(key, found);
+  while (memo.size > MEMO) {
+    const oldest = memo.keys().next();
+    if (oldest.done === true) break;
+    memo.delete(oldest.value);
+  }
+  return found;
 });
+
+/** The pull requests carrying anything that *might* be a tombstone. */
+const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* () {
+  const found: string[] = [];
+  for (const pr of yield* Event.pullRequests()) {
+    const { events } = yield* Event.entries(pr);
+    if (events.some((entry) => entry.payload?.type === "event.redacted")) found.push(pr);
+  }
+  return found;
+});
+
+/**
+ * Answers already worked out, by the refs they were worked out from.
+ *
+ * Small, because it only ever holds repositories that have actually redacted
+ * something and only one entry per state of each.
+ */
+const MEMO = 32;
+const memo = new Map<string, ReadonlySet<Oid>>();
 
 export type RedactionError = Invalid | ObjectNotFound | StorageFailure;

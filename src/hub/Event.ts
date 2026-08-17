@@ -64,6 +64,21 @@ export const newId = Log.newId;
  * Qualified even though this version only writes SHA-1, because the point of
  * qualifying is that the payloads never have to change when it does not.
  */
+/**
+ * A pull request's base branch as a full ref name.
+ *
+ * `base` is a string a client writes, and both spellings are natural — `main`
+ * from a UI, `refs/heads/main` from a script. `Policy.protectedBranch` matches
+ * a pull request to the branch being pushed by comparing this against a fully
+ * qualified ref, so an unqualified base matched nothing: the pull request
+ * stopped counting toward its own branch's approvals and made that branch
+ * permanently unpushable, with a message about missing approvals rather than
+ * about the spelling. Normalised where it is read, so it holds for events
+ * written by any client rather than only by this one.
+ */
+export const branchRef = (value: string): string =>
+  value.startsWith("refs/") ? value : `refs/heads/${value}`;
+
 export const qualify = (oid: Oid): string => `sha1:${oid}`;
 
 export const unqualify = (value: string): Oid | null => {

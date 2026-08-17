@@ -100,6 +100,31 @@ const opened = Effect.fn("test.opened")(function* (where: World) {
 });
 
 describe("hub projection", () => {
+  it("qualifies a base branch spelled without its refs/heads/ prefix", async () => {
+    // `base` is a string a client writes, and both spellings are natural —
+    // `main` from a UI, `refs/heads/main` from a script. `protectedBranch`
+    // matches a pull request to the branch being pushed by comparing this
+    // against a fully qualified ref, so an unqualified one matched nothing:
+    // the pull request stopped counting toward its own branch's approvals and
+    // made that branch permanently unpushable, reported as missing approvals
+    // rather than as a spelling.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const { pr } = yield* PullRequest.open({
+          repo: where.genesis.repoId,
+          title: "Add a thing",
+          base: "main",
+          head: REVISION,
+          key: where.author,
+        });
+        return yield* projectionOf(where, pr);
+      }),
+    );
+
+    assert.equal(state.base, "refs/heads/main");
+  });
+
   it("projects an opened pull request", async () => {
     const state = await scenario(
       Effect.gen(function* () {

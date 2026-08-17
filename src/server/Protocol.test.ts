@@ -699,6 +699,21 @@ describe("advertisement hiding", () => {
     assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
   });
 
+  it("does not hand a namespace to a prefix that merely starts the same way", async () => {
+    // `ls-remote 'refs/h*'` names nothing — three characters, and not the
+    // namespace — so answering it returned the whole of `refs/hub/`: exactly
+    // the state the hiding exists to withhold from a client that did not ask.
+    const refs = await scenario(
+      Effect.gen(function* () {
+        yield* withHubRefs();
+        return yield* namedBy(lsRefs(["refs/h", "refs/m"]));
+      }),
+    );
+
+    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
+    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
+  });
+
   it("answers one that names it without a trailing slash, which is what git sends", async () => {
     // git derives the prefix from the configured refspec, so `refs/hub/*`
     // yields `refs/hub` — no slash. The un-hiding test was written against

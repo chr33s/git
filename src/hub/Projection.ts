@@ -635,7 +635,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         // an approved one has activity by definition.
         title = payload.title;
         description = payload.description;
-        base = payload.base;
+        base = Event.branchRef(payload.base);
         // Authorship is the part a contested opening still does not confer.
         if (!opening.contested) author ??= signer;
         openedBy = mine;
