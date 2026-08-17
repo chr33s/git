@@ -446,7 +446,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
   // payload-carrying events alone would cut every chain at the join where two
   // concurrent histories met, and `supersedes` would fall back to comparing
   // ids for events that are genuinely ordered.
-  const ancestors = ancestorSets(parents, Dag.topological(parents));
+  const ancestors = ancestorSets(parents, walked.ordered);
   const { ancestry, contains: inTrustLog, reaches: reachesTrust } = trustReach();
 
   /**

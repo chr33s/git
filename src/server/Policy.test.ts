@@ -472,6 +472,74 @@ describe("Policy", () => {
       );
     });
 
+    it("still takes a since-revoked member's comments, and not their verdicts", async () => {
+      // A push is not a claim about when its events were written. A replica
+      // seeded from elsewhere, or a client that has been offline, pushes a
+      // pull request whose history is entirely honest and entirely old —
+      // refusing all of it because one past reviewer has since been revoked
+      // makes that pull request unpushable for good on a namespace that only
+      // grows, which is the outcome this rule exists to prevent. So it is
+      // narrowed to what converts into authority: a verdict unlocks a
+      // protected branch and a tombstone destroys bytes; a comment does
+      // neither.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const opened = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "looks reasonable to me",
+            key: where.reviewer,
+          });
+          const spoken = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: EMPTY_TREE_OID,
+            decision: "approve",
+            key: where.reviewer,
+          });
+          const approved = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          // Rewound, so both read as new to the boundary.
+          yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: opened! });
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+          const trust = yield* projectTrust(where.genesis);
+          const judged = (value: Oid) =>
+            evaluate({
+              update: { name: `refs/hub/pr/${pr}`, value },
+              principal: where.principal,
+              genesis: where.genesis,
+              trust,
+              rules: OPEN,
+            });
+
+          return { comment: yield* judged(spoken!), verdict: yield* judged(approved!) };
+        }),
+      );
+
+      assert.equal(outcome.comment.ok, true, "an old comment is not a claim on anything");
+      assert.equal(outcome.verdict.ok, false);
+      assert.match(outcome.verdict.ok === false ? outcome.verdict.reason : "", /has been revoked/);
+    });
+
     it("refuses a pushed tombstone from a member whose hub.redact was narrowed away", async () => {
       // The fold's first pass asks only whether a tombstone's signer *ever*
       // held `hub.redact`, because that set has to be monotone: an answer that

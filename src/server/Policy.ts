@@ -203,10 +203,35 @@ export type FoldCache = Map<string, PullRequestState>;
  */
 export type MentionCache = Map<string, ReadonlySet<string>>;
 
+/**
+ * Every revision one pull request has proposed, kept across requests.
+ *
+ * `MentionCache` is per batch, which is the right lifetime for a decision and
+ * the wrong one for a walk: this reads a pull request's whole event DAG, and
+ * it is asked about *every* pull request the repository has on *every*
+ * protected-branch push. Keyed by the ref's value, so a moved ref is a
+ * different answer and a stale one is not possible — the same shape as the
+ * redaction memos. Bounded by pull requests, least-recently-used.
+ */
+const MENTIONS = 1024;
+const mentions = new Map<string, ReadonlySet<string>>();
+
 /** Whether a pull request's events ever named this revision as a head. */
 const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, cache: MentionCache) {
+  const repository = yield* Repository;
+
   const known = cache.get(pr);
   if (known !== undefined) return known.has(to);
+
+  const at = yield* repository.resolve(Event.refOf(pr));
+  const key = `${pr}\u0000${at}`;
+  const remembered = mentions.get(key);
+  if (remembered !== undefined) {
+    mentions.delete(key);
+    mentions.set(key, remembered);
+    cache.set(pr, remembered);
+    return remembered.has(to);
+  }
 
   // A pull request this replica cannot walk proposes nothing it can act on.
   // The ceiling is enforced where a *push* crosses it, so a history that
@@ -231,6 +256,13 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
     if (head !== null) heads.add(head);
   }
   cache.set(pr, heads);
+  mentions.delete(key);
+  mentions.set(key, heads);
+  while (mentions.size > MENTIONS) {
+    const oldest = mentions.keys().next();
+    if (oldest.done === true) break;
+    mentions.delete(oldest.value);
+  }
   return heads.has(to);
 });
 
@@ -566,9 +598,33 @@ const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string,
  * a second parent — so an ordinary reconciling push walked back to the root
  * and re-read every event already on the ref.
  */
-const added = Effect.fnUntraced(function* (commit: Oid, current: Oid | null) {
-  if (!(yield* Event.isHubCommit(commit))) return false;
-  return current === null ? true : !(yield* contains(commit, current));
+const added = Effect.fnUntraced(function* (commit: Oid, held: ReadonlySet<Oid>) {
+  if (held.has(commit)) return false;
+  return yield* Event.isHubCommit(commit);
+});
+
+/**
+ * Everything an append-only ref already reaches, walked once.
+ *
+ * Asked per candidate through `isAncestor`, this was an unbounded walk of the
+ * ref's whole history *per commit the push adds* — and twice per push, since
+ * two rules ask it. One bounded walk answers all of them: the namespace's own
+ * commits, stopping at the ceiling a fold would stop at anyway, so the reads
+ * are the ones the fold was going to make regardless.
+ */
+const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, current: Oid | null) {
+  if (current === null) return new Set<Oid>();
+  const repository = yield* Repository;
+  const hub = name.startsWith("refs/hub/");
+  const belongs = hub ? Event.isHubCommit : Log.isTrustCommit;
+  const anchor = hub ? null : yield* repository.resolve(Refspec.TRUST_GENESIS);
+  const walked = yield* Dag.reachable(current, anchor, (commit) => belongs(commit)).pipe(
+    // An unreadable history is not "the ref holds nothing": every rule that
+    // takes this set fails closed on an edge it cannot account for, and an
+    // empty set is the most permissive answer rather than the safest.
+    Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+  );
+  return new Set(walked === null ? [current] : walked.keys());
 });
 
 /**
@@ -596,7 +652,8 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   // root and re-judged every event already on the ref. One old comment from a
   // member revoked since then made that pull request refuse its own joins for
   // good, on a namespace that cannot be rewound.
-  const parents = yield* Dag.reachable(to, current, (commit) => added(commit, current)).pipe(
+  const held = yield* alreadyHeld("refs/hub/", current);
+  const parents = yield* Dag.reachable(to, current, (commit) => added(commit, held)).pipe(
     // An unreadable history is not a signature claim. It is refused, or passed
     // over, by the walks that own that question.
     Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
@@ -613,9 +670,25 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     );
     if (record === null) continue;
     const signed = yield* Verify.signers(record.payload, record.signatures);
-    for (const signer of signed) {
-      if (openWindow(trust.revoked.get(signer)) !== null) {
-        return `${signer} has been revoked and may not add events`;
+    const payload = yield* Event.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+
+    // Only the events that *convert into authority*. A push is not a claim
+    // about when its events were written: a replica seeded from elsewhere,
+    // or a client that has been offline, pushes a pull request whose history
+    // is entirely honest and entirely old. Refusing all of it because one
+    // past reviewer has since been revoked would make that pull request
+    // unpushable for good, which is the outcome this rule exists to prevent
+    // rather than a second way to arrive at it. A verdict unlocks a protected
+    // branch and a tombstone destroys bytes; a comment, a thread, a check and
+    // a state change do neither, and they are the bulk of any history.
+    const authoritative =
+      payload?.type === "event.redacted" ||
+      (payload?.type === "review.submitted" && payload.decision !== "comment");
+    if (authoritative) {
+      for (const signer of signed) {
+        if (openWindow(trust.revoked.get(signer)) !== null) {
+          return `${signer} has been revoked and may not add a ${payload.type}`;
+        }
       }
     }
 
@@ -629,7 +702,6 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // first pass and with them the trust floor, and have a tombstone signed
     // against a stale head accepted — sending somebody else's payload to `gc`.
     // The boundary is where "now" is knowable, so it is where that is refused.
-    const payload = yield* Event.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
     if (payload?.type !== "event.redacted") continue;
     const holds = signed.some((signer) =>
       permits(trust.members.get(signer)?.capabilities ?? [], "hub.redact"),
@@ -677,10 +749,11 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   // there is nothing else for the first record to name.
   const repository = yield* Repository;
   const anchor = hub ? null : yield* repository.resolve(Refspec.TRUST_GENESIS);
+  const held = yield* alreadyHeld(name, current);
   const parents = yield* Dag.reachable(to, current, (commit) =>
     Effect.gen(function* () {
-      if (!(yield* belongs(commit))) return false;
-      return current === null ? true : !(yield* contains(commit, current));
+      if (held.has(commit)) return false;
+      return yield* belongs(commit);
     }),
   ).pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   // Unreadable is not "no second root": the objects arrived with this push, so
@@ -708,7 +781,7 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
         attached = true;
         continue;
       }
-      if (current !== null && (yield* contains(parent, current))) {
+      if (held.has(parent)) {
         attached = true;
         continue;
       }

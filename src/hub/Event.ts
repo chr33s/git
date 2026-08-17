@@ -567,7 +567,7 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(refOf(pr));
-  if (head === null) return { events: emptyEvents, parents: emptyParents };
+  if (head === null) return { events: emptyEvents, parents: emptyParents, ordered: emptyOrder };
 
   // Bounded to the hub's own commits. A pull request's history is written
   // here and nowhere else, so a commit with a parent from the source history
@@ -667,7 +667,7 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   // ancestry from the payload-carrying events alone would find its chains cut
   // at every join — which is exactly where two concurrent histories meet, and
   // exactly where knowing which event descends from which matters.
-  return { events, parents };
+  return { events, parents, ordered };
 });
 
 /**
@@ -723,10 +723,20 @@ export const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit:
 export interface Walked {
   readonly events: ReadonlyArray<Entry>;
   readonly parents: Dag.Parents;
+  /**
+   * The topological order this walk was taken in.
+   *
+   * Carried rather than recomputed. The fold needs the same order to build its
+   * ancestor rows, and a pull request carrying a tombstone is folded twice —
+   * so discarding it here meant sorting the same DAG three times over on the
+   * receive-pack path.
+   */
+  readonly ordered: ReadonlyArray<Oid>;
 }
 
 const emptyParents: Dag.Parents = new Map();
 const emptyEvents: ReadonlyArray<Entry> = [];
+const emptyOrder: ReadonlyArray<Oid> = [];
 
 /** Every pull request this repository holds events for. */
 export const pullRequests = Effect.fn("hub.Event.pullRequests")(function* () {
