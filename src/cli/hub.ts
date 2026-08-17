@@ -340,7 +340,12 @@ const confirmRevoked = Effect.fn("hub.confirmRevoked")(function* (
   subject: Fingerprint,
 ) {
   const projection = yield* confirm(genesis, commit);
-  if (!projection.revoked.has(subject)) {
+  // The *open* window, not merely a record. A key that was revoked, let back
+  // in and then had a revocation refused would otherwise be reported as
+  // revoked on the strength of the old, closed window — telling an operator a
+  // key is out when it is still authorized, which is the one direction this
+  // message must never be wrong in.
+  if (openWindow(projection.revoked.get(subject)) === null) {
     return yield* new Invalid({
       field: "trust",
       reason: `${subject} is still authorized; the revocation did not take effect`,

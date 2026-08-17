@@ -191,6 +191,91 @@ describe("cli hub", () => {
     assert.match(listed, /revoked \(left\)/);
   });
 
+  it("does not call a re-instated member revoked on the strength of an old window", async () => {
+    // A revocation stays on the record after a grant ends it — it is still
+    // true about the window it covers — so "has this key ever been revoked?"
+    // and "is it revoked now?" are different questions. Asked the first, the
+    // confirmation reported a revocation that had not taken effect as though
+    // it had, which is the one direction that message must never be wrong in.
+    await cli(["init", "--root", root, "project"]);
+    await writeKeyPair(path.join(root, "id_root"), "root@example.com");
+    await writeKeyPair(path.join(root, "id_member"), "dev@example.com");
+    await cli(["hub", "init", "--root", root, "--key", path.join(root, "id_root"), "project"]);
+
+    const grant = (capability: string) =>
+      cli([
+        "hub",
+        "grant",
+        "--root",
+        root,
+        "--key",
+        path.join(root, "id_root"),
+        "--subject",
+        path.join(root, "id_member.pub"),
+        "--capability",
+        capability,
+        "project",
+      ]);
+
+    const subject = (await grant("source.push")).trim().split(" ").at(-1) ?? "";
+    await cli([
+      "hub",
+      "revoke",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_root"),
+      "--subject",
+      subject,
+      "--reason",
+      "rotated",
+      "project",
+    ]);
+    // Back in, with the old window closed but still on the record.
+    await grant("source.push");
+
+    // An issuer who may invite but not revoke. Their revocation is refused, and
+    // the confirmation behind it has to agree — asked whether the subject has
+    // *ever* been revoked it would find the old, closed window and report a
+    // revocation that had not happened as done.
+    await writeKeyPair(path.join(root, "id_inviter"), "inviter@example.com");
+    await cli([
+      "hub",
+      "grant",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_root"),
+      "--subject",
+      path.join(root, "id_inviter.pub"),
+      "--capability",
+      "member.invite",
+      "project",
+    ]);
+    const refused = await cli([
+      "hub",
+      "revoke",
+      "--root",
+      root,
+      "--key",
+      path.join(root, "id_inviter"),
+      "--subject",
+      subject,
+      "--reason",
+      "left",
+      "project",
+    ]).then(
+      () => null,
+      (error: { stderr?: string; stdout?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
+    );
+    assert.notEqual(refused, null, "a revocation that did not take effect must be reported");
+    assert.match(refused ?? "", /may not revoke|still authorized/);
+
+    const listed = await cli(["hub", "members", "--root", root, "project"]);
+    assert.ok(!listed.includes("  revoked"), `a re-instated member is not revoked: ${listed}`);
+    assert.match(listed, new RegExp(subject.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+
   it("refuses a subject that is not a fingerprint, and says what one looks like", async () => {
     await cli(["init", "--root", root, "project"]);
     await writeKeyPair(path.join(root, "id_root"), "root@example.com");

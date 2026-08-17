@@ -132,6 +132,23 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     }
   };
 
+  /**
+   * Just enough of a repository to check who is asking.
+   *
+   * `Auth.guard` reads the genesis and the trust log, and nothing else — no
+   * hooks, no webhook registry, no API router. Answering it from the cached
+   * per-repository state meant every request built that state *before* it was
+   * allowed, so an unauthenticated scan over names that need not exist opened
+   * a `Scope` apiece and evicted live repositories' routers out of the cache
+   * it was thrashing. Built per request and thrown away: the guard is one read
+   * of two refs, and the repositories that pass it go on to be cached below.
+   */
+  const guardLayer = (repo: string) =>
+    GitRepository.layer.pipe(
+      Layer.provide(GitRepository.hooksNoop),
+      Layer.provide(stores(path.join(options.root, repo))),
+    );
+
   const stateFor = (repo: string): RepoState => {
     const cached = repos.get(repo);
     if (cached !== undefined) {
@@ -340,7 +357,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // secret to configure any more, so there is nothing to leave off.
       const denied = await Effect.runPromise(
         Auth.guard(request).pipe(
-          Effect.provide(Layer.mergeAll(stateFor(repo).layer, nonces, openWrites)),
+          Effect.provide(Layer.mergeAll(guardLayer(repo), nonces, openWrites)),
           // A repository whose identity cannot be read is not a repository
           // with no members: it is one nobody can be checked against, and the
           // honest answer is that the service is unavailable.

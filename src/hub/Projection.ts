@@ -532,10 +532,16 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     const behind = floor !== null && !(yield* reachesTrust(declared, floor));
     const effective = behind ? floor : declared;
 
+    // Verified once for this event and reused by `alsoHolds` below: several
+    // events cost a second capability check, and re-verifying up to
+    // `MAX_SIGNATURES` attacker-supplied signatures to ask a second question
+    // about the same bytes doubles the work on the synchronous push path.
+    const signed = yield* Verify.signers(entry.bytes, entry.signatures);
     const authorized = yield* Verify.authorize({
       projection: trust,
       bytes: entry.bytes,
       signatures: entry.signatures,
+      signed,
       capability: Event.capabilityFor(payload),
       made: { at: new Date(payload.issuedAt), trustHead: effective },
       seen: ancestry,
@@ -596,6 +602,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         projection: trust,
         bytes: entry.bytes,
         signatures: entry.signatures,
+        signed,
         capability,
         made: { at: issued, trustHead: effective },
         seen: ancestry,

@@ -215,11 +215,21 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
   readonly seen?: Ancestry;
   /** As `seen`, for "is this a trust-log commit?"; see `Membership`. */
   readonly contains?: Membership;
+  /**
+   * Who signed, when the caller has already worked it out.
+   *
+   * Signature verification is the expensive half of this, and it is over
+   * attacker-supplied input on a synchronous path. A caller asking twice about
+   * one event — "may they comment?", then "do they also hold `hub.merge`?" —
+   * was paying for every signature again to answer a question about the same
+   * bytes, up to `MAX_SIGNATURES` of them per extra ask.
+   */
+  readonly signed?: ReadonlyArray<Fingerprint>;
 }) {
   const made = input.made ?? null;
   const ancestry = input.seen ?? Log.ancestry;
   const membership = input.contains ?? Log.contains;
-  const found = yield* signers(input.bytes, input.signatures);
+  const found = input.signed ?? (yield* signers(input.bytes, input.signatures));
   if (found.length === 0) return denied("no valid signature");
 
   let closest = "signer is not a member of this repository";

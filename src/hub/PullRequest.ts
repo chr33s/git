@@ -15,12 +15,13 @@
  */
 import { Effect } from "effect";
 
-import type { PrivateKey } from "../crypto/SshSignature.ts";
+import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { readGenesis, type RepoId } from "../trust/Genesis.ts";
-import { project as projectTrust } from "../trust/Projection.ts";
+import { permits } from "../trust/Certificate.ts";
+import { openWindow, project as projectTrust } from "../trust/Projection.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import * as Event from "./Event.ts";
 import { project } from "./Projection.ts";
@@ -338,6 +339,27 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
     return yield* new Invalid({
       field: "target",
       reason: "a tombstone is the record of a removal and is not itself removable",
+    });
+  }
+
+  // Asked *before* the tombstone is written, not only afterwards. The check
+  // below rebuilds the projection and refuses a tombstone that did not count —
+  // but by then the event is on an append-only ref forever, and `Redaction`
+  // has to fold this pull request on every `gc` and every retried fetch the
+  // moment any `event.redacted` payload is present. So a signer holding
+  // nothing could make every future collection pay for a tombstone that was
+  // never going to work. What they can still do is push the event directly;
+  // what they cannot do is have this command do it for them.
+  const signer = yield* fingerprint(input.key.publicKey);
+  const member = trust.members.get(signer);
+  if (
+    member === undefined ||
+    openWindow(trust.revoked.get(signer)) !== null ||
+    !permits(member.capabilities, "hub.redact")
+  ) {
+    return yield* new Invalid({
+      field: "key",
+      reason: `${signer} may not redact events here; that needs hub.redact`,
     });
   }
 

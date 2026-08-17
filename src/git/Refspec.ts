@@ -181,6 +181,24 @@ export const hiddenFromAdvertisement = (ref: string): boolean =>
  * it with hub state is the default the hiding exists to avoid.
  */
 export const namesHiddenNamespace = (prefix: string): boolean =>
-  ["refs/hub", "refs/meta"].some(
-    (namespace) => prefix.startsWith(namespace) || namespace.startsWith(prefix),
-  ) && prefix.length > "refs/".length;
+  HIDDEN.some((namespace) => prefix.startsWith(namespace) || namespace.startsWith(prefix)) &&
+  prefix.length > "refs/".length;
+
+const HIDDEN = ["refs/hub/", "refs/meta/"];
+
+/**
+ * The prefixes a client must ask for by name to reach a hidden namespace.
+ *
+ * The mirror of `namesHiddenNamespace`, for the side doing the asking. A
+ * refspec covers a namespace whenever either name is a prefix of the other,
+ * but the *ask* has to name the namespace: `refs/` is what "everything" looks
+ * like and is answered with the default. So `refs/hub/*` asks for `refs/hub/`
+ * and `refs/*` asks for both namespaces by name — which is the case that used
+ * to fetch nothing, because a probe built from the refspec's own prefix was
+ * too short to name anything and the client never sent an `ls-refs` at all.
+ * v0 hides these too, so that fetch reported a replication it had not done.
+ */
+export const hiddenPrefixes = (prefix: string): ReadonlyArray<string> =>
+  HIDDEN.flatMap((namespace) =>
+    prefix.startsWith(namespace) ? [prefix] : namespace.startsWith(prefix) ? [namespace] : [],
+  );

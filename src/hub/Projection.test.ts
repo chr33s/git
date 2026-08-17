@@ -1734,13 +1734,19 @@ describe("hub projection", () => {
       assert.equal(thread?.head, null);
     });
 
-    it("refuses a redaction from a member without hub.redact, and keeps the content", async () => {
+    it("refuses a redaction from a member without hub.redact, and writes nothing", async () => {
       // Writing the tombstone and deleting the payload are two different
       // authorities. Treating the first as implying the second let anybody who
       // could write a hub ref blank another member's words: the projection
       // refused their tombstone, so nothing was marked redacted — but the blob
       // was already gone, and the event had become unreadable and stopped
-      // counting. The removal now happens only once it is known to count.
+      // counting.
+      //
+      // Refused before anything is written, too. Rebuilding the projection and
+      // reporting the refusal afterwards still left the tombstone on an
+      // append-only ref forever, and `Redaction` folds a pull request on every
+      // collection and every retried fetch once any `event.redacted` payload
+      // is present — so one refused command made every future collection pay.
       const outcome = await scenario(
         Effect.gen(function* () {
           const where = yield* world();
@@ -1768,10 +1774,62 @@ describe("hub projection", () => {
 
       assert.equal(outcome.failure._tag, "Invalid");
       assert.match(outcome.failure.reason, /hub\.redact/);
-      assert.match(outcome.state.rejected.at(-1)?.reason ?? "", /hub\.redact/);
+      assert.deepEqual(outcome.state.rejected, [], "nothing was appended to be rejected");
       assert.equal(outcome.state.redacted.size, 0);
       // The words the tombstone had no authority to remove are still there.
       assert.equal(outcome.state.threads[0]?.comments[0]?.body, "ordinary");
+    });
+
+    it("refuses one pushed straight at the ref, which is what a replica sees", async () => {
+      // The command refuses before writing; the fold has to refuse too, since
+      // a replica receives the event and never the command that made it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "ordinary",
+            key: where.author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "event.redacted",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: yield* repository.resolve(Log.LOG_REF),
+            target,
+            targetCommit: Event.qualify(commit),
+            reason: "no",
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "event.redacted unauthorized\n",
+            }),
+            expected: head,
+          });
+
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /hub\.redact/);
+      assert.equal(outcome.redacted.size, 0);
+      assert.equal(outcome.threads[0]?.comments[0]?.body, "ordinary");
     });
 
     it("will not redact a tombstone", async () => {

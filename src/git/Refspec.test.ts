@@ -100,4 +100,22 @@ describe("Refspec", () => {
     assert.equal(Refspec.namesHiddenNamespace(""), false);
     assert.equal(Refspec.namesHiddenNamespace("refs/heads/"), false);
   });
+
+  it("names the namespaces a refspec has to ask for by hand", () => {
+    // The asking side of the same rule, and the half that went missing: the
+    // probe was built by appending a character to the refspec's own prefix and
+    // asking whether *that* was a hidden ref, so a refspec broad enough to
+    // cover everything — `+refs/*:refs/*` — produced `refs/x`, which is not,
+    // and no `ls-refs` was sent at all. Since v0 hides these too, the fetch
+    // took no hub or trust state and reported success.
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/hub/"), ["refs/hub/"]);
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/hub/pr/"), ["refs/hub/pr/"]);
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/meta/trust/"), ["refs/meta/trust/"]);
+    // A refspec that covers everything covers both, and has to name both.
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/"), ["refs/hub/", "refs/meta/"]);
+    assert.deepEqual(Refspec.hiddenPrefixes(""), ["refs/hub/", "refs/meta/"]);
+    // And one that covers neither asks for nothing.
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/heads/"), []);
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/tags/"), []);
+  });
 });
