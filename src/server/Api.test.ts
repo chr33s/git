@@ -461,6 +461,28 @@ describe("Api", () => {
         // used the raw one, so `into: "main"` was judged as `refs/heads/main`
         // and written to a top-level ref called `main`: the branch never moved
         // and the response said it had.
+        // `HEAD` is already a full ref name. Qualified, it became a literal
+        // branch called `refs/heads/HEAD`: the merge reported success while
+        // the checked-out branch never moved.
+        const atHead = yield* client.repo
+          .merge({
+            params: { repo: "r" },
+            payload: {
+              ours: "HEAD",
+              theirs: "refs/heads/side",
+              author: alice,
+              into: "HEAD",
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(atHead._tag, "Invalid");
+        const { refs: afterHead } = yield* client.repo.refs({ params: { repo: "r" } });
+        assert.equal(
+          afterHead.find((ref) => ref.name === "refs/heads/HEAD"),
+          undefined,
+          `no branch called HEAD: ${afterHead.map((ref) => ref.name).join(", ")}`,
+        );
+
         const merged = yield* client.repo.merge({
           params: { repo: "r" },
           payload: {

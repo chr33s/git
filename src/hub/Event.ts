@@ -47,6 +47,29 @@ export const RECORD = "event";
 /** Where a pull request's history lives. */
 export const refOf = (pr: string): string => `refs/hub/pr/${pr}`;
 
+/**
+ * Whether a string may name a pull request.
+ *
+ * One path component, and one this repository can find again: a `/` in an id
+ * puts the ref under `refs/hub/pr/team/42`, which `prOf` refuses — so
+ * `pullRequests()` never lists it, `Policy.protectedBranch` can never match
+ * it (and the branch it targets becomes unpushable, since a pull request that
+ * cannot be found is a pull request that approves nothing), and
+ * `Redaction.excluded` never honours its tombstones.
+ */
+export const isPullRequestId = (id: string): boolean => {
+  if (id.length === 0 || id.length > 128 || id.includes("/")) return false;
+  // The characters a ref name may not carry, and the control range with them:
+  // an id is a path component of `refs/hub/pr/<id>`, so anything git refuses
+  // there is an id this cannot store.
+  for (const character of id) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return false;
+    if ("~^: ?*[\\".includes(character)) return false;
+  }
+  return true;
+};
+
 /** The pull request a hub ref names, or `null` when it names something else. */
 export const prOf = (ref: string): string | null => {
   const prefix = "refs/hub/pr/";

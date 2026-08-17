@@ -27,6 +27,7 @@ import * as Pack from "./Pack.ts";
 import { bufferSource, readAt } from "./PackFile.ts";
 import { buildPackIndex, parsePackIndex } from "./PackIndex.ts";
 import type { PackStore } from "./Packed.ts";
+import * as Refspec from "./Refspec.ts";
 import { isOid, ObjectStore, type Oid, type RawObject, type RefStore } from "./Store.ts";
 
 /** The two ports every operation here reads; `repack` also needs the third. */
@@ -454,7 +455,30 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
     classify: willRepack,
     skip: options?.exclude,
   });
-  const keep = walked.seen;
+
+  // An exclusion says "the hub must not keep this alive", not "delete this".
+  // Git dedupes by content, so a redacted event payload can be byte-identical
+  // to a blob the source history also holds — post the comment, commit the
+  // same bytes as a file, have the comment redacted — and a skip applied to
+  // the *whole* walk then deleted an object `refs/heads/*` still reaches,
+  // leaving the source history dangling. So the refs the exclusion is not
+  // about are walked again without it, and what they reach survives.
+  const source =
+    (options?.exclude?.size ?? 0) === 0
+      ? null
+      : yield* reachable(
+          objects,
+          named.filter(([name]) => !Refspec.hiddenFromAdvertisement(name)).map(([, oid]) => oid),
+          { ignoreMissing: true, classify: willRepack },
+        );
+  const keep = source === null ? walked.seen : new Set([...walked.seen, ...source.seen]);
+  const classified =
+    source === null
+      ? walked.classified
+      : {
+          kinds: new Map([...source.classified.kinds, ...walked.classified.kinds]),
+          names: new Map([...source.classified.names, ...walked.classified.names]),
+        };
 
   // What a pack holds cannot be deleted object by object, so an unreachable
   // object that is packed is only reported as removed when a repack — which
@@ -518,7 +542,7 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
     : yield* repack(
         objects,
         packs,
-        walked.classified,
+        classified,
         handles.map((handle) => handle.name),
       );
 

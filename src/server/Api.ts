@@ -152,9 +152,17 @@ const FileWire = Schema.Struct({
   mode: Schema.optional(Schema.String),
 });
 
-/** A branch name as a ref, for the payloads that accept either spelling. */
+/**
+ * A branch name as a ref, for the payloads that accept either spelling.
+ *
+ * `HEAD` is left alone: it is already a full ref name, and qualifying it
+ * produced a literal branch called `refs/heads/HEAD` — so a merge `into:
+ * "HEAD"` reported success while the checked-out branch never moved. Left as
+ * it is, it reaches the ref-name check that refuses it, which is the clean
+ * failure it had before.
+ */
 const refNameOf = (value: string): string =>
-  value.startsWith("refs/") ? value : `refs/heads/${value}`;
+  value === "HEAD" || value.startsWith("refs/") ? value : `refs/heads/${value}`;
 
 const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = false) {
   // Fail closed: a policy that cannot be evaluated refuses the write rather

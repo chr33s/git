@@ -962,6 +962,11 @@ Pull requests use globally unique IDs generated offline — UUIDv7:
 0194f59d-4b7a-7c95-a9e5-b358272cb204
 ```
 
+An ID MUST be a single ref path component: it becomes `refs/hub/pr/<id>`, and
+one containing a `/` lands on a ref nothing lists — so the pull request can
+never be found, the branch it targets becomes unpushable (a pull request that
+cannot be found approves nothing), and its tombstones are never honoured.
+
 A host MAY separately display human-friendly numbers such as `#42`, but these are presentation metadata, not canonical identity.
 
 Every event payload carries its own UUIDv7 event ID. Event identity binds ID to content: two objects claiming the same event ID with different content is an integrity conflict that MUST be surfaced, not merged over.
@@ -1153,6 +1158,13 @@ projections read E as absent — on every replica, whether
 replicas MUST NOT serve, re-fetch, or re-accept E's blob
 GC excludes E's blob from reachability protection (§27)
 ```
+
+A tombstone excludes a payload from _the hub's_ reachability, not from the
+repository's. Git dedupes by content, so a redacted payload can be the very
+object a branch names — post the comment, commit the same bytes as a file,
+then have the comment redacted — and treating the exclusion as "delete this"
+leaves the source history dangling. Both the immediate removal and `gc` walk
+the refs the exclusion is not about, and what those reach survives.
 
 Because Git is content-addressed, absence composes: the commit references the tree, the tree references the blob's hash, and the blob object is simply gone. Verifiers treat a missing blob as valid **only** when a valid tombstone covers that event; a missing blob without a tombstone is corruption.
 

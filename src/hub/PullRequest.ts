@@ -17,6 +17,7 @@ import { Effect } from "effect";
 
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { hiddenFromAdvertisement } from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { readGenesis, type RepoId } from "../trust/Genesis.ts";
@@ -61,6 +62,12 @@ export interface OpenInput {
 /** Open a pull request, and return the identifier the ref is named for. */
 export const open = Effect.fn("hub.PullRequest.open")(function* (input: OpenInput) {
   const pr = input.id ?? Event.newId();
+  if (!Event.isPullRequestId(pr)) {
+    return yield* new Invalid({
+      field: "id",
+      reason: `'${pr}' cannot name a pull request; it must be one ref path component`,
+    });
+  }
   const base = yield* context(input.repo, pr);
 
   const commit = yield* Event.issue(
@@ -394,6 +401,24 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
     });
   }
 
+  // What the rest of the repository still reaches, which a redaction may not
+  // take with it. Git dedupes by content, so a redacted payload can be the
+  // very object a branch names — post the comment, commit the same bytes as a
+  // file, then have the comment redacted — and deleting it outright left the
+  // source history dangling. A walk that fails leaves everything alone: `gc`
+  // applies the same rule with the same exclusion set, so nothing is lost by
+  // waiting, and something is lost by guessing.
+  const outside = (yield* repository.refs)
+    .filter(([name]) => !hiddenFromAdvertisement(name))
+    .map(([, oid]) => oid);
+  const reachable =
+    outside.length === 0
+      ? new Set<Oid>()
+      : yield* repository.fetch({ wants: outside, haves: [] }).pipe(
+          Effect.map((plan) => new Set(plan.oids)),
+          Effect.orElseSucceed(() => null),
+        );
+
   // The blob, by the name its own tree entry gives it.
   //
   // This drops the loose copy only. A packed object cannot be removed without
@@ -406,9 +431,10 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   // Exactly the commits the projection redacted, which is what makes this
   // aimable at one event rather than at every event sharing an id.
   for (const entry of state.redacted) {
+    if (reachable === null) break;
     const info = yield* repository.readCommit(entry);
     const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
-    if (path !== null) yield* repository.deleteObject(path.oid);
+    if (path !== null && !reachable.has(path.oid)) yield* repository.deleteObject(path.oid);
   }
 
   return commit;

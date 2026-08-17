@@ -11,6 +11,7 @@ import { ObjectStore, type Oid } from "../git/Store.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
+import * as Record from "../trust/Record.ts";
 import * as Event from "./Event.ts";
 import * as PullRequest from "./PullRequest.ts";
 import * as Redaction from "./Redaction.ts";
@@ -176,6 +177,54 @@ describe("hub redaction", () => {
     assert.equal(outcome.strict, false, "the blob really is missing without the exclusion");
     assert.ok(outcome.full > 0, "a full fetch must still produce a plan");
     assert.ok(outcome.shallow > 0, "and so must a depth-limited one");
+  });
+
+  it("keeps a redacted payload the source history also holds", async () => {
+    // Git dedupes by content, so a redaction's blob can be the very object a
+    // branch reaches: post the comment, commit the same bytes as a file, then
+    // have the comment redacted. Applied to the whole reachability walk, the
+    // exclusion deleted an object `refs/heads/*` still names and left the
+    // source history dangling. An exclusion says the *hub* must not keep it
+    // alive; it does not say the branch may not.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+        const { pr, target, blob } = yield* withASecret(where);
+
+        // The same bytes, on a branch, by their own name.
+        const payload = yield* objects.read(blob!);
+        const copy = yield* repository.writeBlob(payload.data);
+        const tree = yield* repository.writeTree([
+          { mode: "100644", name: "leaked.json", oid: copy },
+        ]);
+        yield* repository.setRef({
+          name: "refs/heads/main",
+          to: yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "the same bytes\n",
+            author: Record.identityAt(new Date(1_700_000_000_000)),
+          }),
+        });
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const exclude = yield* Redaction.excluded();
+        yield* repository.gc({ repack: true, exclude });
+        return { same: copy === blob, held: yield* objects.has(blob!) };
+      }),
+    );
+
+    assert.equal(outcome.same, true, "the fixture must actually collide");
+    assert.equal(outcome.held, true, "a branch still reaches it, so it must survive");
   });
 
   it("excludes nothing in a repository that has no genesis", async () => {

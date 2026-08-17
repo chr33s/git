@@ -100,6 +100,42 @@ const opened = Effect.fn("test.opened")(function* (where: World) {
 });
 
 describe("hub projection", () => {
+  it("refuses an id that cannot name a ref this repository can find again", async () => {
+    // The id becomes a path component of `refs/hub/pr/<id>`, and `prOf`
+    // refuses one with a `/` in it — so a pull request opened as `team/42`
+    // landed on a ref nothing lists. `Policy.protectedBranch` could then never
+    // match it, which makes the branch it targets unpushable, and
+    // `Redaction.excluded` never honoured its tombstones.
+    const failures = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const attempt = (id: string) =>
+          PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "Add a thing",
+            base: "refs/heads/main",
+            head: REVISION,
+            id,
+            key: where.author,
+          }).pipe(
+            Effect.as(null),
+            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          );
+        return {
+          nested: yield* attempt("team/42"),
+          empty: yield* attempt(""),
+          wild: yield* attempt("a*b"),
+          plain: yield* attempt("42"),
+        };
+      }),
+    );
+
+    assert.match(failures.nested ?? "", /one ref path component/);
+    assert.notEqual(failures.empty, null);
+    assert.notEqual(failures.wild, null);
+    assert.equal(failures.plain, null, "an ordinary id still opens");
+  });
+
   it("qualifies a base branch spelled without its refs/heads/ prefix", async () => {
     // `base` is a string a client writes, and both spellings are natural —
     // `main` from a UI, `refs/heads/main` from a script. `protectedBranch`
