@@ -612,10 +612,17 @@ handler; left at the guard's charge, a bot scoped
 to delete a branch could register a receiver for every push the repository
 ever accepts, or throw the objects away.
 
-Fetching and pulling from an inline remote URL are charged `repo.read` for a
-related reason: negotiation offers a `have` line for every local ref, so
+Uploading an LFS object is charged `source.push`, for the same reason as
+`blob` and `tree`. Fetching and pulling from an inline remote URL are charged
+`repo.read` for a related reason: negotiation offers a `have` line for every local ref, so
 pointing one at a URL of the caller's choosing discloses a read-restricted
 repository's commit oids, and `source.push` does not carry `repo.read`.
+
+A gate that covers only _part_ of a verb refuses that part, not the verb: a
+repository protecting `refs/tags/*` still has tracking refs to update, so a
+fetch takes what it may and leaves the tags, and the answer lists what moved.
+Refusing the whole operation for the half it may not do enforces a stronger
+rule than the operator wrote.
 
 A repository with no genesis has no membership to charge anything against and
 is left exactly as a plain git repository has always been: whether it accepts

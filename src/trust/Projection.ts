@@ -24,6 +24,7 @@ import {
 } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
 import { MAX_SIGNATURES } from "./Certificate.ts";
@@ -273,7 +274,14 @@ const holds = (
  * without its identity — which is over the genesis bytes — ever changing.
  */
 export const project = Effect.fn("trust.Projection.project")(function* (genesis: Genesis) {
+  const repository = yield* Repository;
   const { endorsed, entries, keyOf, winner } = yield* readLog();
+
+  // The ref, not the last record the fold reached. A join carries no record,
+  // so after `Replication.reconcile` the two differ — and this field is what
+  // a caller keys a memo on, which would then miss the join that changed
+  // nothing and hit for two states that are not the same.
+  const head = yield* repository.resolve(Log.LOG_REF);
 
   const members = new Map<Fingerprint, Member>();
   const former = new Map<Fingerprint, Member>();
@@ -283,11 +291,7 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
   let roots: ReadonlyArray<RootKey> = genesis.roots;
   let threshold = genesis.document.threshold;
   const checkpoints: Attestation[] = [];
-  let head: Oid | null = null;
-
   for (const entry of entries) {
-    head = entry.commit;
-
     const invalid = yield* Certificate.validate(entry.payload, genesis.repoId).pipe(
       Effect.as(null),
       Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),

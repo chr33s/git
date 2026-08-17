@@ -224,7 +224,7 @@ export class GitRepo extends DurableObject<TestEnv> {
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
           ),
-          Effect.provide(lfsR2({ bucket: this.env.GIT_OBJECTS, repo })),
+          Effect.provide(Layer.mergeAll(lfsR2({ bucket: this.env.GIT_OBJECTS, repo }), requester)),
         ),
       );
     }

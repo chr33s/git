@@ -1454,12 +1454,15 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // written another way, and refused it to a member holding only
           // `source.push`. An `into` that does not exist yet holds nothing
           // that a merge could discard.
+          // Resolved exactly as `Repository.merge` resolves them: an oid as
+          // itself, anything else through the ref store, which follows
+          // symrefs. Qualifying first answered `null` for `HEAD` — and a
+          // `null` side is a side nothing matches, so the merge was charged a
+          // rewrite again for the one spelling git itself uses most.
           const at = (revision: string) =>
             isOid(revision)
               ? Effect.succeed(revision)
-              : repository
-                  .resolve(refNameOf(revision))
-                  .pipe(Effect.catchTag("StorageFailure", Effect.die));
+              : repository.resolve(revision).pipe(Effect.catchTag("StorageFailure", Effect.die));
           const tip = yield* at(into);
           const rewrites =
             tip !== null &&
@@ -1869,8 +1872,15 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
         // names exactly as the remote spelled them, so gating tracking alone
         // let `refs/tags/*` in past the policy boundary.
         yield* gateWrite(`refs/remotes/${target.name}/*`);
-        yield* gateWrite("refs/tags/*");
-        // `fetchFrom` declares both options as possibly-undefined and treats an
+        // Tags are asked about rather than demanded. A repository protecting
+        // `refs/tags/*` still has tracking refs to update, and refusing the
+        // whole verb for the half it may not do left it unable to replicate at
+        // all — a stronger rule than the one the operator wrote. The tags it
+        // did not take are visible in the answer, which lists what moved.
+        const tags = yield* Policy.gateWrite("refs/tags/*").pipe(
+          Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+        );
+        // `fetchFrom` declares its options as possibly-undefined and treats an
         // absent value and an undefined one the same way.
         const fetched = yield* fetchFrom({
           remote: target.name,
@@ -1878,6 +1888,7 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
           credential: target.credential,
           refs: payload.refs,
           depth: payload.depth,
+          tags: tags === null,
         });
         return { remote: target.name, refs: fetched.refs, objects: fetched.objects };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
@@ -1922,9 +1933,11 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
         // makes and has to meet the same rules — a protected branch is not
         // less protected because the commits arrived over a remote.
         yield* gateWrite(refNameOf(payload.branch));
-        // And the fetch underneath it, which writes tracking refs and tags.
+        // And the fetch underneath it, which writes tracking refs. Not tags:
+        // a pull asks for one branch by name, so it never takes any — and
+        // gating a namespace it cannot write left a repository that protects
+        // `refs/tags/*` unable to pull at all.
         yield* gateWrite(`refs/remotes/${target.name}/*`);
-        yield* gateWrite("refs/tags/*");
         // `pull` declares `depth` as possibly-undefined and treats an absent
         // value and an undefined one the same way.
         return yield* pull({ target, branch: payload.branch, depth: payload.depth });

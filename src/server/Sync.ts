@@ -109,6 +109,15 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
   readonly credential: string | null;
   readonly refs?: ReadonlyArray<string> | undefined;
   readonly depth?: number | undefined;
+  /**
+   * Whether tag names may be written, default yes.
+   *
+   * A caller whose policy protects `refs/tags/*` still has tracking refs to
+   * update — refusing the whole fetch for the half it may not do left such a
+   * repository unable to replicate at all, which is a stronger rule than the
+   * one the operator wrote.
+   */
+  readonly tags?: boolean | undefined;
 }) {
   const repository = yield* Repository;
   const token = input.credential ?? undefined;
@@ -129,7 +138,8 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
         // `refs/tags/v1^{}` is the tag's target, not a ref to hold, and
         // `HEAD` is a symbolic ref this repository has one of already.
         !ref.name.endsWith("^{}") &&
-        (ref.name.startsWith("refs/heads/") || ref.name.startsWith("refs/tags/")) &&
+        (ref.name.startsWith("refs/heads/") ||
+          (input.tags !== false && ref.name.startsWith("refs/tags/"))) &&
         selects(input.refs, ref.name),
     )
     .map((ref) => ({ name: trackingOf(input.remote, ref.name), oid: ref.oid }))
@@ -237,6 +247,9 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
     credential: input.target.credential,
     refs: [`refs/heads/${short}`],
     depth: input.depth,
+    // Said rather than implied: `refs` already selects one branch, and the
+    // policy gate above this reads the same fact off the call.
+    tags: false,
   });
 
   // Absent from the fetch's own report means the tracking ref was

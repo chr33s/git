@@ -657,6 +657,16 @@ describe("cli hub", () => {
 
       const allowed = await write(owner.credential);
       assert.equal(allowed.status, 200, await allowed.text());
+
+      // The same gap, through the other door that writes unbounded content.
+      const lfs = (credential: string) =>
+        fetch(`${server.url}/store/info/lfs/objects/${"a".repeat(64)}`, {
+          method: "PUT",
+          headers: { authorization: `Bearer ${credential}` },
+          body: "unbounded\n",
+        });
+      const uploadRefused = await lfs(deleter.credential);
+      assert.equal(uploadRefused.status, 403, await uploadRefused.text());
     } finally {
       await server.close();
     }

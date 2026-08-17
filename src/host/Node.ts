@@ -255,7 +255,9 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // LFS first: it shares the `info/` prefix with the advertisement, and
       // its bodies are the large ones, so it must not be behind a handler
       // that would read them.
-      const lfs = await Effect.runPromise(Lfs.handle(request).pipe(Effect.provide(state.lfs)));
+      const lfs = await Effect.runPromise(
+        Lfs.handle(request).pipe(Effect.provide(Layer.mergeAll(state.lfs, requester))),
+      );
       if (lfs !== null) return lfs;
 
       // Also ahead of the API: a bulk commit body is arbitrarily large and is

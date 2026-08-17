@@ -245,7 +245,7 @@ export default Repo.make(
               Effect.map(
                 (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
               ),
-              Effect.provide(lfsR2({ bucket: r2, repo })),
+              Effect.provide(Layer.mergeAll(lfsR2({ bucket: r2, repo }), requester)),
             );
           }
 
