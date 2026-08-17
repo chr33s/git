@@ -112,20 +112,23 @@ const rfcKey = (): PrivateKey =>
 
 describe("SshSignature", () => {
   it("takes a 32-byte seed however wide the PKCS#8 export is", async () => {
-    // The wrapper is fixed-width only for the minimal export. A runtime that
-    // emits the longer form — the public key alongside the seed, which the
-    // encoding permits — left a seed wider than 32 bytes, and signing then
-    // died inside `Effect.promise` as a defect rather than as anything a
-    // caller could see. So the seed is the *last* 32 bytes, not everything
-    // after the prefix.
+    // Neither end of the buffer is the answer. "Everything after the fixed
+    // prefix" is right only for the 48-byte v1 export; a v2 one carries the
+    // public key too, leaving a seed wider than 32 bytes that WebCrypto then
+    // refuses as a defect nothing can catch. "The last 32 bytes" is worse: in
+    // that encoding the trailing bytes are the *public* point, and signing
+    // would produce signatures no verifier accepts. The field's own header is
+    // what is stable, so that is what is looked for.
     const key = await Effect.runPromise(generate("wide@example.com"));
     assert.equal(key.seed.length, 32);
 
     const bytes = new TextEncoder().encode("something to sign");
     const armored = await Effect.runPromise(sign(key, bytes, NAMESPACE));
+    // The round trip is the assertion that matters: a seed read from the wrong
+    // place still signs, and the signature verifies against nothing.
     const back = await Effect.runPromise(verify(armored, bytes, NAMESPACE));
     assert.notEqual(back, null, "a key that signs must verify");
-    assert.equal(back?.point.length, key.publicKey.point.length);
+    assert.deepEqual([...(back?.point ?? [])], [...key.publicKey.point]);
   });
 
   describe("public keys", () => {

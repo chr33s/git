@@ -1237,6 +1237,88 @@ describe("hub projection", () => {
       assert.match(outcome.state.rejected.at(-1)?.reason ?? "", /needs hub\.merge/);
     });
 
+    it("cannot burn the opening's id by replaying it parentless", async () => {
+      // The id slot used to be claimed before the event's *own* branch had
+      // accepted it, so an event the switch then refused still took it. A
+      // `source.push` holder could replay the pull request's signed
+      // `pr.opened` as a parentless commit, have it sort first, claim the id,
+      // be refused for not being the winning opening — and the genuine
+      // opening was then dropped as the duplicate, leaving the pull request
+      // with no base and no head and its protected branch unpushable, on a ref
+      // that only grows.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+
+          // Opened until its commit lands in the upper half of the oid space,
+          // so grinding a *lower* replay below is a bounded search rather than
+          // a coin that lands heads once in millions. The id is the opener's
+          // to choose, which is the attacker's position too.
+          let pr = "";
+          let events: Event.Walked["events"] = [];
+          let original: Event.Walked["events"][number] | undefined;
+          for (let attempt = 0; ; attempt++) {
+            ({ pr } = yield* PullRequest.open({
+              repo: where.genesis.repoId,
+              title: "Add a thing",
+              description: "It does the thing.",
+              base: "refs/heads/main",
+              head: REVISION,
+              key: where.author,
+            }));
+            ({ events } = yield* Event.entries(pr));
+            original = events.find((entry) => entry.payload?.type === "pr.opened");
+            if (original!.commit >= "8".padEnd(40, "0") || attempt >= 64) break;
+          }
+
+          // Activity descending from the genuine opening, so the replay loses
+          // descent rather than winning it and supplying the same content it
+          // copied. Losing is the whole point: the loser is refused, and the
+          // question is whether its refusal still cost the author the id.
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+
+          // The opening's own bytes and signatures, committed again with no
+          // history behind them, and ground below it. Nothing here is forged:
+          // it is a replay, and the message is not part of what identifies it.
+          let replay = original!.commit;
+          for (let attempt = 0; attempt < 64 && replay >= original!.commit; attempt++) {
+            replay = yield* Record.write({
+              name: Event.RECORD,
+              payload: original!.bytes,
+              signatures: original!.signatures,
+              parents: [],
+              message: `pr.opened replayed ${attempt}\n`,
+            });
+          }
+
+          yield* repository.setRef({ name: ref, to: yield* Event.join(pr, [head!, replay]) });
+          return {
+            ground: replay < original!.commit,
+            state: yield* projectionOf(where, pr),
+          };
+        }),
+      );
+
+      assert.equal(outcome.ground, true, "the fixture must actually grind a lower oid");
+      assert.equal(
+        outcome.state.base,
+        "refs/heads/main",
+        "the opening must survive its own replay folding first",
+      );
+      assert.equal(outcome.state.head, REVISION);
+      assert.equal(approvals(outcome.state).length, 1, "the approval must still count");
+    });
+
     it("cannot blank the base and freeze the branch behind it", async () => {
       // Withholding *all* of a contested opening's content left `base` empty,
       // and `Policy.protectedBranch` compares `pullRequest.base` against the
@@ -1299,18 +1381,24 @@ describe("hub projection", () => {
             name: ref,
             to: yield* Event.join(pr, [head!, forged]),
           });
-          return yield* projectionOf(where, pr);
+          return {
+            state: yield* projectionOf(where, pr),
+            author: yield* fingerprint(where.author.publicKey),
+          };
         }),
       );
 
       assert.equal(
-        outcome.base,
+        outcome.state.base,
         "refs/heads/main",
         "the pull request must still name the branch it targets",
       );
-      assert.equal(outcome.title, "Add a thing", "and keep the content it was opened with");
-      // The part a contested opening still does not confer.
-      assert.equal(outcome.author, null, "and confer no authorship on the forgery");
+      assert.equal(outcome.state.title, "Add a thing", "and keep the content it was opened with");
+      // And its author keeps it. Contestation is for the case descent cannot
+      // separate; here it plainly can, and treating a parentless graft as a
+      // contest anyway cost the real author the ability to update, close or
+      // reopen their own work — a denial by another route.
+      assert.equal(outcome.state.author, outcome.author, "the forgery takes nothing from them");
     });
 
     it("cannot win descent by chaining filler commits under a graft", async () => {

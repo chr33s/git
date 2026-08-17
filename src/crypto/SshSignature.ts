@@ -502,6 +502,31 @@ const PKCS8_ED25519_PREFIX = new Uint8Array([
 const SEED_BYTES = 32;
 
 /**
+ * The seed inside a PKCS#8 export, wherever the encoder put it.
+ *
+ * Neither end of the buffer is the answer. "Everything after the fixed
+ * prefix" is right only for the 48-byte v1 export, and a v2 one — which
+ * carries the public key as well, and which RFC 5958 permits — leaves a seed
+ * wider than 32 bytes that WebCrypto then refuses, as a defect nothing can
+ * catch. "The last 32 bytes" is worse: in that same v2 encoding the trailing
+ * bytes are the *public* point, so signing would produce signatures no
+ * verifier accepts.
+ *
+ * What is stable in both is the field itself: an OCTET STRING of length 0x22
+ * whose contents are an OCTET STRING of length 0x20. That four-byte header is
+ * what this looks for, and the 32 bytes after it are the seed.
+ */
+const seedOf = (pkcs8: Uint8Array): Uint8Array => {
+  for (let at = 0; at + 4 + SEED_BYTES <= pkcs8.length; at++) {
+    if (pkcs8[at] !== 0x04 || pkcs8[at + 1] !== 0x22) continue;
+    if (pkcs8[at + 2] !== 0x04 || pkcs8[at + 3] !== 0x20) continue;
+    return pkcs8.subarray(at + 4, at + 4 + SEED_BYTES);
+  }
+  // The fixed v1 layout, as the fallback rather than the assumption.
+  return pkcs8.subarray(PKCS8_ED25519_PREFIX.length, PKCS8_ED25519_PREFIX.length + SEED_BYTES);
+};
+
+/**
  * Sign a message, producing the armor `ssh-keygen -Y verify` accepts.
  *
  * `sha512` because that is what `ssh-keygen` defaults to, and a signature
@@ -648,11 +673,6 @@ export const generate = (comment: string): Effect.Effect<PrivateKey> =>
         application: null,
         comment,
       },
-      // The last 32 bytes, not "everything after the prefix". The wrapper is
-      // fixed-width only for the minimal export; a longer one — a version that
-      // carries the public key alongside, which the spec permits — left a seed
-      // wider than 32 bytes, and `sign` then died inside `Effect.promise` as a
-      // defect rather than as anything a caller could see.
-      seed: pkcs8.subarray(pkcs8.length - SEED_BYTES),
+      seed: seedOf(pkcs8),
     };
   });

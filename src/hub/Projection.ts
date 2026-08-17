@@ -554,10 +554,18 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
 
     // A *legitimate* second opening — the author retargeting their own pull
     // request — descends from the first. One that does not is a competing
-    // claim to have started it.
-    const contested = candidates.some(
-      (commit) => commit !== best[2] && ancestors.get(commit)?.has(best[2]) !== true,
-    );
+    // claim to have started it, but only a claim that the ranking could not
+    // separate: a parentless forgery with nothing behind it loses on both
+    // counts, and treating it as a contest let anyone holding `hub.create-pr`
+    // strip the winner of its authorship — and with it the self-approval
+    // exclusion — by pushing one commit at a pull request they have no part
+    // in. It is contested when it is genuinely tied.
+    let contested = false;
+    for (const commit of candidates) {
+      if (commit === best[2] || ancestors.get(commit)?.has(best[2]) === true) continue;
+      const candidate = yield* rank(commit);
+      if (candidate[0] === best[0] && candidate[1] === best[1]) contested = true;
+    }
     return { commit: best[2], contested } satisfies Opening;
   });
 
@@ -720,8 +728,15 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
       });
       continue;
     }
-    claimed.set(mine, entry.commit);
-    byId.set(payload.id, [...(byId.get(payload.id) ?? []), entry.commit]);
+    // Claimed below, once the event's *own* branch has accepted it. Claimed
+    // here, an event that the switch then refuses still burned the slot: a
+    // `source.push` holder could replay a pull request's signed `pr.opened` as
+    // a parentless commit with a ground-down oid, have it sort first, claim
+    // the id, be refused for not being the winning opening — and the genuine
+    // opening was then dropped as the duplicate, leaving the pull request with
+    // no `base` and no `head` and the protected branch behind it unpushable,
+    // on a ref that only grows.
+    const already = rejected.length;
 
     const issued = new Date(payload.issuedAt);
     if (issued > at) at = issued;
@@ -1023,6 +1038,12 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         redacted.add(targetCommit);
         break;
       }
+    }
+
+    // The slot is the accepted event's, and nobody else's; see `already`.
+    if (rejected.length === already) {
+      claimed.set(mine, entry.commit);
+      byId.set(payload.id, [...(byId.get(payload.id) ?? []), entry.commit]);
     }
   }
 

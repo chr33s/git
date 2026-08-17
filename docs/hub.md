@@ -980,6 +980,15 @@ For the same reason authority is checked against the **union of the signatures e
 
 An ID is chosen by whoever writes the record, so "already applied" MUST be keyed on the ID **together with the record's bytes**, and a hub event's ID additionally on its signer. Keyed on the bare ID, re-using one becomes a weapon rather than a mistake: on the trust log, any member holding a trust capability publishes a record they are entitled to make under the ID of a revocation naming them, and the revocation is discarded as a duplicate on a ref that can never be rewound. Two records sharing an ID but not their content are two different claims, and each is answered on its own authority; what the ID check exists for is the same statement committed twice.
 
+An ID slot is taken by an event the projection **accepted**, and by no other. An
+event refused on its own terms — one whose capability check or whose per-type
+rule turned it away — MUST leave the slot free. Taken on arrival instead, a
+refusal spends somebody else's ID: replaying a pull request's own signed
+`pr.opened` as a parentless commit with a ground-down OID makes it fold first,
+claim the ID, and be refused for not being the winning opening — and the genuine
+opening is then discarded as the duplicate, leaving the pull request with no
+`base`, no `head`, and the branch behind it unpushable on a ref that only grows.
+
 ### No mutable PR head ref
 
 Do NOT make this canonical:
@@ -1405,9 +1414,14 @@ them — not over raw commits. Counted over the walked DAG, a forger grafts an
 opening and chains empty commits under it until it outnumbers the real
 conversation; counted this way, displacing one costs a member key per
 participant rather than a commit per event.
-Where two competing openings are structurally indistinguishable — a pull request
-with no other events — the opening is _contested_ and establishes no author at
-all, so every action in the table above needs its capability. That costs the
+Where two competing openings are structurally indistinguishable — neither
+descends from the other and the weighted count above separates them by nothing —
+the opening is _contested_ and establishes no author at all, so every action in
+the table above needs its capability. A candidate the count _does_ separate is
+not a contest but a loss, and MUST NOT strip the winner of its authorship:
+treated as one, a member holding only `hub.create-pr` could erase the author of
+any pull request — and with it the self-approval exclusion — by pushing a single
+parentless commit at it. That costs the
 honest author a shortcut and denies the forger the thing they were after: a
 contested pull request can still be reviewed, approved and settled by a
 `hub.merge` holder, so the protected branch behind it never freezes.
