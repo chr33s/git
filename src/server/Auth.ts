@@ -534,15 +534,6 @@ const challenge = (nonce: string) => ({
 });
 
 /**
- * Whether this repository lets anonymous readers in.
- *
- * A repository with no genesis is not hub-enabled and is left exactly as it
- * was: open. Turning every existing repository private the moment this module
- * shipped would be a migration nobody asked for.
- */
-export const isPublic = (projection: Projection | null): boolean => projection === null;
-
-/**
  * Identify the requester and decide whether they may proceed.
  *
  * Returns the principal rather than a bare yes: the policy boundary needs to

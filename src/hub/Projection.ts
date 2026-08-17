@@ -286,12 +286,28 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   pr: string,
 ) {
   const walked = yield* Event.entries(pr);
+  const byCommit = new Map(walked.events.map((entry) => [entry.commit, entry]));
 
   const named = new Set<Oid>();
   for (const entry of walked.events) {
     if (entry.payload?.type !== "event.redacted") continue;
+    // A pull request's own tombstones, and nothing else. Left out, an event
+    // that named another pull request took a commit out of *this* fold.
+    if (entry.payload.pr !== pr) continue;
     const target = Event.unqualify(entry.payload.targetCommit);
-    if (target !== null) named.add(target);
+    if (target === null) continue;
+    // And never a tombstone. The fold refuses to *honour* a tombstone over a
+    // tombstone — a redaction that removed the record of a removal would put
+    // its own target's blob back in circulation — but this list is built
+    // before any signature is checked, so an unauthorized event naming a valid
+    // tombstone was enough to have the valid one read as absent in the first
+    // pass. It then reported nothing redacted at all: `gc` re-protected the
+    // payload the operator believed was gone, and on the host that had already
+    // deleted its loose copy the fetch retry got an empty exclusion set and
+    // every clone of the repository failed. Any member who can append a hub
+    // event could undo somebody else's authorized `hub.redact` this way.
+    if (byCommit.get(target)?.payload?.type === "event.redacted") continue;
+    named.add(target);
   }
   if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named);
 

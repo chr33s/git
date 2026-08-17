@@ -1879,6 +1879,79 @@ describe("hub projection", () => {
       assert.equal(approvals(outcome.replica).length, approvals(outcome.host).length);
     });
 
+    it("cannot be undone by a junk tombstone naming the tombstone", async () => {
+      // The set of commits the first pass reads as absent is built before any
+      // signature is checked — it has to be, since it is what makes two hosts
+      // agree about which payloads they can still read. Built without asking
+      // whether the *target* is itself a tombstone, it handed any member who
+      // can append a hub event a way to undo somebody else's authorized
+      // redaction: name the valid tombstone, watch the first pass skip it, and
+      // the fold reports nothing redacted at all. `gc` then re-protects the
+      // payload the operator believes is gone, and on the host that already
+      // deleted its loose copy the fetch retry gets an empty exclusion set and
+      // every clone of the repository fails.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const commit = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "here is a password: hunter2",
+            key: where.author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          const tombstone = yield* PullRequest.redact({
+            repo: where.genesis.repoId,
+            pr,
+            target,
+            reason: "sensitive-content",
+            key: where.reviewer,
+          });
+          const before = yield* projectionOf(where, pr);
+
+          // A member with nothing but `hub.comment` names the tombstone.
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "event.redacted",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead: yield* repository.resolve(Log.LOG_REF),
+            target: "whatever",
+            targetCommit: Event.qualify(tombstone),
+            reason: "no",
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "event.redacted over a tombstone\n",
+            }),
+            expected: head,
+          });
+
+          return { before, after: yield* projectionOf(where, pr) };
+        }),
+      );
+
+      assert.equal(outcome.before.redacted.size, 1, "the fixture must actually redact something");
+      assert.deepEqual(
+        [...outcome.after.redacted],
+        [...outcome.before.redacted],
+        "a tombstone over a tombstone must not put the payload back in circulation",
+      );
+    });
+
     it("refuses a redaction from a member without hub.redact, and writes nothing", async () => {
       // Writing the tombstone and deleting the payload are two different
       // authorities. Treating the first as implying the second let anybody who
