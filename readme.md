@@ -14,6 +14,7 @@ Object, on plain node, in a browser tab, and in a terminal. Stock `git` clones
 from it and pushes to it, and reads the index and history its own commands
 write.
 
+- [Why git-native, agent-first](#why-git-native-agent-first)
 - [Install](#install)
 - [Run a server](#run-a-server)
 - [Use the CLI](#use-the-cli)
@@ -21,6 +22,46 @@ write.
 - [Benchmarks](#benchmarks)
 - [Architecture](#architecture)
 - [Development](#development)
+
+## Why git-native, agent-first
+
+Git already gives agents the right local model for code — cheap branches,
+content addressing, everything offline. The hub design
+([docs/hub.md](docs/hub.md)) extends that model to the collaboration layer,
+which is where agents are otherwise stuck behind a hosting provider's API:
+
+- **The whole project fetches.** A repository carries its source, identity,
+  membership, pull requests, reviews and checks as git objects and refs. One
+  fetch gives an agent complete, causally-ordered project state to project
+  over — no API scraping, and losing a host's database loses nothing.
+- **The forge runs in the sandbox.** One implementation serves from a Durable
+  Object, plain node, a browser tab and the CLI, so an agent in an ephemeral
+  container can host, review and merge locally — no rate limits, no third
+  party in the loop.
+- **Credentials fit the task.** Authority is capability-scoped
+  (`source.push`, `hub.check:test`) and delegated credentials are short-lived,
+  repository-pinned and minted by a member's own key — least privilege for an
+  agent with no server secret or token registry, and revoking the member
+  revokes every credential it minted.
+- **Authorship is cryptographic.** When humans and agents share a repository,
+  every review, check and trust change is SSH-signed and bound to an exact
+  head — "who approved this?" has a verifiable answer, a CI key can vouch only
+  for its own check, and self-approval structurally counts for nothing.
+- **Concurrency is the designed-for case.** Hub state is an append-only event
+  DAG per pull request that converges by DAG union, and merge policy applies
+  through compare-and-swap at the ref boundary — parallel agents can't merge
+  stale approvals or rewrite review history, no matter how fast they move.
+- **Mistakes are containable.** A compromised agent key can be retroactively
+  revoked, invalidating even accepted events; a leaked secret in a comment is
+  removed by a replicating tombstone without breaking the hash chain.
+
+The collaboration layer becomes as local, verifiable and automatable as the
+code layer — which is what autonomous agents need and what a centralized
+forge cannot hand them. [docs/agents.md](docs/agents.md) covers all of it in
+three parts: giving an agent its own key, membership and signing setup; a
+proposed spec carrying the sessions that produced the code — prompts, plans,
+outcomes — as refs beside it; and the whole lifecycle walked once, from
+`hub init` to a merged, provenanced, resumable change.
 
 ## Install
 
