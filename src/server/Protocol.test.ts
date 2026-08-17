@@ -571,6 +571,47 @@ describe("the push report", () => {
   });
 });
 
+describe("an atomic push the policy refuses", () => {
+  it("reports every command, rather than nothing at all", async () => {
+    // `Policy.gate` returns no allowed updates for a refused atomic batch, so
+    // reporting on *those* produced zero `ng` lines and the client saw a bare
+    // "unpack ok" for a push that had been refused outright.
+    const report = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const commit = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+        yield* repository.setRef({ name: "refs/heads/topic", to: commit });
+
+        const request = new Request("http://git.test/r/git-receive-pack", {
+          method: "POST",
+          body: `${[
+            `${commit} ${ZERO} refs/heads/topic\0report-status atomic\n`,
+            `${commit} ${ZERO} refs/meta/trust/genesis\n`,
+          ]
+            .map(pktLine)
+            .join("")}0000`,
+        });
+        const response = yield* Protocol.receivePack(request);
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return { lines: linesOf(bytes).lines, now: yield* repository.resolve("refs/heads/topic") };
+      }),
+    );
+
+    const named = report.lines.filter((line) => /^(ok|ng) refs\//.test(line));
+    assert.equal(named.length, 2, `every command needs a line: ${report.lines.join(" | ")}`);
+    assert.ok(
+      named.every((line) => line.startsWith("ng ")),
+      `atomic means none of them applied: ${named.join(" | ")}`,
+    );
+    assert.notEqual(report.now, null, "and nothing was deleted");
+  });
+});
+
 describe("advertisement hiding", () => {
   const lsRefs = (prefixes: ReadonlyArray<string> = []): Request =>
     new Request("http://host/repo/git-upload-pack", {

@@ -341,7 +341,7 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
     return yield* new Invalid({ field: "repo", reason: "this repository has no genesis" });
   }
   const state = yield* project(stored.genesis, yield* projectTrust(stored.genesis), input.pr);
-  if (!state.redacted.has(input.target)) {
+  if (!state.redacted.has(target.commit)) {
     const refused = state.rejected.find((entry) => entry.commit === commit);
     return yield* new Invalid({
       field: "target",
@@ -358,11 +358,10 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   // gigabyte, and doing nothing here would leave the bytes loose until the
   // next collection — the loose copy is the one that can go now, so it goes.
   //
-  // Every commit carrying the id, not merely the first: a duplicate claim is
-  // refused by the projection but its blob is just as readable.
-  for (const entry of events) {
-    if (entry.payload?.id !== input.target) continue;
-    const info = yield* repository.readCommit(entry.commit);
+  // Exactly the commits the projection redacted, which is what makes this
+  // aimable at one event rather than at every event sharing an id.
+  for (const entry of state.redacted) {
+    const info = yield* repository.readCommit(entry);
     const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
     if (path !== null) yield* repository.deleteObject(path.oid);
   }

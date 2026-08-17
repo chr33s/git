@@ -787,7 +787,11 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // with it rather than after it.
     const judged = yield* Policy.gate(updates, atomic);
     if (atomic && judged.refused.length > 0) {
-      return respond(allFailed(judged.updates, judged.refused[0]!.reason), "ok");
+      // The client's whole list, not `judged.updates`: an atomic batch with a
+      // refusal in it has *no* allowed updates, so reporting on those produces
+      // no `ng` lines at all — a push refused in complete silence. Atomic means
+      // every command failed, and the report has to say so for each of them.
+      return respond(allFailed(updates, judged.refused[0]!.reason), "ok");
     }
     // Non-atomic: the refusals ride back in the same report as the `ok`s, so a
     // client is told which refs the policy declined and why, rather than

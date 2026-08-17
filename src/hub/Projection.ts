@@ -97,8 +97,14 @@ export interface PullRequest {
   readonly reviews: ReadonlyArray<Review>;
   readonly threads: ReadonlyArray<Thread>;
   readonly checks: ReadonlyArray<Check>;
-  /** Events whose payloads have been tombstoned. */
-  readonly redacted: ReadonlySet<string>;
+  /**
+   * The commits whose payloads a valid tombstone reached.
+   *
+   * Commits rather than event ids, because an id is scoped to its author here
+   * and a bare one can be claimed twice; a commit names exactly one event, so
+   * a consumer deleting blobs cannot be aimed at somebody else's.
+   */
+  readonly redacted: ReadonlySet<Oid>;
   readonly rejected: ReadonlyArray<Rejected>;
   readonly at: Date;
 }
@@ -259,14 +265,28 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   let mergeCommit: Oid | null = null;
   let at = new Date(0);
   let headSetter: { readonly commit: Oid; readonly id: string; readonly head: Oid } | null = null;
-  /** The `pr.opened` event, so a tombstone over it can blank what it said. */
+  /** The `pr.opened` event's key, so a tombstone over it blanks what it said. */
   let openedBy: string | null = null;
 
   const reviews = new Map<string, Review>();
   const dismissed = new Set<string>();
   const threads = new Map<string, Thread>();
   const checks = new Map<string, Check>();
-  const redacted = new Set<string>();
+  /**
+   * The *commits* a tombstone reached, not the ids it named.
+   *
+   * Ids are scoped to their author everywhere else in this fold, and a
+   * tombstone that resolved by bare id would walk straight around that: a
+   * member holding only `hub.comment` could post a comment re-using an
+   * approval's id, redact their own comment, and take the approval's payload
+   * with it — the blob deleted, the event unreadable, the approval gone. A
+   * commit names exactly one event, so this is the one spelling that cannot
+   * be aimed at somebody else's.
+   */
+  const redacted = new Set<Oid>();
+
+  /** Bare id to the commits claiming it, for resolving a tombstone's target. */
+  const byId = new Map<string, Oid[]>();
 
   /** The trust head each accepted event named, for the monotonicity check. */
   const heads = new Map<Oid, Oid>();
@@ -368,6 +388,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       continue;
     }
     claimed.set(mine, entry.commit);
+    byId.set(payload.id, [...(byId.get(payload.id) ?? []), entry.commit]);
 
     const issued = new Date(payload.issuedAt);
     if (issued > at) at = issued;
@@ -378,7 +399,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         description = payload.description;
         base = payload.base;
         author ??= signer;
-        openedBy = payload.id;
+        openedBy = mine;
         const head = Event.unqualify(payload.head);
         if (
           head !== null &&
@@ -502,14 +523,35 @@ export const project = Effect.fn("hub.Projection.project")(function* (
         break;
       }
 
-      case "event.redacted":
-        redacted.add(payload.target);
+      case "event.redacted": {
+        const claimants = byId.get(payload.target) ?? [];
+        // Exactly one, or none: a target two authors claim is a target the
+        // tombstone does not identify, and guessing would hand whoever
+        // duplicated an id the power to erase the original.
+        if (claimants.length !== 1) {
+          rejected.push({
+            commit: entry.commit,
+            reason:
+              claimants.length === 0
+                ? `no event ${payload.target}`
+                : `ambiguous redaction target ${payload.target}`,
+          });
+          break;
+        }
+        redacted.add(claimants[0]!);
         break;
+      }
     }
   }
 
   const head = headSetter?.head ?? null;
-  const openingRedacted = openedBy !== null && redacted.has(openedBy);
+
+  /** Whether a tombstone reached the event this key names. */
+  const blanked = (key: string): boolean => {
+    const commit = claimed.get(key);
+    return commit !== undefined && redacted.has(commit);
+  };
+  const openingRedacted = openedBy !== null && blanked(openedBy);
 
   return {
     id: pr,
@@ -520,7 +562,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     state,
     author,
     mergeCommit,
-    reviews: [...reviews.values()].map((review) => ({
+    reviews: [...reviews.entries()].map(([key, review]) => ({
       ...review,
       dismissed: dismissed.has(review.id),
       // Stale, not gone: the statement stays true about the revision it named.
@@ -529,12 +571,14 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       // comments would leave a redacted review's prose, and a pull request's
       // title and description, readable on every replica that still holds the
       // blob — which is most of them, since the object is deleted locally.
-      body: redacted.has(review.id) ? "" : review.body,
+      body: blanked(key) ? "" : review.body,
     })),
     threads: [...threads.values()].map((thread) => ({
       ...thread,
       comments: thread.comments.map((comment) =>
-        redacted.has(comment.id) ? { ...comment, body: "", redacted: true } : comment,
+        blanked(keyOf(comment.author, comment.id))
+          ? { ...comment, body: "", redacted: true }
+          : comment,
       ),
     })),
     checks: [...checks.values()],

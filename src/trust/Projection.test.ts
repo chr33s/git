@@ -400,6 +400,57 @@ describe("trust projection", () => {
       assert.equal(outcome.ok, false);
     });
 
+    it("refuses an event signed before its author was granted the capability", async () => {
+      // Revocation was ordered by ancestry; grants were not, so a stored event
+      // was judged against whatever its signer holds *now*. A member with only
+      // `hub.review` could pre-plant approvals and have them start counting the
+      // moment somebody granted them `hub.approve` — on a revision they never
+      // looked at again.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          yield* grantTo(where, bob, ["hub.review"], where.roots.slice(0, 2));
+
+          // Bob signs an approval against the head he can see, holding only
+          // `hub.review`.
+          const before = yield* repository.resolve(Log.LOG_REF);
+          const bytes = new TextEncoder().encode("an approval written in advance");
+          const signature = yield* sign(bob, bytes, NAMESPACE);
+
+          // Later, somebody grants him what it needs.
+          yield* grantTo(where, bob, ["hub.review", "hub.approve"], where.roots.slice(0, 2));
+
+          return {
+            planted: yield* Verify.authorize({
+              projection: yield* projectionOf(where),
+              bytes,
+              signatures: [signature],
+              capability: "hub.approve",
+              made: { at: new Date(), trustHead: before },
+            }),
+            // The same signature judged against the head that *does* contain
+            // the grant is fine: this is about ordering, not about the key.
+            now: yield* Verify.authorize({
+              projection: yield* projectionOf(where),
+              bytes,
+              signatures: [signature],
+              capability: "hub.approve",
+              made: { at: new Date(), trustHead: yield* repository.resolve(Log.LOG_REF) },
+            }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.planted.ok, false);
+      assert.match(
+        outcome.planted.ok === false ? outcome.planted.reason : "",
+        /did not yet hold hub\.approve/,
+      );
+      assert.equal(outcome.now.ok, true, "the grant is visible from a later head");
+    });
+
     it("refuses an event whose trust head is a commit outside the trust log", async () => {
       // The sharper version of the test above: an oid this replica genuinely
       // holds, but that is not a trust record — the tip of `main`, say. An

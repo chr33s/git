@@ -52,15 +52,15 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
     const state = yield* project(genesis, trust, pr);
     if (state.redacted.size === 0) continue;
 
-    const { events } = yield* Event.entries(pr);
-    for (const entry of events) {
-      const id = entry.payload?.id;
-      if (id === undefined || !state.redacted.has(id)) continue;
-
+    // By commit, not by event id: an id belongs to its author here, and a
+    // tombstone matched by bare id would take every same-id event with it —
+    // which is how somebody holding only `hub.comment` could have an approval's
+    // payload deleted along with their own duplicate.
+    for (const entry of state.redacted) {
       // The blob by the name its own tree gives it. A tombstone whose target
       // has already been collected finds nothing, which is the state it was
       // asking for.
-      const info = yield* repository.readCommit(entry.commit);
+      const info = yield* repository.readCommit(entry);
       const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
       if (path !== null) found.add(path.oid);
     }

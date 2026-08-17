@@ -793,6 +793,85 @@ describe("hub projection", () => {
     });
   });
 
+  describe("a tombstone", () => {
+    it("reaches only the event its author claimed, not every event sharing an id", async () => {
+      // Ids are scoped to their author everywhere else in the fold, and a
+      // tombstone resolved by bare id walked straight around that: a member
+      // holding only `hub.comment` posts a comment re-using an approval's id,
+      // redacts their *own* comment, and the approval's payload goes with it —
+      // blob deleted, event unreadable, approval gone.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const ref = Event.refOf(pr);
+          const root = yield* repository.resolve(ref);
+
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            body: "looks right",
+            key: where.reviewer,
+          });
+          const approval = yield* repository.resolve(ref);
+          const { events } = yield* Event.entries(pr);
+          const id = events.find((entry) => entry.commit === approval)?.payload?.id ?? "";
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          // The author's comment re-uses the approval's id.
+          const bytes = Event.encode({
+            version: 1,
+            type: "comment.created",
+            repo: where.genesis.repoId,
+            pr,
+            id,
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead,
+            body: "a decoy",
+            head: null,
+            path: null,
+            side: null,
+            line: null,
+            contextHash: null,
+          });
+          const decoy = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+            parents: [root!],
+            message: `comment.created ${id}\n`,
+          });
+          const joined = yield* Event.join(pr, [approval!, decoy]);
+          yield* repository.setRef({ name: ref, to: joined });
+
+          // The reviewer holds `hub.redact` and names that id. Two events
+          // answer to it, so the tombstone identifies neither.
+          yield* PullRequest.redact({
+            repo: where.genesis.repoId,
+            pr,
+            target: id,
+            reason: "sensitive-content",
+            key: where.reviewer,
+          }).pipe(Effect.ignore);
+
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(outcome.reviews.length, 1, "the approval must survive");
+      assert.equal(outcome.reviews[0]?.body, "looks right", "and keep its content");
+      assert.equal(outcome.redacted.size, 0, "an ambiguous target redacts nothing");
+      assert.match(
+        outcome.rejected.map((entry) => entry.reason).join(" "),
+        /ambiguous redaction target/,
+      );
+    });
+  });
+
   describe("redaction", () => {
     it("removes the content and keeps the event's place in the chain", async () => {
       const outcome = await scenario(

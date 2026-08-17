@@ -116,6 +116,22 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
 });
 
 /**
+ * Whether the grant a member's capabilities come from was already visible.
+ *
+ * The mirror of `reaches`, and for the same reason: "had the author already
+ * seen this?" is a question about ancestry, which every replica computes the
+ * same way, rather than about clocks anybody can write. A live request is
+ * judged against the current state, so it needs no check; an event recording
+ * no trust head is treated as having seen everything, which is the reading
+ * that field gets everywhere else.
+ */
+const held = Effect.fn("trust.Verify.held")(function* (grant: Oid, made: Made | null) {
+  if (made === null || made.trustHead === null) return true;
+  if (made.trustHead === grant) return true;
+  return (yield* Log.ancestry(made.trustHead)).has(grant);
+});
+
+/**
  * Authorize a signed payload for one capability.
  *
  * Returns the member rather than a boolean: the caller's next step is almost
@@ -159,6 +175,17 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
 
     if (!permits(member.capabilities, input.capability)) {
       closest = `${signer} does not hold ${input.capability}`;
+      continue;
+    }
+
+    // And they had to hold it *then*. Revocation was already ordered by
+    // ancestry; grants were not, so a stored event was judged against whatever
+    // its signer holds now — which let a member with `hub.comment` pre-plant
+    // approvals and have them start counting the moment somebody granted them
+    // `hub.approve`, on a revision they never reviewed. The grant that carries
+    // the capability has to be something the author could already see.
+    if (!(yield* held(member.grant, made))) {
+      closest = `${signer} did not yet hold ${input.capability} when this was signed`;
       continue;
     }
 
