@@ -163,6 +163,47 @@ describe("hub projection", () => {
     assert.equal(failures.plain, null, "an ordinary id still opens");
   });
 
+  it("refuses to fold a pull request past the ceiling, and to push one there", async () => {
+    // Folding builds an ancestor set per commit, which is quadratic, and how
+    // many commits a pull request has is chosen by whoever may append to it —
+    // the lowest hub capability there is. On the protected-branch path that
+    // fold is synchronous and inside a worker with a fixed memory ceiling, so
+    // an unbounded one is a push that never returns rather than a push that is
+    // refused. The bound is asked in both places: at the fold, for a history
+    // that arrived by replication, and at the boundary, so a pull request can
+    // never *become* unfoldable — bounded only at the fold, whoever may append
+    // could take somebody else's approved one past the line and freeze the
+    // protected branch behind it.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const { pr } = yield* opened(where);
+        yield* PullRequest.comment({
+          repo: where.genesis.repoId,
+          pr,
+          body: "and another thing",
+          key: where.author,
+        });
+        const head = yield* repository.resolve(Event.refOf(pr));
+        return {
+          under: (yield* Event.entries(pr, 8)).events.length,
+          over: yield* Event.entries(pr, 1).pipe(
+            Effect.as(null),
+            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          ),
+          admits: yield* Event.withinCeiling(head!, 8),
+          refuses: yield* Event.withinCeiling(head!, 1),
+        };
+      }),
+    );
+
+    assert.equal(outcome.under, 2, "an ordinary pull request folds");
+    assert.match(outcome.over ?? "", /cannot be folded/);
+    assert.equal(outcome.admits, true);
+    assert.equal(outcome.refuses, false, "and the boundary refuses the push that would get there");
+  });
+
   it("qualifies a base branch spelled without its refs/heads/ prefix", async () => {
     // `base` is a string a client writes, and both spellings are natural —
     // `main` from a UI, `refs/heads/main` from a script. `protectedBranch`

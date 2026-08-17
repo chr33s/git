@@ -44,6 +44,15 @@ const encoder = new TextEncoder();
 /** The record name inside each event commit — `event.json` and `event.sig`. */
 export const RECORD = "event";
 
+/**
+ * How many commits one pull request's fold will walk.
+ *
+ * Not a limit on the feature — a pull request with twenty thousand events is
+ * not a conversation — but a ceiling on what an append to a hub ref can make
+ * every later protected-branch push pay for.
+ */
+export const MAX_EVENTS = 20_000;
+
 /** Where a pull request's history lives. */
 export const refOf = (pr: string): string => `refs/hub/pr/${pr}`;
 
@@ -506,7 +515,7 @@ const summaryOf = Effect.fn("hub.Event.summaryOf")(function* (commit: Oid) {
  * deciding *which* of them is the impostor needs the trust state this walk
  * does not have, so both are handed on and `hub/Projection.ts` rules on them.
  */
-export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
+export const entries = Effect.fn("hub.Event.entries")(function* (pr: string, ceiling = MAX_EVENTS) {
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(refOf(pr));
@@ -517,6 +526,20 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   // is not a longer event chain — it is an attempt to make every projection
   // walk the whole repository, with a quadratic ancestor map on top.
   const parents = yield* Dag.reachable(head, null, (commit) => isHubCommit(commit));
+  // Bounded in *size* as well as in shape. Folding a pull request builds an
+  // ancestor set per commit, which is quadratic, and how many commits a pull
+  // request has is chosen by whoever may append to it — the lowest hub
+  // capability there is. On the protected-branch path that fold is
+  // synchronous and inside a worker with a fixed memory ceiling, so an
+  // unbounded one is a push that never returns rather than a push that is
+  // refused. The bound is far above any conversation: a pull request with
+  // more events than this is not one a person is having.
+  if (parents.size > ceiling) {
+    return yield* new Invalid({
+      field: "pr",
+      reason: `pull request '${pr}' has more than ${ceiling} events and cannot be folded`,
+    });
+  }
   const ordered = Dag.topological(parents);
 
   const events: Entry[] = [];
@@ -590,6 +613,23 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   // at every join — which is exactly where two concurrent histories meet, and
   // exactly where knowing which event descends from which matters.
   return { events, parents };
+});
+
+/**
+ * Whether a value stays inside the fold's ceiling.
+ *
+ * Asked by the policy boundary before a hub ref is allowed to move, so that a
+ * pull request can never *become* unfoldable. Bounded only on the fold side,
+ * the ceiling turned a slow push into a bricked pull request: anybody who may
+ * append could take somebody else's approved one past the line and, with it,
+ * every approval the protected branch behind it was counting on.
+ */
+export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (
+  head: Oid,
+  ceiling = MAX_EVENTS,
+) {
+  const parents = yield* Dag.reachable(head, null, (commit) => isHubCommit(commit));
+  return parents.size <= ceiling;
 });
 
 /**

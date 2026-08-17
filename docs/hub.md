@@ -694,6 +694,8 @@ These are separate checks.
 
 Signatures MUST bind authentication to the request being authorized. The envelope binds the **ref-command list, not the streamed body bytes**: a receive-pack body streams, and hashing it before sending would force the client to buffer the entire pack. The pack's contents are already bound transitively — each command names the exact new OID, and the server verifies the pack against those OIDs.
 
+Each command carries an old OID and a new OID, and **both** MUST be checked against the command line the client actually sent. Checking only the new one leaves the compare-and-swap unsigned: a signed "move `main` from A to B" replays as an unconditional "set `main` to B", which lands the push on a branch that has moved on since the client looked — the exact race the old OID exists to lose.
+
 The signed envelope MUST include:
 
 ```text
@@ -1259,6 +1261,8 @@ refs/tags/*         immutable-by-name
 refs/hub/*          append-only event DAGs
 refs/meta/trust/*   append-only trust log + fixed genesis
 ```
+
+Append-only means three things, and all three are checked at the boundary. An update MUST contain what it replaces. It MUST NOT bring a **parentless commit the ref did not already reach**: every hub event is written onto the ref's current head, so an append-only history has exactly one beginning — a pull request's `pr.opened`, a trust log's first record — and a push that grafts a second one is not adding to this history but setting another beside it. A fold with two beginnings must then choose between them by something, and on a pull request with no activity yet that can only be the OID, which whoever wrote the commit ground; that is how a `hub.create-pr` holder took the authorship, title and base of a pull request they had no part in opening. And it MUST leave the ref within the **ceiling a fold will walk**: folding builds an ancestor set per commit, and how many commits a pull request has is chosen by whoever may append to it. That bound belongs here as well as at the fold — applied only at the fold, it converts a slow push into a bricked pull request, and anybody holding the lowest hub capability could take somebody else's approved one past the line and freeze the protected branch it was the only route to. A history that arrived by replication is not held to it, so a fold that refuses one pull request MUST be read as one candidate missing rather than as a refusal of the push.
 
 ### Convergence
 

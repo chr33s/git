@@ -27,6 +27,7 @@
  */
 import { Effect, Option, Schema } from "effect";
 
+import * as Dag from "../git/Dag.ts";
 import { Invalid } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
@@ -425,9 +426,66 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     return refused(update.name, `${update.name} is append-only and may not be deleted`);
   }
   if (current === null) return allowed;
-  return (yield* contains(current, update.value))
-    ? allowed
-    : refused(update.name, `${update.name} is append-only: the update must contain ${current}`);
+  if (!(yield* contains(current, update.value))) {
+    return refused(
+      update.name,
+      `${update.name} is append-only: the update must contain ${current}`,
+    );
+  }
+
+  // And it may not graft a second beginning onto the history. Every event a
+  // hub ref carries is written onto the ref's current head, so an append-only
+  // history has exactly one parentless commit: a pull request's `pr.opened`,
+  // a trust log's first record. A push that brings a *new* one is not adding
+  // to this history, it is adding another one beside it — and a fold with two
+  // roots has to choose between them by something, which on a pull request
+  // with no activity yet can only be the oid, which whoever wrote the commit
+  // ground. That is how a `hub.create-pr` holder took the authorship, the
+  // title and the base of a pull request they had no part in opening.
+  const grafted = yield* orphanBeyond(current, update.value);
+  if (grafted !== null) {
+    return refused(
+      update.name,
+      `${update.name} is append-only: ${grafted} begins a second history`,
+    );
+  }
+
+  // And it stays within what a fold will walk. The fold builds an ancestor set
+  // per commit, and how many commits a pull request has is chosen by whoever
+  // may append to it. Bounded only where the fold runs, the ceiling would turn
+  // a slow push into a bricked pull request — anybody holding the lowest hub
+  // capability could take somebody else's *approved* one past the line and
+  // freeze the protected branch it was the only route to. Bounded here, the
+  // ref never gets there.
+  if (update.name.startsWith("refs/hub/") && !(yield* Event.withinCeiling(update.value))) {
+    return refused(update.name, `${update.name} would hold more events than a fold will walk`);
+  }
+  return allowed;
+});
+
+/**
+ * A parentless commit the update brings that the ref did not already have.
+ *
+ * Walked from the new value and stopped at the current one, so the ordinary
+ * push — a handful of commits on the tip — costs a handful of reads. A root
+ * found this way may still be one the ref already reached by another path, and
+ * a redundant join over an old commit is a strange thing to write but not a
+ * dishonest one, so it is checked against the current value before being
+ * called new.
+ */
+const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (current: Oid, to: Oid) {
+  const parents = yield* Dag.reachable(to, current).pipe(
+    Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+  );
+  // Unreadable is not "no second root": the objects arrived with this push, so
+  // a missing one is a push this cannot judge rather than one it may wave on.
+  if (parents === null) return to;
+  for (const [commit, of] of parents) {
+    if (of.length > 0 || commit === current) continue;
+    if (yield* contains(commit, current)) continue;
+    return commit;
+  }
+  return null;
 });
 
 /** Whether `to` can reach `from` — a fast-forward, or a join that kept it. */
@@ -491,7 +549,18 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     const cached = input.folds.get(id);
     if (cached === undefined && !(yield* proposes(id, input.to, input.mentions))) continue;
 
-    const pullRequest = cached ?? (yield* projectPr(input.genesis, input.trust, id));
+    // One pull request this cannot read is one candidate, not a refusal of the
+    // push. A history that arrived by replication is not held to the ceiling
+    // the boundary applies to a push, so a replica can hold a pull request
+    // larger than it will fold — and failing here would let whoever grew it
+    // freeze a branch on every replica that copied it, which is the denial the
+    // ceiling exists to prevent rather than a second way to arrive at it.
+    const pullRequest =
+      cached ??
+      (yield* projectPr(input.genesis, input.trust, id).pipe(
+        Effect.catchTag("Invalid", () => Effect.succeed(null)),
+      ));
+    if (pullRequest === null) continue;
     input.folds.set(id, pullRequest);
     if (pullRequest.base !== input.ref || pullRequest.head === null) continue;
     // A closed or already-merged pull request authorizes nothing further.
@@ -698,6 +767,16 @@ const coveredByEnvelope = (
   }
   if ((signed.to ?? null) !== (update.value ?? null)) {
     return refusedCommand(update.name, "the signed request named a different revision");
+  }
+  // The old oid too, and for the reason the envelope exists. `from` is the
+  // compare-and-swap the client signed for; `expected` is what the receive-pack
+  // command line — which nothing signs — asked for. Comparing only `to` left
+  // the two free to disagree: a signed "move `main` from A to B" was replayable
+  // as an unconditional "set `main` to B", landing the push on a branch that
+  // had moved on since the client looked, which is the exact race the
+  // compare-and-swap was promised against.
+  if ((signed.from ?? null) !== (update.expected ?? null)) {
+    return refusedCommand(update.name, "the signed request named a different current revision");
   }
   return { ok: true };
 };

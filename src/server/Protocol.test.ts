@@ -679,6 +679,50 @@ describe("what a signed envelope binds", () => {
     );
   });
 
+  it("refuses a command whose old oid the signature never named", async () => {
+    // The envelope's `from` is the compare-and-swap the client signed for; the
+    // `expected` on the command line is unsigned. Comparing only `to` let the
+    // two disagree, so "move `main` from A to B" replayed as an unconditional
+    // "set `main` to B" — landing the push on a branch that had moved on since
+    // the client looked, which is the race the compare-and-swap was promised
+    // against.
+    const report = await scenario(
+      Effect.gen(function* () {
+        const response = yield* Protocol.receivePack(
+          new Request("http://git.test/r/git-receive-pack", {
+            method: "POST",
+            body:
+              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/agreed\0report-status`)}` +
+              `0000not a pack at all`,
+          }),
+        ).pipe(
+          Effect.provide(
+            Auth.requester({
+              ...Auth.anonymous,
+              capabilities: ["source.push"],
+              envelope: {
+                type: "auth.request",
+                version: 1,
+                repo: Auth.anonymous.projection.repoId,
+                operation: "git-receive-pack",
+                // Signed as a move off `b…`, sent as a create.
+                commands: [{ ref: "refs/heads/agreed", from: "b".repeat(40), to: "a".repeat(40) }],
+                nonce: "n",
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            }),
+          ),
+        );
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return linesOf(bytes).lines;
+      }),
+    );
+
+    const line = report.find((entry) => entry.includes("refs/heads/agreed"));
+    assert.match(line ?? "", /^ng /, report.join(" | "));
+    assert.match(line ?? "", /different current revision/, report.join(" | "));
+  });
+
   it("reports on every command when a covered delete outlives the refused creates", async () => {
     // The object phase is the only reader of the pack, and it runs only when
     // there is a write left to unpack for. With every create uncovered and a

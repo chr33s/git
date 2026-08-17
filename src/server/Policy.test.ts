@@ -292,6 +292,94 @@ describe("Policy", () => {
       assert.match(decision.ok === false ? decision.reason : "", /must contain/);
     });
 
+    it("refuses a hub update that grafts a second beginning onto the history", async () => {
+      // Every hub event is written onto the ref's current head, so the history
+      // has exactly one parentless commit: the `pr.opened` that started it.
+      // A join over a *second* root is not adding to that history, it is
+      // adding another one beside it — and the fold then has to choose
+      // between two openings by something, which on a pull request with no
+      // activity yet can only be the oid, which whoever wrote the commit
+      // ground. That is how a `hub.create-pr` holder took the authorship, the
+      // title and the base of a pull request they had no part in opening.
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // A parentless commit of the same shape, joined in beside the
+          // opening. The join keeps everything the ref held, so the
+          // append-only rule above is satisfied.
+          const forged = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "pr.opened forged\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!, forged],
+            message: "join\n",
+            author,
+          });
+          return yield* judge(where, { name: `refs/hub/pr/${pr}`, value: joined });
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /second history/);
+    });
+
+    it("allows a join that keeps both heads it already had", async () => {
+      // The rule is about *new* roots, not about joins: two members appending
+      // concurrently is the ordinary case, and the join that reconciles them
+      // brings no beginning the ref did not already have.
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const opened = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "more",
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // A second branch off the opening, and a join over both — divergence
+          // and its resolution, with no root but the one the ref started at.
+          const sibling = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [opened!],
+            message: "concurrent\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!, sibling],
+            message: "join\n",
+            author,
+          });
+          return yield* judge(where, { name: `refs/hub/pr/${pr}`, value: joined });
+        }),
+      );
+      assert.equal(decision.ok, true);
+    });
+
     it("allows a hub update that grows the history", async () => {
       const decision = await scenario(
         Effect.gen(function* () {
