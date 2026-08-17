@@ -261,6 +261,13 @@ const requireCapability = Effect.fn("Api.requireCapability")(function* (capabili
   return yield* new Invalid({ field: "capability", reason: `this needs ${capability}` });
 });
 
+/** Whether a ref is there to be rewritten; a create discards nothing. */
+const exists = Effect.fn("Api.exists")(function* (ref: string) {
+  const repository = yield* Repository;
+  const at = yield* repository.resolve(ref).pipe(Effect.catchTag("StorageFailure", Effect.die));
+  return at !== null;
+});
+
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
   // Fail closed, for the reason `gateWrite` gives.
   const judged = yield* Policy.gate([update], true, false).pipe(Effect.orElseSucceed(() => null));
@@ -1331,7 +1338,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // re-pointed between the decision and the delete would be removed at
         // a value the policy boundary never saw. `receive` is the delete that
         // carries a compare-and-swap.
-        const judged = yield* gateOne({ name: `refs/tags/${params.name}`, value: null });
+        const judged = yield* gateOne({
+          name: `refs/tags/${params.name}`,
+          value: null,
+          reason: "tag: delete",
+        });
         // Whether there was anything to delete, asked before the delete and
         // through `resolve`. `receive` reports `from` as the value the command
         // was *judged* against, which for a symbolic ref is `null` — so a
@@ -1339,9 +1350,14 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const existed = yield* repository
           .resolve(`refs/tags/${params.name}`)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        const results = yield* repository
-          .receive([judged])
-          .pipe(Effect.catchTags({ StorageFailure: Effect.die, HookRejected: Effect.die }));
+        const results = yield* repository.receive([judged]).pipe(
+          Effect.catchTags({
+            StorageFailure: Effect.die,
+            // A hook refusing a deletion is the repository saying no, not
+            // this server failing — and these endpoints can say so now.
+            HookRejected: (error) => new Invalid({ field: "name", reason: error.message }),
+          }),
+        );
         const outcome = results.at(0);
         if (outcome !== undefined && !outcome.ok) {
           return yield* new Invalid({
@@ -1373,15 +1389,24 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // Under the judged value, for the reason `tagRemove` gives: a branch
         // that moved between the decision and the delete would otherwise lose
         // a push the boundary never judged.
-        const judged = yield* gateOne({ name: `refs/heads/${params.name}`, value: null });
+        const judged = yield* gateOne({
+          name: `refs/heads/${params.name}`,
+          value: null,
+          reason: "delete",
+        });
         // As in `tagRemove`: asked before the delete and through `resolve`, so
         // a symbolic branch is not reported as one that was never there.
         const existed = yield* repository
           .resolve(`refs/heads/${params.name}`)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        const results = yield* repository
-          .receive([judged])
-          .pipe(Effect.catchTags({ StorageFailure: Effect.die, HookRejected: Effect.die }));
+        const results = yield* repository.receive([judged]).pipe(
+          Effect.catchTags({
+            StorageFailure: Effect.die,
+            // A hook refusing a deletion is the repository saying no, not
+            // this server failing — and these endpoints can say so now.
+            HookRejected: (error) => new Invalid({ field: "name", reason: error.message }),
+          }),
+        );
         const outcome = results.at(0);
         if (outcome !== undefined && !outcome.ok) {
           return yield* new Invalid({
@@ -1497,9 +1522,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
         if (payload.author !== undefined) request.author = signatureFrom(payload.author);
         // Qualified once, for the gate and the write alike; see `merge` above.
+        // And a rewrite only when there is something to rewrite: an `into`
+        // that does not exist yet holds nothing a replay could discard, and
+        // charging `source.force-push` for it refused the readme's own
+        // contributor set a branch they were creating.
         if (payload.into !== undefined) {
           request.into = refNameOf(payload.into);
-          yield* gateWrite(request.into, true);
+          yield* gateWrite(request.into, yield* exists(request.into));
         }
         return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
@@ -1509,9 +1538,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // As `merge` above: a rebase writes its replayed commits either way.
         yield* requireCapability("source.push");
         const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
+        // As `cherry-pick` above.
         if (payload.into !== undefined) {
           request.into = refNameOf(payload.into);
-          yield* gateWrite(request.into, true);
+          yield* gateWrite(request.into, yield* exists(request.into));
         }
         return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),

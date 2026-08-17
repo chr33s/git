@@ -764,6 +764,71 @@ describe("cli hub", () => {
     }
   });
 
+  it("does not charge a rebase onto a branch it is creating a force-push", async () => {
+    // A rebase or a cherry-pick with `into` lands replayed commits on a branch
+    // that need not contain what it held — a force push wearing another name,
+    // and charged as one. But an `into` that does not exist yet holds nothing
+    // a replay could discard, and charging it anyway refused the readme's own
+    // contributor set a branch they were creating.
+    const serverRoot = path.join(root, "replay");
+    await fs.mkdir(serverRoot, { recursive: true });
+    await cli(["init", "--root", serverRoot, "work"]);
+    const owner = await enableHubUnder(serverRoot, "work", ["repo.admin"]);
+    const author = await grantMemberUnder(serverRoot, "work", owner.root, owner.repoId, [
+      "repo.read",
+      "source.push",
+    ]);
+
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
+    try {
+      const call = (verb: string, credential: string, body: JsonBody) =>
+        fetch(`${server.url}/work/${verb}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${credential}` },
+          body: JSON.stringify(body),
+        });
+
+      const who = { name: "A", email: "a@example.com", at: new Date().toISOString(), offset: 0 };
+      const seeded = await call("commit", owner.credential, {
+        branch: "main",
+        message: "one",
+        author: who,
+        files: [{ path: "a.txt", content: "one\n" }],
+      });
+      assert.equal(seeded.status, 200, await seeded.text());
+      await call("branches/create", owner.credential, { name: "topic", base: "refs/heads/main" });
+      const grown = await call("commit", owner.credential, {
+        branch: "topic",
+        message: "two",
+        author: who,
+        files: [{ path: "b.txt", content: "two\n" }],
+      });
+      assert.equal(grown.status, 200, await grown.text());
+
+      // Onto a branch that does not exist yet: a create, not a rewrite.
+      const created = await call("rebase", author.credential, {
+        branch: "refs/heads/topic",
+        onto: "refs/heads/main",
+        into: "landing",
+      });
+      const body = await created.text();
+      assert.equal(created.status, 200, body);
+      assert.ok(!body.includes("force-push"), body);
+
+      // And onto one that does: still a rewrite, still charged.
+      const rewritten = await call("rebase", author.credential, {
+        branch: "refs/heads/topic",
+        onto: "refs/heads/main",
+        into: "landing",
+      });
+      const refusal = await rewritten.text();
+      assert.equal(rewritten.status, 400, refusal);
+      assert.match(refusal, /force-push/);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("refuses to negotiate with a remote on a push-only credential", async () => {
     // Negotiation is a disclosure: a fetch offers a `have` line for every
     // local ref, so pointing one at a URL of the caller's choosing hands that

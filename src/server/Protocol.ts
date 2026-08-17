@@ -835,7 +835,23 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
     // *delete* down with the create in a mixed push, and the delete is the one
     // thing this principal was entitled to do — `Policy.gate` would have
     // refused the create alone.
-    const writes = updates.filter((update) => update.value !== null);
+    // The envelope binds *every* command, delete or not, and checking it needs
+    // nothing from the pack — so it is asked here too. Left to `gate`, a push
+    // naming refs the signed request never covered had its whole pack unpacked
+    // and persisted before being refused.
+    for (const entry of yield* Policy.uncovered(updates).pipe(Effect.orElseSucceed(() => []))) {
+      const command = updates.find((update) => update.name === entry.ref);
+      refused.push({
+        ref: entry.ref,
+        from: command?.expected ?? null,
+        to: command?.value ?? null,
+        ok: false,
+        reason: entry.reason,
+      });
+    }
+    const uncovered = new Set(refused.map((entry) => entry.ref));
+
+    const writes = updates.filter((update) => update.value !== null && !uncovered.has(update.name));
     const refusal =
       writes.length === 0
         ? null
@@ -857,7 +873,9 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         });
       }
     }
-    const allowed = refusal === null ? updates : updates.filter((update) => update.value === null);
+    const allowed = (refusal === null ? updates : updates.filter((u) => u.value === null)).filter(
+      (update) => !uncovered.has(update.name),
+    );
 
     // The object phase. A pack arrives whenever any command creates or moves
     // a ref; a delete-only push sends none, and a push whose creates were all

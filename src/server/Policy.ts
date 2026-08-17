@@ -546,6 +546,30 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
  *
  * `null` means nothing was refused; anything else is the reason.
  */
+/**
+ * Which commands the requester's signed envelope does not cover.
+ *
+ * A native client signs the refs it is moving and where to, and that promise
+ * needs nothing from the pack to check — unlike the force-push rule, which
+ * cannot tell a fast-forward from a rewrite until the objects are present. So
+ * it is asked before the body is read: left to `gate`, a push naming refs the
+ * envelope never covered had its whole pack unpacked and persisted first.
+ */
+export const uncovered = Effect.fn("Policy.uncovered")(function* (
+  updates: ReadonlyArray<RefUpdate>,
+) {
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  const who = Option.getOrElse(requester, () => Auth.anonymous);
+  if (who.envelope === null) return [];
+
+  const refused: Array<{ readonly ref: string; readonly reason: string }> = [];
+  for (const update of updates) {
+    const covered = coveredByEnvelope(who.envelope, update);
+    if (!covered.ok) refused.push({ ref: covered.ref, reason: covered.reason });
+  }
+  return refused;
+});
+
 export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: string) {
   const stored = yield* readGenesis();
   if (stored === null) {

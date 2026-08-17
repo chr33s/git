@@ -27,6 +27,7 @@ import { DELIM, FLUSH, pkt } from "../git/Pkt.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { RefStore, type Oid } from "../git/Store.ts";
+import * as Auth from "./Auth.ts";
 import * as Policy from "./Policy.ts";
 import * as Protocol from "./Protocol.ts";
 
@@ -617,6 +618,57 @@ describe("an atomic push the policy refuses", () => {
       `atomic means none of them applied: ${named.join(" | ")}`,
     );
     assert.notEqual(report.now, null, "and nothing was deleted");
+  });
+});
+
+describe("what a signed envelope binds", () => {
+  it("refuses a ref it never named before the pack is unpacked", async () => {
+    // The envelope names the refs a native client is moving and where to, and
+    // checking it needs nothing from the pack — unlike the force-push rule,
+    // which cannot tell a fast-forward from a rewrite until the objects are
+    // present. Left to the gate, a push naming refs the signature never
+    // covered had its whole pack unpacked and persisted first.
+    //
+    // The body is deliberately not a pack: a refusal that arrives before the
+    // unpack cannot have noticed, and one that arrives after says so.
+    const report = await scenario(
+      Effect.gen(function* () {
+        const response = yield* Protocol.receivePack(
+          new Request("http://git.test/r/git-receive-pack", {
+            method: "POST",
+            body:
+              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere\0report-status`)}` +
+              `0000not a pack at all`,
+          }),
+        ).pipe(
+          Effect.provide(
+            Auth.requester({
+              ...Auth.anonymous,
+              capabilities: ["source.push"],
+              envelope: {
+                type: "auth.request",
+                version: 1,
+                repo: Auth.anonymous.projection.repoId,
+                operation: "git-receive-pack",
+                commands: [{ ref: "refs/heads/agreed", from: null, to: "a".repeat(40) }],
+                nonce: "n",
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            }),
+          ),
+        );
+        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+        return linesOf(bytes).lines;
+      }),
+    );
+
+    const line = report.find((entry) => entry.includes("refs/heads/elsewhere"));
+    assert.match(line ?? "", /^ng /, report.join(" | "));
+    assert.match(line ?? "", /did not name this ref/, report.join(" | "));
+    assert.ok(
+      !report.some((entry) => entry.includes("unpacker")),
+      `refused before the unpack: ${report.join(" | ")}`,
+    );
   });
 });
 
