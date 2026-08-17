@@ -33,7 +33,12 @@ import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid, RefUpdate } from "../git/Store.ts";
 import { type Genesis, readGenesis } from "../trust/Genesis.ts";
-import { type Member, project, type Projection as TrustProjection } from "../trust/Projection.ts";
+import {
+  type Member,
+  openWindow,
+  project,
+  type Projection as TrustProjection,
+} from "../trust/Projection.ts";
 import * as Event from "../hub/Event.ts";
 import {
   approvals,
@@ -43,6 +48,7 @@ import {
 } from "../hub/Projection.ts";
 import { permits } from "../trust/Certificate.ts";
 import * as Log from "../trust/Log.ts";
+import * as Record from "../trust/Record.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Auth from "./Auth.ts";
 
@@ -404,16 +410,13 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // approval signed by the revoked key against that same head — `reaches` sees
   // the revocation as unreachable, `former` supplies the capabilities it had,
   // and the approval satisfies a protected branch. Nothing in the events says
-  // when they were written, but the boundary knows what the log holds *now*,
-  // and a push arriving now has no claim to have been made before a revocation
-  // this repository already has.
+  // when they were written, but the boundary knows whose keys are revoked
+  // *now*, and a signature arriving now from a key this repository has already
+  // revoked is one it has no reason to take.
   if (update.name.startsWith("refs/hub/") && update.value !== null) {
-    const behind = yield* namesRevokedHead(update.value, current, input.trust);
-    if (behind !== null) {
-      return refused(
-        update.name,
-        `an event names trust head ${behind}, which predates a revocation this repository holds`,
-      );
+    const revoked = yield* signedByRevoked(update.value, current, input.trust);
+    if (revoked !== null) {
+      return refused(update.name, `${revoked} has been revoked and may not add events`);
     }
   }
 
@@ -484,7 +487,7 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   // with no activity yet can only be the oid, which whoever wrote the commit
   // ground. That is how a `hub.create-pr` holder took the authorship, the
   // title and the base of a pull request they had no part in opening.
-  const grafted = yield* orphanBeyond(current, update.value);
+  const grafted = yield* orphanBeyond(update.name, current, update.value);
   if (grafted !== null) {
     return refused(
       update.name,
@@ -521,39 +524,44 @@ const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string,
 });
 
 /**
- * A trust head the push declares that does not reach every revocation on
- * record, or `null` when every one of them does.
+ * A revoked signer on an event the push is adding, or `null`.
  *
- * Only the events the push is *adding* are asked, so an ordinary push reads
- * one commit, and a history already on the ref is left alone — it was judged
- * when it arrived, and re-judging it would make every later push to a pull
- * request fail because of an event written before the revocation legitimately
- * was.
+ * Narrow on purpose. Refusing every event whose declared trust head predates a
+ * revocation would catch the honest straggler too — somebody who signed a
+ * comment minutes before a revocation landed — and on an append-only ref that
+ * is a pull request they can never push again. What actually needs stopping is
+ * a *new signature from a key this repository has already revoked*, which no
+ * honest client produces: the key is gone from its holder's hands or should
+ * be, and the events it signed before the revocation are already on the ref
+ * and are not re-judged.
  *
- * A client genuinely lagging the trust log is asked to fetch it before
- * pushing, which the replication ordering already requires of it: trust refs
- * before hub refs, for exactly this reason.
+ * Only what the push adds is walked, so an ordinary push reads one commit.
  */
-const namesRevokedHead = Effect.fn("Policy.namesRevokedHead")(function* (
+const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   to: Oid,
   current: Oid | null,
   trust: TrustProjection,
 ) {
-  const revocations = new Set<Oid>();
-  for (const entries of trust.revoked.values()) {
-    for (const revocation of entries) revocations.add(revocation.commit);
-  }
-  if (revocations.size === 0) return null;
+  if (trust.revoked.size === 0) return null;
 
-  const declared = yield* Event.declaredHeads(to, current).pipe(
-    // An unreadable history is not a claim about trust heads. It is refused,
-    // or passed over, by the walks that own that question.
-    Effect.catchTag("ObjectNotFound", () => Effect.succeed(new Set<Oid>())),
+  const parents = yield* Dag.reachable(to, current, (commit) => Event.isHubCommit(commit)).pipe(
+    // An unreadable history is not a signature claim. It is refused, or passed
+    // over, by the walks that own that question.
+    Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
   );
-  for (const head of declared) {
-    const seen = yield* Log.ancestry(head);
-    for (const revocation of revocations) {
-      if (revocation !== head && !seen.has(revocation)) return head;
+  if (parents === null) return null;
+
+  for (const oid of parents.keys()) {
+    if (!(yield* Record.carries(oid, Event.RECORD))) continue;
+    const record = yield* Record.read(oid, Event.RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    if (record === null) continue;
+    for (const signer of yield* Verify.signers(record.payload, record.signatures)) {
+      if (openWindow(trust.revoked.get(signer)) !== null) return signer;
     }
   }
   return null;
@@ -569,8 +577,19 @@ const namesRevokedHead = Effect.fn("Policy.namesRevokedHead")(function* (
  * dishonest one, so it is checked against the current value before being
  * called new.
  */
-const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (current: Oid, to: Oid) {
-  const parents = yield* Dag.reachable(to, current).pipe(
+const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
+  name: string,
+  current: Oid,
+  to: Oid,
+) {
+  // Bounded to the namespace's own commits, like every other walk of them. An
+  // unbounded one is what a hub commit naming a *source* commit as a second
+  // parent turns into: the whole repository history, walked synchronously on
+  // the receive-pack path, from a push of one tiny commit. The ceiling check
+  // above does not catch it — that walk is bounded, so it simply steps over
+  // the foreign parent and finds nothing to refuse.
+  const belongs = name.startsWith("refs/hub/") ? Event.isHubCommit : Log.isTrustCommit;
+  const parents = yield* Dag.reachable(to, current, (commit) => belongs(commit)).pipe(
     Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
   );
   // Unreadable is not "no second root": the objects arrived with this push, so

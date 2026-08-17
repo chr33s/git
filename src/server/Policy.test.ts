@@ -328,7 +328,7 @@ describe("Policy", () => {
       assert.match(outcome.ok === false ? outcome.reason : "", /a fold will walk/);
     });
 
-    it("refuses a hub event signed against a head that predates a revocation", async () => {
+    it("refuses a hub event signed by a key this repository has revoked", async () => {
       // A hub event's trust head is written by its own signer, and the only
       // thing the fold holds it to is the floor its ancestors raise it to — so
       // a pull request that has just been opened has no floor at all. Name a
@@ -337,6 +337,12 @@ describe("Policy", () => {
       // revocation is unreachable from there, `former` supplies the
       // capabilities it had, and the approval satisfies a protected branch.
       // Revocation had no effect on new pull requests.
+      //
+      // The boundary answers what the events cannot. Not "does this head
+      // predate a revocation" — that catches the honest straggler too, and on
+      // an append-only ref that is a pull request they can never push again —
+      // but "is this signature from a key this repository has already
+      // revoked", which no honest client produces.
       const outcome = await scenario(
         Effect.gen(function* () {
           const where = yield* world(["repo.admin"]);
@@ -349,15 +355,15 @@ describe("Policy", () => {
             key: where.dev,
           });
           const before = yield* repository.resolve(`refs/hub/pr/${pr}`);
-          yield* PullRequest.comment({
+          yield* PullRequest.review({
             repo: where.genesis.repoId,
             pr,
-            body: "and another thing",
-            key: where.dev,
+            head: EMPTY_TREE_OID,
+            decision: "approve",
+            key: where.reviewer,
           });
           const after = yield* repository.resolve(`refs/hub/pr/${pr}`);
-          // Rewound, so the comment reads as new to the boundary — and it was
-          // signed against the head the log had before the revocation below.
+          // Rewound, so the approval reads as new to the boundary.
           yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: before! });
 
           yield* Log.issue(
@@ -371,31 +377,21 @@ describe("Policy", () => {
           );
           const trust = yield* projectTrust(where.genesis);
 
-          // The history already on the ref was judged when it arrived and is
-          // not re-judged; only what this push adds is.
-          const settled = yield* evaluate({
-            update: { name: `refs/hub/pr/${pr}`, value: before },
-            principal: where.principal,
-            genesis: where.genesis,
-            trust,
-            rules: OPEN,
-          });
-
-          const added = yield* evaluate({
-            update: { name: `refs/hub/pr/${pr}`, value: after },
-            principal: where.principal,
-            genesis: where.genesis,
-            trust,
-            rules: OPEN,
-          });
-
-          return { settled: settled.ok, added };
+          const judged = (value: Oid) =>
+            evaluate({
+              update: { name: `refs/hub/pr/${pr}`, value },
+              principal: where.principal,
+              genesis: where.genesis,
+              trust,
+              rules: OPEN,
+            });
+          return { settled: yield* judged(before!), added: yield* judged(after!) };
         }),
       );
 
-      assert.equal(outcome.settled, true, "what the ref already held is left alone");
+      assert.equal(outcome.settled.ok, true, "what the ref already held is left alone");
       assert.equal(outcome.added.ok, false);
-      assert.match(outcome.added.ok === false ? outcome.added.reason : "", /predates a revocation/);
+      assert.match(outcome.added.ok === false ? outcome.added.reason : "", /has been revoked/);
     });
 
     it("holds the trust log to a ceiling of its own", async () => {
@@ -467,6 +463,54 @@ describe("Policy", () => {
       );
       assert.equal(decision.ok, false);
       assert.match(decision.ok === false ? decision.reason : "", /second history/);
+    });
+
+    it("does not follow a hub commit into the source history", async () => {
+      // The graft walk had no `belongs` predicate, so a hub commit naming a
+      // *source* commit as a second parent turned one tiny push into a walk of
+      // the whole repository, synchronously, on the receive-pack path — and
+      // repeatably. The ceiling check does not catch it: that walk *is*
+      // bounded to hub commits, so it steps over the foreign parent and finds
+      // nothing to refuse.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          // An ordinary source commit — a real tree, so nothing about it looks
+          // like a hub join — named as a parent of a hub commit.
+          const blob = yield* repository.writeBlob(new TextEncoder().encode("source\n"));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "file.txt", oid: blob },
+          ]);
+          const source = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "source\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!, source],
+            message: "join\n",
+            author,
+          });
+          return yield* judge(where, { name: `refs/hub/pr/${pr}`, value: joined });
+        }),
+      );
+
+      // The source commit is not a hub commit, so the walk steps over it
+      // rather than reading everything behind it — and the push is allowed on
+      // its own merits, which is what makes this about cost and not about
+      // permission.
+      assert.equal(outcome.ok === false ? outcome.reason : "allowed", "allowed");
     });
 
     it("allows a join that keeps both heads it already had", async () => {

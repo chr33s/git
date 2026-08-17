@@ -14,7 +14,7 @@
  */
 import { Effect } from "effect";
 
-import type { ObjectNotFound, StorageFailure } from "./Error.ts";
+import { Invalid, type ObjectNotFound, type StorageFailure } from "./Error.ts";
 import { Repository } from "./Repository.ts";
 import type { Oid } from "./Store.ts";
 
@@ -40,6 +40,15 @@ export const reachable = Effect.fn("Dag.reachable")(function* (
    * repository into a walk meant to cover one pull request.
    */
   belongs?: (commit: Oid) => Effect.Effect<boolean, ObjectNotFound | StorageFailure, Repository>,
+  /**
+   * How many commits this walk may read before giving up.
+   *
+   * Checked as the walk runs rather than against what it produced. A caller
+   * that bounds the *result* has already paid for the whole history by the
+   * time it can refuse it — which on the receive-pack path is the cost the
+   * bound existed to refuse, taken anyway, once per push.
+   */
+  limit?: number,
 ) {
   const repository = yield* Repository;
 
@@ -49,6 +58,12 @@ export const reachable = Effect.fn("Dag.reachable")(function* (
     const oid = pending.pop()!;
     if (parents.has(oid) || oid === boundary) continue;
     if (belongs !== undefined && !(yield* belongs(oid))) continue;
+    if (limit !== undefined && parents.size >= limit) {
+      return yield* new Invalid({
+        field: "history",
+        reason: `this history reaches more than ${limit} commits`,
+      });
+    }
 
     const commit = yield* repository.readCommit(oid);
     parents.set(oid, commit.parents);

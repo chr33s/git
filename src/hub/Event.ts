@@ -548,7 +548,20 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   // here and nowhere else, so a commit with a parent from the source history
   // is not a longer event chain — it is an attempt to make every projection
   // walk the whole repository, with a quadratic ancestor map on top.
-  const parents = yield* Dag.reachable(head, null, (commit) => isHubCommit(commit));
+  // Bounded as the walk runs, not once it has finished: bounding the result
+  // means paying for the whole history before refusing it, which on the
+  // receive-pack path is the cost the ceiling existed to refuse.
+  const ceiling = yield* ceilingOf();
+  const parents = yield* Dag.reachable(head, null, (commit) => isHubCommit(commit), ceiling).pipe(
+    Effect.mapError((error) =>
+      error._tag === "Invalid"
+        ? new Invalid({
+            field: "pr",
+            reason: `pull request '${pr}' has more than ${ceiling} events and cannot be folded`,
+          })
+        : error,
+    ),
+  );
   // Bounded in *size* as well as in shape. Folding a pull request builds an
   // ancestor set per commit, which is quadratic, and how many commits a pull
   // request has is chosen by whoever may append to it — the lowest hub
@@ -557,13 +570,6 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
   // unbounded one is a push that never returns rather than a push that is
   // refused. The bound is far above any conversation: a pull request with
   // more events than this is not one a person is having.
-  const ceiling = yield* ceilingOf();
-  if (parents.size > ceiling) {
-    return yield* new Invalid({
-      field: "pr",
-      reason: `pull request '${pr}' has more than ${ceiling} events and cannot be folded`,
-    });
-  }
   const ordered = Dag.topological(parents);
 
   const events: Entry[] = [];
@@ -640,46 +646,6 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
 });
 
 /**
- * The trust heads the events a push is adding declare.
- *
- * Walked from the new value and stopped at the current one, so an ordinary
- * push — one event on the tip — reads one commit. The boundary asks this
- * because a hub event's trust head is written by its own signer, and the only
- * thing the *fold* holds it to is the floor its ancestors raise it to: a pull
- * request that has just been opened has no ancestors, and so no floor.
- */
-export const declaredHeads = Effect.fn("hub.Event.declaredHeads")(function* (
-  from: Oid,
-  boundary: Oid | null,
-) {
-  const parents = yield* Dag.reachable(from, boundary, (commit) => isHubCommit(commit));
-
-  const found = new Set<Oid>();
-  for (const oid of parents.keys()) {
-    if (!(yield* Record.carries(oid, RECORD))) continue;
-    // Unreadable is not a declaration. A redacted payload is gone by design,
-    // and a malformed one is refused by the fold on its own merits; neither is
-    // a head this may invent a claim about.
-    const record = yield* Record.read(oid, RECORD).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        Invalid: () => Effect.succeed(null),
-      }),
-    );
-    if (record === null) continue;
-    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-    // A bare oid, not a qualified one: `trustHead` names a commit in this
-    // repository's own trust log rather than a revision a payload is about.
-    const head = payload?.trustHead ?? null;
-    if (head === null || !/^[0-9a-f]{40}$/.test(head)) continue;
-    // SAFETY: the pattern above is exactly the forty lowercase hex characters
-    // the `Oid` brand names.
-    found.add(head as Oid);
-  }
-  return found;
-});
-
-/**
  * Whether a value stays inside the fold's ceiling.
  *
  * Asked by the policy boundary before a hub ref is allowed to move, so that a
@@ -689,8 +655,16 @@ export const declaredHeads = Effect.fn("hub.Event.declaredHeads")(function* (
  * every approval the protected branch behind it was counting on.
  */
 export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (head: Oid) {
-  const parents = yield* Dag.reachable(head, null, (commit) => isHubCommit(commit));
-  return parents.size <= (yield* ceilingOf());
+  const walked = yield* Dag.reachable(
+    head,
+    null,
+    (commit) => isHubCommit(commit),
+    yield* ceilingOf(),
+  ).pipe(
+    Effect.as(true),
+    Effect.catchTag("Invalid", () => Effect.succeed(false)),
+  );
+  return walked;
 });
 
 /**
@@ -699,7 +673,7 @@ export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (hea
  * An event carries `event.json`; a join carries an empty tree. Anything else
  * is a commit from somewhere that is not the hub, and the walk stops there.
  */
-const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
+export const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
   const repository = yield* Repository;
   const info = yield* repository
     .readCommit(commit)

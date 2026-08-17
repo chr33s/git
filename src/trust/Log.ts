@@ -213,7 +213,7 @@ export const join = Effect.fn("trust.Log.join")(function* (heads: ReadonlyArray<
  * make every authorization check walk the whole repository — the same trap
  * `hub/Event.ts` guards against.
  */
-const isTrustCommit = Effect.fn("trust.Log.isTrustCommit")(function* (commit: Oid) {
+export const isTrustCommit = Effect.fn("trust.Log.isTrustCommit")(function* (commit: Oid) {
   const repository = yield* Repository;
   const info = yield* repository
     .readCommit(commit)
@@ -271,8 +271,17 @@ const ceilingOf = Effect.fnUntraced(function* () {
 export const withinCeiling = Effect.fn("trust.Log.withinCeiling")(function* (head: Oid) {
   const repository = yield* Repository;
   const genesis = yield* repository.resolve(GENESIS_REF);
-  const parents = yield* Dag.reachable(head, genesis, (commit) => isTrustCommit(commit));
-  return parents.size <= (yield* ceilingOf());
+  // Bounded as the walk runs. Bounding the result means reading the whole log
+  // before refusing it, which is the cost the ceiling exists to refuse.
+  return yield* Dag.reachable(
+    head,
+    genesis,
+    (commit) => isTrustCommit(commit),
+    yield* ceilingOf(),
+  ).pipe(
+    Effect.as(true),
+    Effect.catchTag("Invalid", () => Effect.succeed(false)),
+  );
 });
 
 export const entries = Effect.fn("trust.Log.entries")(function* () {
