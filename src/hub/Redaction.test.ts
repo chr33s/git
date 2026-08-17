@@ -127,6 +127,57 @@ describe("hub redaction", () => {
     assert.equal(outcome.afterGc, false, "the repack must not carry the payload forward");
   });
 
+  it("lets a fetch plan the pull request whose payload was redacted", async () => {
+    // The tree naming a tombstoned payload survives — the hash chain depends
+    // on it — so a strict pack closure fails on the blob that is gone by
+    // design, and one `hub redact` made every fetch of `refs/hub/*` fail
+    // outright. `Repository.fetch` stays strict, which is what keeps an
+    // unexplained absence reading as corruption; what a tombstone covers is
+    // handed in, and `Protocol` is the caller that works the set out.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const { pr, target } = yield* withASecret(where);
+
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const head = yield* repository.resolve(Event.refOf(pr));
+        const wants = [head!];
+        // Recomputed from scratch, which is the case that used to come back
+        // empty: the id a tombstone named was read from the payload it
+        // deleted, so a projection rebuilt afterwards lost its own target.
+        const exclude = yield* Redaction.excluded();
+
+        const strict = yield* repository.fetch({ wants, haves: [] }).pipe(
+          Effect.as(true),
+          Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+        );
+
+        const full = yield* repository.fetch({ wants, haves: [], exclude });
+        // And the deepening path, which reaches the same trees by another walk.
+        const shallow = yield* repository.fetch({ wants, haves: [], depth: 1, exclude });
+        return {
+          excluded: exclude.size,
+          strict,
+          full: full.oids.length,
+          shallow: shallow.oids.length,
+        };
+      }),
+    );
+
+    assert.equal(outcome.excluded, 1, "a rebuilt projection must still find the tombstone");
+    assert.equal(outcome.strict, false, "the blob really is missing without the exclusion");
+    assert.ok(outcome.full > 0, "a full fetch must still produce a plan");
+    assert.ok(outcome.shallow > 0, "and so must a depth-limited one");
+  });
+
   it("excludes nothing in a repository that has no genesis", async () => {
     const excluded = await scenario(Redaction.excluded());
     assert.equal(excluded.size, 0);

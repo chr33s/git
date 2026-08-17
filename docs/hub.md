@@ -1035,10 +1035,20 @@ Redaction is therefore a first-class, signed, replicated operation:
 {
   "type": "event.redacted",
   "target": "0195...",
+  "targetCommit": "sha1:abc123...",
   "reason": "sensitive-content",
   "redactedAt": "2026-08-16T12:00:00Z"
 }
 ```
+
+Both fields are signed, and `targetCommit` is the one that resolves the target.
+An id alone stops resolving the moment the removal happens — the payload an id
+is read from is the payload the tombstone deletes — so a projection rebuilt
+afterwards would lose its own target and quietly stop excluding the blob from
+packs and collection, which is the removal undoing itself. A commit is stable
+across exactly the change the tombstone makes. `target` remains for display and
+for the operator naming an event they want gone; a name that two events answer
+to is refused before a tombstone is written.
 
 signed by a principal holding `hub.redact` (or `repo.admin`), appended to the same event DAG as any other event.
 

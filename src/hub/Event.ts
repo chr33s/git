@@ -212,6 +212,18 @@ export const CheckCompleted = Schema.Struct({
 export const EventRedacted = Schema.Struct({
   type: Schema.tag("event.redacted"),
   ...envelope,
+  /**
+   * The commit carrying the event being removed, hash-qualified.
+   *
+   * Named as well as `target`, and this is the field that resolves it. An id
+   * alone stops resolving the moment the removal happens: the payload it was
+   * read from is the payload that was deleted, so a projection rebuilt
+   * afterwards could no longer tell which commit the tombstone meant — and
+   * the blob quietly stopped being excluded from packs and collection, which
+   * is the removal undoing itself. A commit is stable across exactly the
+   * change the tombstone makes.
+   */
+  targetCommit: Schema.String,
   /** The event whose payload is to be removed. */
   target: Schema.String,
   reason: Schema.String,

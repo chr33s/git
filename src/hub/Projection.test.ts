@@ -794,6 +794,68 @@ describe("hub projection", () => {
   });
 
   describe("an event folded before the opening one", () => {
+    it("cannot re-enable self-approval by contesting the opening", async () => {
+      // `contested` is computed over *accepted* openings. Computed over the
+      // raw walk, an unsigned second `pr.opened` — pushable by anybody who may
+      // write the ref — left `author` null, and `approvals` can only exclude
+      // an author it knows: so one member could open a pull request for their
+      // own commit, contest their own opening, approve it, and clear
+      // `requiredApprovals` on a protected branch alone.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "mine",
+            base: "refs/heads/main",
+            head: REVISION,
+            key: where.reviewer,
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const trustHead = yield* repository.resolve(Log.LOG_REF);
+
+          // A second opening nobody signed at all.
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.opened",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            trustHead,
+            title: "noise",
+            description: "",
+            base: "refs/heads/main",
+            head: Event.qualify(REVISION),
+          });
+          const unsigned = yield* Record.write({
+            name: Event.RECORD,
+            payload: bytes,
+            signatures: [],
+            parents: [],
+            message: "pr.opened unsigned\n",
+          });
+          const joined = yield* Event.join(pr, [head!, unsigned]);
+          yield* repository.setRef({ name: ref, to: joined });
+
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+
+          const trust = yield* projectTrust(where.genesis);
+          return yield* project(where.genesis, trust, pr);
+        }),
+      );
+
+      assert.equal(approvals(outcome).length, 0, "self-approval must still count for nothing");
+    });
+
     it("cannot become the author by folding first", async () => {
       // Which `pr.opened` opens a pull request is decided by descent, not by
       // fold order: every honest event descends from the genuine opening, and

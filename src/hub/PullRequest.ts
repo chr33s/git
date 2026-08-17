@@ -343,7 +343,13 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
 
   const base = yield* context(input.repo, input.pr);
   const commit = yield* Event.issue(
-    { ...base, type: "event.redacted", target: input.target, reason: input.reason },
+    {
+      ...base,
+      type: "event.redacted",
+      target: input.target,
+      targetCommit: Event.qualify(targetCommit),
+      reason: input.reason,
+    },
     input.key,
   );
 

@@ -1220,10 +1220,17 @@ export const layer = Layer.effect(
         else boundary.delete(oid);
       }
 
-      const excluded = (yield* reachable(objects, input.haves, {
-        ignoreMissing: true,
-        boundary: clientShallow,
-      })).seen;
+      const excluded = new Set(
+        (yield* reachable(objects, input.haves, {
+          ignoreMissing: true,
+          boundary: clientShallow,
+        })).seen,
+      );
+      // The same absences the shallow path steps over. Dropping `exclude`
+      // here meant a `deepen`/`deepen-since`/`deepen-not` fetch that reached a
+      // redacted event's tree put the deleted blob into the plan, and the pack
+      // writer then failed on an object the tombstone accounts for.
+      for (const oid of input.exclude ?? []) excluded.add(oid);
 
       const loose =
         unwalkable.length === 0

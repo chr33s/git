@@ -107,6 +107,14 @@ export interface PullRequest {
    */
   readonly claims: ReadonlyMap<string, ReadonlyArray<Oid>>;
   /**
+   * Everybody who claimed to have opened this pull request.
+   *
+   * `author` alone is not enough to exclude self-approval: a contested opening
+   * deliberately establishes no author, and an approval from either claimant
+   * is still somebody approving their own proposal.
+   */
+  readonly openers: ReadonlySet<Fingerprint>;
+  /**
    * The commits whose payloads a valid tombstone reached.
    *
    * Commits rather than event ids, because an id is scoped to its author here
@@ -278,6 +286,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   // concurrent histories met, and `supersedes` would fall back to comparing
   // ids for events that are genuinely ordered.
   const ancestors = ancestorSets(parents, Dag.topological(parents));
+  const { ancestry, reaches: reachesTrust } = trustReach();
 
   /**
    * The opening event, and whether anything is competing to be it.
@@ -296,10 +305,49 @@ export const project = Effect.fn("hub.Projection.project")(function* (
    * attacker gains nothing — they still cannot close the pull request or free
    * the branch behind it — and a `hub.merge` holder can still settle it.
    */
-  const opening = (() => {
-    const candidates = events.flatMap((entry) =>
-      entry.payload?.type === "pr.opened" ? [entry.commit] : [],
-    );
+  /**
+   * Everybody who has claimed to have opened this pull request.
+   *
+   * Usually one. More than one means the opening is contested, and an
+   * approval from *any* claimant is still self-approval — so the exclusion
+   * cannot be keyed on the single `author` a contested opening declines to
+   * establish.
+   */
+  const openers = new Set<Fingerprint>();
+
+  const opening = yield* Effect.gen(function* () {
+    // Only openings that would actually be *accepted* compete. Computed over
+    // the raw walk, an unsigned second `pr.opened` — pushable by any
+    // `source.push` holder — contested the genuine one, and a contested
+    // opening establishes no author: which locked the real author out of
+    // their own pull request and, worse, re-enabled self-approval, since
+    // `approvals` can only exclude an author it knows.
+    const candidates: Oid[] = [];
+    for (const entry of events) {
+      if (entry.payload?.type !== "pr.opened") continue;
+      const payload = entry.payload;
+      if (payload.pr !== pr) continue;
+
+      const valid = yield* Event.validate(payload, genesis.repoId).pipe(
+        Effect.as(true),
+        Effect.catchTag("Invalid", () => Effect.succeed(false)),
+      );
+      if (!valid) continue;
+
+      const authorized = yield* Verify.authorize({
+        projection: trust,
+        bytes: entry.bytes,
+        signatures: entry.signatures,
+        capability: Event.capabilityFor(payload),
+        made: { at: new Date(payload.issuedAt), trustHead: trustHeadOf(payload.trustHead) },
+        seen: ancestry,
+      });
+      if (authorized.ok) {
+        candidates.push(entry.commit);
+        openers.add(authorized.principal.fingerprint);
+      }
+    }
+
     if (candidates.length <= 1) {
       return { commit: candidates[0] ?? null, contested: false } satisfies Opening;
     }
@@ -329,7 +377,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       (commit) => commit !== best && ancestors.get(commit)?.has(best) !== true,
     );
     return { commit: best, contested } satisfies Opening;
-  })();
+  });
 
   let title = "";
   let description = "";
@@ -364,7 +412,6 @@ export const project = Effect.fn("hub.Projection.project")(function* (
 
   /** The trust head each accepted event named, for the monotonicity check. */
   const heads = new Map<Oid, Oid>();
-  const { ancestry, reaches: reachesTrust } = trustReach();
 
   /**
    * The newest trust head any accepted ancestor of this commit named.
@@ -439,9 +486,15 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       continue;
     }
 
-    // Recorded only once the event counts, so a rejected one cannot raise the
-    // floor for everything after it.
-    if (declared !== null) heads.set(entry.commit, declared);
+    // Recorded only once the event counts, and only when the head it names is
+    // a commit this replica's trust log actually holds. A fabricated one
+    // passes its own floor check — it has no ancestors to be behind — and
+    // would then become the floor for everything after it, which nothing can
+    // reach: `Log.ancestry` of a commit nobody has is empty, so every later
+    // event is refused forever on a ref that only grows.
+    if (declared !== null && (yield* Log.contains(declared))) {
+      heads.set(entry.commit, declared);
+    }
 
     const signer = authorized.principal.fingerprint;
 
@@ -711,21 +764,24 @@ export const project = Effect.fn("hub.Projection.project")(function* (
       }
 
       case "event.redacted": {
-        const claimants = byId.get(payload.target) ?? [];
-        // Exactly one, or none: a target two authors claim is a target the
-        // tombstone does not identify, and guessing would hand whoever
-        // duplicated an id the power to erase the original.
-        if (claimants.length !== 1) {
+        // By commit, which is what the tombstone signs. Resolving the id
+        // instead worked exactly once: the payload an id is read from is the
+        // payload the tombstone deletes, so every later projection lost the
+        // target and stopped excluding its blob — the removal undoing itself
+        // the first time anything rebuilt the state.
+        const targetCommit = Event.unqualify(payload.targetCommit);
+        if (targetCommit === null || !parents.has(targetCommit)) {
           rejected.push({
             commit: entry.commit,
-            reason:
-              claimants.length === 0
-                ? `no event ${payload.target}`
-                : `ambiguous redaction target ${payload.target}`,
+            reason: `${payload.targetCommit} is not an event of this pull request`,
           });
           break;
         }
-        redacted.add(claimants[0]!);
+        if (targetCommit === entry.commit) {
+          rejected.push({ commit: entry.commit, reason: "a tombstone cannot remove itself" });
+          break;
+        }
+        redacted.add(targetCommit);
         break;
       }
     }
@@ -770,6 +826,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     })),
     checks: [...checks.values()],
     claims: byId,
+    openers,
     redacted,
     rejected,
     at,
@@ -795,8 +852,10 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
     if (review.stale || review.dismissed) continue;
     // Self-approval satisfies nothing. Without this, one member holding
     // `hub.approve` opened a pull request for their own commit, approved it,
-    // and cleared `requiredApprovals` on a protected branch alone.
-    if (pullRequest.author !== null && review.author === pullRequest.author) continue;
+    // and cleared `requiredApprovals` on a protected branch alone. Every
+    // claimed opener, not merely `author`: a contested opening establishes no
+    // author, and an approval from either claimant is still their own.
+    if (pullRequest.openers.has(review.author)) continue;
     const existing = latest.get(review.author);
     if (existing === undefined || existing.at <= review.at) latest.set(review.author, review);
   }

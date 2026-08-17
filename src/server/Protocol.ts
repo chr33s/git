@@ -37,6 +37,41 @@ const AGENT = "agent=chr33s-git/0";
 
 const corrupt = (reason: string) => new PackCorrupt({ reason });
 
+/**
+ * The objects a fetch needs, computed strictly and retried once.
+ *
+ * A redacted payload is absent by design while the tree naming it survives, so
+ * a strict closure fails the moment anything has been redacted — and computing
+ * "which absences a tombstone accounts for" up front would fold the trust log
+ * and walk every pull request on *every* fetch, including the overwhelming
+ * majority that never touch a hub ref at all.
+ *
+ * So the strict walk goes first and pays nothing, and only a walk that actually
+ * hits a missing object asks what the tombstones say. An absence no tombstone
+ * covers fails the retry too, which is the corruption it is.
+ */
+const planFor = (request: {
+  readonly wants: ReadonlyArray<Oid>;
+  readonly haves: ReadonlyArray<Oid>;
+  readonly clientShallow: ReadonlyArray<Oid>;
+  readonly depth: number | undefined;
+  readonly since: Date | undefined;
+  readonly notRefs: ReadonlyArray<string>;
+}) =>
+  Effect.gen(function* () {
+    const repository = yield* Repository;
+    // Only a *missing object* is worth a second look; a storage fault is not
+    // something tombstones explain, and retrying it would pay for a trust fold
+    // to fail the same way twice.
+    const plan = yield* repository
+      .fetch(request)
+      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+    if (plan !== null) return plan;
+
+    const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
+    return yield* repository.fetch({ ...request, exclude });
+  });
+
 /** A text pkt-line, the conventional trailing newline stripped. */
 const text = (payload: Uint8Array): string => {
   const decoded = decoder.decode(payload);
@@ -363,21 +398,7 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
 
     // `fetch` reads an undefined `depth` or `since` exactly as it reads their
     // absence, and an empty `notRefs` as no stops — the locals pass through.
-    // Redacted payloads are absent by design and their trees still name them,
-    // so a strict closure would fail every fetch of `refs/hub/*` the moment
-    // anything had been redacted. Cheap when nothing has: the set is computed
-    // by a walk that rules out a pull request carrying no tombstone before
-    // folding it, and answers an empty set for a repository with no genesis.
-    const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
-    const plan = yield* repository.fetch({
-      wants,
-      haves,
-      clientShallow,
-      depth,
-      since,
-      notRefs,
-      exclude,
-    });
+    const plan = yield* planFor({ wants, haves, clientShallow, depth, since, notRefs });
 
     /**
      * The boundary section comes before anything else, and only when the
@@ -607,21 +628,7 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
 
     // As in the v0 round: `fetch` treats undefined options and an empty
     // `notRefs` exactly like their absence, so the locals pass through.
-    // Redacted payloads are absent by design and their trees still name them,
-    // so a strict closure would fail every fetch of `refs/hub/*` the moment
-    // anything had been redacted. Cheap when nothing has: the set is computed
-    // by a walk that rules out a pull request carrying no tombstone before
-    // folding it, and answers an empty set for a repository with no genesis.
-    const exclude = yield* Redaction.excluded().pipe(Effect.orElseSucceed(() => new Set<Oid>()));
-    const plan = yield* repository.fetch({
-      wants,
-      haves,
-      clientShallow,
-      depth,
-      since,
-      notRefs,
-      exclude,
-    });
+    const plan = yield* planFor({ wants, haves, clientShallow, depth, since, notRefs });
 
     const prelude: Uint8Array[] = [...acks];
     if (deepening) {
