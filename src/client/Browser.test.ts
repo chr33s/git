@@ -12,9 +12,11 @@
  * bundle carries no `node:` imports at all — and the scenario ends with the
  * headline: a real smart-HTTP clone executed inside the browser.
  *
- * Skipped when Chromium is not available.
+ * Skipped when Chromium is not installed — but not when it is installed and
+ * fails to launch; see `hasChromium`.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -141,14 +143,33 @@ interface ScenarioResult {
   readonly clonedMessages: ReadonlyArray<string>;
 }
 
-/** Resolved once, at collection time, so the skip is a fact not a branch. */
-const hasChromium = await chromium
-  .launch()
-  .then(async (browser) => {
-    await browser.close();
-    return true;
-  })
-  .catch(() => false);
+/**
+ * Whether Chromium is *installed* — deliberately not whether it launches.
+ *
+ * Resolved once, at collection time, so the skip is a fact and not a branch.
+ * The presence of the executable is the question, because the two ways a
+ * browser can be unavailable deserve opposite answers: a machine that never
+ * downloaded it should skip, while a browser that is there and refuses to start
+ * is a result worth seeing.
+ *
+ * A trial `launch().catch(() => false)` could not tell them apart and answered
+ * "not available" to both. Playwright gives `launch()` a 30s timeout of its own,
+ * so on a machine loaded enough to exceed it this suite reported *skipped* and
+ * the run stayed green having quietly dropped it — the one probe in this
+ * repository that could lose coverage without saying so. It also cost a browser
+ * launch and teardown at import time, for an answer `existsSync` already had.
+ *
+ * A launch failure now reaches the test body, where it fails with Playwright's
+ * own diagnostics — which say to run `npx playwright install`, the thing the
+ * silent skip left the reader to work out.
+ *
+ * One asymmetry to know about: this checks the headed Chrome that
+ * `executablePath()` names, while `launch()` defaults to the headless shell
+ * beside it. `playwright install chromium` places both, so a partial install
+ * reads as "installed, will not launch" and fails — which is the outcome that
+ * partial install deserves.
+ */
+const hasChromium = existsSync(chromium.executablePath());
 
 describe.skipIf(!hasChromium)("Client in real Chromium", () => {
   it("runs OPFS stores and the derived client inside the browser", async () => {
