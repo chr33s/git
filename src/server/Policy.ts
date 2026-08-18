@@ -28,7 +28,7 @@
 import { Effect, Option, Schema } from "effect";
 
 import * as Dag from "../git/Dag.ts";
-import { Invalid } from "../git/Error.ts";
+import { Invalid, type StorageFailure } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid, RefUpdate } from "../git/Store.ts";
@@ -353,9 +353,15 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // Walked once and handed to every rule that asks "does the ref already
   // reach this?". Asked per candidate, it was an unbounded ancestry walk per
   // commit the push adds — twice over, since two rules ask.
-  const held = Refspec.isAppendOnly(update.name)
-    ? yield* alreadyHeld(update.name, current)
-    : new Set<Oid>();
+  //
+  // Cached rather than computed: the rules that read it sit behind the
+  // membership check and behind the refusals that need nothing from it, so
+  // walking here meant a `source.delete` holder could spend a whole trust-log
+  // walk per command on updates this refuses out of hand.
+  const nothing: ReadonlySet<Oid> = new Set();
+  const held = yield* Effect.cached(
+    Refspec.isAppendOnly(update.name) ? alreadyHeld(update.name, current) : Effect.succeed(nothing),
+  );
 
   // Identity is not a thing a push may edit. This is checked before anything
   // about membership, because a repository whose genesis can move has no
@@ -485,8 +491,8 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   update: RefUpdate,
   current: Oid | null,
   stored: Oid | null,
-  /** What the ref already reaches, walked once per push; see `alreadyHeld`. */
-  held: ReadonlySet<Oid>,
+  /** What the ref already reaches, walked at most once per push; see `alreadyHeld`. */
+  held: Effect.Effect<ReadonlySet<Oid>, StorageFailure, Repository>,
 ) {
   // The client's own old-oid wins when it declared one. A push that names the
   // value it believes the ref holds is asserting something, and replacing that
@@ -675,7 +681,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   to: Oid,
   current: Oid | null,
   trust: TrustProjection,
-  held: ReadonlySet<Oid>,
+  held: Effect.Effect<ReadonlySet<Oid>, StorageFailure, Repository>,
 ) {
   // Stopped at everything the ref already reaches, not at the tip alone. A
   // boundary of one oid only cuts the chain that runs through it, and a join
@@ -683,7 +689,8 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   // root and re-judged every event already on the ref. One old comment from a
   // member revoked since then made that pull request refuse its own joins for
   // good, on a namespace that cannot be rewound.
-  const parents = yield* Dag.reachable(to, current, (commit) => added(commit, held)).pipe(
+  const reached = yield* held;
+  const parents = yield* Dag.reachable(to, current, (commit) => added(commit, reached)).pipe(
     // An unreadable history is not a signature claim. It is refused, or passed
     // over, by the walks that own that question.
     Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
@@ -763,7 +770,7 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   name: string,
   current: Oid | null,
   to: Oid,
-  held: ReadonlySet<Oid>,
+  held: Effect.Effect<ReadonlySet<Oid>, StorageFailure, Repository>,
 ) {
   // Bounded to the namespace's own commits, like every other walk of them. An
   // unbounded one is what a hub commit naming a *source* commit as a second
@@ -788,9 +795,10 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   // there is nothing else for the first record to name.
   const repository = yield* Repository;
   const anchor = hub ? null : yield* repository.resolve(Refspec.TRUST_GENESIS);
+  const reached = yield* held;
   const parents = yield* Dag.reachable(to, current, (commit) =>
     Effect.gen(function* () {
-      if (held.has(commit)) return false;
+      if (reached.has(commit)) return false;
       return yield* belongs(commit);
     }),
   ).pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
@@ -819,7 +827,7 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
         attached = true;
         continue;
       }
-      if (held.has(parent)) {
+      if (reached.has(parent)) {
         attached = true;
         continue;
       }

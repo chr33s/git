@@ -618,7 +618,11 @@ takes as long as the history is deep, so a write that re-reads the destination
 compares it against itself and cannot fail — a push landing in that window is
 overwritten, and a write judged a fast-forward becomes one that drops commits
 without ever being charged for it. This is the same rule receive-pack already
-follows, where the evaluated old OID travels with the update to `apply`.
+follows, where the evaluated old OID travels with the update to `apply`. It
+is the ref's **own** value that travels, not the commit it resolves to: those
+differ for a symbolic destination, and the store compares the former — so
+handing over the resolved OID names a value nobody wrote and fails every such
+write as a conflict, for good.
 
 ### Verbs that move nothing
 

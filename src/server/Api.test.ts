@@ -124,7 +124,7 @@ describe("Api", () => {
             theirs: "refs/heads/topic",
             author: { ...alice, at: new Date(1_700_000_003_000) },
             into: "refs/heads/main",
-            expected: judged.tip,
+            expected: judged.swap,
             noFastForward: true,
           })
           .pipe(
@@ -145,6 +145,38 @@ describe("Api", () => {
     assert.equal(outcome.rewrites, false, "the merge was judged to drop nothing");
     assert.equal(outcome.merged, "RefConflict", "so the write that would has to fail the swap");
     assert.equal(outcome.main, outcome.landed, "and the push that landed first stands");
+  });
+
+  it("reports the swap as what the store compares, not as what the ref resolves to", async () => {
+    // Two readings of "what `into` is now", and they differ. Reachability
+    // wants the commit the destination resolves to; the compare-and-swap
+    // wants exactly what the store will compare against — the ref's own
+    // value, and nothing at all when the destination was spelled as an oid.
+    // Handed the resolved oid instead, a write to a symbolic destination
+    // names a value nobody wrote and fails as a conflict for good, and a
+    // write to an oid destination swaps against a ref that does not exist.
+    // `Policy.evaluate` splits the same two readings for the same reason.
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const first = yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "first",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+        return {
+          first,
+          named: (yield* Api.discards("refs/heads/main", ["refs/heads/main"])).swap,
+          spelled: (yield* Api.discards(first, [first])).swap,
+          absent: (yield* Api.discards("refs/heads/nowhere", ["refs/heads/main"])).swap,
+        };
+      }).pipe(Effect.provide(repository)),
+    );
+
+    assert.equal(outcome.named, outcome.first, "a ref swaps against its own value");
+    assert.equal(outcome.spelled, undefined, "an oid destination is no ref to swap against");
+    assert.equal(outcome.absent, null, "and a ref that does not exist swaps against nothing");
   });
 
   it("charges a rewrite only when the destination would lose commits", async () => {

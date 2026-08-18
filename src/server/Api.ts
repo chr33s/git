@@ -294,22 +294,33 @@ export const discards = Effect.fn("Api.discards")(function* (
   // *this* value, or a push landing in the window turns a write judged a
   // fast-forward into one that drops commits, which is `source.force-push`'s
   // to allow and not this caller's.
+  //
+  // Two readings of "what `into` is now", and they differ for a symbolic ref.
+  // Reachability wants the commit it resolves to; the compare-and-swap wants
+  // exactly what the store will compare against, which is the ref's own value
+  // — `null` for a symref, and nothing at all when the destination was spelled
+  // as an oid. Handing the resolved oid over as the swap names a value nobody
+  // wrote, so every write to a symbolic destination failed as a conflict for
+  // good. `Policy.evaluate` splits the same two readings for the same reason.
+  const swap = isOid(into)
+    ? undefined
+    : yield* repository.readRef(into).pipe(Effect.catchTag("StorageFailure", Effect.die));
   const tip = yield* at(into);
   // A destination that does not exist yet holds nothing a write could discard.
-  if (tip === null) return { rewrites: false, tip } as const;
+  if (tip === null) return { rewrites: false, swap } as const;
   for (const base of bases) {
     const oid = yield* at(base);
     if (oid === null) continue;
-    if (oid === tip) return { rewrites: false, tip } as const;
+    if (oid === tip) return { rewrites: false, swap } as const;
     const reaches = yield* repository.isAncestor(tip, oid).pipe(
       Effect.catchTags({
         ObjectNotFound: () => Effect.succeed(false),
         StorageFailure: Effect.die,
       }),
     );
-    if (reaches) return { rewrites: false, tip } as const;
+    if (reaches) return { rewrites: false, swap } as const;
   }
-  return { rewrites: true, tip } as const;
+  return { rewrites: true, swap } as const;
 });
 
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
@@ -1546,7 +1557,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // rewrite again for the one spelling git itself uses most.
           const judged = yield* discards(into, [payload.ours, payload.theirs]);
           yield* gateWrite(into, judged.rewrites);
-          request.expected = judged.tip;
+          request.expected = judged.swap;
         }
         const outcome = yield* repository
           .merge(request)
@@ -1570,7 +1581,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           request.into = refNameOf(payload.into);
           const judged = yield* discards(request.into, [payload.onto]);
           yield* gateWrite(request.into, judged.rewrites);
-          request.expected = judged.tip;
+          request.expected = judged.swap;
         }
         return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
@@ -1585,7 +1596,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           request.into = refNameOf(payload.into);
           const judged = yield* discards(request.into, [payload.onto]);
           yield* gateWrite(request.into, judged.rewrites);
-          request.expected = judged.tip;
+          request.expected = judged.swap;
         }
         return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
