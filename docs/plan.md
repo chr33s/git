@@ -102,34 +102,33 @@ causally latest producer.
 
 **Exit:** a second agent reads a first agent's session and continues it.
 
-## Phase 3 — wake and `session enable` (small, node-host only)
+## Phase 3 — wake — **the dispatcher has landed**
 
 ```text
-src/cli/wake.ts        `wake dispatch`: reads post-receive triples
-                       (or Hooks.postReceive results), walks
-                       old..new for refs/hub/**, matches rules from
-                       .chr33s/wake.json (ref pattern × event kind ×
-                       predicate), spawns the configured command,
-                       advances a local cursor ref; `wake catchup`
-                       reconciles cursor → tip on start
-src/host/Node.ts       provide a Hooks layer that invokes the
-                       dispatcher (replacing hooksNoop) when a
-                       wake config exists
-src/cli/session.ts     `enable`: writes Claude Code hooks
-                       (SessionStart → whoami + open;
-                       Stop → produce) into .claude/settings.json;
-                       one harness only
+done   src/cli/wake.ts   `chr33s-git wake <repo>`: walks each hub
+                         ref from its bookmark to the tip, decodes
+                         the typed signed events, matches local
+                         rules from wake.json, spawns them with the
+                         event in the environment, and advances.
+                         --dry-run says what would run
+next   src/host/Node.ts  call it from a real Hooks layer, so a push
+                         wakes without waiting for a timer
+later  src/cli/session.ts  `enable` — writes the harness hooks;
+                         waits on Phase 1's session verbs
 ```
 
-The Workers host needs nothing: `Webhooks.ts` already delivers signed
+Pull rather than push, which is what makes the hook optional: the same
+run serves a hook, a timer and a person, so a missed hook is a late wake
+rather than a lost one. Five end-to-end tests cover waking once and not
+twice, waking for what arrived since, replaying a failed batch, the dry
+run, and refusing unreadable rules.
+
+The Workers host needs nothing new: `Webhooks.ts` already delivers signed
 push events with retries — a wake consumer there is a webhook receiver,
-documented, not built.
+documented rather than built.
 
-Tests: dispatcher matches/ignores correctly; cursor survives restart;
-missed events replay on catchup; enable is idempotent.
-
-**Exit:** the loop closes — an agent is woken by a review on its PR,
-resumes its session, and answers.
+**Exit:** an agent is woken by a review on its pull request. Closing the
+loop back into a _session_ waits on Phase 1.
 
 ## Phase 4 — deferred layers (explicitly not v0)
 
