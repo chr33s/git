@@ -288,22 +288,28 @@ export const discards = Effect.fn("Api.discards")(function* (
       ? Effect.succeed(revision)
       : repository.resolve(revision).pipe(Effect.catchTag("StorageFailure", Effect.die));
 
+  // Reported as well as judged. The verdict is about the value `into` held at
+  // this instant, and the write happens after a merge or a replay that can
+  // take as long as the history is deep — so the write has to swap against
+  // *this* value, or a push landing in the window turns a write judged a
+  // fast-forward into one that drops commits, which is `source.force-push`'s
+  // to allow and not this caller's.
   const tip = yield* at(into);
   // A destination that does not exist yet holds nothing a write could discard.
-  if (tip === null) return false;
+  if (tip === null) return { rewrites: false, tip } as const;
   for (const base of bases) {
     const oid = yield* at(base);
     if (oid === null) continue;
-    if (oid === tip) return false;
+    if (oid === tip) return { rewrites: false, tip } as const;
     const reaches = yield* repository.isAncestor(tip, oid).pipe(
       Effect.catchTags({
         ObjectNotFound: () => Effect.succeed(false),
         StorageFailure: Effect.die,
       }),
     );
-    if (reaches) return false;
+    if (reaches) return { rewrites: false, tip } as const;
   }
-  return true;
+  return { rewrites: true, tip } as const;
 });
 
 const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
@@ -1168,6 +1174,7 @@ type MergeRequest = {
   message?: string;
   strategy?: MergeStrategy;
   into?: string;
+  expected?: Oid | null;
   noFastForward?: boolean;
 };
 
@@ -1176,12 +1183,14 @@ type CherryPickRequest = {
   onto: string;
   author?: Signature;
   into?: string;
+  expected?: Oid | null;
 };
 
 type RebaseRequest = {
   branch: string;
   onto: string;
   into?: string;
+  expected?: Oid | null;
 };
 
 type PatchOptions = {
@@ -1535,7 +1544,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // symrefs. Qualifying first answered `null` for `HEAD` — and a
           // `null` side is a side nothing matches, so the merge was charged a
           // rewrite again for the one spelling git itself uses most.
-          yield* gateWrite(into, yield* discards(into, [payload.ours, payload.theirs]));
+          const judged = yield* discards(into, [payload.ours, payload.theirs]);
+          yield* gateWrite(into, judged.rewrites);
+          request.expected = judged.tip;
         }
         const outcome = yield* repository
           .merge(request)
@@ -1557,7 +1568,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // contributor set a branch they were creating.
         if (payload.into !== undefined) {
           request.into = refNameOf(payload.into);
-          yield* gateWrite(request.into, yield* discards(request.into, [payload.onto]));
+          const judged = yield* discards(request.into, [payload.onto]);
+          yield* gateWrite(request.into, judged.rewrites);
+          request.expected = judged.tip;
         }
         return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),
@@ -1570,7 +1583,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // As `cherry-pick` above.
         if (payload.into !== undefined) {
           request.into = refNameOf(payload.into);
-          yield* gateWrite(request.into, yield* discards(request.into, [payload.onto]));
+          const judged = yield* discards(request.into, [payload.onto]);
+          yield* gateWrite(request.into, judged.rewrites);
+          request.expected = judged.tip;
         }
         return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),

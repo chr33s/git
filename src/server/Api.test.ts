@@ -79,6 +79,74 @@ const alice = {
  * reported as a `Cause` with its fiber trace.
  */
 describe("Api", () => {
+  it("swaps against the value the rewrite charge was judged on", async () => {
+    // The charge is decided from a snapshot of `into`, and the write happens
+    // after a merge or a replay that takes as long as the history is deep.
+    // Read again at write time, the swap compared the ref's value against
+    // itself and could not fail — so a push landing in that window was
+    // silently overwritten, and a write judged a fast-forward became one that
+    // drops commits, which is `source.force-push`'s to allow.
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const first = yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "first",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+        yield* git.setRef({ name: "refs/heads/topic", to: first });
+        const ahead = yield* git.commit({
+          branch: "refs/heads/topic",
+          tree: EMPTY_TREE_OID,
+          message: "ahead",
+          author: { ...alice, at: new Date(1_700_000_001_000) },
+        });
+
+        // Judged here: `main` is at `first`, and merging `topic` into it drops
+        // nothing.
+        const judged = yield* Api.discards("refs/heads/main", [
+          "refs/heads/main",
+          "refs/heads/topic",
+        ]);
+
+        // And now somebody else's push lands on `main`.
+        const landed = yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "landed",
+          author: { ...alice, at: new Date(1_700_000_002_000) },
+        });
+
+        const merged = yield* git
+          .merge({
+            ours: "refs/heads/main",
+            theirs: "refs/heads/topic",
+            author: { ...alice, at: new Date(1_700_000_003_000) },
+            into: "refs/heads/main",
+            expected: judged.tip,
+            noFastForward: true,
+          })
+          .pipe(
+            Effect.as(null),
+            Effect.catchTag("RefConflict", (error) => Effect.succeed(error._tag)),
+          );
+
+        return {
+          rewrites: judged.rewrites,
+          merged,
+          main: yield* git.resolve("refs/heads/main"),
+          landed,
+          ahead,
+        };
+      }).pipe(Effect.provide(repository)),
+    );
+
+    assert.equal(outcome.rewrites, false, "the merge was judged to drop nothing");
+    assert.equal(outcome.merged, "RefConflict", "so the write that would has to fail the swap");
+    assert.equal(outcome.main, outcome.landed, "and the push that landed first stands");
+  });
+
   it("charges a rewrite only when the destination would lose commits", async () => {
     // The charge was "does `into` exist", so `{onto: "main", into: "main"}` —
     // an ordinary fast-forward — was refused to a member holding only
@@ -113,11 +181,12 @@ describe("Api", () => {
         void second;
 
         return {
-          onto: yield* Api.discards("refs/heads/main", ["refs/heads/main"]),
-          behind: yield* Api.discards("refs/heads/behind", ["refs/heads/main"]),
-          fresh: yield* Api.discards("refs/heads/absent", ["refs/heads/main"]),
-          side: yield* Api.discards("refs/heads/behind", ["refs/heads/apart", "refs/heads/main"]),
-          apart: yield* Api.discards("refs/heads/apart", ["refs/heads/main"]),
+          onto: (yield* Api.discards("refs/heads/main", ["refs/heads/main"])).rewrites,
+          behind: (yield* Api.discards("refs/heads/behind", ["refs/heads/main"])).rewrites,
+          fresh: (yield* Api.discards("refs/heads/absent", ["refs/heads/main"])).rewrites,
+          side: (yield* Api.discards("refs/heads/behind", ["refs/heads/apart", "refs/heads/main"]))
+            .rewrites,
+          apart: (yield* Api.discards("refs/heads/apart", ["refs/heads/main"])).rewrites,
         };
       }).pipe(Effect.provide(repository)),
     );

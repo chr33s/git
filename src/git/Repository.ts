@@ -456,6 +456,15 @@ export class Repository extends Context.Service<
       readonly strategy?: MergeStrategy;
       /** The ref to move on success; absent computes the merge and stops. */
       readonly into?: string;
+      /**
+       * What `into` held when the *caller* judged this write, if it judged one.
+       *
+       * Read at write time instead, the swap compares the ref's value against
+       * itself and cannot fail — so a push landing while the merge was being
+       * computed was silently overwritten, and a write the boundary had judged
+       * a fast-forward became one that drops commits.
+       */
+      readonly expected?: Oid | null;
       /** A fast-forward is the default when history allows one. */
       readonly noFastForward?: boolean;
     }) => Effect.Effect<MergeOutcome, RefConflict | ObjectNotFound | Invalid | StorageFailure>;
@@ -1609,7 +1618,14 @@ export const layer = Layer.effect(
         const settled = (kind: MergeOutcome["kind"], commit: Oid, tree: Oid, base: Oid | null) =>
           Effect.gen(function* () {
             if (input.into !== undefined && kind !== "up-to-date") {
-              const expected = isOid(input.into) ? undefined : yield* refs.read(input.into);
+              // The caller's snapshot wins when it took one; see `expected`.
+              // The caller's snapshot wins when it took one; see `expected`.
+              const expected =
+                input.expected !== undefined
+                  ? input.expected
+                  : isOid(input.into)
+                    ? undefined
+                    : yield* refs.read(input.into);
               const update: RefUpdateDraft = {
                 name: input.into,
                 value: commit,

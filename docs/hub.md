@@ -612,7 +612,13 @@ destination either of those already reaches is one the write contains. Asked as
 "does the destination exist", an ordinary fast-forward is charged
 `source.force-push`; asked by comparing tips, a destination a side reaches
 without being it is charged the same way. Both refuse work a `source.push`
-holder is entitled to do.
+holder is entitled to do. And the value the charge was judged on MUST be
+carried into the write as its compare-and-swap: the merge or replay in between
+takes as long as the history is deep, so a write that re-reads the destination
+compares it against itself and cannot fail — a push landing in that window is
+overwritten, and a write judged a fast-forward becomes one that drops commits
+without ever being charged for it. This is the same rule receive-pack already
+follows, where the evaluated old OID travels with the update to `apply`.
 
 ### Verbs that move nothing
 
