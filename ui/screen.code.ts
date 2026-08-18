@@ -16,14 +16,16 @@
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 
+import type { MenuSelectDetail } from "@chr33s/base-wc/src/menu";
 import { FileTree, type GitStatusEntry } from "@pierre/trees";
 import type { File as DiffsFile } from "@pierre/diffs";
 
-import { ApiError, type GitApi } from "./api.ts";
+import { ApiError, describe, type GitApi, type Unavailable } from "./api.ts";
 import { GitPlusElement } from "./base.ts";
 import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
 import * as theme from "./theme.ts";
+import { ago, initials } from "./time.ts";
 
 /** The design's explorer, used when the server is unreachable. */
 const FALLBACK_PATHS: readonly string[] = [
@@ -81,15 +83,15 @@ opening a Change Request.
 /**
  * The tip commit, as the commit bar shows it.
  *
- * `author` is optional because the JSON API does not carry one: `/log/:oid`
- * answers `{ oid, message }` and `/commit/:oid` adds only parents and tree. The
- * bar omits the name rather than printing a placeholder that looks like data.
+ * Author and age come from the raw commit header via `api.commitDetail` — no
+ * JSON endpoint carries a timestamp, so that is the only route to one.
  */
 interface HeadCommit {
   readonly sha: string;
   readonly message: string;
-  readonly author?: string;
-  readonly avatar?: string;
+  readonly author: string;
+  readonly avatar: string;
+  readonly when: string;
 }
 
 @customElement("gp-code")
@@ -103,6 +105,8 @@ export class GpCode extends GitPlusElement {
   @state() private accessor content: string | null = null;
   @state() private accessor head: HeadCommit | null = null;
   @state() private accessor offline = false;
+  /** Why the fallback is showing, in the reader\'s terms. */
+  @state() private accessor reason = "";
   @state() private accessor loading = true;
 
   #tree: FileTree | null = null;
@@ -149,21 +153,59 @@ export class GpCode extends GitPlusElement {
       const files = await api.files(this.ref);
       this.#paths = files.map((file) => file.path);
 
-      const tip = refs.find((ref) => ref.name === `refs/heads/${this.ref}`);
-      if (tip !== undefined) {
-        const commits = await api.log(tip.oid);
-        const latest = commits[0];
-        if (latest !== undefined) {
-          const subject = latest.message.split("\n", 1)[0] ?? latest.message;
-          this.head = { sha: latest.oid.slice(0, 7), message: subject };
-        }
-      }
-
+      await this.#loadHead(api);
       this.offline = false;
       await this.#openDefault(api);
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
-      this.#useFallback();
+      this.#useFallback(error);
+    } finally {
+      this.loading = false;
+      this.#mountTree();
+    }
+  }
+
+  /** The tip of the current ref, with the author and age from its header. */
+  async #loadHead(api: GitApi): Promise<void> {
+    const refs = await api.refs();
+    const tip = refs.find((ref) => ref.name === `refs/heads/${this.ref}`);
+    if (tip === undefined) {
+      this.head = null;
+      return;
+    }
+    const commit = await api.commitDetail(tip.oid);
+    this.head = {
+      sha: commit.oid.slice(0, 7),
+      message: commit.subject,
+      author: commit.author,
+      avatar: initials(commit.author),
+      when: ago(commit.at),
+    };
+  }
+
+  /**
+   * Switch the ref the whole screen is showing.
+   *
+   * The explorer, the file view and the commit bar all read one ref, so this
+   * refetches the lot rather than trying to patch each in place.
+   */
+  async #switchTo(ref: string): Promise<void> {
+    const api = this.api;
+    if (api === null || ref === this.ref) return;
+    this.ref = ref;
+    this.loading = true;
+    try {
+      const files = await api.files(ref);
+      this.#paths = files.map((file) => file.path);
+      await this.#loadHead(api);
+      this.selected = null;
+      this.content = null;
+      this.#viewer = null;
+      await this.#openDefault(api);
+      this.offline = false;
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.#useFallback(error);
     } finally {
       this.loading = false;
       this.#mountTree();
@@ -178,8 +220,9 @@ export class GpCode extends GitPlusElement {
     this.content = await api.file(this.ref, readme);
   }
 
-  #useFallback(): void {
+  #useFallback(error?: Unavailable): void {
     this.offline = true;
+    this.reason = error === undefined ? "no API client was provided" : describe(error);
     this.#paths = FALLBACK_PATHS;
     this.selected = "README.md";
     this.content = FALLBACK_README;
@@ -188,6 +231,7 @@ export class GpCode extends GitPlusElement {
       message: "merge CR-18: update pipeline config",
       author: "rbaek",
       avatar: "RB",
+      when: "2h ago",
     };
   }
 
@@ -293,9 +337,7 @@ export class GpCode extends GitPlusElement {
             <span class="gp-pill-outline">Public</span>
           </div>
           <div class="gp-repo-actions">
-            <button class="gp-branch-trigger" type="button">
-              ${icons.branch()} ${this.ref} ${icons.chevronDown()}
-            </button>
+            ${this.#branchMenu()}
             <button class="gp-btn-primary" type="button">Clone</button>
           </div>
         </header>
@@ -304,7 +346,7 @@ export class GpCode extends GitPlusElement {
           ${
             this.offline
               ? html`<p class="gp-notice">
-                  Showing the design's sample repository — the git+ API did not answer.
+                  Showing the design's sample repository — ${this.reason}.
                 </p>`
               : ""
           }
@@ -333,6 +375,43 @@ export class GpCode extends GitPlusElement {
     `;
   }
 
+  /** base-wc types its own `menu-select` detail, so nothing here is asserted. */
+  #onBranchSelect = (event: CustomEvent<MenuSelectDetail>): void => {
+    void this.#switchTo(event.detail.value);
+  };
+
+  /**
+   * The branch picker, over the real ref list.
+   *
+   * `ui-menu` from base-wc owns the popover, keyboard handling and dismissal;
+   * `menu-select` carries the chosen value. With one branch there is nothing to
+   * pick, so it renders as the plain button the design draws.
+   */
+  #branchMenu(): TemplateResult {
+    const trigger = html`${icons.branch()} ${this.ref} ${icons.chevronDown()}`;
+    if (this.branches.length < 2) {
+      return html`<button class="gp-branch-trigger" type="button" disabled>${trigger}</button>`;
+    }
+    return html`
+      <ui-menu class="gp-branch-menu" @menu-select=${this.#onBranchSelect}>
+        <button class="gp-branch-trigger" type="button" data-menu-trigger>${trigger}</button>
+        <ui-menu-popup class="gp-menu-popup">
+          ${this.branches.map(
+            (branch) => html`
+              <ui-menu-item
+                class="gp-menu-item"
+                value=${branch}
+                ?data-current=${branch === this.ref}
+              >
+                ${icons.branch(12)} ${branch}
+              </ui-menu-item>
+            `,
+          )}
+        </ui-menu-popup>
+      </ui-menu>
+    `;
+  }
+
   #commitBar(head: HeadCommit): TemplateResult {
     return html`
       <div class="gp-commit-bar">
@@ -342,8 +421,9 @@ export class GpCode extends GitPlusElement {
             ? ""
             : html`<span class="gp-commit-author">${head.author}</span>`
         }
-        <span>${head.message}</span>
+        <span class="gp-commit-subject">${head.message}</span>
         <span class="gp-commit-sha">${head.sha}</span>
+        <span>${head.when}</span>
       </div>
     `;
   }

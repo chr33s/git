@@ -19,7 +19,7 @@ import { customElement, property, state } from "lit/decorators.js";
 
 import type { FileDiff } from "@pierre/diffs";
 
-import { ApiError, type DiffFile, type GitApi } from "./api.ts";
+import { ApiError, describe, type DiffFile, type GitApi } from "./api.ts";
 import { GitPlusElement, navigate } from "./base.ts";
 import { byId } from "./fixtures.ts";
 import { diffs } from "./highlight.ts";
@@ -48,6 +48,7 @@ export class GpDetail extends GitPlusElement {
   @state() private accessor live: readonly LoadedDiff[] | null = null;
   @state() private accessor diffPending = false;
   @state() private accessor diffOffline = false;
+  @state() private accessor diffReason = "";
 
   #renderers = new Map<string, FileDiff>();
 
@@ -77,6 +78,7 @@ export class GpDetail extends GitPlusElement {
     const task = this.#task;
     if (api === null || !isChangeRequest(task)) {
       this.diffOffline = true;
+      this.diffReason = `${task.id} names refs that are not in this repository`;
       return;
     }
     this.diffPending = true;
@@ -98,6 +100,7 @@ export class GpDetail extends GitPlusElement {
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
       this.diffOffline = true;
+      this.diffReason = describe(error);
     } finally {
       this.diffPending = false;
     }
@@ -287,10 +290,7 @@ export class GpDetail extends GitPlusElement {
     return html`
       ${
         this.diffOffline
-          ? html`<p class="gp-notice">
-              Showing the design's sample diff — <code>${cr.sourceRef}</code> is not a ref in this
-              repository.
-            </p>`
+          ? html`<p class="gp-notice">Showing the design's sample diff — ${this.diffReason}.</p>`
           : ""
       }
       <div class="gp-panel-card">

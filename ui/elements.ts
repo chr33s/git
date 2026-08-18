@@ -13,6 +13,7 @@
  * each one self-registers when it is evaluated. `REGISTERED` is exported and
  * read by `main.ts` so nothing here can be shaken out either.
  */
+import { UIMenu, UIMenuItem, UIMenuPopup } from "@chr33s/base-wc/src/menu";
 import { UISearchField } from "@chr33s/base-wc/src/search-field";
 import { UISwitch } from "@chr33s/base-wc/src/switch";
 import { UITabList, UITabs } from "@chr33s/base-wc/src/tabs";
@@ -20,6 +21,9 @@ import { UIToggle, UIToggleGroup } from "@chr33s/base-wc/src/toggle";
 
 /** Every custom element constructor the templates rely on. */
 export const REGISTERED: readonly CustomElementConstructor[] = [
+  UIMenu,
+  UIMenuItem,
+  UIMenuPopup,
   UISearchField,
   UISwitch,
   UITabList,

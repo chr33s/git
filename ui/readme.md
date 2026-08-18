@@ -50,7 +50,7 @@ declared in `src/server/Api.ts`:
 | Detail | `POST /:repo/diff`    | Which files a Change Request touches |
 | Detail | `GET /:repo/file`     | Both sides of each changed file      |
 
-**Tasks and Change Requests are fixtures.** The git-native hub
+**Tasks and Change Requests are still fixtures.** The git-native hub
 (`src/hub/PullRequest.ts`, `src/hub/Projection.ts`) already models pull
 requests, reviews, comments and checks as signed events in `refs/hub/*`, but it
 has no HTTP surface yet — `Api.ts` exposes git itself and nothing else. Until it
@@ -74,6 +74,19 @@ both this page and `/:repo/…`.
 
 ## Working on it
 
+The UI and the API are two processes. `ui:dev` starts the first and proxies to
+the second; it does not start a server for you, and says so at startup if
+nothing is listening:
+
+```bash
+GIT_ROOT=/path/to/repos PORT=8787 node src/host/Node.ts   # terminal 1
+npm run ui:dev                                            # terminal 2
+```
+
+Without terminal 1 the UI still loads — every screen falls back to the design's
+fixtures and each notice names the reason. That is a working UI showing sample
+data, not a broken one.
+
 ```bash
 npm run ui:dev              # watch and serve on :8000 — the one to reach for
 npm run ui:build            # bundle to dist/ui
@@ -85,6 +98,18 @@ node ui/build.ts --debug    # unminified, for reading a stack trace
 
 `--serve` and `--watch` both stay in the foreground and rebuild on change; that
 is the process doing its job, not hanging. Only `--serve` puts a page at a URL.
+
+`--serve` fronts the bundle with a proxy: anything the bundle does not have is
+forwarded to the API, so the page and `/:repo/...` share an origin. That matters
+because a browser blocks the cross-origin alternative outright, and the UI would
+quietly show its fixtures instead. Point it anywhere with `GIT_API`:
+
+```bash
+GIT_API=http://elsewhere:9000 npm run ui:dev
+```
+
+Deployed, no proxy is involved: the Worker serves both the page and the API, and
+`gp-api-base` stays empty.
 
 `verify.ts` runs three suites in Chromium: every screen mounts in both palettes
 with nothing thrown; the behaviours from the design conversation still work

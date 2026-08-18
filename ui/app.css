@@ -394,8 +394,56 @@ gp-settings {
   font-family: inherit;
 }
 
-.gp-branch-trigger:hover {
+.gp-branch-trigger:hover:not(:disabled) {
   border-color: var(--gp-border-hover);
+}
+
+/* One branch means nothing to pick; the design's button, minus the affordance. */
+.gp-branch-trigger:disabled {
+  cursor: default;
+}
+
+.gp-branch-menu {
+  display: contents;
+}
+
+/* base-wc puts the popup in the top layer via the Popover API, so it escapes
+   the header's overflow; position and look are ours. */
+.gp-menu-popup {
+  position: absolute;
+  margin: 0;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 5px;
+  background: var(--gp-surface);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.16);
+  z-index: 40;
+}
+
+.gp-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--gp-radius-sm);
+  font-size: 13px;
+  font-family: var(--gp-mono);
+  color: var(--gp-fg-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.gp-menu-item[data-highlighted],
+.gp-menu-item:hover {
+  background: var(--gp-surface-hover);
+  color: var(--gp-fg);
+}
+
+.gp-menu-item[data-current] {
+  color: var(--gp-accent);
 }
 
 /* -------------------------------------------------------------- primitives */
@@ -697,8 +745,17 @@ gp-settings {
   font-weight: 500;
 }
 
+/* The subject takes the slack so a long message truncates rather than pushing
+   the oid and age off the end of the bar. */
+.gp-commit-subject {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .gp-commit-sha {
-  margin-left: auto;
   font-family: var(--gp-mono);
   font-size: 12px;
 }
@@ -916,6 +973,33 @@ gp-settings {
   font-size: 11.5px;
   color: var(--gp-fg-faint);
   margin-top: 2px;
+}
+
+/*
+ * A commit is a point in time, so its card gets one day column — about 90px.
+ * The design's single-line ellipsis was written for bars spanning a week and
+ * truncates a commit subject to nothing useful, so these wrap instead.
+ */
+.gp-cal-event[data-point] {
+  padding: 7px 9px;
+}
+
+.gp-cal-event[data-point] .gp-cal-event-title {
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.gp-cal-event[data-point] .gp-cal-event-meta {
+  font-family: var(--gp-mono);
+  font-size: 10.5px;
+  white-space: normal;
+  margin-top: 4px;
 }
 
 /* The epic gets the accent-tinted treatment from the design. */
@@ -1509,6 +1593,11 @@ gp-settings {
   color: var(--gp-fg-faint);
   font-weight: 600;
   margin-bottom: 6px;
+}
+
+.gp-field-note {
+  font-weight: 400;
+  color: var(--gp-fg-faint);
 }
 
 .gp-field-value {
