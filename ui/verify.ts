@@ -309,6 +309,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             capabilities: [],
             expiresAt: null,
             trust: null,
+            budget: null,
             branches: {},
           });
         }
@@ -508,6 +509,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           return json(Contract.RemoteList, {
             remotes: stubRemotes.map((remote) => ({
               ...remote,
+              has_key: false,
               sync: null,
               created_at: new Date().toISOString(),
             })),
@@ -523,6 +525,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           stubRemotes.push(remote);
           return json(Contract.RemoteWire, {
             ...remote,
+            has_key: false,
             sync: null,
             created_at: new Date().toISOString(),
           });
