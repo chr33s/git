@@ -56,6 +56,35 @@ describe("what a standing instruction carries", () => {
     ]);
   });
 
+  it("never carries a session ref by default, and carries it when named", () => {
+    // Sessions hold the prompts an agent was given, which is the most
+    // leak-prone thing this repository stores. "Everything" configured once —
+    // a mirror, a backup, a fork — would put them somewhere nobody chose to
+    // put them, and a forge that knows nothing of hub refs would then serve
+    // them to whoever can read that repository.
+    const withSession = [
+      ...results,
+      {
+        ref: "refs/hub/session/0198f2aa-71c4-7d2e-9a3b-4c5d6e7f8a9b",
+        from: null,
+        to: EMPTY_TREE_OID,
+        ok: true,
+      },
+    ] as const;
+
+    assert.deepEqual(
+      named(covered(remote({ mode: "mirror", refs: [] }), withSession)),
+      ["refs/heads/main", "refs/heads/topic", "refs/tags/v1"],
+      "a mirror of everything is still not a mirror of the prompts",
+    );
+
+    // Named, it goes: that is what configuring a provenance remote *is*.
+    assert.deepEqual(
+      named(covered(remote({ mode: "push", refs: ["refs/hub/session/*"] }), withSession)),
+      ["refs/hub/session/0198f2aa-71c4-7d2e-9a3b-4c5d6e7f8a9b"],
+    );
+  });
+
   it("takes only what the patterns name, and only what the push applied", () => {
     assert.deepEqual(named(covered(remote({ mode: "mirror", refs: ["refs/heads/*"] }), results)), [
       "refs/heads/main",

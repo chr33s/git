@@ -362,6 +362,32 @@ describe("cli session", () => {
     assert.equal(stored.trim(), memory.trim());
   });
 
+  it("refuses a prompt that carries a credential, and not one that mentions an oid", async () => {
+    // The scan is over what somebody typed, not over the record. A RepoID is
+    // base64 of a digest and a trust head is forty hex characters, so a scan
+    // of the envelope refused every session on every hub-enabled repository —
+    // which is how a scanner teaches an operator to turn it off.
+    const ordinary = await openSession(
+      "the fold at 90c7f2e1b4a8d3f5c6e7a0b1c2d3e4f5a6b7c8d9 walks refs/hub/pr/*",
+    );
+    assert.match(ordinary, /^[0-9a-f-]{36}$/);
+
+    const refused = await failing([
+      "session",
+      "open",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--prompt",
+      "deploy with ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+      "project",
+    ]);
+    assert.match(refused, /provider token/);
+    // And the refusal does not reprint what it refused.
+    assert.ok(!refused.includes("VwXyZ0123456789"), refused);
+  });
+
   it("refuses to record a session against a repository that has no identity", async () => {
     await cli(["init", "--root", root, "plain"]);
     const refused = await failing([

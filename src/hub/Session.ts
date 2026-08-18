@@ -29,6 +29,7 @@ import { Invalid } from "../git/Error.ts";
 import * as Dag from "../git/Dag.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Record from "../trust/Record.ts";
+import * as Secrets from "./Secrets.ts";
 import * as Event from "./Event.ts";
 
 /** Where one session's events live. */
@@ -296,6 +297,28 @@ export const produced = Effect.fn("hub.Session.produced")(function* (input: {
   );
 });
 
+/**
+ * The parts of a record a person or an agent wrote.
+ *
+ * Object ids, ref names and the envelope are this repository talking about
+ * itself; a secret does not arrive that way, and treating them as suspect only
+ * makes the scan wrong.
+ */
+const prose = (payload: SessionPayload): string => {
+  switch (payload.type) {
+    case "session.opened":
+      return [payload.prompt, payload.agent.kind, payload.agent.model, payload.agent.harness].join(
+        "\n",
+      );
+    case "session.produced":
+      return payload.note ?? "";
+    case "decision.requested":
+      return [payload.question, ...payload.options].join("\n");
+    case "decision.resolved":
+      return [payload.chose, payload.note ?? ""].join("\n");
+  }
+};
+
 /** Sign one session event and append it to its session's ref. */
 export const issue = Effect.fn("hub.Session.issue")(function* (
   payload: SessionPayload,
@@ -316,6 +339,25 @@ export const issue = Effect.fn("hub.Session.issue")(function* (
     return yield* new Invalid({
       field: "session",
       reason: `a session record may not exceed ${MAX_PAYLOAD} bytes; this one is ${bytes.length}`,
+    });
+  }
+
+  // Scanned before it is written, not after it has replicated. Redaction is
+  // the way back and it is recovery rather than hygiene: a tombstone reaches
+  // every replica that syncs, but only once the bytes are already there.
+  //
+  // What is scanned is what somebody *typed*, not the whole record. A
+  // repository's own identifiers are high-entropy by construction — a RepoID
+  // is base64 of a digest, a trust head is forty hex characters — and scanning
+  // the envelope refused every session on every hub-enabled repository, which
+  // is how a scanner teaches an operator to turn it off.
+  const leaked = Secrets.scan(prose(payload));
+  if (leaked.length > 0) {
+    return yield* new Invalid({
+      field: "session",
+      reason: `this record looks like it carries ${leaked
+        .map((finding) => `a ${finding.kind} (${finding.hint})`)
+        .join(", ")}; a session record is a distillation, not a transcript`,
     });
   }
 

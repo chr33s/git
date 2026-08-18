@@ -710,8 +710,9 @@ sessions only over protocol v2 prefix fetch.
 
 #### A separate provenance remote
 
-Deployments SHOULD consider routing session refs to a different remote than
-source — hub §25's per-remote sync configuration already expresses it: a
+Automatic replication never carries a session ref under a
+mirror-everything default — that rule is **built** — and deployments SHOULD
+route session refs to a different remote than source — hub §25's per-remote sync configuration already expresses it: a
 remote whose `sync.refs` names `refs/hub/session/*` and nothing else,
 reached with its own narrowly-scoped credential. The hazard this contains
 is mirroring: `git push --mirror` to a hub-unaware forge is the easiest way
@@ -737,14 +738,13 @@ a tombstone for an event whose payload references a
   transcript object (§6) also covers that object:
   replicas MUST delete it and MUST NOT re-serve it
 
-implementations SHOULD scan session payloads for
-  secrets at the policy boundary and refuse the push
-  that trips it — redaction is recovery, not hygiene
+session payloads are scanned for secrets before they
+  are written, and a record that trips it is refused —
+  redaction is recovery, not hygiene
 ```
 
-The scanning design worth implementing is layered, with the cheap
-unambiguous layers unconditional and the judgement calls opt-in — the shape
-field-tested by Entire (§18):
+This is **built**, and layered as Entire's is (§18): the cheap unambiguous
+layers unconditional, the judgement calls left to configuration.
 
 ```text
 always on:
@@ -1230,8 +1230,8 @@ the trust graph verifies.
 
 Session records capture learnings one session at a time; nothing else
 compounds them. Repository memory is the aggregation, and this is **built**
-(`session memory --distill`): a distillation of
-`session.closed` summaries across the fleet — what agents have learned
+(`session memory --distill`): a distillation of the
+notes `session.produced` carries across the fleet — what agents have learned
 about this repository, the machine-maintained sibling of a hand-written
 `CLAUDE.md`.
 
