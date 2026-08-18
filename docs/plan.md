@@ -51,56 +51,45 @@ its member). `npm run check` and all 818 tests pass.
 **Exit — met:** an agent can ask "what may I do here?" before doing
 anything, locally or over the wire.
 
-## Phase 1 — session capture (the core)
+## Phase 1 — session capture — **landed**
 
 Two event kinds on the existing event machinery, one capability, one
 namespace.
 
 ```text
-src/trust/Certificate.ts   add "hub.session" to CAPABILITIES
-src/hub/Session.ts         payload schemas: session.opened (agent,
-                           prompt, context.instructions, trustHead),
-                           session.produced (commits, refs, pulls,
-                           note, usage); 256 KiB bound; UUIDv7 ids
-src/hub/Event.ts           generalize the append path's ref naming
-                           from refs/hub/pr/<id> to a caller-supplied
-                           refs/hub/<class>/<id> (mechanical; the
-                           append/sign/join logic does not change)
-src/server/Policy.ts       gate refs/hub/session/** appends on
-                           hub.session (append-only rules for
-                           refs/hub/** already apply)
-src/cli/session.ts         open / produce / show; trailer helper
-                           printing "Session: <id>" for commit -m
+src/hub/Session.ts         session.opened (agent, prompt, role, and the
+                           standing instructions as an object id) and
+                           session.produced (commits, refs, pulls, note,
+                           usage); 256 KiB bound; open/produced helpers
+src/hub/Event.ts           `append` became `appendTo`, taking the ref
+                           rather than deriving it from a pull request
+                           id — pull-request behaviour unchanged
+src/trust/Certificate.ts   hub.session
+src/server/Policy.ts       sessions admitted as the namespace's second
+                           shape, and the population bound counted per
+                           class
+src/cli/session.ts         open / produce / show
 ```
 
-Free rides to verify, not build: advertisement hiding and protocol-v2
-prefix fetch (Protocol tests already cover `refs/hub/*`), replication
-join (`reconcile` is namespace-agnostic), redaction (tombstones target
-events by commit, class-blind).
+Free rides, verified rather than built: `refs/hub/*` already carries
+append-only enforcement, advertisement hiding, protocol-v2 prefix fetch,
+replication join and redaction, and a session ref is one of those.
 
-Tests: schema roundtrips; append refused without `hub.session`;
-append-only enforcement on the session ref; interop — stock git pushes
-branch + session ref in one receive-pack and both land; hidden from a
-source-only clone's advertisement.
-
-**Exit:** a hook script can record who was instructed, what was asked,
+**Exit — met:** a hook can record who was instructed, what was asked, and
 what came of it — signed, replicated, invisible to stock clients.
 
-## Phase 2 — projection and resume (small)
+## Phase 2 — projection and resume — **landed**
 
-```text
-src/hub/Session.ts     projectSession(id): walk the DAG (reuse
-                       Projection.ts helpers), causal order, §16
-                       tiebreak; latestForBranch(branch): scan
-                       session refs' produced events
-src/cli/session.ts     show <id>; resume --branch <name> prints
-                       the projection for context injection
-```
+`Session.entries` walks the DAG the way a wake does — bounded to the
+namespace, stepping over joins, treating an event it cannot decode as one
+event rather than a broken session — and `Session.project` folds it into
+what a reader about to continue needs. `session show` takes an id or
+`--branch`, because "put me back in context for this branch" is the
+question an agent has on checkout; an id is what a caller holds only if it
+opened the session itself.
 
-Tests: divergent-heads join projects once; branch index picks the
-causally latest producer.
-
-**Exit:** a second agent reads a first agent's session and continues it.
+**Exit — met:** a second agent reads a first agent's session and continues
+it.
 
 ## Phase 3 — wake — **the dispatcher has landed**
 
@@ -116,8 +105,8 @@ src/cli/wake.ts           the same pass from a terminal, and
                           --dry-run
 src/host/Node.ts          `serve --wake` runs it on post-receive,
                           forked so a push never waits on a rule
-later  src/cli/session.ts  `enable` — writes the harness hooks;
-                          waits on Phase 1's session verbs
+src/cli/session.ts        `enable` — writes the harness hooks that
+                          call the verbs above
 ```
 
 Pull rather than push, which is what makes the hook optional rather than
@@ -130,8 +119,9 @@ real server and a real push — that the host wakes at all.
 The Workers host needs nothing new: `Webhooks.ts` already delivers signed
 push events with retries, which is a wake anyone can consume.
 
-**Exit — met:** an agent is woken by a review on its pull request. Closing
-the loop back into a _session_ waits on Phase 1.
+**Exit — met:** an agent is woken by a review on its pull request, and
+`session enable` closes the loop back into a session — one harness, as the
+v0 cut says.
 
 ## Phase 4 — deferred layers (explicitly not v0)
 
