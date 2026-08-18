@@ -52,10 +52,9 @@ import {
 import { layer as knownRepos } from "../trust/KnownRepos.node.ts";
 import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
-import { openWindow, project, type Projection as TrustProjection } from "../trust/Projection.ts";
-import * as Verify from "../trust/Verify.ts";
-import * as Policy from "../server/Policy.ts";
+import { openWindow, project } from "../trust/Projection.ts";
 import { reconcile } from "../server/Replication.ts";
+import * as Whoami from "../server/Whoami.ts";
 import {
   readAnyPublicKey,
   readPrivateKey,
@@ -369,110 +368,16 @@ const confirmRevoked = Effect.fn("hub.confirmRevoked")(function* (
 
 // -- what a key may do here -------------------------------------------------
 
-/** What one key holds here, and why it may not write at all. */
-interface Standing {
-  readonly capabilities: ReadonlyArray<string>;
-  readonly expiresAt: Date | null;
-  readonly refusal: string | null;
-}
-
-/** The standing of a key this repository has never heard of, or cannot use. */
-const withoutMembership = (refusal: string): Standing => ({
-  capabilities: [],
-  expiresAt: null,
-  refusal,
-});
-
-/**
- * Why this key may not write at all, and what it holds.
- *
- * Expiry is judged here rather than read off the projection, because the
- * projection keeps expired members on purpose — a record signed while a grant
- * was live stays authorized by it — and the question this command asks is the
- * other one: what may this key do *now*.
- */
-const standingOf = (projection: TrustProjection, subject: Fingerprint, now: Date): Standing => {
-  const member = projection.members.get(subject);
-  if (member === undefined) {
-    const windows = projection.revoked.get(subject);
-    const out = windows === undefined ? null : openWindow(windows);
-    return withoutMembership(
-      out === null
-        ? "this key is not a member of this repository"
-        : `this key is revoked (${out.reason})`,
-    );
-  }
-  return {
-    capabilities: member.capabilities,
-    expiresAt: member.expiresAt,
-    refusal:
-      member.expiresAt !== null && member.expiresAt.getTime() <= now.getTime()
-        ? `this grant expired ${member.expiresAt.toISOString()}; ask for a fresh one`
-        : null,
-  };
-};
-
-/** Whether a push to one ref would get through, and what it answers to. */
-interface Verdict {
-  readonly push: "allowed" | "refused";
-  readonly why: ReadonlyArray<string>;
-}
-
-/** What a protected branch asks of a push, in the order a caller meets them. */
-const requirementsOf = (rules: Policy.Rules): ReadonlyArray<string> => {
-  const why: Array<string> = [];
-  if (rules.requirePullRequest) why.push("requirePullRequest");
-  if (rules.requiredApprovals > 0) why.push(`requiredApprovals: ${rules.requiredApprovals}`);
-  if (rules.requiredChecks.length > 0) {
-    why.push(`requiredChecks: [${rules.requiredChecks.join(", ")}]`);
-  }
-  if (rules.requireResolvedThreads) why.push("requireResolvedThreads");
-  return why;
-};
-
-/**
- * Whether a push to one ref would get through, and what it would answer to.
- *
- * Answered by name and before the fact, so it is the *standing* verdict: a
- * protected branch with requirements refuses a direct push whatever the
- * revision is, and one with none still refuses a delete or a force. What this
- * cannot say is whether a particular revision satisfies an approval or a check
- * — that is a question about a push that does not exist yet.
- */
-const verdictFor = (input: {
-  readonly rules: Policy.Rules;
-  readonly protectedRef: boolean;
-  readonly standing: Standing;
-  readonly stale: string | null;
-}): Verdict => {
-  if (input.standing.refusal !== null) return { push: "refused", why: [input.standing.refusal] };
-  if (input.stale !== null) return { push: "refused", why: [input.stale] };
-  if (!Certificate.permits(input.standing.capabilities, "source.push")) {
-    return { push: "refused", why: ["source.push is not granted to this key"] };
-  }
-  if (!input.protectedRef) return { push: "allowed", why: [] };
-
-  const requirements = requirementsOf(input.rules);
-  return requirements.length === 0
-    ? { push: "allowed", why: ["protected: no force-push, no deletion"] }
-    : {
-        push: "refused",
-        why: [...requirements, "a direct push meets none of these; open a pull request"],
-      };
-};
-
 /**
  * The answer, as one read of this repository's own refs.
  *
- * Rules are read whether or not there is a genesis: a repository may publish
- * branch rules before it has an identity, and the boundary honours them, so an
- * answer that skipped them would understate what a push has to satisfy.
+ * The join itself lives in `server/Whoami.ts`, because the JSON verb answers
+ * the same question for a credential presented over the wire and the two must
+ * not drift. What is local here is only where the pieces come from: a
+ * repository on this disk, and a key on it.
  */
 const standing = Effect.fn("hub.standing")(function* (subject: Fingerprint) {
   const stored = yield* readGenesis();
-  const rules = yield* Policy.rulesOf();
-  const now = new Date();
-
   const projection = stored === null ? null : yield* project(stored.genesis);
 
   // A repository with no genesis has no membership to grant anything, so the
@@ -480,59 +385,17 @@ const standing = Effect.fn("hub.standing")(function* (subject: Fingerprint) {
   // that cannot exist here.
   const held =
     projection === null
-      ? withoutMembership(
+      ? Whoami.withoutMembership(
           "this repository has no genesis, so it has no membership: writes are refused unless the host serves --open",
         )
-      : standingOf(projection, subject, now);
+      : Whoami.standingOf(projection, subject, new Date());
 
-  const freshness =
-    projection === null || rules.maxTrustAgeSeconds <= 0
-      ? null
-      : Verify.fresh(projection, rules.maxTrustAgeSeconds * 1000, now);
-  const stale = freshness === null || freshness.ok ? null : freshness.reason;
-
-  const branches: Record<string, { readonly push: string; readonly why: ReadonlyArray<string> }> =
-    {};
-  for (const pattern of rules.protected) {
-    branches[pattern] = verdictFor({
-      rules,
-      protectedRef: true,
-      standing: held,
-      stale,
-    });
-  }
-  // Asked as its own case rather than by matching a wildcard: `isProtected`
-  // treats two overlapping prefixes as a match, which is right for a write
-  // that names a whole namespace and wrong here — it would report every
-  // unprotected branch as protected the moment one branch under it was.
-  branches["(any other ref)"] = verdictFor({
-    rules,
-    protectedRef: false,
-    standing: held,
-    stale,
-  });
-
-  // Every key is present on every answer, `null` where it does not apply,
-  // rather than appearing only when there is something to say. The reader is a
-  // program deciding what to do next, and a field that vanishes is a field it
-  // has to guess the meaning of.
-  return {
-    repo: stored === null ? null : stored.genesis.repoId,
+  return yield* Whoami.answer({
     subject,
-    member: held.refusal === null,
-    why: held.refusal,
-    capabilities: held.capabilities,
-    expiresAt: held.expiresAt === null ? null : held.expiresAt.toISOString(),
-    trust:
-      freshness === null
-        ? null
-        : {
-            maxTrustAgeSeconds: rules.maxTrustAgeSeconds,
-            fresh: freshness.ok,
-            reason: freshness.ok ? null : freshness.reason,
-          },
-    branches,
-  };
+    repoId: stored === null ? null : stored.genesis.repoId,
+    projection,
+    held,
+  });
 });
 
 /**

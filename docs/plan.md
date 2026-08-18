@@ -19,30 +19,37 @@ independent; everything else depends on 1.
 
 ---
 
-## Phase 0 — `hub whoami` — **the local half has landed**
+## Phase 0 — `hub whoami` — **landed**
 
 The read-only join of the trust projection and the policy document
 (agents.md Part I).
 
 ```text
-done   src/cli/hub.ts      `whoami <repo> --key <path>`: capabilities,
-                           expiry, trust freshness and per-branch push
-                           verdicts, as JSON, for either half of a key
-done   src/cli/shared.ts   readAnyPublicKey — a private key carries its
-                           own public half, and an agent's sandbox holds
-                           the private one
-done   src/server/Policy.ts  isProtected exported, so the CLI answers by
-                           the boundary's own rule rather than a copy
-next   src/server/Api.ts   the same answer over the wire, for a
-                           credential presented to a remote
+src/server/Whoami.ts    the join itself: standing, per-ref verdicts,
+                        trust freshness, and the wire schema — one
+                        implementation, because an answer that
+                        disagreed with the enforcement is worse than
+                        no answer
+src/cli/hub.ts          `whoami <repo> --key <path>`, for a repository
+                        on this disk
+src/server/Api.ts       `GET /:repo/whoami`, for the credential
+                        presented to a host — the form a sandboxed
+                        agent needs, and it reports the credential's
+                        narrowed capabilities rather than the
+                        member's full grant
+src/cli/shared.ts       readAnyPublicKey — a private key carries its
+                        own public half, and a sandbox holds that one
+src/server/Policy.ts    isProtected exported, so both answers use the
+                        boundary's own rule rather than a copy
 ```
 
-Five end-to-end tests in `src/cli/hub.test.ts` cover a member, a
-protected branch naming its requirements, a stranger, a revoked key, and a
-repository with no genesis. `npm run check` and all 816 tests pass.
+Seven tests: five end-to-end through the CLI (member, protected branch
+naming its requirements, stranger, revoked key, no genesis) and two
+through the derived API client (anonymous, and a credential narrower than
+its member). `npm run check` and all 818 tests pass.
 
-**Exit:** an agent can ask "what may I do here?" before doing anything —
-locally today, over the wire once the Api verb lands.
+**Exit — met:** an agent can ask "what may I do here?" before doing
+anything, locally or over the wire.
 
 ## Phase 1 — session capture (the core)
 
