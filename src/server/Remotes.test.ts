@@ -129,6 +129,7 @@ describe("Remotes", () => {
         name: "origin",
         url: "https://example.com/repo.git",
         has_credential: true,
+        has_key: false,
         // Nothing was asked for, so nothing happens to this remote on its own.
         sync: null,
         created_at: added.createdAt.toISOString(),
@@ -139,6 +140,53 @@ describe("Remotes", () => {
       assert.equal(yield* registry.remove("origin"), true);
       assert.equal(yield* registry.remove("origin"), false);
       assert.deepEqual(yield* registry.list, []);
+    }).pipe(Effect.provide(Remotes.memory)),
+  );
+
+  it.effect("refuses a delegated credential, which stops working within a day", () =>
+    Effect.gen(function* () {
+      // A delegated credential is capped at `MAX_DELEGATION_SECONDS` on both
+      // the minting and the verifying side, so one written into the registry
+      // authenticates until tomorrow and then stops. Behind a standing
+      // instruction that is invisible: the forward runs detached and reports
+      // into a log, so the mirror goes quiet — revocations included — while
+      // the origin goes on accepting the pushes it is failing to send.
+      // Refused where it is written, as `fetch` mode is, and the refusal
+      // names the thing that does keep working.
+      const registry = yield* Remotes.Remotes;
+      const refused = yield* Effect.exit(
+        registry.add({
+          name: "mirror",
+          url: "https://example.com/repo.git",
+          credential: "hub1.eyJ2ZXJzaW9uIjoxfQ.c2ln",
+          sync: { mode: "mirror", refs: [] },
+        }),
+      );
+      assert.equal(refused._tag, "Failure");
+      assert.match(JSON.stringify(refused), /expires within a day/);
+
+      // A manual remote keeps it: nothing happens to that remote unless
+      // somebody asks, and what comes back when it stops working comes back
+      // to them.
+      const manual = yield* registry.add({
+        name: "byhand",
+        url: "https://example.com/repo.git",
+        credential: "hub1.eyJ2ZXJzaW9uIjoxfQ.c2ln",
+      });
+      assert.equal(manual.name, "byhand");
+
+      // And the key that replaces it has to be one, rather than a token
+      // somebody put in the new field.
+      const bent = yield* Effect.exit(
+        registry.add({ name: "mirror", url: "https://example.com/repo.git", key: "s3cret" }),
+      );
+      assert.equal(bent._tag, "Failure");
+      assert.match(JSON.stringify(bent), /not an OpenSSH private key/);
+
+      assert.deepEqual(
+        (yield* registry.list).map((row) => row.name),
+        ["byhand"],
+      );
     }).pipe(Effect.provide(Remotes.memory)),
   );
 

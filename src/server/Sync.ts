@@ -15,6 +15,7 @@ import { lsRemote, requestPack } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import * as Auth from "./Auth.ts";
 import { Remotes, validate as validateRemote } from "./Remotes.ts";
 
 /**
@@ -52,13 +53,22 @@ export const remoteFor = Effect.fn("Sync.remoteFor")(function* (payload: {
   if (stored === null) {
     return yield* new Invalid({ field: "name", reason: `unknown remote '${name}'` });
   }
-  return { name: stored.name, url: stored.url, credential: stored.credential };
+  // Minted here rather than read straight off the row, when the registration
+  // stored a key: what a hub-enabled destination accepts is a signature over
+  // this request or a delegation good for a day, so a token written into a
+  // registry authenticates until tomorrow and then stops.
+  return {
+    name: stored.name,
+    url: stored.url,
+    credential: (yield* Auth.present(stored)) ?? null,
+  };
 });
 
 /** What `remoteFor` resolves to, and what every operation below acts on. */
 export interface Target {
   readonly name: string;
   readonly url: string;
+  /** What to present, already minted where the registration stored a key. */
   readonly credential: string | null;
 }
 

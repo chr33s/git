@@ -29,6 +29,7 @@ const remote = (sync: Remote["sync"]): Remote => ({
   name: "mirror",
   url: "http://127.0.0.1:1/nothing",
   credential: null,
+  key: null,
   sync,
   createdAt: new Date(0),
 });

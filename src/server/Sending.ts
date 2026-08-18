@@ -21,6 +21,7 @@ import { Effect, Layer } from "effect";
 
 import { push, type PushRef } from "../client/Push.ts";
 import { Hooks, type ReceiveResult, Repository } from "../git/Repository.ts";
+import * as Auth from "./Auth.ts";
 import { type Remote, Remotes, sends } from "./Remotes.ts";
 
 /**
@@ -77,8 +78,12 @@ const forward = Effect.fn("Sending.forward")(function* (
   // Never forced. A standing instruction is not a licence to overwrite what
   // the other side has: a ref that will not fast-forward there is a divergence
   // for a person, which is the same answer `reconcile` gives a branch.
+  // Minted here rather than read out of the registry: a stored token expires
+  // within a day against any hub-enabled destination, and this path fails into
+  // a log, so it would go quiet without anybody being told.
+  const token = yield* Auth.present(remote);
   const request: PushRequest = { url: remote.url, refs, force: false };
-  if (remote.credential !== null) request.token = remote.credential;
+  if (token !== undefined) request.token = token;
 
   yield* push(request);
 });

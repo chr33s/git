@@ -608,12 +608,24 @@ describe("cli hub", () => {
         left.filter(
           (line) =>
             line.includes("refs/hub/") ||
-            line.includes("refs/meta/trust/") ||
+            line.includes("refs/meta/trust/log") ||
             line.includes("refs/meta/policy") ||
             line.includes("refs/meta/presented/"),
         ).length,
         0,
         `nothing chr33s-git manages is left: ${left.join(", ")}`,
+      );
+
+      // Except the identity document, which is the one ref here whose removal
+      // fails *open*. `refs/meta/trust/*` matches it, so the obvious filter
+      // took it — and the directory this runs against may also be one a
+      // server is pointed at. A mirror is exactly that, and it passes the pin
+      // check because a mirror's identity is the origin's; a served
+      // repository with no genesis reads as not hub-enabled and answers
+      // anonymously, writably where the host was started `--open`.
+      assert.ok(
+        left.some((line) => line.includes("refs/meta/trust/genesis")),
+        `the genesis is not disable's to remove: ${left.join(", ")}`,
       );
 
       // The identity is a separate decision, and `hub forget` is the command

@@ -569,11 +569,10 @@ const disable = Command.make(
         // The pin says the *URL* is one this client enabled against. It says
         // nothing about the directory, and the directory is what gets deleted
         // — so a mistyped `--as` or `--root` pointed the one command that
-        // removes an identity at somebody else's repository, and there is no
-        // undo: the genesis and the trust log are gone, and a served
-        // repository that has lost its genesis answers every read
-        // anonymously. So the two are checked against each other: what this
-        // directory says it is has to be what the URL was pinned as.
+        // deletes refs at somebody else's repository, and there is no undo:
+        // the trust log and every event are gone. So the two are checked
+        // against each other: what this directory says it is has to be what
+        // the URL was pinned as.
         const stored = yield* readGenesis();
         if (stored === null || stored.genesis.repoId !== pinned) {
           return yield* new Invalid({
@@ -587,12 +586,23 @@ const disable = Command.make(
 
         const refs = yield* RefStore;
         const held = yield* refs.list("refs/");
+        // Everything `hub enable` fetched, *except* the identity document.
+        // `refs/meta/trust/*` matches the genesis, and removing it is the one
+        // deletion here that fails open rather than closed: a directory this
+        // client disabled may also be one a server has been pointed at — a
+        // mirror is exactly that, and it passes the pin check above because a
+        // mirror's identity is the origin's — and a served repository with no
+        // genesis reads as not hub-enabled, so it answers every request
+        // anonymously, writably where the host was started `--open`. Losing
+        // the log and the events leaves a repository nobody is a member of,
+        // which refuses; losing the genesis leaves one with no members to be.
         const managed = held
           .map(([name]) => name)
           .filter(
             (name) =>
-              name === PRESENTED_REF ||
-              Refspec.HUB_FETCH.some((spec) => Refspec.map(spec, name) !== null),
+              name !== GENESIS_REF &&
+              (name === PRESENTED_REF ||
+                Refspec.HUB_FETCH.some((spec) => Refspec.map(spec, name) !== null)),
           );
         if (managed.length > 0) {
           yield* refs.apply(managed.map((name) => ({ name, value: null, reason: "hub disable" })));
@@ -602,7 +612,9 @@ const disable = Command.make(
 
       yield* Console.log(`${key}`);
       yield* Console.log(`  ${removed} hub/trust ref(s) removed from ${root}/${name}`);
-      yield* Console.log("  source refs untouched; identity still pinned (hub forget drops it)");
+      yield* Console.log(
+        "  source refs and genesis untouched; identity still pinned (hub forget drops it)",
+      );
     }).pipe(Effect.provide(knownRepos)),
 );
 

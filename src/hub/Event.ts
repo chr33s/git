@@ -505,7 +505,11 @@ export const append = Effect.fn("hub.Event.append")(
     const repository = yield* Repository;
 
     const ref = refOf(payload.pr);
-    const head = yield* repository.resolve(ref);
+    // `readRef`, not `resolve`: this value is both the parent and the
+    // compare-and-swap, and a symbolic ref resolves to an oid the store never
+    // wrote — so the swap would conflict against a value nobody holds, on
+    // every append, with nothing to point at as the cause.
+    const head = yield* repository.readRef(ref);
 
     const commit = yield* Record.write({
       name: RECORD,

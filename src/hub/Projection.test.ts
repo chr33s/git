@@ -3603,3 +3603,68 @@ describe("hub projection", () => {
     assert.deepEqual([...ids.listed].sort(), ids.expected);
   });
 });
+
+describe("what a compare-and-swap compares against", () => {
+  it("appends against what the hub ref holds, not what it resolves to", async () => {
+    // `resolve` follows a symbolic ref to an oid; `readRef` reports the oid
+    // the ref itself holds, and a symbolic ref holds none. Every writer here
+    // uses one value as both the parent of the record it writes *and* the
+    // expected value of the swap that publishes it — and the store compares
+    // the swap against what the ref holds. Taken from `resolve`, the two are
+    // the same value only for as long as no ref in these namespaces is
+    // symbolic; the moment one is, every append conflicts against a value
+    // nobody wrote, on a namespace with no way back, and the retry that
+    // exists for concurrent authors spends itself three times over on a
+    // conflict no retry can clear.
+    //
+    // Nothing makes a hub ref symbolic today, which is exactly why this is
+    // asked of a repository that reports one rather than of a fixture that
+    // has one: the writers must not be the reason it stays that way.
+    const symbolic = Layer.effect(
+      Repository,
+      Effect.gen(function* () {
+        const inner = yield* Repository;
+        return Repository.of({
+          ...inner,
+          resolve: (name) =>
+            name.startsWith("refs/hub/") ? Effect.succeed(EMPTY_TREE_OID) : inner.resolve(name),
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(stores),
+        ),
+      ),
+    );
+
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const say = (type: "pr.closed" | "pr.reopened") => {
+          const payload = {
+            version: 1,
+            type,
+            repo: where.genesis.repoId,
+            pr: "1",
+            id: Event.newId(),
+            issuedAt: new Date().toISOString(),
+            trustHead: null,
+          } as const;
+          return Event.append(payload, Event.encode(payload), []);
+        };
+        const first = yield* say("pr.closed");
+        const second = yield* say("pr.reopened");
+        const repository = yield* Repository;
+        return { first, second, held: yield* repository.readRef("refs/hub/pr/1") };
+      }).pipe(Effect.provide(symbolic), Effect.exit),
+    );
+
+    assert.ok(
+      Exit.isSuccess(outcome),
+      `appending must not swap against a resolved value: ${JSON.stringify(outcome)}`,
+    );
+    assert.equal(outcome.value.held, outcome.value.second, "and the second append is what stands");
+  });
+});

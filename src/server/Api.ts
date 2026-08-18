@@ -44,6 +44,7 @@ interface RemoteRequest {
   name: string;
   url: string;
   credential?: string;
+  key?: string;
   sync?: { mode: "manual" | "fetch" | "push" | "mirror"; refs: ReadonlyArray<string> };
 }
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
@@ -600,6 +601,7 @@ const RemoteWire = Schema.Struct({
   name: Schema.String,
   url: Schema.String,
   has_credential: Schema.Boolean,
+  has_key: Schema.Boolean,
   /** The standing instruction, or `null` for a remote nothing happens to. */
   sync: Schema.NullOr(Schema.Struct({ mode: Schema.String, refs: Schema.Array(Schema.String) })),
   created_at: Schema.String,
@@ -2013,6 +2015,7 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
         // reader from having to know that.
         const asked: RemoteRequest = { name: payload.name, url: payload.url };
         if (payload.credential !== undefined) asked.credential = payload.credential;
+        if (payload.key !== undefined) asked.key = payload.key;
         if (payload.sync !== undefined) {
           asked.sync = { mode: payload.sync.mode, refs: payload.sync.refs ?? [] };
         }

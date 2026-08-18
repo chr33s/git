@@ -105,7 +105,9 @@ export const newId = (at: Date = new Date()): string => {
 const base = Effect.fn("trust.Log.base")(function* () {
   const repository = yield* Repository;
 
-  const head = yield* repository.resolve(LOG_REF);
+  // `readRef`: the same value is the parent *and* the compare-and-swap, and a
+  // resolved oid is not what the store compares against.
+  const head = yield* repository.readRef(LOG_REF);
   if (head !== null) return { parent: head, expected: head };
 
   const genesis = yield* repository.resolve(GENESIS_REF);

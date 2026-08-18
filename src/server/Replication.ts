@@ -128,7 +128,10 @@ export const pull = Effect.fn("Replication.pull")(function* (input: {
 export const reconcile = Effect.fn("Replication.reconcile")(function* (ref: string, theirs: Oid) {
   const repository = yield* Repository;
 
-  const ours = yield* repository.resolve(ref);
+  // What the ref holds, not what it resolves to: `ours` is the expected value
+  // of every swap below, and a symbolic ref's resolved oid is one the store
+  // will never agree with.
+  const ours = yield* repository.readRef(ref);
   if (ours === null) {
     yield* repository.setRef({ name: ref, to: theirs, expected: null });
     return { ref, ours: theirs, theirs, joined: null, diverged: false } satisfies Divergence;

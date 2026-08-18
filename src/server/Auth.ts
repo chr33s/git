@@ -31,12 +31,13 @@
  * command names the exact new oid, and the pack is checked against those oids
  * on the way in, so the body is bound transitively by content addressing.
  */
-import { Context, Effect, Layer, Option, Schema } from "effect";
+import { Context, Effect, Layer, Option, Result, Schema } from "effect";
 
 import {
   type Fingerprint,
   fingerprint,
   NAMESPACE,
+  parsePrivateKey,
   type PrivateKey,
   sign,
   verify,
@@ -47,7 +48,7 @@ import { type Oid, storageOf } from "../git/Store.ts";
 import { type Genesis, readGenesis, type RepoId } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import { type Member, project, type Projection } from "../trust/Projection.ts";
-import { permits } from "../trust/Certificate.ts";
+import { CAPABILITIES, permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
 
 const encoder = new TextEncoder();
@@ -361,7 +362,7 @@ export type Presented =
   | { readonly kind: "delegated"; readonly credential: string }
   | { readonly kind: "native"; readonly payload: string; readonly signature: string };
 
-const DELEGATION_PREFIX = "hub1.";
+export const DELEGATION_PREFIX = "hub1.";
 const NATIVE_SCHEME = "Hub-SSH-v1 ";
 
 /**
@@ -441,6 +442,71 @@ export const mintDelegation = Effect.fn("Auth.mintDelegation")(function* (input:
   const bytes = encodeDelegation(delegation);
   const signature = yield* sign(input.key, bytes, NAMESPACE);
   return `${DELEGATION_PREFIX}${toBase64Url(bytes)}.${toBase64Url(encoder.encode(signature))}`;
+});
+
+/**
+ * How long a credential minted for a repository's own replication lives.
+ *
+ * Well inside the ceiling, because nothing has to survive a restart: it is
+ * minted when the forward runs and thrown away when it finishes. An hour
+ * rather than a minute only so that a large pack does not outlive the
+ * credential that started it.
+ */
+export const REPLICATION_TTL_SECONDS = 3600;
+
+/**
+ * What a replication credential claims: everything but `repo.admin`.
+ *
+ * A mirror carries whatever landed — source branches, trust records, hub
+ * events, the rules file — and each of those is charged a different capability
+ * at the far boundary, so naming a subset here would be picking which of a
+ * repository's refs replicate. Claiming is not holding: verification
+ * intersects the claim with what the *issuer* holds, so this authorizes
+ * exactly what the key's owner could have pushed by hand and nothing more.
+ * `repo.admin` is left out because it is the one capability that would widen
+ * rather than narrow — an admin's key already covers this list by implication.
+ */
+export const REPLICATION_CAPABILITIES: ReadonlyArray<string> = CAPABILITIES.filter(
+  (capability) => capability !== "repo.admin",
+);
+
+/**
+ * The bearer token to present to a registered remote, if any.
+ *
+ * A stored `key` beats a stored `credential`, and is the only one of the two
+ * that keeps working: every credential a hub-enabled destination accepts is
+ * either a signature over the request in hand or a delegation capped at
+ * `MAX_DELEGATION_SECONDS`, so a token written into a registry authenticates
+ * until tomorrow and then stops. Minting per use has no such day.
+ *
+ * The delegation is bound to *this* repository's `RepoID`, which is the right
+ * one exactly when the destination is a replica of this repository — which is
+ * what §25 replication is. Against anything else it presents as garbage, the
+ * same as a credential minted for the wrong repository always has.
+ */
+export const present = Effect.fn("Auth.present")(function* (remote: {
+  readonly credential: string | null;
+  readonly key: string | null;
+}) {
+  if (remote.key === null) return remote.credential ?? undefined;
+
+  const parsed = parsePrivateKey(remote.key);
+  if (Result.isFailure(parsed)) return yield* parsed.failure;
+
+  const stored = yield* readGenesis();
+  if (stored === null) {
+    return yield* new Invalid({
+      field: "key",
+      reason: "this repository has no genesis, so there is no identity to mint a credential for",
+    });
+  }
+
+  return yield* mintDelegation({
+    key: parsed.success,
+    repo: stored.genesis.repoId,
+    capabilities: REPLICATION_CAPABILITIES,
+    ttlSeconds: REPLICATION_TTL_SECONDS,
+  });
 });
 
 export interface Delegated {

@@ -7,6 +7,7 @@ import { fingerprint, formatPublicKey, generate, NAMESPACE, sign } from "../cryp
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
+import { opensshPrivateKey } from "../testing/Hub.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
@@ -21,6 +22,8 @@ import {
   Nonces,
   noncesInMemory,
   openDelegation,
+  present,
+  REPLICATION_CAPABILITIES,
   requiredCapability,
   signEnvelope,
 } from "./Auth.ts";
@@ -735,5 +738,62 @@ describe("Auth", () => {
     // The policy boundary needs the principal; recovering it with a second
     // lookup is how authentication and authorization come apart.
     assert.notEqual(outcome.ok === true ? outcome.authenticated.principal : null, null);
+  });
+});
+
+describe("what a registered remote presents", () => {
+  it("mints from a stored key rather than handing over a stored token", async () => {
+    // Every credential a hub-enabled destination accepts is either a
+    // signature over the request in hand or a delegation capped at
+    // `MAX_DELEGATION_SECONDS` — a day. A token written into the remote
+    // registry is therefore a credential that authenticates until tomorrow
+    // and then stops, and the path that presents it is a standing
+    // instruction: detached, reporting into a log, watched by nobody. The
+    // mirror simply goes quiet, revocations included, while the origin goes
+    // on accepting the pushes it is failing to forward. So the registry
+    // stores the key and the credential is minted where it is used.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const where = yield* hub(["source.push", "hub.comment", "member.revoke"]);
+        const presented = yield* present({
+          credential: null,
+          key: opensshPrivateKey(where.member, "mirror@example.com"),
+        });
+        const opened = yield* openDelegation(presented ?? "", where.genesis.repoId, new Date());
+        return { presented, opened, signer: yield* fingerprint(where.member.publicKey) };
+      }),
+    );
+
+    assert.ok(
+      outcome.presented?.startsWith("hub1.") === true,
+      `a key must present as a delegation, not as itself: ${outcome.presented}`,
+    );
+    assert.equal(outcome.opened?.signer, outcome.signer, "signed by the key that was stored");
+    // Claiming is not holding: verification intersects this with what the
+    // issuer holds, so a mirror carries exactly what its key could have
+    // pushed by hand. Naming a subset here would be picking which of a
+    // repository's refs replicate.
+    assert.deepEqual(
+      [...(outcome.opened?.delegation.capabilities ?? [])],
+      [...REPLICATION_CAPABILITIES],
+    );
+  });
+
+  it("hands over a stored token when there is no key, and nothing at all when there is neither", async () => {
+    // The registry still holds tokens, because not every destination is a
+    // hub: a mirror to a forge that takes a personal access token is exactly
+    // what a stored credential is for.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        yield* hub(["source.push"]);
+        return {
+          token: yield* present({ credential: "s3cret", key: null }),
+          neither: yield* present({ credential: null, key: null }),
+        };
+      }),
+    );
+
+    assert.equal(outcome.token, "s3cret");
+    assert.equal(outcome.neither, undefined);
   });
 });
