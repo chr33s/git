@@ -143,9 +143,16 @@ export const HUB_FETCH: ReadonlyArray<Refspec> = [
  * That is a different rule from a branch (which may move to anything that
  * keeps its commits) and from a tag (which may not move at all), and every
  * surface that applies a ref update needs to know which of the three it has.
+ *
+ * The trust log is one ref, not a namespace. Matching `refs/meta/trust/log/*`
+ * as well let a name nothing reads through the check that closes that
+ * namespace: unbounded in count, since the population bound covers only
+ * `refs/hub/`, undeletable, hidden from the advertisement, copied to every
+ * mirror and rooted by collection on each of them — a permanent, invisible pin
+ * on the object graph, for a ref no fold ever opens.
  */
 export const isAppendOnly = (ref: string): boolean =>
-  ref.startsWith("refs/hub/") || ref === TRUST_LOG || ref.startsWith("refs/meta/trust/log/");
+  ref.startsWith("refs/hub/") || ref === TRUST_LOG;
 
 /** The one trust ref that moves; the genesis never does. */
 export const TRUST_LOG = "refs/meta/trust/log";

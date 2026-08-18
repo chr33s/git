@@ -1253,6 +1253,11 @@ describe("Policy", () => {
           const log = yield* repository.resolve(Log.LOG_REF);
           return {
             stray: yield* judge(where, { name: "refs/meta/trust/notes", value: log! }),
+            // The log is one ref, not a namespace. Spelled as one, a name
+            // under it passed for append-only and slipped through this very
+            // check — while no fold ever opens it, nothing bounds how many
+            // there are, and every replica roots collection at each.
+            under: yield* judge(where, { name: "refs/meta/trust/log/shard", value: log! }),
             // The two the namespace is actually for still work.
             log: yield* judge(where, { name: Log.LOG_REF, value: log! }),
           };
@@ -1262,6 +1267,11 @@ describe("Policy", () => {
       assert.equal(outcome.stray.ok, false);
       assert.match(
         outcome.stray.ok === false ? outcome.stray.reason : "",
+        /not part of the trust namespace/,
+      );
+      assert.equal(outcome.under.ok, false, "and a name spelled underneath the log is one too");
+      assert.match(
+        outcome.under.ok === false ? outcome.under.reason : "",
         /not part of the trust namespace/,
       );
       assert.equal(outcome.log.ok, true, "the log itself is still appendable");

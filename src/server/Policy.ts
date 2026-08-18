@@ -747,7 +747,7 @@ const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string,
       ? null
       : `${name} would hold more events than a fold will walk`;
   }
-  if (name === Refspec.TRUST_LOG || name.startsWith("refs/meta/trust/log/")) {
+  if (name === Refspec.TRUST_LOG) {
     return (yield* Log.withinCeiling(to))
       ? null
       : `${name} would hold more records than a fold will walk`;
@@ -1239,8 +1239,7 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
 const repairable = (ref: string, principal: Principal, open: boolean): boolean =>
   ref === RULES_REF && (open || may(principal, "policy.write"));
 
-const boundApplies = (ref: string): boolean =>
-  ref !== RULES_REF && ref !== Refspec.TRUST_LOG && !ref.startsWith("refs/meta/trust/log/");
+const boundApplies = (ref: string): boolean => ref !== RULES_REF && ref !== Refspec.TRUST_LOG;
 
 export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   ref: string,
