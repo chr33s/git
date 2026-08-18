@@ -19,6 +19,7 @@ import { Effect, Layer } from "effect";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
+import { serve } from "../host/Node.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import { enableHubUnder } from "../testing/Hub.ts";
 
@@ -197,6 +198,64 @@ describe("cli wake", () => {
     const real = await cli(["wake", "--root", root, "project"]);
     assert.match(real, /1 rule\(s\) run/);
     assert.equal((await lines()).length, 1);
+  });
+
+  it("wakes from a push, when the host was told to", async () => {
+    const where = await withPullRequest();
+    await writeRules([recorder(["*"])]);
+
+    // A client with something to push. What it pushes is a source branch —
+    // the wake is a walk, not a delivery, so the push only has to happen.
+    const client = path.join(root, "client");
+    await fs.mkdir(client, { recursive: true });
+    await cli(["init", "--root", client, "copy"]);
+    await inRepository(
+      path.join(client, "copy"),
+      Effect.gen(function* () {
+        const repository = yield* GitRepository.Repository;
+        yield* repository.commit({
+          branch: "refs/heads/topic",
+          tree: EMPTY_TREE_OID,
+          message: "from the client",
+          author: {
+            name: "Dev",
+            email: "dev@example.com",
+            at: new Date(1_700_000_100_000),
+            offset: 0,
+          },
+        });
+      }),
+    );
+
+    const server = await serve({ root, wake: true });
+    try {
+      await cli([
+        "push",
+        "--root",
+        client,
+        "--token",
+        where.credential,
+        "copy",
+        `${server.url}/project`,
+        "topic",
+      ]);
+
+      // Forked off the response, so the push does not wait for it — which is
+      // the point, and why this waits here instead.
+      const deadline = Date.now() + 10_000;
+      while ((await lines()).length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const woken = await lines();
+      assert.equal(
+        woken.length,
+        1,
+        `the push should have woken the rule: ${JSON.stringify(woken)}`,
+      );
+      assert.match(woken[0] ?? "", /^pr\.opened refs\/hub\/pr\//);
+    } finally {
+      await server.close();
+    }
   });
 
   it("refuses rules it cannot read rather than treating them as none", async () => {

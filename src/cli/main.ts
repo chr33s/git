@@ -365,8 +365,11 @@ const serveCommand = Command.make(
       Flag.withDefault(false),
       Flag.withDescription("Serve writes to repositories that have no genesis"),
     ),
+    wake: Flag.boolean("wake").pipe(
+      Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
+    ),
   },
-  ({ hostname, open, port, root }) =>
+  ({ hostname, open, port, root, wake }) =>
     Effect.gen(function* () {
       // There is no `--secret` any more: a repository with a genesis is
       // guarded by its own membership, and no server secret enters into it.
@@ -374,9 +377,16 @@ const serveCommand = Command.make(
       // it has no membership at all — where the choice really is the host's,
       // and the safe answer is the one you have to ask for.
       const server = yield* Effect.promise(() =>
-        serve({ root, port, hostname, allowAnonymousWrites: open }),
+        serve({ root, port, hostname, allowAnonymousWrites: open, wake }),
       );
       yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
+      // Said out loud, because it is the one switch that makes this process
+      // start other processes.
+      if (wake) {
+        yield* Console.error(
+          "--wake: a push that moves a repository's hub refs runs the rules in its wake.json",
+        );
+      }
       yield* Console.error(
         (open
           ? "--open: repositories with no genesis accept writes from anyone who can reach the port. "

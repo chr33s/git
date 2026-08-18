@@ -37,6 +37,7 @@ import { collects, routeOf, settledWithin } from "../server/Route.ts";
 import * as Sending from "../server/Sending.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import * as Subscribers from "../server/Subscribers.ts";
+import * as Wake from "../server/Wake.node.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 
 export interface ServeOptions {
@@ -53,6 +54,15 @@ export interface ServeOptions {
    * where saying so out loud is the point.
    */
   readonly allowAnonymousWrites?: boolean;
+  /**
+   * Run each repository's `wake.json` rules when a push moves its hub refs.
+   *
+   * Off by default, because it is the one option that makes this server start
+   * processes. The rules are the operator's own file beside the repository, so
+   * nothing a pusher writes chooses what runs — but a server that will run
+   * commands at all should have been told to.
+   */
+  readonly wake?: boolean;
 }
 
 export interface Server {
@@ -185,14 +195,17 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     // to remember.
     const remotes = remotesFile(path.join(options.root, repo, "remotes.json"));
 
-    // What happens after a push lands: deliver to whoever subscribed, and
-    // forward to whoever this repository is configured to send to. Both, not
-    // one — `Hooks` is a single service, so the two are combined rather than
-    // chosen between.
+    // What happens after a push lands: deliver to whoever subscribed, forward
+    // to whoever this repository is configured to send to, and — where the
+    // operator asked for it — run its wake rules. All of them, not one:
+    // `Hooks` is a single service, so they are combined rather than chosen
+    // between.
     //
     // The forwarder gets a repository built with no hooks at all. Handed the
     // one it is installed on, a forward would be its own trigger: a push
-    // forwards, the forward is a push, and that one forwards again.
+    // forwards, the forward is a push, and that one forwards again. A wake
+    // reads through its own no-hooks repository for the same reason.
+    const directory = path.join(options.root, repo);
     const afterPush = Layer.effect(
       GitRepository.Hooks,
       Effect.gen(function* () {
@@ -208,6 +221,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
             remotes: registry,
             using: (effect) => effect.pipe(Effect.provide(guardLayer(repo))),
           }),
+          ...(options.wake === true ? [Wake.service(directory, repo)] : []),
         ]);
       }),
     ).pipe(Layer.provide(Layer.mergeAll(subscribers, remotes, FetchHttpClient.layer)));
@@ -218,7 +232,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // the response without the push waiting on a slow receiver.
       Layer.provide(afterPush),
       // As `guardLayer` above: `provide` would swallow `Storage`.
-      Layer.provideMerge(stores(path.join(options.root, repo))),
+      Layer.provideMerge(stores(directory)),
     );
 
     // Built once per repository, not once per request. The requester stays

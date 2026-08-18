@@ -1075,17 +1075,27 @@ state transition there is.
 ```sh
 chr33s-git wake --root . project             # run what is due, advance
 chr33s-git wake --root . --dry-run project   # say what would run
+chr33s-git serve --wake                      # and on every push, immediately
 ```
+
+`serve --wake` is off by default, because it is the one switch that makes
+the server start processes. What runs is the operator's own file beside the
+repository, so nothing a pusher writes chooses the command — but a server
+that will run commands at all should have been told to.
 
 It **pulls rather than takes a push**, which is the decision that makes
 the rest work. Each run walks from its bookmark to each hub ref's tip,
 matches rules, spawns commands, and advances — so a post-receive hook can
 call it, and so can a timer, and so can a person. A missed hook becomes a
 late wake rather than a lost one, and git's at-most-once hook becomes
-at-least-once processing. The seam is already there on every host:
-`RefStore.apply → postReceive` drives replication today (hub §25),
-surfaced as filesystem hooks on the node host and as signed webhooks with
-retries on the Workers host.
+at-least-once processing. The seam was already there: `RefStore.apply →
+postReceive` is what makes a push deliver its webhooks, and the node host
+now runs the same walk on it — forked, because a push must not wait on
+whatever a rule decides to start. Two pushes landing together are
+serialized per repository with a single re-run remembered, so an event
+wakes once rather than once per pusher. The Workers host needs nothing
+new: its signed webhooks with retries are already a wake anyone can
+consume.
 
 The bookmark is a **file beside the repository, not a ref inside it**. A
 ref would replicate — turning one replica's progress into everybody's —
