@@ -57,6 +57,21 @@ export const describe = (error: Unavailable): string =>
 
 export type Ref = Contract.Ref;
 export type FileEntry = Contract.FileEntry;
+export type FileWrite = Contract.FileWrite;
+export type CommitCreated = Contract.CommitCreated;
+
+/**
+ * What `POST /:repo/commit` is asked for, in the fields this client uses.
+ *
+ * `files` are layered onto the branch's current tree, and `expected` — when
+ * given — must equal the tip for the commit to land; see `commitFiles`.
+ */
+export interface CommitFilesRequest {
+  branch: string;
+  message: string;
+  files: readonly FileWrite[];
+  expected?: string;
+}
 export type FileContent = Contract.FileContent;
 export type DiffFile = Contract.DiffFile;
 export type CommitSummary = Contract.CommitSummary;
@@ -279,6 +294,31 @@ export class GitApi {
       body: JSON.stringify(payload),
     });
     return body.files;
+  }
+
+  /**
+   * Write files to a branch tip as one new commit.
+   *
+   * See {@link CommitFilesRequest} for the fields.
+   *
+   * The server layers `files` onto the branch's current tree — a write is an
+   * addition to what is there, not a replacement of it — and `expected` is a
+   * compare-and-swap on the tip: if someone else committed while the editor
+   * was open, the answer is `409 RefConflict` rather than a silent overwrite.
+   * A `content` of `null` removes the path.
+   */
+  async commitFiles(options: Readonly<CommitFilesRequest>): Promise<CommitCreated> {
+    const payload: CommitFilesRequest = {
+      branch: options.branch,
+      message: options.message,
+      files: options.files,
+    };
+    if (options.expected !== undefined) payload.expected = options.expected;
+    return await this.#json(this.#url("/commit"), Contract.CommitCreated, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
   }
 
   /** Who the server thinks is asking. */

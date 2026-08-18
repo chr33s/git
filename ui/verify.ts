@@ -118,6 +118,26 @@ const HISTORY: readonly Stubbed[] = [
   { oid: oid("4".repeat(40)), subject: "seed the repository", author: "Maya Kessler", daysAgo: 6 },
 ];
 
+/**
+ * The slice of the server's commit payload the stub honours.
+ *
+ * `files` decodes against the contract's `FileWrite` — the same schema the
+ * real declaration uses — so a client that drifts from the wire fails here.
+ */
+const CommitPayload = Schema.Struct({
+  branch: Schema.optional(Schema.String),
+  message: Schema.optional(Schema.String),
+  expected: Schema.optional(Schema.NullOr(Contract.OidString)),
+  files: Schema.optional(Schema.Array(Contract.FileWrite)),
+});
+
+/** A fixture tree as a mutable map, dropping the index type's `undefined`. */
+const entries = (tree: Tree): Map<string, string> => {
+  const map = new Map<string, string>();
+  for (const [key, value] of Object.entries(tree)) if (value !== undefined) map.set(key, value);
+  return map;
+};
+
 /** A raw commit object, in the format `/object/:oid` returns base64-encoded. */
 const rawCommit = (commit: Stubbed): string => {
   const at = Math.floor((Date.now() - commit.daysAgo * 86400000) / 1000);
@@ -140,6 +160,21 @@ const rawCommit = (commit: Stubbed): string => {
  * fixture fallback exists for; the `render` and `interact` suites rely on that.
  */
 const serve = async (api: boolean, port: number): Promise<Server> => {
+  // Mutable per-server repository state. The live suite commits through
+  // `POST /commit`, and every read endpoint answers from these maps so a
+  // write is observable exactly the way a real server would show it.
+  const trees = new Map<string, Map<string, string>>([
+    ["main", entries(AT_MAIN)],
+    [BRANCH, entries(AT_BRANCH)],
+  ]);
+  const tips = new Map<string, Contract.Ref["oid"]>([
+    ["main", OID_MAIN],
+    [BRANCH, OID_BRANCH],
+  ]);
+  /** Commits written during the run, served back by `/object/:oid`. */
+  const written = new Map<string, Stubbed>();
+  const NEXT_TIPS = ["5", "6", "7", "8", "9"] as const;
+  let commitCount = 0;
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
@@ -166,24 +201,27 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             JSON.stringify({ _tag: "Invalid", field: "ref", reason: `unknown ref '${ref}'` }),
           );
         }
-        const tree = ref === `refs/heads/${BRANCH}` ? AT_BRANCH : AT_MAIN;
+        const branchOf = (name: string | null): string =>
+          name !== null && name.startsWith("refs/heads/")
+            ? name.slice("refs/heads/".length)
+            : "main";
+        const tree = trees.get(branchOf(ref)) ?? new Map<string, string>();
+        const refsNow = [
+          { name: "refs/heads/main", oid: tips.get("main") ?? OID_MAIN },
+          { name: `refs/heads/${BRANCH}`, oid: tips.get(BRANCH) ?? OID_BRANCH },
+        ];
 
         if (path === "/core/refs") {
-          return json(Contract.RefsResponse, {
-            refs: [
-              { name: "refs/heads/main", oid: OID_MAIN },
-              { name: `refs/heads/${BRANCH}`, oid: OID_BRANCH },
-            ],
-          });
+          return json(Contract.RefsResponse, { refs: refsNow });
         }
         if (path === "/core/files") {
           return json(Contract.FilesResponse, {
-            files: Object.keys(tree).map((p) => ({ path: p, mode: "100644", oid: OID_BRANCH })),
+            files: [...tree.keys()].map((p) => ({ path: p, mode: "100644", oid: OID_BRANCH })),
           });
         }
         if (path === "/core/file") {
           const wanted = url.searchParams.get("path") ?? "";
-          const content = tree[wanted];
+          const content = tree.get(wanted);
           if (content === undefined) {
             response.writeHead(404, { "content-type": "application/json" });
             return response.end(JSON.stringify({ _tag: "ObjectNotFound" }));
@@ -200,14 +238,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         // Settings reads the paged `/branches`, which is the endpoint built for
         // a branch list; Code reads `/refs` because it wants the tip oid too.
         if (path === "/core/branches") {
-          return json(Contract.RefPage, {
-            items: [
-              { name: "refs/heads/main", oid: OID_MAIN },
-              { name: `refs/heads/${BRANCH}`, oid: OID_BRANCH },
-            ],
-            next_cursor: null,
-            has_more: false,
-          });
+          return json(Contract.RefPage, { items: refsNow, next_cursor: null, has_more: false });
         }
         if (path === "/core/whoami") {
           return json(Contract.WhoamiAnswer, {
@@ -223,7 +254,8 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         }
         if (path.startsWith("/core/object/")) {
           const requestedOid = oid(path.slice("/core/object/".length));
-          const commit = HISTORY.find((entry) => entry.oid === requestedOid);
+          const commit =
+            HISTORY.find((entry) => entry.oid === requestedOid) ?? written.get(requestedOid);
           const subject = commit ?? {
             oid: requestedOid,
             subject: "add auth middleware",
@@ -252,6 +284,56 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
               { oid: OID_BRANCH, message: "earlier" },
             ],
           });
+        }
+        if (path === "/core/commit" && request.method === "POST") {
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of request) chunks.push(Buffer.from(chunk));
+            const input: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            const payload = Schema.decodeUnknownSync(CommitPayload)(input);
+            const branch = payload.branch ?? "main";
+            const tip = tips.get(branch);
+            const target = trees.get(branch);
+            if (tip === undefined || target === undefined) {
+              response.writeHead(400, { "content-type": "application/json" });
+              return response.end(
+                JSON.stringify({ _tag: "Invalid", field: "branch", reason: `unknown '${branch}'` }),
+              );
+            }
+            // The compare-and-swap the real server performs: a stale
+            // `expected` is a conflict, never a silent overwrite.
+            if (payload.expected !== undefined && payload.expected !== tip) {
+              response.writeHead(409, { "content-type": "application/json" });
+              return response.end(
+                JSON.stringify({
+                  _tag: "RefConflict",
+                  message: `refs/heads/${branch} is at ${tip}`,
+                }),
+              );
+            }
+            for (const file of payload.files ?? []) {
+              if (file.content === null) target.delete(file.path);
+              else target.set(file.path, file.content);
+            }
+            const next = oid((NEXT_TIPS[commitCount] ?? "9").repeat(40));
+            commitCount += 1;
+            tips.set(branch, next);
+            written.set(next, {
+              oid: next,
+              subject: (payload.message ?? "").split("\n", 1)[0] ?? "",
+              author: "Rune Baek",
+              daysAgo: 0,
+            });
+            return json(Contract.CommitCreated, { oid: next, tree: oid("a".repeat(40)) });
+          } catch (cause) {
+            response.writeHead(400, { "content-type": "application/json" });
+            return response.end(
+              JSON.stringify({
+                _tag: "Invalid",
+                reason: cause instanceof Error ? cause.message : String(cause),
+              }),
+            );
+          }
         }
         if (path === "/core/diff" && request.method === "POST") {
           try {
@@ -438,6 +520,27 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
 
   check("tasks list shows the whole hierarchy", (await page.locator(".gp-task-row").count()) === 9);
 
+  // --- the kind filter ----------------------------------------------------
+  await page.click('.gp-segment[value="crs"]');
+  await page.waitForTimeout(400);
+  check(
+    "the CR segment narrows the list to Change Requests",
+    (await page.locator(".gp-task-row").count()) === 4,
+  );
+  check(
+    "and marks itself active",
+    (await page.locator('.gp-segment[value="crs"][data-active]').count()) === 1,
+  );
+  await page.click('.gp-segment[value="tasks"]');
+  await page.waitForTimeout(400);
+  check(
+    "the Tasks segment shows only pure Tasks",
+    (await page.locator(".gp-task-row").count()) === 5,
+  );
+  await page.click('.gp-segment[value="all"]');
+  await page.waitForTimeout(400);
+  check("All restores the hierarchy", (await page.locator(".gp-task-row").count()) === 9);
+
   // 224px plus the 1px right border — content-box, as the design sizes it.
   const wide = await railWidth();
   await page.click(".gp-logo-row");
@@ -505,9 +608,26 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ["light", "dark"].includes(await page.evaluate(() => localStorage.getItem("gp-theme") ?? "")),
   );
 
+  await page.goto(`${origin}/#/code`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(1200);
+  check(
+    "the editor is read-only against the sample repository",
+    await page.evaluate(
+      () =>
+        document.querySelector<HTMLButtonElement>('.gp-file-card button[aria-label="Edit file"]')
+          ?.disabled === true &&
+        document.querySelector<HTMLButtonElement>('.gp-explorer button[aria-label="New file"]')
+          ?.disabled === true,
+    ),
+  );
+
   await page.goto(`${origin}/#/activity`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(600);
   check("the timeline lays out every event", (await page.locator(".gp-cal-event").count()) === 7);
+  check(
+    "the zoom disables while showing the sample timeline",
+    (await page.locator('.gp-segment[value="day"][disabled]').count()) === 1,
+  );
   await page.click(".gp-cal-event:nth-child(1)");
   await page.waitForTimeout(500);
   check("a timeline card opens its task", (await hash()).startsWith("#/detail/"), await hash());
@@ -539,6 +659,79 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     await page.evaluate(
       () => document.querySelector<HTMLButtonElement>(".gp-merge-btn")?.disabled === true,
     ),
+  );
+
+  // --- merging ------------------------------------------------------------
+  // Hash-only navigations share one document, so the store carries state
+  // from here on: the merge and the created task below stay visible.
+  await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(600);
+  await page.click(".gp-merge-btn");
+  await page.waitForTimeout(400);
+  check(
+    "merging a mergeable Change Request lands it",
+    (await page.textContent(".gp-detail-eyebrow .gp-status"))?.trim() === "Merged",
+  );
+  check(
+    "and the button settles into its merged state",
+    await page.evaluate(() => {
+      const btn = document.querySelector<HTMLButtonElement>(".gp-merge-btn");
+      return btn?.dataset["state"] === "merged" && btn.disabled;
+    }),
+  );
+  check(
+    "and the rail badge counts one fewer open item",
+    (await page.textContent(".gp-nav-badge"))?.trim() === "6",
+  );
+
+  // --- creating a task ----------------------------------------------------
+  await page.goto(`${origin}/#/tasks`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(400);
+  await page.click(".gp-tasks-head .gp-btn-primary");
+  await page.waitForTimeout(400);
+  await page.fill("#gp-new-title", "Verify the composer");
+  await page.fill("#gp-new-desc", "Created by verify.ts");
+  await page.click('.gp-dialog button[type="submit"]');
+  await page.waitForTimeout(500);
+  check("creating a task opens its detail", (await hash()) === "#/detail/T-21");
+  check(
+    "and it carries the typed title",
+    (await page.textContent(".gp-detail-title"))?.trim() === "Verify the composer",
+  );
+  check(
+    "and the rail badge counts it as open",
+    (await page.textContent(".gp-nav-badge"))?.trim() === "7",
+  );
+
+  // --- the comment composer ----------------------------------------------
+  await page.fill(".gp-comment-form textarea", "First comment.");
+  await page.click('.gp-comment-form button[type="submit"]');
+  await page.waitForTimeout(400);
+  check(
+    "a submitted comment joins the discussion",
+    (await page.locator(".gp-comment").count()) === 1 &&
+      ((await page.textContent(".gp-comment-body")) ?? "").includes("First comment."),
+  );
+  check(
+    "authored as whoami's answer — anonymous with no API",
+    (await page.textContent(".gp-comment-author"))?.trim() === "anonymous",
+  );
+
+  await page.click(".gp-back");
+  await page.waitForTimeout(400);
+  check("the created task joined the list", (await page.locator(".gp-task-row").count()) === 10);
+
+  // --- ⌘K and the rail search --------------------------------------------
+  await page.keyboard.press("Control+k");
+  check(
+    "ctrl/cmd-K focuses the rail search",
+    await page.evaluate(() => document.activeElement?.matches(".gp-search input") === true),
+  );
+  await page.keyboard.type("auth");
+  await page.waitForTimeout(600);
+  check(
+    "typing a query narrows the Tasks list",
+    (await page.locator(".gp-task-row").count()) === 2,
   );
   await page.close();
 };
@@ -597,6 +790,76 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     themeBefore !== "" && themeAfter !== "" && themeBefore !== themeAfter,
   );
   await shot(page, "live-code");
+
+  // --- editing, through POST /commit --------------------------------------
+  await page.click('.gp-file-card button[aria-label="Edit file"]');
+  await page.waitForTimeout(300);
+  check(
+    "the pencil opens the blob in an editor",
+    (await page.inputValue(".gp-editor")).includes("Live from the API."),
+  );
+  await page.fill(".gp-editor", "# core\n\nEdited from the UI.\n");
+  await page.fill(".gp-editor-message", "update the README from the browser");
+  await page.click(".gp-editor-bar .gp-btn-primary");
+  await page.waitForTimeout(1500);
+  check(
+    "committing returns to the view with the new content",
+    (await page.getByText("Edited from the UI.").count()) > 0,
+  );
+  check(
+    "and the commit bar carries the new tip",
+    ((await page.textContent(".gp-commit-bar")) ?? "").includes(
+      "update the README from the browser",
+    ),
+  );
+  check(
+    "and stays on the edited file",
+    ((await page.textContent(".gp-card-head")) ?? "").includes("README.md"),
+  );
+
+  // --- a new file, from the explorer's "+" --------------------------------
+  await page.click('.gp-explorer button[aria-label="New file"]');
+  await page.waitForTimeout(300);
+  await page.fill(".gp-editor-path", "docs/notes.md");
+  await page.fill(".gp-editor", "# Notes\n");
+  await page.click(".gp-editor-bar .gp-btn-primary");
+  await page.waitForTimeout(1500);
+  check(
+    "a new file lands in the explorer",
+    (await page.locator('[data-item-path="docs/notes.md"]').count()) > 0,
+  );
+  check(
+    "and opens in the viewer",
+    ((await page.textContent(".gp-card-head")) ?? "").includes("docs/notes.md"),
+  );
+
+  // --- a commit that lost the race ----------------------------------------
+  await page.click('.gp-file-card button[aria-label="Edit file"]');
+  await page.waitForTimeout(300);
+  await page.route("**/core/commit", async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ _tag: "RefConflict", message: "refs/heads/main moved" }),
+    });
+  });
+  await page.click(".gp-editor-bar .gp-btn-primary");
+  await page.waitForTimeout(600);
+  check(
+    "a conflicting tip surfaces as an error, not an overwrite",
+    ((await page.textContent(".gp-notice[data-error]")) ?? "").includes("someone else committed"),
+  );
+  await page.unroute("**/core/commit");
+
+  // --- deleting: the same request, with `content: null` -------------------
+  await page.click(".gp-editor-bar button:has-text('Delete file')");
+  await page.waitForTimeout(1500);
+  check(
+    "deleting removes the file and falls back to the README",
+    (await page.locator('[data-item-path="docs/notes.md"]').count()) === 0 &&
+      ((await page.textContent(".gp-card-head")) ?? "").includes("README.md"),
+  );
+  await shot(page, "live-code-edited");
 
   // --- the branch picker, over the real ref list -------------------------
   check(
@@ -718,6 +981,33 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     ((await page.textContent(".gp-cal-month")) ?? "").includes(
       new Date().toLocaleString(undefined, { month: "long" }),
     ),
+  );
+
+  // --- the window controls, over real history ----------------------------
+  await page.click('.gp-range button[aria-label="Earlier"]');
+  await page.waitForTimeout(400);
+  check(
+    "paging back shows the explicitly empty older window",
+    (await page.locator(".gp-cal-event").count()) === 0 &&
+      ((await page.textContent(".gp-cal-body")) ?? "").includes("No commits in this window"),
+  );
+  await page.click('.gp-range button[aria-label="Later"]');
+  await page.waitForTimeout(400);
+  check(
+    "paging forward restores today's window",
+    (await page.locator(".gp-cal-event").count()) === HISTORY.length,
+  );
+  await page.click('.gp-segment[value="day"]');
+  await page.waitForTimeout(400);
+  check("day zoom narrows the grid to a week", (await page.locator(".gp-cal-day").count()) === 7);
+  await page.click('.gp-segment[value="month"]');
+  await page.waitForTimeout(400);
+  check("month zoom widens it to 31 days", (await page.locator(".gp-cal-day").count()) === 31);
+  await page.click('.gp-segment[value="week"]');
+  await page.waitForTimeout(400);
+  check(
+    "week zoom restores the design's fortnight",
+    (await page.locator(".gp-cal-day").count()) === 14,
   );
   await shot(page, "live-activity");
 

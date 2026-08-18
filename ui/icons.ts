@@ -88,6 +88,9 @@ export const ellipsis = (size = 15): TemplateResult =>
     ${svg`<circle cx="3" cy="8" r="1.3"></circle><circle cx="8" cy="8" r="1.3"></circle><circle cx="13" cy="8" r="1.3"></circle>`}
   </svg>`;
 
+export const pencil = (size = 13): TemplateResult =>
+  icon(size, svg`<path d="m10.5 2.5 3 3L6 13l-3.5.5L3 10Z"></path><path d="m9 4 3 3"></path>`);
+
 export const document_ = (size = 13): TemplateResult =>
   icon(size, svg`<path d="M3 2.5h10v11H3z"></path><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"></path>`);
 

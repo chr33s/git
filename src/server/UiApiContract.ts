@@ -43,6 +43,21 @@ export const FileContent = Schema.Struct({
 });
 export type FileContent = (typeof FileContent)["Type"];
 
+export const Encoding = Schema.Literals(["utf8", "base64"]);
+
+/** A path to write, or — with `content: null` — to remove. */
+export const FileWrite = Schema.Struct({
+  path: Schema.String,
+  content: Schema.NullOr(Schema.String),
+  encoding: Schema.optional(Encoding),
+  mode: Schema.optional(Schema.String),
+});
+export type FileWrite = (typeof FileWrite)["Type"];
+
+/** What `POST /:repo/commit` answers: the commit written, and its tree. */
+export const CommitCreated = Schema.Struct({ oid: OidString, tree: OidString });
+export type CommitCreated = (typeof CommitCreated)["Type"];
+
 export const DiffRequest = Schema.Struct({
   from: Schema.String,
   to: Schema.String,

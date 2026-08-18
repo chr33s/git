@@ -114,3 +114,56 @@
 .gp-file-card {
   margin-top: 20px;
 }
+
+/* ------------------------------------------------------------- file editor */
+
+/* The explorer's "+" reuses the icon-button treatment without its push-right
+   margin — the actions row is already right-aligned by the header. */
+.gp-explorer-actions .gp-icon-btn {
+  margin-left: 0;
+}
+
+.gp-editor {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 340px;
+  padding: 14px 16px;
+  border: 0;
+  outline: none;
+  resize: vertical;
+  background: var(--gp-surface);
+  color: var(--gp-fg);
+  font-family: var(--gp-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.gp-editor-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--gp-border);
+  background: var(--gp-surface-raised);
+}
+
+.gp-editor-bar .gp-editor-message {
+  flex: 1;
+  width: auto;
+  font-size: 12.5px;
+}
+
+.gp-card-head .gp-editor-path {
+  flex: 1;
+  width: auto;
+  padding: 4px 8px;
+  font-family: var(--gp-mono);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+/* The commit error, inside the card between editor and bar. */
+.gp-file-card .gp-notice[data-error] {
+  margin: 0 12px 10px;
+}

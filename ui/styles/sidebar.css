@@ -97,6 +97,56 @@
   font-family: var(--gp-mono);
 }
 
+/* The row is a label until it holds a query or the caret: the input starts
+   visually hidden so the design's icon + "Search" + ⌘K reads unchanged, and
+   surfaces in place of the label the moment it is focused or non-empty. */
+.gp-search:focus-within input,
+.gp-search:not([data-empty]) input {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  clip: auto;
+  overflow: visible;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  font: inherit;
+  color: var(--gp-fg);
+}
+
+.gp-search:focus-within .gp-nav-label,
+.gp-search:not([data-empty]) .gp-nav-label,
+.gp-search:focus-within .gp-search-kbd,
+.gp-search:not([data-empty]) .gp-search-kbd {
+  display: none;
+}
+
+/* base-wc generates the ✕; keep it quiet and only when there is a query. */
+.gp-search [data-search-clear] {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  color: var(--gp-fg-faint);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.gp-search [data-search-clear]:hover {
+  color: var(--gp-fg);
+}
+
+/* Collapsed, the rail has no room for a caret — the icon button stands in and
+   ⌘K expands the rail before focusing. */
+.gp-sidebar[data-collapsed] .gp-search input,
+.gp-sidebar[data-collapsed] .gp-search [data-search-clear] {
+  display: none;
+}
+
 .gp-nav-list {
   display: flex;
   flex-direction: column;

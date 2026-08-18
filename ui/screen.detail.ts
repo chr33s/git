@@ -21,12 +21,13 @@ import type { FileDiff } from "@pierre/diffs";
 
 import { ApiError, describe, type DiffFile, type GitApi } from "./api.ts";
 import { GitPlusElement, navigate } from "./base.ts";
-import { byId } from "./fixtures.ts";
 import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
 import { type ChangeRequest, isChangeRequest, type Task } from "./model.ts";
 import { kindChip, statusPill } from "./screen.tasks.ts";
+import { store } from "./store.ts";
 import { current as currentTheme, type Theme } from "./theme.ts";
+import { initials } from "./time.ts";
 
 type Tab = "conversation" | "diff" | "commits" | "checks";
 
@@ -51,14 +52,25 @@ export class GpDetail extends GitPlusElement {
   @property({ type: String }) accessor taskId = "T-12";
   @property({ type: String }) accessor theme: Theme = currentTheme();
 
+  /** Who the server said is asking; their comments are authored as them. */
+  @property({ type: String }) accessor viewer: string | null = null;
+
   @state() private accessor tab: Tab = "conversation";
   @state() private accessor diffState: DiffState = { tag: "idle" };
 
   #renderers = new Map<string, FileDiff>();
   #diffGeneration = 0;
+  #unsubscribe: (() => void) | null = null;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this.#unsubscribe = store.subscribe(() => this.requestUpdate());
+  }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.#unsubscribe?.();
+    this.#unsubscribe = null;
     this.#diffGeneration += 1;
     this.#renderers.clear();
   }
@@ -75,8 +87,22 @@ export class GpDetail extends GitPlusElement {
   }
 
   get #task(): Task {
-    return byId.get(this.taskId) ?? byId.get("T-12") ?? { ...EMPTY };
+    return store.get(this.taskId) ?? store.get("T-12") ?? { ...EMPTY };
   }
+
+  /** Append a comment as whoever `/whoami` said is asking. */
+  #comment = (event: SubmitEvent): void => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!(form instanceof HTMLFormElement)) return;
+    const field = form.elements.namedItem("text");
+    if (!(field instanceof HTMLTextAreaElement)) return;
+    const text = field.value.trim();
+    if (text === "") return;
+    const author = this.viewer ?? "anonymous";
+    store.comment(this.#task.id, { avatar: initials(author), author, when: "just now", text });
+    form.reset();
+  };
 
   #select(tab: Tab): void {
     this.tab = tab;
@@ -207,7 +233,19 @@ export class GpDetail extends GitPlusElement {
                 </div>
               `,
             )}
-            <div class="gp-comment-box">Leave a comment…</div>
+            <form class="gp-comment-form" @submit=${this.#comment}>
+              <textarea
+                class="gp-textarea"
+                name="text"
+                rows="3"
+                required
+                placeholder="Leave a comment…"
+                aria-label="Leave a comment"
+              ></textarea>
+              <div class="gp-comment-actions">
+                <button class="gp-btn-primary" type="submit">Comment</button>
+              </div>
+            </form>
           </div>
 
           ${this.#meta(task)}
@@ -350,6 +388,7 @@ export class GpDetail extends GitPlusElement {
           type="button"
           data-state=${state}
           ?disabled=${state !== "ready"}
+          @click=${() => store.merge(cr.id)}
         >
           ${cr.review.action}
         </button>
@@ -359,7 +398,7 @@ export class GpDetail extends GitPlusElement {
 
   #subtasks(task: Task): TemplateResult | typeof nothing {
     const children = (task.children ?? [])
-      .map((id) => byId.get(id))
+      .map((id) => store.get(id))
       .filter((child): child is Task => child !== undefined);
     if (children.length === 0) return nothing;
     return html`
@@ -384,7 +423,7 @@ export class GpDetail extends GitPlusElement {
   }
 
   #meta(task: Task): TemplateResult {
-    const parent = task.parent === undefined ? undefined : byId.get(task.parent);
+    const parent = task.parent === undefined ? undefined : store.get(task.parent);
     return html`
       <aside class="gp-meta">
         <div>
