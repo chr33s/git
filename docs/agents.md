@@ -1342,11 +1342,12 @@ repository to a merged, provenanced, resumable change. Commands shown against a 
 deployed Worker is the same flow with a different URL.
 
 Not everything below exists at the same stage. Repository identity,
-membership, credentials and serving are **implemented** (`hub`,
-`credential`, `serve`, `clone`, `push`). Pull-request and review events
-exist as library code (`src/hub/`) without CLI verbs yet, and every
-`session` verb is **proposed** by Part II §15. Proposed commands are
-marked ▹; everything unmarked runs today.
+membership, credentials, serving, `whoami`, `wake` and the `session` verbs
+are **implemented**. Pull-request, review and check events exist as
+library code (`src/hub/`) without CLI verbs yet, and the layers Part II
+§15 defers — tasks, `requireProvenance`, decisions, memory, budgets — are
+**proposed**. Proposed commands are marked ▹; everything unmarked runs
+today.
 
 ### The cast
 
@@ -1406,7 +1407,8 @@ npx chr33s-git hub grant project --key ~/.ssh/hub \
   --capability repo.read,hub.check:test --expires-in 7776000
 ```
 
-(`hub.session` is ▹ provenance §7; the grants work today without it.)
+(`hub.session` is what a session record is charged; the rest are as
+before.)
 `hub members project` now reads as an inventory of the fleet: which key,
 which capabilities, which expiry. Note what is absent: no agent holds
 `hub.approve` or `hub.merge` — approving and merging stay human in this
@@ -1421,8 +1423,9 @@ instructions in `CLAUDE.md` / `AGENTS.md` tell the agent what it holds and
 how to push. One addition on top of Part I:
 
 ```sh
-▹ chr33s-git session enable    # installs the harness hooks (.claude/, .codex/…)
-                               # that call session open / produce / close
+chr33s-git session enable --root . --key ~/.ssh/agent-claude project
+                               # writes .chr33s/session.mjs and the Claude
+                               # Code hooks that call it
 ```
 
 `session enable` makes capture a one-time decision: after it, the session
@@ -1437,13 +1440,12 @@ refused (Part I, `hub whoami`) — then records the session
 before the agent touches a file:
 
 ```sh
-▹ chr33s-git hub whoami http://127.0.0.1:8080/project --key ~/.ssh/agent-claude
+chr33s-git hub whoami --root . --key ~/.ssh/agent-claude project
     # → capabilities, expiry, and that main takes a PR + approval + test
-▹ chr33s-git session open project --key ~/.ssh/agent-claude \
-    --agent claude-code --model claude-fable-5        # → session ID S
-▹ chr33s-git session prompt project --key ~/.ssh/agent-claude \
-    --session S --role user \
-    "document how to set up agents with their own ssh key"
+chr33s-git session open project --key ~/.ssh/agent-claude \
+    --agent claude-code --model claude-fable-5 \
+    --prompt "document how to set up agents with their own ssh key"
+                               # prints the session id, S
 ```
 
 `session.opened` and `session.prompted` are now the first two events of
@@ -1470,8 +1472,8 @@ The commit is SSH-signed (step 3) and names its session (rung 1,
 provenance §2). The harness's stop hook distills what happened:
 
 ```sh
-▹ chr33s-git session produce project --key ~/.ssh/agent-claude \
-    --session S --commit sha1:89ab... --ref refs/heads/claude/agent-keys
+chr33s-git session produce project --key ~/.ssh/agent-claude \
+    --session S --commit 89ab… --ref refs/heads/claude/agent-keys
 ```
 
 Then one push carries branch and provenance together — a receive-pack takes
@@ -1535,13 +1537,17 @@ TOKEN=$(npx chr33s-git credential project --key ~/.ssh/agent-codex \
 
 The branch is the natural key — "put me back in context for this branch"
 is the question an agent has on checkout, and the latest session whose
-`session.produced` names the branch is derivable from the refs.
-`--session S` works too when the ID is known, and `session show project S`
-prints the projection (prompt, plan, what was produced) without appending
-anything.
+`session.produced` names the branch is derivable from the refs. An id
+works too, when the caller has one: `session show project S`. Both print
+the projection — prompt, agent, what was produced, what it cost — and
+append nothing.
 
-`session.resumed` records exactly which event head Codex read
-(provenance §8), and from here Codex appends to the same session:
+Appending to a session another agent opened is `session produce
+--session S`, which is a record of what _this_ agent did under the same
+id; §7's authorship rules are the deferred half.
+
+From here Codex appends to the same session (a `session.resumed` naming
+the head it read is provenance §8's refinement, still deferred):
 prompts, produced commits, its own trailer-carrying pushes. Two agents,
 one account of the work, no shared platform between them.
 

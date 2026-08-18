@@ -8,7 +8,8 @@
  * key that wrote it.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -212,6 +213,63 @@ describe("cli session", () => {
     // advertisement. The listing a stock client sees is `refs/heads/*`.
     const advertised = refs.filter((name) => name.startsWith("refs/hub/"));
     assert.equal(advertised.length, 2, "two sessions, two refs");
+  });
+
+  it("installs hooks that record a session, and installs them once", async () => {
+    const work = path.join(root, "work");
+    await fs.mkdir(work, { recursive: true });
+
+    await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
+    await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
+
+    // Merged rather than appended blindly: running it twice must not record
+    // everything twice, and an operator's other hooks are not this command's
+    // to remove.
+    const settings = JSON.parse(
+      await fs.readFile(path.join(work, ".claude", "settings.json"), "utf8"),
+    );
+    assert.equal(settings.hooks.UserPromptSubmit.length, 1);
+    assert.equal(settings.hooks.Stop.length, 1);
+
+    // And the hook actually records, driven the way the harness drives it:
+    // the prompt arrives as JSON on stdin.
+    const script = path.join(work, ".chr33s", "session.mjs");
+    // `execFileSync`, because the hook reads its event from stdin and only the
+    // synchronous form takes `input` — the async one leaves the pipe open and
+    // the script waits on it forever.
+    execFileSync(process.execPath, [script, "start"], {
+      input: JSON.stringify({ prompt: "fix the flaky test" }),
+      encoding: "utf8",
+    });
+
+    const id = (await fs.readFile(path.join(work, ".chr33s", "session.id"), "utf8")).trim();
+    const shown = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+    assert.deepEqual(
+      shown.prompts.map((entry: { prompt: string }) => entry.prompt),
+      ["fix the flaky test"],
+    );
+
+    // A second start is the same session, not a second account of it.
+    execFileSync(process.execPath, [script, "start"], {
+      input: JSON.stringify({ prompt: "and again" }),
+      encoding: "utf8",
+    });
+    assert.equal(
+      (await fs.readFile(path.join(work, ".chr33s", "session.id"), "utf8")).trim(),
+      id,
+      "one opening per session",
+    );
+
+    // Stopping reports what it produced and clears the state, so the next
+    // prompt opens a new session rather than appending to a finished one.
+    execFileSync(process.execPath, [script, "stop"], {
+      input: "{}",
+      encoding: "utf8",
+      env: { ...process.env, CHR33S_GIT_BRANCH: "refs/heads/topic" },
+    });
+    const after = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+    assert.deepEqual(after.refs, ["refs/heads/topic"]);
+    assert.equal(fsSync.existsSync(path.join(work, ".chr33s", "session.id")), false);
   });
 
   it("refuses to record a session against a repository that has no identity", async () => {

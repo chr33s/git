@@ -7,6 +7,9 @@
  * a person typing ceremonies. `open` prints the session id alone, so a hook
  * can capture it and put it in a commit trailer without parsing prose.
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
+
 import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
@@ -187,12 +190,155 @@ const show = Command.make(
     }),
 );
 
+/**
+ * The script the harness actually runs.
+ *
+ * Written into the work tree rather than generated inline in a settings file,
+ * for two reasons: a hook an operator can read is one they can correct, and
+ * the prompt arrives as JSON on the hook's stdin, which is more than a shell
+ * one-liner should be asked to parse.
+ *
+ * It records at most one opening per session and, when the session ends, what
+ * the branch it worked on came to. Everything it passes to the CLI it got from
+ * the harness or from git — never from a hub event, which is somebody else's
+ * text (docs/agents.md §8).
+ */
+const hookScript = (input: {
+  readonly cli: string;
+  readonly root: string;
+  readonly repo: string;
+  readonly key: string;
+}) => `#!/usr/bin/env node
+// Written by \`chr33s-git session enable\`. Safe to edit; safe to delete.
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+const CLI = ${JSON.stringify(input.cli)};
+const ROOT = ${JSON.stringify(input.root)};
+const REPO = ${JSON.stringify(input.repo)};
+const KEY = ${JSON.stringify(input.key)};
+const STATE = path.join(import.meta.dirname, "session.id");
+
+const run = (args) =>
+  execFileSync(process.execPath, [CLI, ...args], { encoding: "utf8" }).trim();
+
+const read = async () => {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  } catch {
+    return {};
+  }
+};
+
+const event = await read();
+
+if (process.argv[2] === "start") {
+  // One opening per session: the harness may call this more than once, and a
+  // second opening would be a second account of the same work.
+  if (!fs.existsSync(STATE)) {
+    const session = run([
+      "session", "open",
+      "--root", ROOT, "--key", KEY,
+      "--agent", "claude-code",
+      "--model", process.env.CLAUDE_MODEL ?? "",
+      "--harness", process.env.CLAUDE_CODE_VERSION ?? "",
+      "--prompt", event.prompt ?? "",
+      REPO,
+    ]);
+    fs.writeFileSync(STATE, session);
+  }
+} else if (fs.existsSync(STATE)) {
+  const session = fs.readFileSync(STATE, "utf8").trim();
+  const branch = process.env.CHR33S_GIT_BRANCH ?? "";
+  run([
+    "session", "produce",
+    "--root", ROOT, "--key", KEY,
+    "--session", session,
+    ...(branch === "" ? [] : ["--ref", branch]),
+    REPO,
+  ]);
+  // The session is closed by being reported: the next start opens a new one.
+  fs.rmSync(STATE, { force: true });
+}
+`;
+
+/** The hook entries this writes, which is also how it recognises its own. */
+const entryFor = (script: string, phase: "start" | "stop") => ({
+  hooks: [{ type: "command", command: `node ${JSON.stringify(script)} ${phase}` }],
+});
+
+const enable = Command.make(
+  "enable",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    work: Flag.string("work").pipe(
+      Flag.withDefault("."),
+      Flag.withDescription("The checkout whose harness should record sessions"),
+    ),
+    repo: repoArgument,
+  },
+  ({ key, repo, root, work }) =>
+    Effect.gen(function* () {
+      const directory = path.resolve(work, ".chr33s");
+      const script = path.join(directory, "session.mjs");
+      const settings = path.resolve(work, ".claude", "settings.json");
+
+      yield* Effect.try({
+        try: () => {
+          fs.mkdirSync(directory, { recursive: true });
+          fs.writeFileSync(
+            script,
+            hookScript({
+              cli: path.resolve(import.meta.dirname, "bin.ts"),
+              root: path.resolve(root),
+              repo,
+              key: path.resolve(key),
+            }),
+            { mode: 0o755 },
+          );
+
+          // Merged into whatever is already there, and matched by the command
+          // it would write: an operator's other hooks are not this command's
+          // to remove, and running it twice must not record everything twice.
+          fs.mkdirSync(path.dirname(settings), { recursive: true });
+          const existing: { hooks?: Record<string, Array<unknown>> } = fs.existsSync(settings)
+            ? JSON.parse(fs.readFileSync(settings, "utf8"))
+            : {};
+          const hooks = existing.hooks ?? {};
+          for (const [event, phase] of [
+            ["UserPromptSubmit", "start"],
+            ["Stop", "stop"],
+          ] as const) {
+            const entry = entryFor(script, phase);
+            const already = (hooks[event] ?? []).filter(
+              (value) => JSON.stringify(value) !== JSON.stringify(entry),
+            );
+            hooks[event] = [...already, entry];
+          }
+          fs.writeFileSync(settings, `${JSON.stringify({ ...existing, hooks }, null, 2)}\n`);
+          return { script, settings };
+        },
+        catch: (cause) =>
+          new Invalid({ field: "work", reason: `cannot write hooks: ${String(cause)}` }),
+      });
+
+      yield* Console.log(`Recording sessions for ${repo}:`);
+      yield* Console.log(`  ${script}`);
+      yield* Console.log(`  ${settings}`);
+    }),
+);
+
 export const sessionCommand = Command.make("session", {}, () =>
-  Console.log("chr33s-git session <open|produce|show> — see --help"),
+  Console.log("chr33s-git session <open|produce|show|enable> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record who was instructed, and what they were asked")),
     produce.pipe(Command.withDescription("Record what a session produced")),
     show.pipe(Command.withDescription("What a session amounts to, by id or by branch")),
+    enable.pipe(Command.withDescription("Install the harness hooks that record sessions")),
   ]),
 );
