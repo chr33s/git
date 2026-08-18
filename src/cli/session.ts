@@ -190,6 +190,72 @@ const show = Command.make(
     }),
 );
 
+const ask = Command.make(
+  "ask",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    session: Flag.string("session").pipe(Flag.withDescription("The session that is blocked")),
+    question: Flag.string("question").pipe(Flag.withDescription("What only a person can answer")),
+    option: Flag.string("option").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("The answers on offer, comma-separated"),
+    ),
+    repo: repoArgument,
+  },
+  ({ key, option, question, repo, root, session }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      const decision = yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          return yield* Session.ask({
+            repo: yield* identityOf(repo),
+            session,
+            key: signer,
+            question,
+            options: listOf(option),
+          });
+        }),
+      );
+      // The decision id alone, so whatever asked can wait on this one answer.
+      yield* Console.log(decision);
+    }),
+);
+
+const answer = Command.make(
+  "answer",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    session: Flag.string("session").pipe(Flag.withDescription("The session that asked")),
+    decision: Flag.string("decision").pipe(Flag.withDescription("The question being answered")),
+    chose: Flag.string("chose").pipe(Flag.withDescription("The answer")),
+    note: Flag.string("note").pipe(Flag.withDefault("")),
+    repo: repoArgument,
+  },
+  ({ chose, decision, key, note, repo, root, session }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          yield* Session.answer({
+            repo: yield* identityOf(repo),
+            session,
+            key: signer,
+            decision,
+            chose,
+            note: note === "" ? null : note,
+          });
+        }),
+      );
+      yield* Console.log(`Answered ${decision}: ${chose}`);
+    }),
+);
+
 /**
  * The script the harness actually runs.
  *
@@ -333,12 +399,14 @@ const enable = Command.make(
 );
 
 export const sessionCommand = Command.make("session", {}, () =>
-  Console.log("chr33s-git session <open|produce|show|enable> — see --help"),
+  Console.log("chr33s-git session <open|produce|show|ask|answer|enable> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record who was instructed, and what they were asked")),
     produce.pipe(Command.withDescription("Record what a session produced")),
     show.pipe(Command.withDescription("What a session amounts to, by id or by branch")),
+    ask.pipe(Command.withDescription("Record a question only a person can answer")),
+    answer.pipe(Command.withDescription("Answer one, which unblocks the session that asked")),
     enable.pipe(Command.withDescription("Install the harness hooks that record sessions")),
   ]),
 );

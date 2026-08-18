@@ -215,6 +215,53 @@ describe("cli session", () => {
     assert.equal(advertised.length, 2, "two sessions, two refs");
   });
 
+  it("carries a question a person answers, and says what they chose", async () => {
+    const session = await openSession("rename the thing or keep the alias?");
+
+    const decision = (
+      await cli([
+        "session",
+        "ask",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--session",
+        session,
+        "--question",
+        "rename, or keep an alias?",
+        "--option",
+        "rename,alias",
+        "project",
+      ])
+    ).trim();
+
+    const blocked = JSON.parse(await cli(["session", "show", "--root", root, "project", session]));
+    assert.equal(blocked.decisions.length, 1);
+    assert.equal(blocked.decisions[0].id, decision);
+    assert.equal(blocked.decisions[0].chose, null, "unanswered until somebody answers");
+    assert.deepEqual(blocked.decisions[0].options, ["rename", "alias"]);
+
+    await cli([
+      "session",
+      "answer",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--session",
+      session,
+      "--decision",
+      decision,
+      "--chose",
+      "alias",
+      "project",
+    ]);
+
+    const answered = JSON.parse(await cli(["session", "show", "--root", root, "project", session]));
+    assert.equal(answered.decisions[0].chose, "alias");
+  });
+
   it("installs hooks that record a session, and installs them once", async () => {
     const work = path.join(root, "work");
     await fs.mkdir(work, { recursive: true });

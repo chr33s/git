@@ -19,6 +19,7 @@ import type { RepoId } from "../trust/Genesis.ts";
 import { openWindow, type Projection } from "../trust/Projection.ts";
 import { permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
+import * as Session from "../hub/Session.ts";
 import * as Policy from "./Policy.ts";
 
 /** Whether a push to one ref would get through, and what it answers to. */
@@ -49,6 +50,15 @@ export const Answer = Schema.Struct({
       maxTrustAgeSeconds: Schema.Int,
       fresh: Schema.Boolean,
       reason: Schema.NullOr(Schema.String),
+    }),
+  ),
+  /** Only where the repository bounds what it accepts being told it cost. */
+  budget: Schema.NullOr(
+    Schema.Struct({
+      maxUsageTokens: Schema.Int,
+      windowSeconds: Schema.Int,
+      usedTokens: Schema.Int,
+      remainingTokens: Schema.Int,
     }),
   ),
   branches: Schema.Record(Schema.String, Verdict),
@@ -170,6 +180,28 @@ export const answer = Effect.fn("Whoami.answer")(function* (input: {
   const rules = yield* Policy.rulesOf();
   const now = input.now ?? new Date();
 
+  // Read only where it is set: it is a walk of every session, which a
+  // repository that bounds nothing should not pay for to be told its standing.
+  // Surfaced here rather than enforced at the boundary, because what it counts
+  // is self-reported — an agent that can see the line coming stops at it,
+  // which is all an advisory bound can honestly ask for.
+  const budget =
+    rules.maxUsageTokens <= 0
+      ? null
+      : yield* Effect.gen(function* () {
+          const window =
+            rules.usageWindowSeconds > 0
+              ? new Date(now.getTime() - rules.usageWindowSeconds * 1000)
+              : new Date(0);
+          const spent = yield* Session.usageSince(window);
+          return {
+            maxUsageTokens: rules.maxUsageTokens,
+            windowSeconds: rules.usageWindowSeconds,
+            usedTokens: spent.total,
+            remainingTokens: Math.max(0, rules.maxUsageTokens - spent.total),
+          };
+        });
+
   const freshness =
     input.projection === null || rules.maxTrustAgeSeconds <= 0
       ? null
@@ -202,6 +234,7 @@ export const answer = Effect.fn("Whoami.answer")(function* (input: {
             fresh: freshness.ok,
             reason: freshness.ok ? null : freshness.reason,
           },
+    budget,
     branches,
   } satisfies Answer;
 });

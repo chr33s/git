@@ -135,7 +135,46 @@ export const SessionProduced = Schema.Struct({
 
 export type SessionOpened = (typeof SessionOpened)["Type"];
 
-export const SessionPayload = Schema.Union([SessionOpened, SessionProduced]);
+/**
+ * A question only a person can answer.
+ *
+ * Agents block on judgement calls, and the only channel for one was a comment
+ * nobody could act on mechanically. Recorded here, the human's word becomes a
+ * signed, causally-placed part of the same account as the work it unblocked.
+ */
+export const DecisionRequested = Schema.Struct({
+  type: Schema.tag("decision.requested"),
+  ...envelope,
+  question: Schema.String,
+  options: Schema.Array(Schema.String),
+  /** What the question is about: refs, commits, pull requests. */
+  refs: Schema.Array(Schema.String),
+});
+
+/**
+ * The answer — the one projected record a harness may treat as instruction.
+ *
+ * Everything else a session holds is somebody's account of their own work, and
+ * docs/agents.md §8 says to read it as data. This is the carve-out, and it is
+ * narrow on purpose: an answer to a question *this* session asked, from a key
+ * the trust graph can name. What the answer authorizes is still judged
+ * downstream, on the push it leads to.
+ */
+export const DecisionResolved = Schema.Struct({
+  type: Schema.tag("decision.resolved"),
+  ...envelope,
+  /** The `decision.requested` this answers. */
+  decision: Schema.String,
+  chose: Schema.String,
+  note: Schema.NullOr(Schema.String),
+});
+
+export const SessionPayload = Schema.Union([
+  SessionOpened,
+  SessionProduced,
+  DecisionRequested,
+  DecisionResolved,
+]);
 export type SessionPayload = (typeof SessionPayload)["Type"];
 
 const decodePayload = Schema.decodeUnknownEffect(SessionPayload);
@@ -289,6 +328,51 @@ export const issue = Effect.fn("hub.Session.issue")(function* (
   });
 });
 
+/** Ask a question this session cannot answer for itself. */
+export const ask = Effect.fn("hub.Session.ask")(function* (input: {
+  readonly repo: string;
+  readonly session: string;
+  readonly key: PrivateKey;
+  readonly question: string;
+  readonly options?: ReadonlyArray<string>;
+  readonly refs?: ReadonlyArray<string>;
+}) {
+  const base = yield* context(input.repo, input.session);
+  yield* issue(
+    {
+      ...base,
+      type: "decision.requested",
+      question: input.question,
+      options: input.options ?? [],
+      refs: input.refs ?? [],
+    },
+    input.key,
+  );
+  return base.id;
+});
+
+/** Answer one, which anybody holding a key of their own may do. */
+export const answer = Effect.fn("hub.Session.answer")(function* (input: {
+  readonly repo: string;
+  readonly session: string;
+  readonly key: PrivateKey;
+  readonly decision: string;
+  readonly chose: string;
+  readonly note?: string | null;
+}) {
+  const base = yield* context(input.repo, input.session);
+  return yield* issue(
+    {
+      ...base,
+      type: "decision.resolved",
+      decision: input.decision,
+      chose: input.chose,
+      note: input.note ?? null,
+    },
+    input.key,
+  );
+});
+
 /**
  * One session's events, oldest first, with what could not be read named.
  *
@@ -357,7 +441,23 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
   let inputTokens = 0;
   let outputTokens = 0;
 
+  const asked = new Map<
+    string,
+    { readonly question: string; readonly options: ReadonlyArray<string>; chose: string | null }
+  >();
+
   for (const { payload } of walked.events) {
+    if (payload.type === "decision.requested") {
+      asked.set(payload.id, { question: payload.question, options: payload.options, chose: null });
+      continue;
+    }
+    if (payload.type === "decision.resolved") {
+      // An answer to a question this session never asked is somebody else's
+      // record, and recording it here would put words in this session's mouth.
+      const question = asked.get(payload.decision);
+      if (question !== undefined) question.chose = payload.chose;
+      continue;
+    }
     if (payload.type === "session.opened") {
       // The opening is the first one this walk reaches; a second is somebody
       // else's claim on an id already in use, and the earlier one stands.
@@ -385,6 +485,7 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
     refs,
     pulls,
     notes,
+    decisions: [...asked].map(([id, value]) => ({ id, ...value })),
     usage: { inputTokens, outputTokens },
     unreadable: walked.unreadable,
   };
@@ -464,3 +565,29 @@ export const trailerOf = (
   const session = found[0]!;
   return isSessionId(session) ? { session } : { reason: `'${session}' cannot name a session` };
 };
+
+/**
+ * What this repository has been told it cost, inside a window.
+ *
+ * Summed from what sessions report about themselves, which is the only place
+ * the number exists here. A signer who under-reports is not caught by this and
+ * is not meant to be: it is a budget over an honest fleet's own accounting,
+ * and reading it as a spend limit would be reading it as something it cannot
+ * be (docs/agents.md §23).
+ */
+export const usageSince = Effect.fn("hub.Session.usageSince")(function* (since: Date) {
+  let inputTokens = 0;
+  let outputTokens = 0;
+
+  for (const session of yield* sessions()) {
+    for (const { payload } of (yield* entries(session)).events) {
+      if (payload.type !== "session.produced" || payload.usage === null) continue;
+      const at = Date.parse(payload.issuedAt);
+      if (!Number.isFinite(at) || at < since.getTime()) continue;
+      inputTokens += payload.usage.inputTokens;
+      outputTokens += payload.usage.outputTokens;
+    }
+  }
+
+  return { inputTokens, outputTokens, total: inputTokens + outputTokens };
+});

@@ -1238,6 +1238,56 @@ describe("cli hub", () => {
     const whoami = async (key: string) =>
       JSON.parse(await cli(["hub", "whoami", "--root", root, "--key", key, "project"]));
 
+    it("says how much of a budget is left, where a repository sets one", async () => {
+      await enrol("repo.read,source.push,hub.session");
+      await publishRules(path.join(root, "project"), {
+        ...Policy.OPEN,
+        maxUsageTokens: 10_000,
+        usageWindowSeconds: 86_400,
+      });
+
+      const before = await whoami(path.join(root, "id_agent"));
+      assert.equal(before.budget.maxUsageTokens, 10_000);
+      assert.equal(before.budget.usedTokens, 0);
+      assert.equal(before.budget.remainingTokens, 10_000);
+
+      // Spent by being reported: what a session says it cost is the only
+      // number this repository has, which is exactly what makes the bound
+      // advisory rather than a limit.
+      const session = (
+        await cli([
+          "session",
+          "open",
+          "--root",
+          root,
+          "--key",
+          path.join(root, "id_agent"),
+          "--prompt",
+          "do the thing",
+          "project",
+        ])
+      ).trim();
+      await cli([
+        "session",
+        "produce",
+        "--root",
+        root,
+        "--key",
+        path.join(root, "id_agent"),
+        "--session",
+        session,
+        "--input-tokens",
+        "3000",
+        "--output-tokens",
+        "1000",
+        "project",
+      ]);
+
+      const after = await whoami(path.join(root, "id_agent"));
+      assert.equal(after.budget.usedTokens, 4000);
+      assert.equal(after.budget.remainingTokens, 6000);
+    });
+
     it("answers for a member from the private half alone", async () => {
       await enrol("repo.read,source.push,hub.create-pr");
 
