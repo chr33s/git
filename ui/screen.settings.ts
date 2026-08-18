@@ -8,8 +8,9 @@
  * because the native input is the value, the form still submits with JS off.
  */
 import { html, type TemplateResult } from "lit";
-import { customElement } from "lit/decorators.js";
+import { customElement, state } from "lit/decorators.js";
 
+import { ApiError, type GitApi } from "./api.ts";
 import { GitPlusElement } from "./base.ts";
 
 interface Policy {
@@ -27,6 +28,41 @@ const POLICIES: readonly Policy[] = [
 
 @customElement("gp-settings")
 export class GpSettings extends GitPlusElement {
+  /** Injected by the shell so every screen shares one client. */
+  api: GitApi | null = null;
+
+  @state() private accessor branch: string | null = null;
+  @state() private accessor branchCount = 0;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    void this.#load();
+  }
+
+  /**
+   * Resolve the branch to show as the default.
+   *
+   * The JSON API exposes no HEAD: `/refs` and `/branches` answer heads only, and
+   * nothing reports which one HEAD points at. So this infers it the same way the
+   * Code screen does — prefer `main`, else the first head — rather than printing
+   * a hardcoded "main" that would be wrong for any repository that renamed it.
+   */
+  async #load(): Promise<void> {
+    const api = this.api;
+    if (api === null) return;
+    try {
+      const branches = await api.branches();
+      const names = branches
+        .filter((ref) => ref.name.startsWith("refs/heads/"))
+        .map((ref) => ref.name.slice("refs/heads/".length));
+      this.branchCount = names.length;
+      this.branch = names.includes("main") ? "main" : (names[0] ?? null);
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.branch = null;
+    }
+  }
+
   protected override render(): TemplateResult {
     return html`
       <div class="gp-screen">
@@ -36,9 +72,16 @@ export class GpSettings extends GitPlusElement {
           <section class="gp-setting-card">
             <h2 class="gp-setting-title">General</h2>
             <div class="gp-field-label">Repository name</div>
-            <div class="gp-field-value">git-plus/core</div>
-            <div class="gp-field-label">Default branch</div>
-            <div class="gp-field-value">main</div>
+            <div class="gp-field-value">${this.api?.repo ?? "—"}</div>
+            <div class="gp-field-label">
+              Default
+              branch${
+                this.branchCount > 1
+                  ? html` <span class="gp-field-note">of ${this.branchCount}</span>`
+                  : ""
+              }
+            </div>
+            <div class="gp-field-value">${this.branch ?? "—"}</div>
           </section>
 
           <section class="gp-setting-card">

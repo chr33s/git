@@ -84,6 +84,45 @@ const AT_BRANCH: Tree = {
 const base64 = (text: string): string => Buffer.from(text, "utf8").toString("base64");
 
 /**
+ * The commits the stub serves, dated relative to now.
+ *
+ * Relative rather than fixed, because the assertions are on what `ago()`
+ * renders and on the Activity grid's window — both of which move with today.
+ */
+interface Stubbed {
+  readonly oid: string;
+  readonly subject: string;
+  readonly author: string;
+  readonly daysAgo: number;
+}
+
+const HISTORY: readonly Stubbed[] = [
+  {
+    oid: OID_MAIN,
+    subject: "merge CR-18: update pipeline config",
+    author: "Rune Baek",
+    daysAgo: 1,
+  },
+  { oid: "3".repeat(40), subject: "widen the api surface", author: "Maya Kessler", daysAgo: 3 },
+  { oid: "4".repeat(40), subject: "seed the repository", author: "Maya Kessler", daysAgo: 6 },
+];
+
+/** A raw commit object, in the format `/object/:oid` returns base64-encoded. */
+const rawCommit = (commit: Stubbed): string => {
+  const at = Math.floor((Date.now() - commit.daysAgo * 86400000) / 1000);
+  const email = `${commit.author.split(" ")[0]?.toLowerCase() ?? "who"}@example.com`;
+  return [
+    `tree ${"a".repeat(40)}`,
+    `parent ${"b".repeat(40)}`,
+    `author ${commit.author} <${email}> ${String(at)} +0000`,
+    `committer ${commit.author} <${email}> ${String(at)} +0000`,
+    "",
+    commit.subject,
+    "",
+  ].join("\n");
+};
+
+/**
  * The success bodies this stub returns, transcribed from `src/server/Api.ts`
  * alongside the client in `api.ts`. Naming them is what makes a drift between
  * the two show up as a type error here rather than as a silent test pass.
@@ -106,6 +145,30 @@ type ApiAnswer =
       readonly size: number;
     }
   | { readonly commits: ReadonlyArray<{ readonly oid: string; readonly message: string }> }
+  | {
+      readonly items: ReadonlyArray<{ readonly oid: string; readonly message: string }>;
+      readonly next_cursor: string | null;
+      readonly has_more: boolean;
+    }
+  | {
+      readonly items: ReadonlyArray<{ readonly name: string; readonly oid: string }>;
+      readonly next_cursor: string | null;
+      readonly has_more: boolean;
+    }
+  | {
+      readonly oid: string;
+      readonly type: "blob" | "tree" | "commit" | "tag";
+      readonly size: number;
+      readonly content: string;
+      readonly encoding: "base64";
+    }
+  | {
+      readonly repo: string | null;
+      readonly subject: string | null;
+      readonly member: boolean;
+      readonly why: string | null;
+      readonly capabilities: ReadonlyArray<string>;
+    }
   | {
       readonly files: ReadonlyArray<{
         readonly path: string;
@@ -134,7 +197,17 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
 
       if (api) {
         const ref = url.searchParams.get("ref");
-        const tree = ref === BRANCH ? AT_BRANCH : AT_MAIN;
+        // The real server resolves refs strictly — an oid, `HEAD`, or a full
+        // `refs/...` name — and answers 400 for a bare branch name. The stub
+        // enforces the same rule: accepting anything is what let a client that
+        // sent short names pass this suite and then fail against the server.
+        if (ref !== null && !ref.startsWith("refs/") && !/^[0-9a-f]{40}$/.test(ref)) {
+          response.writeHead(400, { "content-type": "application/json" });
+          return response.end(
+            JSON.stringify({ _tag: "Invalid", field: "ref", reason: `unknown ref '${ref}'` }),
+          );
+        }
+        const tree = ref === `refs/heads/${BRANCH}` ? AT_BRANCH : AT_MAIN;
 
         if (path === "/core/refs") {
           return json({
@@ -163,6 +236,51 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             content: base64(content),
             encoding: "base64",
             size: content.length,
+          });
+        }
+        // Settings reads the paged `/branches`, which is the endpoint built for
+        // a branch list; Code reads `/refs` because it wants the tip oid too.
+        if (path === "/core/branches") {
+          return json({
+            items: [
+              { name: "refs/heads/main", oid: OID_MAIN },
+              { name: `refs/heads/${BRANCH}`, oid: OID_BRANCH },
+            ],
+            next_cursor: null,
+            has_more: false,
+          });
+        }
+        if (path === "/core/whoami") {
+          return json({
+            repo: "core",
+            subject: null,
+            member: false,
+            why: "this repository has no genesis",
+            capabilities: [],
+          });
+        }
+        if (path.startsWith("/core/object/")) {
+          const oid = path.slice("/core/object/".length);
+          const commit = HISTORY.find((entry) => entry.oid === oid);
+          const subject = commit ?? {
+            oid,
+            subject: "add auth middleware",
+            author: "Rune Baek",
+            daysAgo: 0,
+          };
+          return json({
+            oid,
+            type: "commit",
+            size: rawCommit(subject).length,
+            content: base64(rawCommit(subject)),
+            encoding: "base64",
+          });
+        }
+        if (path.startsWith("/core/commits/")) {
+          return json({
+            items: HISTORY.map((entry) => ({ oid: entry.oid, message: `${entry.subject}\n` })),
+            next_cursor: null,
+            has_more: false,
           });
         }
         if (path.startsWith("/core/log/")) {
@@ -233,6 +351,38 @@ const render = async (browser: Browser, origin: string): Promise<void> => {
     }
   }
   check("no uncaught errors while rendering", thrown.length === 0, thrown.join("; "));
+
+  // Both fallback reasons, because they used to read identically. This suite's
+  // server is up but serves no API routes, so the notice must name the answer;
+  // a client that cannot connect at all must say something different, which is
+  // what the dead-port pass below checks. Conflating them is how a client
+  // sending unqualified refs looked exactly like a missing server.
+  await page.goto(`${origin}/#/code`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(1500);
+  const answered = ((await page.textContent(".gp-notice")) ?? "").replace(/\s+/g, " ").trim();
+  check(
+    "a fallback caused by a bad answer names it",
+    answered.includes("the git+ API answered"),
+    answered,
+  );
+
+  // 9 is the discard port: nothing accepts there, so `fetch` fails at transport.
+  await page.route("**/index.html", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace(
+      'name="gp-api-base" content=""',
+      'name="gp-api-base" content="http://127.0.0.1:9"',
+    );
+    await route.fulfill({ response, body });
+  });
+  await page.goto(`${origin}/index.html#/code`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(2000);
+  const dead = ((await page.textContent(".gp-notice")) ?? "").replace(/\s+/g, " ").trim();
+  check(
+    "a fallback caused by nothing listening says so instead",
+    dead.includes("the git+ API is not running"),
+    dead,
+  );
   await page.close();
 };
 
@@ -367,14 +517,19 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     "no fallback notice when the API answers",
     (await page.locator(".gp-notice").count()) === 0,
   );
-  check(
-    "the commit bar carries the subject from /log",
-    (await page.textContent(".gp-commit-bar"))?.includes("merge CR-18: update pipeline config") ===
-      true,
-  );
+  const bar = (await page.textContent(".gp-commit-bar")) ?? "";
+  check("the commit bar carries the subject", bar.includes("merge CR-18: update pipeline config"));
   check(
     "and the short oid",
     (await page.textContent(".gp-commit-sha"))?.trim() === OID_MAIN.slice(0, 7),
+  );
+  // Author and age exist only in the raw commit header, so these two prove the
+  // `/object/:oid` round trip and the header parse, not just that a bar rendered.
+  check("and the author from the raw commit header", bar.includes("Rune Baek"), bar.trim());
+  check("and a relative age", /\b\d+[wdhm] ago\b|just now/.test(bar));
+  check(
+    "the sidebar identity comes from /whoami",
+    (await page.textContent(".gp-user-name"))?.trim() === "anonymous",
   );
   // Both libraries render inside shadow roots: Playwright's selector engine
   // pierces them when matching, but `innerText` on the light-DOM host is "" —
@@ -389,6 +544,30 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     (await page.getByText("Live from the API.").count()) > 0,
   );
   await shot(page, "live-code");
+
+  // --- the branch picker, over the real ref list -------------------------
+  check(
+    "the branch picker is a menu when there is more than one branch",
+    (await page.locator("ui-menu.gp-branch-menu").count()) === 1,
+  );
+  await page.click(".gp-branch-trigger");
+  await page.waitForTimeout(400);
+  check("it lists every branch", (await page.locator(".gp-menu-item").count()) === 2);
+  await page.click(`.gp-menu-item[value="${BRANCH}"]`);
+  await page.waitForTimeout(2000);
+  check(
+    "choosing one switches the ref",
+    ((await page.textContent(".gp-branch-trigger")) ?? "").includes(BRANCH),
+  );
+  check(
+    "and the commit bar follows it",
+    ((await page.textContent(".gp-commit-bar")) ?? "").includes("add auth middleware"),
+  );
+  check(
+    "and the explorer refetches at the new ref",
+    (await page.locator('[data-item-path="src/server/Api.ts"]').count()) > 0,
+  );
+  await shot(page, "live-code-switched");
 
   await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "networkidle" });
   await page.waitForTimeout(800);
@@ -409,6 +588,35 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   check("the removed side rendered", (await page.getByText("export const api = 1;").count()) > 0);
   check("the added side rendered", (await page.getByText("export const api = 2;").count()) > 0);
   await shot(page, "live-diff");
+
+  // --- Activity, from real commit history --------------------------------
+  await page.goto(`${origin}/#/activity`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(2500);
+  check("activity does not fall back", (await page.locator(".gp-notice").count()) === 0);
+  check(
+    "activity lays out one card per commit",
+    (await page.locator(".gp-cal-event").count()) === HISTORY.length,
+    `${String(await page.locator(".gp-cal-event").count())} cards`,
+  );
+  check(
+    "activity shows a real subject",
+    ((await page.textContent(".gp-cal-grid")) ?? "").includes("widen the api surface"),
+  );
+  check(
+    "activity computes its month rather than hardcoding one",
+    ((await page.textContent(".gp-cal-month")) ?? "").includes(
+      new Date().toLocaleString(undefined, { month: "long" }),
+    ),
+  );
+  await shot(page, "live-activity");
+
+  // --- Settings, from the ref list --------------------------------------
+  await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(1200);
+  const fields = await page.locator(".gp-field-value").allTextContents();
+  check("settings names the repository the client is pointed at", fields[0]?.trim() === "core");
+  check("settings resolves the default branch from /branches", fields[1]?.trim() === "main");
+  await shot(page, "live-settings");
   await page.close();
 };
 

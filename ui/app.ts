@@ -81,7 +81,7 @@ export class GpApp extends GitPlusElement {
   protected override render(): TemplateResult {
     return html`
       <div class="gp-shell">
-        <gp-sidebar .screen=${this.screen} .openCount=${OPEN}></gp-sidebar>
+        <gp-sidebar .screen=${this.screen} .openCount=${OPEN} .api=${this.#api}></gp-sidebar>
         ${this.#screen()}
       </div>
     `;
@@ -95,7 +95,7 @@ export class GpApp extends GitPlusElement {
         // a child of it.
         return html`<gp-code .api=${this.#api}></gp-code>`;
       case "activity":
-        return html`<div class="gp-main"><gp-activity></gp-activity></div>`;
+        return html`<div class="gp-main"><gp-activity .api=${this.#api}></gp-activity></div>`;
       case "tasks":
         return html`<div class="gp-main"><gp-tasks></gp-tasks></div>`;
       case "detail":
@@ -103,7 +103,7 @@ export class GpApp extends GitPlusElement {
           <gp-detail .api=${this.#api} .taskId=${this.selected}></gp-detail>
         </div>`;
       case "settings":
-        return html`<div class="gp-main"><gp-settings></gp-settings></div>`;
+        return html`<div class="gp-main"><gp-settings .api=${this.#api}></gp-settings></div>`;
     }
   }
 }

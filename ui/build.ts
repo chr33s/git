@@ -22,8 +22,20 @@
  *   node ui/build.ts --serve    # watch, and serve it on :8000
  *   node ui/build.ts --watch    # watch only, for an external server
  *   node ui/build.ts --debug    # unminified, for reading a stack trace
+ *
+ * `--serve` fronts the bundle with a proxy so the page and the API share an
+ * origin, which is the arrangement the deployed Worker gives them and the only
+ * one a browser will allow: served from :8000 and calling :8787 directly, every
+ * request is cross-origin and is blocked, and the UI silently falls back to its
+ * fixtures. Point it elsewhere with `GIT_API`.
  */
 import { context, build as esbuild, type Plugin } from "esbuild";
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type RequestListener,
+} from "node:http";
 import { cp } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +51,62 @@ const diffsWebComponents = join(
   "components",
   "web-components.js",
 );
+
+/**
+ * Say where the UI is, and whether the API behind it is actually up.
+ *
+ * Probed at startup because the alternative is what it replaced: the page loads,
+ * every request 502s, and the UI quietly shows its fixtures. Any HTTP answer
+ * counts as reachable — `/` is not a route, so even a 400 from the router
+ * proves something is listening.
+ */
+const announce = async (port: number, upstream: string): Promise<void> => {
+  const reachable = await fetch(new URL("/", upstream))
+    .then(() => true)
+    .catch(() => false);
+
+  console.info(`\ngit+ UI on http://localhost:${String(port)}`);
+  if (reachable) {
+    console.info(`  API proxied from ${upstream}\n`);
+    return;
+  }
+  console.info(`  API at ${upstream} is not answering, so the UI will show its fixtures.`);
+  console.info("  Start one alongside this, in another terminal:\n");
+  console.info("    GIT_ROOT=/path/to/repos PORT=8787 node src/host/Node.ts\n");
+  console.info("  Already running elsewhere? Point at it with GIT_API.\n");
+};
+
+/**
+ * A request body, for the methods that carry one.
+ *
+ * Returned as a `Uint8Array<ArrayBuffer>` rather than a `Buffer`: this project
+ * compiles against the DOM lib, where `BodyInit` admits an `ArrayBufferView`
+ * over a plain `ArrayBuffer` — not node's `Buffer`, and not the wider
+ * `ArrayBufferLike` a bare `new Uint8Array(n)` is inferred as.
+ */
+const collect = async (request: IncomingMessage): Promise<Uint8Array<ArrayBuffer>> => {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of request) chunks.push(new Uint8Array(Buffer.from(chunk)));
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const body = new Uint8Array(new ArrayBuffer(total));
+  let at = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return body;
+};
+
+/** node's header bag to `fetch`'s, dropping the ones a proxy must not repeat. */
+const headersOf = (incoming: IncomingHttpHeaders): Headers => {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(incoming)) {
+    if (value === undefined) continue;
+    if (name === "host" || name === "connection" || name === "content-length") continue;
+    headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+  }
+  return headers;
+};
 
 const watch = process.argv.includes("--watch");
 const serve = process.argv.includes("--serve");
@@ -90,9 +158,47 @@ if (watch || serve) {
   const ctx = await context(options);
   await ctx.watch();
   if (serve) {
-    // `hosts` rather than `host`: esbuild reports every interface it bound.
-    const { hosts, port } = await ctx.serve({ servedir: outdir, port: 8000 });
-    console.info(`\ngit+ UI on http://${hosts[0] ?? "localhost"}:${port}\n`);
+    // esbuild serves the bundle on an ephemeral port; the proxy below is what
+    // the browser talks to, so both the page and `/:repo/...` are one origin.
+    const assets = await ctx.serve({ servedir: outdir, host: "127.0.0.1", port: 0 });
+    const upstream = process.env["GIT_API"] ?? "http://127.0.0.1:8787";
+    let warned = false;
+    const port = Number(process.env["PORT"] ?? 8000);
+
+    const forward = async (to: string, request: Parameters<RequestListener>[0]) => {
+      const body =
+        request.method === "GET" || request.method === "HEAD" ? undefined : await collect(request);
+      return await fetch(new URL(request.url ?? "/", to), {
+        method: request.method,
+        headers: headersOf(request.headers),
+        body,
+      });
+    };
+
+    createServer((request, response) => {
+      void (async () => {
+        try {
+          // Ask the bundle first; anything it does not have is an API path.
+          // Deciding by 404 rather than by pattern means no list of routes here
+          // can drift from the one the server actually serves.
+          let answer = await forward(`http://127.0.0.1:${String(assets.port)}`, request);
+          if (answer.status === 404) answer = await forward(upstream, request);
+          response.writeHead(answer.status, Object.fromEntries(answer.headers));
+          response.end(Buffer.from(await answer.arrayBuffer()));
+        } catch (cause) {
+          // Once, not per request: a dead upstream would otherwise scroll the
+          // rebuild output away entirely.
+          if (!warned) {
+            warned = true;
+            console.warn(`\n  API at ${upstream} refused the connection — showing fixtures.\n`);
+          }
+          response.writeHead(502, { "content-type": "text/plain" });
+          response.end(`git+ UI proxy could not reach ${upstream}: ${String(cause)}`);
+        }
+      })();
+    }).listen(port, () => {
+      void announce(port, upstream);
+    });
   } else {
     // Watch-only serves nothing, which is worth saying out loud: the process
     // then sits in the foreground by design, waiting for the next change.

@@ -6,11 +6,13 @@
  * search row carries a ⌘K hint that collapses to a bare icon button with it.
  */
 import { html, type TemplateResult } from "lit";
-import { customElement, property } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 
+import { ApiError, type GitApi } from "./api.ts";
 import { GitPlusElement, navigate, type Screen } from "./base.ts";
 import * as icons from "./icons.ts";
 import * as theme from "./theme.ts";
+import { initials } from "./time.ts";
 
 @customElement("gp-sidebar")
 export class GpSidebar extends GitPlusElement {
@@ -21,6 +23,34 @@ export class GpSidebar extends GitPlusElement {
 
   /** Open Task and Change Request count, shown as the Tasks badge. */
   @property({ type: Number }) accessor openCount = 8;
+
+  /** Injected by the shell so every screen shares one client. */
+  api: GitApi | null = null;
+
+  /**
+   * Who the server says is asking, from `/whoami`.
+   *
+   * `null` for an unauthenticated caller — which is the common case for a
+   * repository with no genesis — so the rail says "anonymous" rather than
+   * inventing the design's placeholder name.
+   */
+  @state() private accessor subject: string | null = null;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    void this.#identify();
+  }
+
+  async #identify(): Promise<void> {
+    const api = this.api;
+    if (api === null) return;
+    try {
+      const who = await api.whoami();
+      this.subject = who.subject;
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+    }
+  }
 
   #go(screen: Screen): void {
     navigate(this, { screen });
@@ -76,8 +106,8 @@ export class GpSidebar extends GitPlusElement {
         </div>
 
         <div class="gp-sidebar-foot">
-          <span class="gp-user-avatar">MK</span>
-          <span class="gp-user-name">mkessler</span>
+          <span class="gp-user-avatar">${initials(this.subject ?? "anon")}</span>
+          <span class="gp-user-name">${this.subject ?? "anonymous"}</span>
           <button
             class="gp-theme-toggle"
             type="button"
