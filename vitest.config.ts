@@ -34,19 +34,13 @@ export default defineConfig({
           name: "unit",
           env: gitConfig,
           include: ["src/**/*.test.ts"],
-          // Real `git`, Chromium and a bundler all appear in these suites, and
-          // the budget is sized for the slowest machine rather than the
-          // fastest. Spawning `git` costs ~84ms on macOS against ~5ms on a
-          // Linux CI box, and these suites spawn it in the hundreds —
-          // `Bisect.test.ts` runs 21s on its own before any other file is
-          // competing for a core. The worst single test observed under a full
-          // parallel run was ~60s, so this leaves roughly half as much again.
-          //
-          // Nothing here waits on a network or a lock, so a test that reaches
-          // this limit has genuinely hung, and the cost of noticing that
-          // slightly later is worth a suite that does not fail by machine.
-          testTimeout: 90_000,
-          hookTimeout: 90_000,
+          // Real `git`, Chromium and a bundler all appear in these suites,
+          // and the git-heavy ones (PackFile, Bisect) run dozens of child
+          // processes each. Fine alone, but the parallel run oversubscribes
+          // the CPU by ~10x, so the allowance is for a loaded machine, not
+          // an idle one.
+          testTimeout: 120_000,
+          hookTimeout: 120_000,
         },
       },
       {
