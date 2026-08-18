@@ -73,16 +73,28 @@
   --trees-status-ignored-override: var(--gp-fg-dim);
 }
 
+/* A button, so it can open the history it summarises — sized like the bar the
+   design drew, not like a button. */
 .gp-commit-bar {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 18px;
+  font-family: inherit;
   font-size: 13px;
+  text-align: left;
   color: var(--gp-fg-muted);
   background: var(--gp-surface-raised);
   border: 1px solid var(--gp-border);
   border-radius: var(--gp-radius-lg);
   padding: 12px 16px;
+  cursor: pointer;
+}
+
+.gp-commit-bar:hover:not(:disabled) {
+  border-color: var(--gp-border-hover);
 }
 
 .gp-commit-bar .gp-avatar {
@@ -166,4 +178,74 @@
 /* The commit error, inside the card between editor and bar. */
 .gp-file-card .gp-notice[data-error] {
   margin: 0 12px 10px;
+}
+
+/* ------------------------------------------------- history panels and clone */
+
+.gp-commit-bar:disabled {
+  cursor: default;
+}
+
+.gp-history-panel {
+  margin-top: -8px;
+  margin-bottom: 18px;
+}
+
+.gp-filelog-row {
+  width: 100%;
+  box-sizing: border-box;
+  background: none;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.gp-filelog-row:hover {
+  background: var(--gp-row-hover);
+}
+
+.gp-filelog-row[data-current] {
+  background: var(--gp-surface-selected);
+}
+
+.gp-clone-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.gp-clone-url {
+  font-family: var(--gp-mono);
+  font-size: 12px;
+}
+
+.gp-link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--gp-accent);
+  cursor: pointer;
+}
+
+.gp-file-card .gp-notice[data-history] {
+  margin: 10px 12px 0;
+}
+
+.gp-card-head .gp-icon-btn[data-tight] {
+  margin-left: 4px;
+}
+
+.gp-card-head .gp-icon-btn[data-active] {
+  background: var(--gp-surface-selected);
+  color: var(--gp-fg);
+}
+
+.gp-menu-item[data-action] {
+  border-top: 1px solid var(--gp-divider);
+  color: var(--gp-fg-muted);
 }

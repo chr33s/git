@@ -24,17 +24,21 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
+import { UIDialog } from "@chr33s/base-wc/src/dialog";
 import type { MenuSelectDetail } from "@chr33s/base-wc/src/menu";
 import { FileTree, type GitStatusEntry } from "@pierre/trees";
 import type { File as DiffsFile } from "@pierre/diffs";
 
 import {
   ApiError,
+  type CommitDetail,
   type CommitFilesRequest,
+  type CommitSummary,
   describe,
   type FileWrite,
   type GitApi,
   type Unavailable,
+  type Whoami,
 } from "./api.ts";
 import { GitPlusElement } from "./base.ts";
 import { diffs } from "./highlight.ts";
@@ -130,6 +134,12 @@ export class GpCode extends GitPlusElement {
 
   @property({ type: String }) accessor theme: Theme = currentTheme();
 
+  /** The `/whoami` answer, resolved once by the shell. */
+  @property({ attribute: false }) accessor who: Whoami | null = null;
+
+  /** A path navigation asked for — a search hit, or `#/code/<path>`. */
+  @property({ type: String }) accessor wanted: string | null = null;
+
   @state() private accessor ref = "main";
   @state() private accessor branches: readonly string[] = ["main"];
   @state() private accessor selected: string | null = null;
@@ -142,6 +152,16 @@ export class GpCode extends GitPlusElement {
 
   /** `edit` swaps the source pane for a textarea over the same blob. */
   @state() private accessor mode: "view" | "edit" = "view";
+
+  /** Which side panel is open under the commit bar, if any. */
+  @state() private accessor panel: "none" | "commits" | "filelog" = "none";
+  /** Recent commits at the tip, for the commit-bar panel. */
+  @state() private accessor commitLog: readonly CommitDetail[] | null = null;
+  /** Commits touching the open file, for the file-history panel. */
+  @state() private accessor fileLog: readonly CommitSummary[] | null = null;
+  /** Set while viewing the open file at an older commit — read-only. */
+  @state() private accessor at: string | null = null;
+  @state() private accessor copied = false;
   /** Editing a path that does not exist yet, from the explorer's "+". */
   @state() private accessor editingNew = false;
   @state() private accessor saving = false;
@@ -161,6 +181,14 @@ export class GpCode extends GitPlusElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.#load();
+  }
+
+  override willUpdate(changed: Map<string, unknown>): void {
+    // A later navigation naming a path — another search hit — opens it in
+    // place; the initial one is honoured by `#load` before the tree exists.
+    if (changed.has("wanted") && this.wanted !== null && this.wanted !== this.selected) {
+      void this.#open(this.wanted);
+    }
   }
 
   override disconnectedCallback(): void {
@@ -193,7 +221,7 @@ export class GpCode extends GitPlusElement {
       const refs = await api.refs();
       const branches = this.#branchNames(refs);
       const ref = branches.includes("main") ? "main" : (branches[0] ?? "main");
-      const snapshot = await this.#snapshot(api, ref, refs);
+      const snapshot = await this.#snapshot(api, ref, refs, this.wanted ?? undefined);
       if (generation === this.#loadGeneration) this.#commit(snapshot);
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
@@ -318,6 +346,10 @@ export class GpCode extends GitPlusElement {
     this.mode = "view";
     this.editingNew = false;
     this.editError = null;
+    this.panel = "none";
+    this.commitLog = null;
+    this.fileLog = null;
+    this.at = null;
     this.#viewer = null;
   }
 
@@ -366,10 +398,16 @@ export class GpCode extends GitPlusElement {
     this.selected = path;
     this.content = null;
     // Walking the tree abandons an open editor rather than carrying a draft
-    // of one file over to another.
+    // of one file over to another, and a history view belongs to the file it
+    // was opened from.
     this.mode = "view";
     this.editingNew = false;
     this.editError = null;
+    this.at = null;
+    if (this.panel === "filelog") {
+      this.panel = "none";
+      this.fileLog = null;
+    }
     const api = this.api;
     if (api === null || this.offline) {
       this.content = path === "README.md" ? FALLBACK_README : `// ${path}`;
@@ -489,6 +527,109 @@ export class GpCode extends GitPlusElement {
     }
   }
 
+  /** Show the open file as it was at `oid` — a read-only look back. */
+  async #openAt(oid: string): Promise<void> {
+    const api = this.api;
+    const path = this.selected;
+    if (api === null || path === null || this.offline) return;
+    const generation = ++this.#fileGeneration;
+    this.mode = "view";
+    this.content = null;
+    this.at = oid;
+    try {
+      const content = await api.file(oid, path);
+      if (generation === this.#fileGeneration && path === this.selected) this.content = content;
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      if (generation === this.#fileGeneration && path === this.selected) {
+        this.content = `// ${path} — ${error.message}`;
+      }
+    }
+  }
+
+  /** The commit bar toggles the recent-history panel it summarises. */
+  async #toggleCommits(): Promise<void> {
+    if (this.panel === "commits") {
+      this.panel = "none";
+      return;
+    }
+    this.panel = "commits";
+    const api = this.api;
+    const tip = this.#tip;
+    if (api === null || tip === null || this.commitLog !== null) return;
+    try {
+      const commits = await api.recentCommits(tip, 20);
+      if (this.#tip === tip) this.commitLog = commits;
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.commitLog = [];
+    }
+  }
+
+  /** The clock on the file card: commits that touched the open file. */
+  async #toggleFileLog(): Promise<void> {
+    if (this.panel === "filelog") {
+      this.panel = "none";
+      return;
+    }
+    this.panel = "filelog";
+    const api = this.api;
+    const tip = this.#tip;
+    const path = this.selected;
+    if (api === null || tip === null || path === null) return;
+    this.fileLog = null;
+    try {
+      const entries = await api.history(tip, path);
+      if (this.#tip === tip && this.selected === path) this.fileLog = entries;
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.fileLog = [];
+    }
+  }
+
+  /** The branch menu's "New branch…": create at the current tip, switch to it. */
+  #createBranch = async (event: SubmitEvent): Promise<void> => {
+    event.preventDefault();
+    const api = this.api;
+    const form = event.currentTarget;
+    if (api === null || !(form instanceof HTMLFormElement)) return;
+    const field = form.elements.namedItem("branch");
+    if (!(field instanceof HTMLInputElement)) return;
+    const name = field.value.trim();
+    if (name === "") return;
+    try {
+      await api.branchCreate(name, this.ref);
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.editError = null;
+      this.reason = "";
+      // The dialog stays open with the field intact; the title carries why.
+      field.setCustomValidity(error instanceof ApiError ? error.message : "not reachable");
+      field.reportValidity();
+      return;
+    }
+    form.reset();
+    this.#branchDialog()?.hide();
+    await this.#switchTo(name);
+  };
+
+  #branchDialog(): UIDialog | null {
+    const dialog = this.querySelector(".gp-new-branch");
+    return dialog instanceof UIDialog ? dialog : null;
+  }
+
+  /** The Clone dialog's copy: the same URL `git clone` would be handed. */
+  #copyClone = (): void => {
+    const url = this.api?.cloneUrl;
+    if (url === undefined) return;
+    void navigator.clipboard.writeText(url).then(() => {
+      this.copied = true;
+      setTimeout(() => {
+        this.copied = false;
+      }, 1500);
+    });
+  };
+
   protected override updated(): void {
     this.#mountTree();
     void this.#renderSource();
@@ -534,7 +675,20 @@ export class GpCode extends GitPlusElement {
             >
               ${icons.plus()}
             </button>
-            ${icons.ellipsis()}
+            <ui-menu class="gp-explorer-menu" @menu-select=${this.#onExplorerAction}>
+              <button
+                class="gp-icon-btn"
+                type="button"
+                data-menu-trigger
+                title="Explorer actions"
+                aria-label="Explorer actions"
+              >
+                ${icons.ellipsis()}
+              </button>
+              <ui-menu-popup class="gp-menu-popup">
+                <ui-menu-item class="gp-menu-item" value="refresh">Refresh</ui-menu-item>
+              </ui-menu-popup>
+            </ui-menu>
           </div>
         </div>
         <div class="gp-explorer-tree"></div>
@@ -546,12 +700,11 @@ export class GpCode extends GitPlusElement {
             <span class="gp-breadcrumb-owner">git-plus</span>
             <span class="gp-breadcrumb-sep">/</span>
             <span class="gp-breadcrumb-name">${this.api?.repo ?? "core"}</span>
-            <span class="gp-pill-outline">Public</span>
+            <span class="gp-pill-outline" title=${this.who?.why ?? ""}
+              >${this.who?.member === true ? "Member" : "Public"}</span
+            >
           </div>
-          <div class="gp-repo-actions">
-            ${this.#branchMenu()}
-            <button class="gp-btn-primary" type="button">Clone</button>
-          </div>
+          <div class="gp-repo-actions">${this.#branchMenu()} ${this.#clone()}</div>
         </header>
 
         <div class="gp-screen gp-screen--code">
@@ -562,7 +715,7 @@ export class GpCode extends GitPlusElement {
                 </p>`
               : ""
           }
-          ${this.head === null ? "" : this.#commitBar(this.head)}
+          ${this.head === null ? "" : this.#commitBar(this.head)} ${this.#panel()}
 
           <div class="gp-card gp-file-card">
             <div class="gp-card-head">
@@ -581,20 +734,39 @@ export class GpCode extends GitPlusElement {
               ${
                 this.mode === "view"
                   ? html`<button
-                      class="gp-icon-btn"
-                      type="button"
-                      title=${
-                        this.offline ? "Read-only — the git+ API is not reachable" : "Edit file"
-                      }
-                      aria-label="Edit file"
-                      ?disabled=${this.offline || this.loading || this.selected === null}
-                      @click=${() => this.#edit()}
-                    >
-                      ${icons.pencil(14)}
-                    </button>`
+                        class="gp-icon-btn"
+                        type="button"
+                        title="File history"
+                        aria-label="File history"
+                        ?data-active=${this.panel === "filelog"}
+                        ?disabled=${this.offline || this.loading || this.selected === null}
+                        @click=${() => void this.#toggleFileLog()}
+                      >
+                        ${icons.clock(14)}
+                      </button>
+                      <button
+                        class="gp-icon-btn"
+                        type="button"
+                        data-tight
+                        title=${
+                          this.offline
+                            ? "Read-only — the git+ API is not reachable"
+                            : this.at !== null
+                              ? "Read-only — viewing an old commit"
+                              : "Edit file"
+                        }
+                        aria-label="Edit file"
+                        ?disabled=${
+                          this.offline || this.loading || this.selected === null || this.at !== null
+                        }
+                        @click=${() => this.#edit()}
+                      >
+                        ${icons.pencil(14)}
+                      </button>`
                   : nothing
               }
             </div>
+            ${this.#atBanner()}
             ${
               this.loading
                 ? html`<div class="gp-empty">Loading…</div>`
@@ -672,19 +844,28 @@ export class GpCode extends GitPlusElement {
 
   /** base-wc types its own `menu-select` detail, so nothing here is asserted. */
   #onBranchSelect = (event: CustomEvent<MenuSelectDetail>): void => {
+    if (event.detail.value === "__new-branch") {
+      this.#branchDialog()?.show();
+      return;
+    }
     void this.#switchTo(event.detail.value);
+  };
+
+  #onExplorerAction = (event: CustomEvent<MenuSelectDetail>): void => {
+    if (event.detail.value === "refresh") void this.#reload(this.selected ?? undefined);
   };
 
   /**
    * The branch picker, over the real ref list.
    *
    * `ui-menu` from base-wc owns the popover, keyboard handling and dismissal;
-   * `menu-select` carries the chosen value. With one branch there is nothing to
-   * pick, so it renders as the plain button the design draws.
+   * `menu-select` carries the chosen value. The last item creates a branch at
+   * the current tip through `POST /branches/create`. Offline there is nothing
+   * to pick or create, so the design's plain button renders disabled.
    */
   #branchMenu(): TemplateResult {
     const trigger = html`${icons.branch()} ${this.ref} ${icons.chevronDown()}`;
-    if (this.branches.length < 2) {
+    if (this.offline || this.api === null) {
       return html`<button class="gp-branch-trigger" type="button" disabled>${trigger}</button>`;
     }
     return html`
@@ -702,14 +883,153 @@ export class GpCode extends GitPlusElement {
               </ui-menu-item>
             `,
           )}
+          <ui-menu-item class="gp-menu-item" data-action value="__new-branch">
+            ${icons.plus(12)} New branch…
+          </ui-menu-item>
         </ui-menu-popup>
       </ui-menu>
+      <ui-dialog class="gp-new-branch">
+        <ui-dialog-popup class="gp-dialog">
+          <h2 class="gp-dialog-title" data-dialog-title>New branch</h2>
+          <p class="gp-dialog-hint" data-dialog-description>
+            Created at the tip of ${this.ref} and switched to.
+          </p>
+          <form @submit=${this.#createBranch}>
+            <label class="gp-field-label" for="gp-new-branch-name">Name</label>
+            <input
+              id="gp-new-branch-name"
+              class="gp-input"
+              name="branch"
+              required
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="topic/branch-name"
+              @input=${(event: Event) => {
+                if (event.target instanceof HTMLInputElement) event.target.setCustomValidity("");
+              }}
+            />
+            <div class="gp-dialog-actions">
+              <button
+                class="gp-btn-quiet"
+                type="button"
+                @click=${() => this.#branchDialog()?.hide()}
+              >
+                Cancel
+              </button>
+              <button class="gp-btn-primary" type="submit">Create branch</button>
+            </div>
+          </form>
+        </ui-dialog-popup>
+      </ui-dialog>
+    `;
+  }
+
+  /** The Clone dialog: the smart-HTTP URL, and a copy that says it copied. */
+  #clone(): TemplateResult {
+    return html`
+      <ui-dialog class="gp-clone">
+        <button class="gp-btn-primary" data-dialog-trigger type="button">Clone</button>
+        <ui-dialog-popup class="gp-dialog">
+          <h2 class="gp-dialog-title" data-dialog-title>Clone</h2>
+          <p class="gp-dialog-hint" data-dialog-description>
+            Smart HTTP, served from the same place as this page.
+          </p>
+          <div class="gp-clone-row">
+            <input
+              class="gp-input gp-clone-url"
+              readonly
+              .value=${this.api?.cloneUrl ?? ""}
+              aria-label="Clone URL"
+              @focus=${(event: Event) => {
+                if (event.target instanceof HTMLInputElement) event.target.select();
+              }}
+            />
+            <button class="gp-btn-quiet" type="button" @click=${this.#copyClone}>
+              ${this.copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p class="gp-dialog-hint">git clone ${this.api?.cloneUrl ?? ""}</p>
+        </ui-dialog-popup>
+      </ui-dialog>
+    `;
+  }
+
+  /** Whichever history panel is open: the branch's commits, or one file's. */
+  #panel(): TemplateResult | typeof nothing {
+    if (this.panel === "none") return nothing;
+    if (this.panel === "commits") {
+      const log = this.commitLog;
+      return html`
+        <div class="gp-panel-card gp-history-panel">
+          ${
+            log === null
+              ? html`<div class="gp-empty">Loading history…</div>`
+              : log.length === 0
+                ? html`<div class="gp-empty">No history to show.</div>`
+                : log.map(
+                    (commit) => html`
+                      <div class="gp-list-row">
+                        <span class="gp-sha">${commit.oid.slice(0, 7)}</span>
+                        <span>${commit.subject}</span>
+                        <span class="gp-when">${initials(commit.author)} · ${ago(commit.at)}</span>
+                      </div>
+                    `,
+                  )
+          }
+        </div>
+      `;
+    }
+    const entries = this.fileLog;
+    return html`
+      <div class="gp-panel-card gp-history-panel">
+        ${
+          entries === null
+            ? html`<div class="gp-empty">Loading file history…</div>`
+            : entries.length === 0
+              ? html`<div class="gp-empty">No commits touch this file.</div>`
+              : entries.map(
+                  (entry) => html`
+                    <button
+                      class="gp-list-row gp-filelog-row"
+                      type="button"
+                      ?data-current=${this.at === entry.oid}
+                      @click=${() => void this.#openAt(entry.oid)}
+                    >
+                      <span class="gp-sha">${entry.oid.slice(0, 7)}</span>
+                      <span>${(entry.message.split("\n", 1)[0] ?? "").trim()}</span>
+                    </button>
+                  `,
+                )
+        }
+      </div>
+    `;
+  }
+
+  /** The read-only banner while the pane shows an old revision. */
+  #atBanner(): TemplateResult | typeof nothing {
+    const path = this.selected;
+    const at = this.at;
+    if (path === null || at === null) return nothing;
+    return html`
+      <p class="gp-notice" data-history>
+        Viewing ${path} at ${at.slice(0, 7)} — read-only.
+        <button class="gp-link-btn" type="button" @click=${() => void this.#open(path)}>
+          Back to tip
+        </button>
+      </p>
     `;
   }
 
   #commitBar(head: HeadCommit): TemplateResult {
     return html`
-      <div class="gp-commit-bar">
+      <button
+        class="gp-commit-bar"
+        type="button"
+        title="Recent commits"
+        aria-expanded=${this.panel === "commits" ? "true" : "false"}
+        ?disabled=${this.offline}
+        @click=${() => void this.#toggleCommits()}
+      >
         ${head.avatar === undefined ? "" : html`<span class="gp-avatar">${head.avatar}</span>`}
         ${
           head.author === undefined
@@ -719,7 +1039,7 @@ export class GpCode extends GitPlusElement {
         <span class="gp-commit-subject">${head.message}</span>
         <span class="gp-commit-sha">${head.sha}</span>
         <span>${head.when}</span>
-      </div>
+      </button>
     `;
   }
 }

@@ -19,7 +19,7 @@ import { customElement, property, state } from "lit/decorators.js";
 
 import type { FileDiff } from "@pierre/diffs";
 
-import { ApiError, describe, type DiffFile, type GitApi } from "./api.ts";
+import { ApiError, describe, type DiffFile, type GitApi, qualify } from "./api.ts";
 import { GitPlusElement, navigate } from "./base.ts";
 import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
@@ -58,6 +58,9 @@ export class GpDetail extends GitPlusElement {
   @state() private accessor tab: Tab = "conversation";
   @state() private accessor diffState: DiffState = { tag: "idle" };
 
+  /** Why the last merge attempt refused, shown beside the review card. */
+  @state() private accessor mergeNotice: string | null = null;
+
   #renderers = new Map<string, FileDiff>();
   #diffGeneration = 0;
   #unsubscribe: (() => void) | null = null;
@@ -82,12 +85,60 @@ export class GpDetail extends GitPlusElement {
       this.#diffGeneration += 1;
       this.tab = "conversation";
       this.diffState = { tag: "idle" };
+      this.mergeNotice = null;
       this.#renderers.clear();
     }
   }
 
   get #task(): Task {
     return store.get(this.taskId) ?? store.get("T-12") ?? { ...EMPTY };
+  }
+
+  /**
+   * Merge a mergeable Change Request.
+   *
+   * Two layers, honestly separated: the server's `POST /merge` moves the real
+   * target ref when the named refs exist, and the store's projection records
+   * the Change Request as merged either way. The fixture Change Requests name
+   * refs that live only in the design, so the server answering "unknown ref"
+   * is the expected case there — the projection still lands. A merge the
+   * server *could* run but refused — conflicts — blocks the projection too,
+   * because pretending a conflicted merge landed would be a lie.
+   */
+  async #merge(cr: ChangeRequest): Promise<void> {
+    const api = this.api;
+    this.mergeNotice = null;
+    if (api !== null) {
+      try {
+        const result = await api.merge({
+          ours: qualify(cr.targetRef),
+          theirs: qualify(cr.sourceRef),
+          into: qualify(cr.targetRef),
+          message: `merge ${cr.id}: ${cr.title}`,
+        });
+        if (result.kind === "conflicted") {
+          const paths = result.conflicts.map((conflict) => conflict.path).join(", ");
+          this.mergeNotice = `merge conflicted on ${paths} — resolve on the branch first`;
+          return;
+        }
+      } catch (error) {
+        if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+        // Refs this repository does not have — the fixture case — fall through
+        // to the projection, as does a server with no merge endpoint at all.
+        // A refusal it *could* have honoured (a policy `Invalid`, a conflict)
+        // is worth showing, and blocks the projection.
+        const absent =
+          !(error instanceof ApiError) ||
+          error.unreachable ||
+          error.status === 404 ||
+          error.tag === "ObjectNotFound";
+        if (!absent) {
+          this.mergeNotice = describe(error);
+          return;
+        }
+      }
+    }
+    store.merge(cr.id);
   }
 
   /** Append a comment as whoever `/whoami` said is asking. */
@@ -388,11 +439,16 @@ export class GpDetail extends GitPlusElement {
           type="button"
           data-state=${state}
           ?disabled=${state !== "ready"}
-          @click=${() => store.merge(cr.id)}
+          @click=${() => void this.#merge(cr)}
         >
           ${cr.review.action}
         </button>
       </div>
+      ${
+        this.mergeNotice === null
+          ? nothing
+          : html`<p class="gp-notice" data-error>${this.mergeNotice}</p>`
+      }
     `;
   }
 

@@ -15,7 +15,7 @@ import { customElement, state } from "lit/decorators.js";
 
 import { UISearchField } from "@chr33s/base-wc/src/search-field";
 
-import { ApiError, clientFromDocument, type GitApi } from "./api.ts";
+import { ApiError, clientFromDocument, type GitApi, type Whoami } from "./api.ts";
 import { GitPlusElement, NAVIGATE, NavigateEvent, type Screen } from "./base.ts";
 import { store } from "./store.ts";
 import { current as currentTheme, THEME_CHANGE, ThemeChangeEvent, type Theme } from "./theme.ts";
@@ -24,10 +24,11 @@ import "./nav.sidebar.ts";
 import "./screen.activity.ts";
 import "./screen.code.ts";
 import "./screen.detail.ts";
+import "./screen.search.ts";
 import "./screen.settings.ts";
 import "./screen.tasks.ts";
 
-const SCREENS: readonly string[] = ["activity", "code", "tasks", "detail", "settings"];
+const SCREENS: readonly string[] = ["activity", "code", "tasks", "detail", "settings", "search"];
 
 /**
  * Declared above `GpApp`, not below it.
@@ -49,13 +50,18 @@ export class GpApp extends GitPlusElement {
   @state() private accessor query = "";
 
   /**
-   * Who the server says is asking, from `/whoami` — fetched once here and
-   * handed down, so the rail, the Tasks screen and the detail screen agree on
-   * one identity instead of each asking for it. `null` for an unauthenticated
-   * caller, which the screens render as "anonymous" rather than inventing the
-   * design's placeholder name.
+   * The whole `/whoami` answer — fetched once here and handed down, so the
+   * rail, the screens and the Settings identity card agree on one identity
+   * instead of each asking for it. `null` while unanswered or offline.
    */
-  @state() private accessor viewer: string | null = null;
+  @state() private accessor who: Whoami | null = null;
+
+  /** Which file the Code screen should open, when navigation named one. */
+  @state() private accessor codePath: string | null = null;
+
+  get #viewer(): string | null {
+    return this.who?.subject ?? null;
+  }
 
   readonly #api: GitApi = clientFromDocument();
 
@@ -86,7 +92,7 @@ export class GpApp extends GitPlusElement {
 
   async #identify(): Promise<void> {
     try {
-      this.viewer = (await this.#api.whoami()).subject;
+      this.who = await this.#api.whoami();
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
     }
@@ -97,16 +103,17 @@ export class GpApp extends GitPlusElement {
   /**
    * The rail's search, debounced by `ui-search-field`.
    *
-   * Tasks are what the store can search, so a query shows the Tasks screen
-   * filtered by it; clearing the field clears the filter but stays put.
+   * A query opens the Search screen, which answers from both sides of the
+   * split: Tasks from the client-side store, file contents from the server's
+   * `/grep`. Clearing the field leaves the screen in place with its hint.
    */
   #onSearch = (event: Event): void => {
     const field = event.target;
     if (!(field instanceof UISearchField)) return;
     this.query = field.value;
-    if (field.value.trim() !== "" && this.screen !== "tasks") {
-      this.screen = "tasks";
-      globalThis.location.hash = "#/tasks";
+    if (field.value.trim() !== "" && this.screen !== "search") {
+      this.screen = "search";
+      globalThis.location.hash = "#/search";
     }
   };
 
@@ -118,7 +125,8 @@ export class GpApp extends GitPlusElement {
     if (!(event instanceof NavigateEvent)) return;
     event.stopPropagation();
     this.screen = event.detail.screen;
-    if (event.detail.id !== undefined) this.selected = event.detail.id;
+    if (event.detail.screen === "code") this.codePath = event.detail.id ?? null;
+    else if (event.detail.id !== undefined) this.selected = event.detail.id;
     const hash =
       event.detail.id === undefined
         ? `#/${event.detail.screen}`
@@ -126,12 +134,19 @@ export class GpApp extends GitPlusElement {
     if (globalThis.location.hash !== hash) globalThis.location.hash = hash;
   };
 
-  /** `#/tasks`, `#/detail/CR-14` — deep-linkable, and survives a refresh. */
+  /**
+   * `#/tasks`, `#/detail/CR-14`, `#/code/src/server/Api.ts` — deep-linkable,
+   * and survives a refresh. Only the first segment is the screen; the rest is
+   * the id, joined back together because a file path carries slashes.
+   */
   #fromHash(): void {
-    const [screen, id] = globalThis.location.hash.replace(/^#\/?/, "").split("/");
+    const [screen, ...rest] = globalThis.location.hash.replace(/^#\/?/, "").split("/");
     if (screen === undefined || !isScreen(screen)) return;
     this.screen = screen;
-    if (id !== undefined && id !== "") this.selected = id;
+    const id = rest.join("/");
+    if (id === "") return;
+    if (screen === "code") this.codePath = id;
+    else this.selected = id;
   }
 
   protected override render(): TemplateResult {
@@ -140,7 +155,7 @@ export class GpApp extends GitPlusElement {
         <gp-sidebar
           .screen=${this.screen}
           .openCount=${this.openCount}
-          .subject=${this.viewer}
+          .subject=${this.#viewer}
           .theme=${this.theme}
         ></gp-sidebar>
         ${this.#screen()}
@@ -154,24 +169,33 @@ export class GpApp extends GitPlusElement {
         // `gp-code` owns both the explorer column and the main column, because
         // the explorer is a sibling of the content in the design's layout, not
         // a child of it.
-        return html`<gp-code .api=${this.#api} .theme=${this.theme}></gp-code>`;
+        return html`<gp-code
+          .api=${this.#api}
+          .theme=${this.theme}
+          .who=${this.who}
+          .wanted=${this.codePath}
+        ></gp-code>`;
+      case "search":
+        return html`<div class="gp-main">
+          <gp-search .api=${this.#api} .query=${this.query}></gp-search>
+        </div>`;
       case "activity":
         return html`<div class="gp-main"><gp-activity .api=${this.#api}></gp-activity></div>`;
       case "tasks":
-        return html`<div class="gp-main">
-          <gp-tasks .query=${this.query} .viewer=${this.viewer}></gp-tasks>
-        </div>`;
+        return html`<div class="gp-main"><gp-tasks .viewer=${this.#viewer}></gp-tasks></div>`;
       case "detail":
         return html`<div class="gp-main">
           <gp-detail
             .api=${this.#api}
             .taskId=${this.selected}
             .theme=${this.theme}
-            .viewer=${this.viewer}
+            .viewer=${this.#viewer}
           ></gp-detail>
         </div>`;
       case "settings":
-        return html`<div class="gp-main"><gp-settings .api=${this.#api}></gp-settings></div>`;
+        return html`<div class="gp-main">
+          <gp-settings .api=${this.#api} .who=${this.who}></gp-settings>
+        </div>`;
     }
   }
 }

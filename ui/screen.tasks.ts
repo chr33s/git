@@ -48,9 +48,6 @@ const SEGMENTS: readonly { readonly value: Filter; readonly label: string }[] = 
 
 @customElement("gp-tasks")
 export class GpTasks extends GitPlusElement {
-  /** The rail's search query, handed down by the shell. */
-  @property({ type: String }) accessor query = "";
-
   /** Who the server said is asking; new Tasks are authored by them. */
   @property({ type: String }) accessor viewer: string | null = null;
 
@@ -100,7 +97,7 @@ export class GpTasks extends GitPlusElement {
   };
 
   protected override render(): TemplateResult {
-    const rows = store.rows(this.filter, this.query);
+    const rows = store.rows(this.filter);
     return html`
       <div class="gp-screen">
         <div class="gp-tasks-head">
@@ -126,9 +123,7 @@ export class GpTasks extends GitPlusElement {
 
         ${
           rows.length === 0
-            ? html`<div class="gp-empty">
-                Nothing matches${this.query.trim() === "" ? "" : ` “${this.query.trim()}”`}.
-              </div>`
+            ? html`<div class="gp-empty">Nothing here.</div>`
             : html`<div class="gp-task-list">
                 ${rows.map(({ task, depth }) => this.#row(task, depth))}
               </div>`

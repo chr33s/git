@@ -18,6 +18,7 @@ import "./styles/screen.code.css";
 import "./styles/screen.activity.css";
 import "./styles/screen.tasks.css";
 import "./styles/screen.detail.css";
+import "./styles/screen.search.css";
 import "./styles/screen.settings.css";
 import "./styles/a11y.css";
 

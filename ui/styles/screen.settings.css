@@ -174,3 +174,94 @@ ui-switch.gp-switch > input:focus-visible ~ .gp-switch-thumb {
 .gp-danger-btn:hover {
   background: var(--gp-danger-hover-bg);
 }
+
+/* ------------------------------------------------------ administration rows */
+
+.gp-admin-list {
+  border: 1px solid var(--gp-border);
+  border-radius: var(--gp-radius);
+  overflow: hidden;
+  margin: 10px 0 4px;
+}
+
+.gp-admin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--gp-divider);
+  font-size: 13px;
+}
+
+.gp-admin-row:first-child {
+  border-top: 0;
+}
+
+.gp-admin-name {
+  font-family: var(--gp-mono);
+  font-size: 12.5px;
+  color: var(--gp-fg);
+}
+
+.gp-admin-url {
+  font-family: var(--gp-mono);
+  font-size: 12px;
+  color: var(--gp-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.gp-admin-row > .gp-btn-quiet,
+.gp-admin-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.gp-admin-row[data-wide] > .gp-btn-quiet {
+  margin-left: 0;
+}
+
+.gp-admin-row .gp-btn-quiet {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.gp-admin-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.gp-admin-form .gp-input {
+  flex: 1;
+  min-width: 140px;
+  width: auto;
+  font-size: 12.5px;
+}
+
+.gp-admin-form .gp-admin-select {
+  flex: 0 1 180px;
+}
+
+.gp-admin-form .gp-btn-quiet {
+  flex-shrink: 0;
+}
+
+.gp-admin-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--gp-fg-muted);
+  border-left: 2px solid var(--gp-accent);
+  padding-left: 10px;
+}
+
+.gp-setting-card code {
+  font-family: var(--gp-mono);
+  font-size: 12px;
+}
