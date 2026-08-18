@@ -14,7 +14,7 @@
  * rather than passing stale data off as live.
  */
 import { html, type TemplateResult } from "lit";
-import { customElement, state } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 
 import type { MenuSelectDetail } from "@chr33s/base-wc/src/menu";
 import { FileTree, type GitStatusEntry } from "@pierre/trees";
@@ -24,7 +24,7 @@ import { ApiError, describe, type GitApi, type Unavailable } from "./api.ts";
 import { GitPlusElement } from "./base.ts";
 import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
-import * as theme from "./theme.ts";
+import { current as currentTheme, type Theme } from "./theme.ts";
 import { ago, initials } from "./time.ts";
 
 /** The design's explorer, used when the server is unreachable. */
@@ -94,10 +94,24 @@ interface HeadCommit {
   readonly when: string;
 }
 
+/** One coherent repository view, committed only after every request succeeds. */
+interface CodeSnapshot {
+  readonly ref: string;
+  readonly branches: readonly string[];
+  readonly paths: readonly string[];
+  readonly selected: string | null;
+  readonly content: string | null;
+  readonly head: HeadCommit | null;
+  readonly offline: boolean;
+  readonly reason: string;
+}
+
 @customElement("gp-code")
 export class GpCode extends GitPlusElement {
   /** Injected by the shell so every screen shares one client. */
   api: GitApi | null = null;
+
+  @property({ type: String }) accessor theme: Theme = currentTheme();
 
   @state() private accessor ref = "main";
   @state() private accessor branches: readonly string[] = ["main"];
@@ -113,6 +127,8 @@ export class GpCode extends GitPlusElement {
   #treeHost: HTMLElement | null = null;
   #viewer: DiffsFile | null = null;
   #paths: readonly string[] = [];
+  #loadGeneration = 0;
+  #fileGeneration = 0;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -121,6 +137,8 @@ export class GpCode extends GitPlusElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.#loadGeneration += 1;
+    this.#fileGeneration += 1;
     this.#tree?.cleanUp();
     this.#tree = null;
     this.#treeHost = null;
@@ -135,51 +153,73 @@ export class GpCode extends GitPlusElement {
    * confusing outcome.
    */
   async #load(): Promise<void> {
+    const generation = ++this.#loadGeneration;
+    this.#fileGeneration += 1;
     const api = this.api;
     if (api === null) {
-      this.#useFallback();
+      this.#commit(this.#fallback());
+      this.loading = false;
       return;
     }
     try {
       const refs = await api.refs();
-      const heads = refs
-        .filter((ref) => ref.name.startsWith("refs/heads/"))
-        .map((ref) => ref.name.slice("refs/heads/".length));
-      if (heads.length > 0) {
-        this.branches = heads;
-        this.ref = heads.includes("main") ? "main" : (heads[0] ?? "main");
-      }
-
-      const files = await api.files(this.ref);
-      this.#paths = files.map((file) => file.path);
-
-      await this.#loadHead(api);
-      this.offline = false;
-      await this.#openDefault(api);
+      const branches = this.#branchNames(refs);
+      const ref = branches.includes("main") ? "main" : (branches[0] ?? "main");
+      const snapshot = await this.#snapshot(api, ref, refs);
+      if (generation === this.#loadGeneration) this.#commit(snapshot);
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
-      this.#useFallback(error);
+      if (generation === this.#loadGeneration) this.#commit(this.#fallback(error));
     } finally {
-      this.loading = false;
-      this.#mountTree();
+      if (generation === this.#loadGeneration) {
+        this.loading = false;
+        this.#mountTree();
+      }
     }
   }
 
-  /** The tip of the current ref, with the author and age from its header. */
-  async #loadHead(api: GitApi): Promise<void> {
-    const refs = await api.refs();
-    const tip = refs.find((ref) => ref.name === `refs/heads/${this.ref}`);
-    if (tip === undefined) {
-      this.head = null;
-      return;
-    }
-    const commit = await api.commitDetail(tip.oid);
-    this.head = {
-      sha: commit.oid.slice(0, 7),
-      message: commit.subject,
-      author: commit.author,
-      avatar: initials(commit.author),
-      when: ago(commit.at),
+  #branchNames(refs: readonly { readonly name: string }[]): readonly string[] {
+    return refs
+      .filter((ref) => ref.name.startsWith("refs/heads/"))
+      .map((ref) => ref.name.slice("refs/heads/".length));
+  }
+
+  /** Load one ref without consulting or mutating the component's current ref. */
+  async #snapshot(
+    api: GitApi,
+    ref: string,
+    knownRefs?: Awaited<ReturnType<GitApi["refs"]>>,
+  ): Promise<CodeSnapshot> {
+    const [refs, files] = await Promise.all([
+      knownRefs === undefined ? api.refs() : Promise.resolve(knownRefs),
+      api.files(ref),
+    ]);
+    const paths = files.map((file) => file.path);
+    const readme = paths.find((path) => /^readme(\.md|\.txt)?$/i.test(path)) ?? null;
+    const tip = refs.find((candidate) => candidate.name === `refs/heads/${ref}`);
+    const [commit, content] = await Promise.all([
+      tip === undefined ? Promise.resolve(null) : api.commitDetail(tip.oid),
+      readme === null ? Promise.resolve(null) : api.file(ref, readme),
+    ]);
+    const head =
+      commit === null
+        ? null
+        : {
+            sha: commit.oid.slice(0, 7),
+            message: commit.subject,
+            author: commit.author,
+            avatar: initials(commit.author),
+            when: ago(commit.at),
+          };
+    return {
+      ref,
+      branches: this.#branchNames(refs),
+      paths,
+      selected: readme,
+      content,
+      head,
+      offline: false,
+      reason: "",
     };
   }
 
@@ -191,48 +231,53 @@ export class GpCode extends GitPlusElement {
    */
   async #switchTo(ref: string): Promise<void> {
     const api = this.api;
-    if (api === null || ref === this.ref) return;
-    this.ref = ref;
+    if (api === null) return;
+    const generation = ++this.#loadGeneration;
+    this.#fileGeneration += 1;
     this.loading = true;
     try {
-      const files = await api.files(ref);
-      this.#paths = files.map((file) => file.path);
-      await this.#loadHead(api);
-      this.selected = null;
-      this.content = null;
-      this.#viewer = null;
-      await this.#openDefault(api);
-      this.offline = false;
+      const snapshot = await this.#snapshot(api, ref);
+      if (generation === this.#loadGeneration) this.#commit(snapshot);
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
-      this.#useFallback(error);
+      if (generation === this.#loadGeneration) this.#commit(this.#fallback(error));
     } finally {
-      this.loading = false;
-      this.#mountTree();
+      if (generation === this.#loadGeneration) {
+        this.loading = false;
+        this.#mountTree();
+      }
     }
   }
 
-  /** Open the README if there is one, so the screen is never blank. */
-  async #openDefault(api: GitApi): Promise<void> {
-    const readme = this.#paths.find((path) => /^readme(\.md|\.txt)?$/i.test(path));
-    if (readme === undefined) return;
-    this.selected = readme;
-    this.content = await api.file(this.ref, readme);
+  #fallback(error?: Unavailable): CodeSnapshot {
+    return {
+      ref: "main",
+      branches: ["main"],
+      paths: FALLBACK_PATHS,
+      selected: "README.md",
+      content: FALLBACK_README,
+      head: {
+        sha: "e4a91c2",
+        message: "merge CR-18: update pipeline config",
+        author: "rbaek",
+        avatar: "RB",
+        when: "2h ago",
+      },
+      offline: true,
+      reason: error === undefined ? "no API client was provided" : describe(error),
+    };
   }
 
-  #useFallback(error?: Unavailable): void {
-    this.offline = true;
-    this.reason = error === undefined ? "no API client was provided" : describe(error);
-    this.#paths = FALLBACK_PATHS;
-    this.selected = "README.md";
-    this.content = FALLBACK_README;
-    this.head = {
-      sha: "e4a91c2",
-      message: "merge CR-18: update pipeline config",
-      author: "rbaek",
-      avatar: "RB",
-      when: "2h ago",
-    };
+  #commit(snapshot: CodeSnapshot): void {
+    this.ref = snapshot.ref;
+    this.branches = snapshot.branches;
+    this.#paths = snapshot.paths;
+    this.selected = snapshot.selected;
+    this.content = snapshot.content;
+    this.head = snapshot.head;
+    this.offline = snapshot.offline;
+    this.reason = snapshot.reason;
+    this.#viewer = null;
   }
 
   /**
@@ -275,17 +320,25 @@ export class GpCode extends GitPlusElement {
   async #open(path: string): Promise<void> {
     // Directories arrive here too; they have no blob to read.
     if (!this.#paths.includes(path)) return;
+    const generation = ++this.#fileGeneration;
+    const ref = this.ref;
     this.selected = path;
+    this.content = null;
     const api = this.api;
     if (api === null || this.offline) {
       this.content = path === "README.md" ? FALLBACK_README : `// ${path}`;
       return;
     }
     try {
-      this.content = await api.file(this.ref, path);
+      const content = await api.file(ref, path);
+      if (generation === this.#fileGeneration && ref === this.ref && path === this.selected) {
+        this.content = content;
+      }
     } catch (error) {
       if (!(error instanceof ApiError)) throw error;
-      this.content = `// ${path} — ${error.message}`;
+      if (generation === this.#fileGeneration && ref === this.ref && path === this.selected) {
+        this.content = `// ${path} — ${error.message}`;
+      }
     }
   }
 
@@ -309,12 +362,12 @@ export class GpCode extends GitPlusElement {
     const contents = this.content;
     if (path === null || contents === null) return;
     this.#viewer ??= new File({
-      themeType: theme.current(),
+      themeType: this.theme,
       disableFileHeader: true,
       overflow: "scroll",
       stickyHeader: false,
     });
-    this.#viewer.setThemeType(theme.current());
+    this.#viewer.setThemeType(this.theme);
     this.#viewer.render({ file: { name: path, contents }, containerWrapper: host });
   }
 

@@ -26,7 +26,7 @@ import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
 import { type ChangeRequest, isChangeRequest, type Task } from "./model.ts";
 import { kindChip, statusPill } from "./screen.tasks.ts";
-import * as theme from "./theme.ts";
+import { current as currentTheme, type Theme } from "./theme.ts";
 
 type Tab = "conversation" | "diff" | "commits" | "checks";
 
@@ -38,27 +38,38 @@ interface LoadedDiff {
   readonly newContents: string | null;
 }
 
+type DiffState =
+  | { readonly tag: "idle" }
+  | { readonly tag: "loading"; readonly taskId: string }
+  | { readonly tag: "loaded"; readonly taskId: string; readonly files: readonly LoadedDiff[] }
+  | { readonly tag: "fallback"; readonly taskId: string; readonly reason: string };
+
 @customElement("gp-detail")
 export class GpDetail extends GitPlusElement {
   api: GitApi | null = null;
 
   @property({ type: String }) accessor taskId = "T-12";
+  @property({ type: String }) accessor theme: Theme = currentTheme();
 
   @state() private accessor tab: Tab = "conversation";
-  @state() private accessor live: readonly LoadedDiff[] | null = null;
-  @state() private accessor diffPending = false;
-  @state() private accessor diffOffline = false;
-  @state() private accessor diffReason = "";
+  @state() private accessor diffState: DiffState = { tag: "idle" };
 
   #renderers = new Map<string, FileDiff>();
+  #diffGeneration = 0;
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.#diffGeneration += 1;
+    this.#renderers.clear();
+  }
 
   override willUpdate(changed: Map<string, unknown>): void {
     // A different Change Request means a different diff; drop what was loaded
     // so the old one cannot flash under the new title.
     if (changed.has("taskId")) {
+      this.#diffGeneration += 1;
       this.tab = "conversation";
-      this.live = null;
-      this.diffOffline = false;
+      this.diffState = { tag: "idle" };
       this.#renderers.clear();
     }
   }
@@ -69,40 +80,52 @@ export class GpDetail extends GitPlusElement {
 
   #select(tab: Tab): void {
     this.tab = tab;
-    if (tab === "diff" && this.live === null && !this.diffPending) void this.#loadDiff();
+    if (tab === "diff" && (this.diffState.tag === "idle" || this.diffState.tag === "fallback")) {
+      void this.#loadDiff();
+    }
   }
 
   /** Ask the server what changed, then read both sides of each file. */
   async #loadDiff(): Promise<void> {
     const api = this.api;
     const task = this.#task;
+    const taskId = task.id;
+    const generation = ++this.#diffGeneration;
     if (api === null || !isChangeRequest(task)) {
-      this.diffOffline = true;
-      this.diffReason = `${task.id} names refs that are not in this repository`;
+      this.diffState = {
+        tag: "fallback",
+        taskId,
+        reason: `${task.id} names refs that are not in this repository`,
+      };
       return;
     }
-    this.diffPending = true;
+    this.diffState = { tag: "loading", taskId };
     try {
       const files = await api.diff(task.targetRef, task.sourceRef);
-      const loaded: LoadedDiff[] = [];
-      for (const file of files) {
-        if (file.binary) continue;
-        // `added` has no old side and `removed` has no new one; asking for the
-        // missing side would be a guaranteed 404.
-        const oldContents =
-          file.status === "added" ? null : await api.file(task.targetRef, file.path);
-        const newContents =
-          file.status === "removed" ? null : await api.file(task.sourceRef, file.path);
-        loaded.push({ path: file.path, status: file.status, oldContents, newContents });
+      const loaded = await Promise.all(
+        files
+          .filter((file) => !file.binary)
+          .map(async (file): Promise<LoadedDiff> => {
+            // `added` has no old side and `removed` has no new one; asking for
+            // the missing side would be a guaranteed 404. Existing sides and
+            // separate files are independent, so they all load in parallel.
+            const [oldContents, newContents] = await Promise.all([
+              file.status === "added" ? Promise.resolve(null) : api.file(task.targetRef, file.path),
+              file.status === "removed"
+                ? Promise.resolve(null)
+                : api.file(task.sourceRef, file.path),
+            ]);
+            return { path: file.path, status: file.status, oldContents, newContents };
+          }),
+      );
+      if (generation === this.#diffGeneration && taskId === this.taskId) {
+        this.diffState = { tag: "loaded", taskId, files: loaded };
       }
-      this.live = loaded;
-      this.diffOffline = false;
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
-      this.diffOffline = true;
-      this.diffReason = describe(error);
-    } finally {
-      this.diffPending = false;
+      if (generation === this.#diffGeneration && taskId === this.taskId) {
+        this.diffState = { tag: "fallback", taskId, reason: describe(error) };
+      }
     }
   }
 
@@ -111,23 +134,25 @@ export class GpDetail extends GitPlusElement {
   }
 
   async #renderDiffs(): Promise<void> {
-    const files = this.live ?? [];
-    if (files.length === 0) return;
+    const state = this.diffState;
+    if (state.tag !== "loaded" || state.files.length === 0) return;
+    const files = state.files;
     const { FileDiff } = await diffs();
+    if (this.diffState !== state || state.taskId !== this.taskId) return;
     for (const file of files) {
       const host = this.querySelector<HTMLElement>(`[data-diff-host="${CSS.escape(file.path)}"]`);
       if (host === null) continue;
       let renderer = this.#renderers.get(file.path);
       if (renderer === undefined) {
         renderer = new FileDiff({
-          themeType: theme.current(),
+          themeType: this.theme,
           diffStyle: "unified",
           disableFileHeader: true,
           overflow: "scroll",
         });
         this.#renderers.set(file.path, renderer);
       }
-      renderer.setThemeType(theme.current());
+      renderer.setThemeType(this.theme);
       const oldFile =
         file.oldContents === null ? null : { name: file.path, contents: file.oldContents };
       const newFile =
@@ -264,12 +289,17 @@ export class GpDetail extends GitPlusElement {
   }
 
   #diff(cr: ChangeRequest): TemplateResult {
-    if (this.diffPending)
+    const state = this.diffState;
+    if (state.tag === "idle" || state.tag === "loading")
       return html`<div class="gp-panel-card"><div class="gp-empty">Loading diff…</div></div>`;
 
-    const live = this.live;
-    if (live !== null && live.length > 0) {
-      return html`${live.map(
+    if (state.tag === "loaded") {
+      if (state.files.length === 0) {
+        return html`<div class="gp-panel-card">
+          <div class="gp-empty">No textual changes.</div>
+        </div>`;
+      }
+      return html`${state.files.map(
         (file) => html`
           <div class="gp-panel-card">
             <div class="gp-diff-file-head">
@@ -289,9 +319,9 @@ export class GpDetail extends GitPlusElement {
     // The fixture rendering: the design's own diff, line for line.
     return html`
       ${
-        this.diffOffline
-          ? html`<p class="gp-notice">Showing the design's sample diff — ${this.diffReason}.</p>`
-          : ""
+        state.tag === "fallback"
+          ? html`<p class="gp-notice">Showing the design's sample diff — ${state.reason}.</p>`
+          : nothing
       }
       <div class="gp-panel-card">
         <div class="gp-diff-file-head"><span>${cr.diffFile}</span></div>

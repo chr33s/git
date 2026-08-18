@@ -1,0 +1,218 @@
+/* ---------------------------------------------------------- activity screen */
+
+.gp-activity-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.gp-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--gp-fg-secondary);
+}
+
+.gp-range button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--gp-border-strong);
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--gp-fg-muted);
+  background: none;
+  font: inherit;
+  padding: 0;
+}
+
+.gp-range button:hover {
+  color: var(--gp-fg);
+}
+
+.gp-cal-head {
+  display: grid;
+  grid-template-columns: repeat(14, 1fr);
+  font-size: 12px;
+  color: var(--gp-fg-muted);
+  margin-bottom: 6px;
+}
+
+.gp-cal-month {
+  grid-column: 1 / span 7;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gp-fg);
+  padding-bottom: 10px;
+}
+
+.gp-cal-spacer {
+  grid-column: 8 / span 7;
+}
+
+.gp-cal-day {
+  text-align: center;
+}
+
+.gp-cal-day strong {
+  color: var(--gp-fg-secondary);
+}
+
+.gp-cal-day[data-today],
+.gp-cal-day[data-today] strong {
+  color: var(--gp-accent);
+}
+
+.gp-cal-body {
+  position: relative;
+  border-top: 1px solid var(--gp-border);
+  background: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(100% / 14 - 1px),
+    var(--gp-timeline-grid) calc(100% / 14 - 1px),
+    var(--gp-timeline-grid) calc(100% / 14)
+  );
+}
+
+.gp-cal-now {
+  position: absolute;
+  left: calc(100% / 14 * 8.5);
+  top: 0;
+  bottom: 0;
+  width: 1.5px;
+  background: var(--gp-accent);
+  opacity: 0.7;
+  z-index: 2;
+}
+
+.gp-cal-now-dot {
+  position: absolute;
+  left: calc(100% / 14 * 8.5);
+  top: -4px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3px;
+  border-radius: var(--gp-radius-pill);
+  background: var(--gp-accent);
+  z-index: 2;
+}
+
+.gp-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(14, 1fr);
+  grid-auto-rows: minmax(58px, auto);
+  gap: 10px 0;
+  padding: 18px 0 24px;
+  position: relative;
+  z-index: 1;
+}
+
+.gp-cal-event {
+  margin: 0 6px;
+  background: var(--gp-surface-raised);
+  border: 1px solid var(--gp-border-card);
+  border-left: 3px solid var(--gp-status-color);
+  border-radius: var(--gp-radius-lg);
+  padding: 9px 12px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  min-width: 0;
+}
+
+.gp-cal-event:hover {
+  border-color: var(--gp-border-hover);
+  border-left-color: var(--gp-status-color);
+}
+
+.gp-cal-event-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gp-cal-event-meta {
+  display: block;
+  font-size: 11.5px;
+  color: var(--gp-fg-faint);
+  margin-top: 2px;
+}
+
+/*
+ * A commit is a point in time, so its card gets one day column — about 90px.
+ * The design's single-line ellipsis was written for bars spanning a week and
+ * truncates a commit subject to nothing useful, so these wrap instead.
+ */
+.gp-cal-event[data-point] {
+  padding: 7px 9px;
+}
+
+.gp-cal-event[data-point] .gp-cal-event-title {
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.gp-cal-event[data-point] .gp-cal-event-meta {
+  font-family: var(--gp-mono);
+  font-size: 10.5px;
+  white-space: normal;
+  margin-top: 4px;
+}
+
+/* The epic gets the accent-tinted treatment from the design. */
+.gp-cal-event[data-epic] {
+  background: rgb(var(--gp-accent-rgb) / 0.1);
+  border: 1px solid rgb(var(--gp-accent-rgb) / 0.35);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.gp-cal-event[data-epic]:hover {
+  background: rgb(var(--gp-accent-rgb) / 0.16);
+  border-color: rgb(var(--gp-accent-rgb) / 0.35);
+}
+
+.gp-cal-event[data-epic] .gp-cal-event-title {
+  color: var(--gp-accent-strong);
+}
+
+.gp-cal-event[data-epic] .gp-cal-event-meta {
+  color: var(--gp-accent);
+  opacity: 0.75;
+}
+
+.gp-cal-event-body {
+  display: block;
+  min-width: 0;
+}
+
+.gp-cal-avatars {
+  margin-left: auto;
+  display: flex;
+}
+
+.gp-cal-avatars .gp-avatar {
+  width: 20px;
+  height: 20px;
+  font-size: 8px;
+  border: 1.5px solid var(--gp-avatar-ring);
+}
+
+.gp-cal-avatars .gp-avatar + .gp-avatar {
+  margin-left: -6px;
+}

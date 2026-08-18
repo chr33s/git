@@ -14,6 +14,15 @@
 
 export type Theme = "light" | "dark";
 
+export const THEME_CHANGE = "gp-theme-change";
+
+/** A typed palette change, owned by the shell and passed back down as state. */
+export class ThemeChangeEvent extends CustomEvent<Theme> {
+  constructor(theme: Theme) {
+    super(THEME_CHANGE, { bubbles: true, composed: true, detail: theme });
+  }
+}
+
 const KEY = "gp-theme";
 
 /** The stored choice, or `null` when the user has not made one. */

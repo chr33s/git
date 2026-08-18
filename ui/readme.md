@@ -135,7 +135,7 @@ drift apart.
 | `nav.sidebar.ts` | The left rail                        |
 | `screen.*.ts`    | One module per screen                |
 | `tokens.css`     | Both palettes, as custom properties  |
-| `app.css`        | Everything else                      |
+| `styles/*.css`   | Shell, primitives, and screen styles |
 | `build.ts`       | esbuild bundle                       |
 | `verify.ts`      | Browser checks                       |
 
@@ -176,5 +176,5 @@ drift apart.
 
 - **Shiki is loaded on demand.** It carries every bundled grammar, which is
   megabytes. `highlight.ts` defers `@pierre/diffs` to first use so Activity,
-  Tasks and Settings never pay for it; the entry bundle is ~300 kB (~91 kB
-  gzipped) and grammars arrive per language.
+  Tasks and Settings never pay for it; the runtime-validated entry bundle is
+  ~545 kB (~163 kB gzipped) and grammars arrive per language.

@@ -8,10 +8,9 @@
  *   interact    the behaviours the design conversation settled on still work
  *   live        Code and Diff read the JSON API, not the fixtures
  *
- * The `live` suite serves the shapes from `src/server/Api.ts` rather than
- * booting a Worker, so it runs anywhere and fails loudly if this UI and that
- * declaration drift apart — which is the risk a hand-written client carries
- * (see the note at the top of `api.ts`).
+ * The `live` suite decodes every stub response with the shared schemas used by
+ * `src/server/Api.ts` and the browser client. It therefore runs without a
+ * Worker while still failing immediately if a fixture drifts from the wire.
  *
  *   node ui/build.ts && node ui/verify.ts
  *   node ui/verify.ts --shots <dir>    # also write screenshots
@@ -20,10 +19,16 @@
  * PLAYWRIGHT_BROWSERS_PATH; pass --executable to point at a specific binary.
  */
 import { chromium, type Browser, type Page } from "playwright";
+import { Schema } from "effect";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { createServer, type Server } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import * as Contract from "../src/server/UiApiContract.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Output lives at the repository root alongside `dist/sea`, not under `ui/`. */
@@ -61,8 +66,9 @@ const check = (name: string, ok: boolean, detail = ""): void => {
 };
 
 /** A repository the `live` suite serves: two refs, and a file that differs. */
-const OID_MAIN = "2".repeat(40);
-const OID_BRANCH = "1".repeat(40);
+const oid = Schema.decodeUnknownSync(Contract.OidString);
+const OID_MAIN = oid("2".repeat(40));
+const OID_BRANCH = oid("1".repeat(40));
 const BRANCH = "rbaek/auth-middleware";
 
 /** Blob contents keyed by tree path — one repository, at two revisions. */
@@ -90,7 +96,7 @@ const base64 = (text: string): string => Buffer.from(text, "utf8").toString("bas
  * renders and on the Activity grid's window — both of which move with today.
  */
 interface Stubbed {
-  readonly oid: string;
+  readonly oid: Contract.Ref["oid"];
   readonly subject: string;
   readonly author: string;
   readonly daysAgo: number;
@@ -103,8 +109,13 @@ const HISTORY: readonly Stubbed[] = [
     author: "Rune Baek",
     daysAgo: 1,
   },
-  { oid: "3".repeat(40), subject: "widen the api surface", author: "Maya Kessler", daysAgo: 3 },
-  { oid: "4".repeat(40), subject: "seed the repository", author: "Maya Kessler", daysAgo: 6 },
+  {
+    oid: oid("3".repeat(40)),
+    subject: "widen the api surface",
+    author: "Maya Kessler",
+    daysAgo: 3,
+  },
+  { oid: oid("4".repeat(40)), subject: "seed the repository", author: "Maya Kessler", daysAgo: 6 },
 ];
 
 /** A raw commit object, in the format `/object/:oid` returns base64-encoded. */
@@ -123,62 +134,6 @@ const rawCommit = (commit: Stubbed): string => {
 };
 
 /**
- * The success bodies this stub returns, transcribed from `src/server/Api.ts`
- * alongside the client in `api.ts`. Naming them is what makes a drift between
- * the two show up as a type error here rather than as a silent test pass.
- */
-type ApiAnswer =
-  | { readonly refs: ReadonlyArray<{ readonly name: string; readonly oid: string }> }
-  | {
-      readonly files: ReadonlyArray<{
-        readonly path: string;
-        readonly mode: string;
-        readonly oid: string;
-      }>;
-    }
-  | {
-      readonly path: string;
-      readonly mode: string;
-      readonly oid: string;
-      readonly content: string;
-      readonly encoding: "base64";
-      readonly size: number;
-    }
-  | { readonly commits: ReadonlyArray<{ readonly oid: string; readonly message: string }> }
-  | {
-      readonly items: ReadonlyArray<{ readonly oid: string; readonly message: string }>;
-      readonly next_cursor: string | null;
-      readonly has_more: boolean;
-    }
-  | {
-      readonly items: ReadonlyArray<{ readonly name: string; readonly oid: string }>;
-      readonly next_cursor: string | null;
-      readonly has_more: boolean;
-    }
-  | {
-      readonly oid: string;
-      readonly type: "blob" | "tree" | "commit" | "tag";
-      readonly size: number;
-      readonly content: string;
-      readonly encoding: "base64";
-    }
-  | {
-      readonly repo: string | null;
-      readonly subject: string | null;
-      readonly member: boolean;
-      readonly why: string | null;
-      readonly capabilities: ReadonlyArray<string>;
-    }
-  | {
-      readonly files: ReadonlyArray<{
-        readonly path: string;
-        readonly status: "added" | "removed" | "modified";
-        readonly binary: boolean;
-        readonly patch: string;
-      }>;
-    };
-
-/**
  * Static files, plus — when `api` is set — the JSON endpoints the UI calls.
  *
  * With the API off, every call 404s, which is exactly the condition the
@@ -189,10 +144,14 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       const path = url.pathname;
-      /** Every answer this stub gives is one of the API's success shapes. */
-      const json = (body: ApiAnswer): void => {
+      /** Decode fixtures with the same schema the server and browser use. */
+      const json = <S extends Schema.ConstraintDecoder<unknown>>(
+        schema: S,
+        body: S["Type"],
+      ): void => {
+        const decoded = Schema.decodeUnknownSync(schema)(body);
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify(body));
+        response.end(JSON.stringify(decoded));
       };
 
       if (api) {
@@ -210,7 +169,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         const tree = ref === `refs/heads/${BRANCH}` ? AT_BRANCH : AT_MAIN;
 
         if (path === "/core/refs") {
-          return json({
+          return json(Contract.RefsResponse, {
             refs: [
               { name: "refs/heads/main", oid: OID_MAIN },
               { name: `refs/heads/${BRANCH}`, oid: OID_BRANCH },
@@ -218,7 +177,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           });
         }
         if (path === "/core/files") {
-          return json({
+          return json(Contract.FilesResponse, {
             files: Object.keys(tree).map((p) => ({ path: p, mode: "100644", oid: OID_BRANCH })),
           });
         }
@@ -229,7 +188,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             response.writeHead(404, { "content-type": "application/json" });
             return response.end(JSON.stringify({ _tag: "ObjectNotFound" }));
           }
-          return json({
+          return json(Contract.FileContent, {
             path: wanted,
             mode: "100644",
             oid: OID_BRANCH,
@@ -241,7 +200,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         // Settings reads the paged `/branches`, which is the endpoint built for
         // a branch list; Code reads `/refs` because it wants the tip oid too.
         if (path === "/core/branches") {
-          return json({
+          return json(Contract.RefPage, {
             items: [
               { name: "refs/heads/main", oid: OID_MAIN },
               { name: `refs/heads/${BRANCH}`, oid: OID_BRANCH },
@@ -251,25 +210,28 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           });
         }
         if (path === "/core/whoami") {
-          return json({
+          return json(Contract.WhoamiAnswer, {
             repo: "core",
             subject: null,
             member: false,
             why: "this repository has no genesis",
             capabilities: [],
+            expiresAt: null,
+            trust: null,
+            branches: {},
           });
         }
         if (path.startsWith("/core/object/")) {
-          const oid = path.slice("/core/object/".length);
-          const commit = HISTORY.find((entry) => entry.oid === oid);
+          const requestedOid = oid(path.slice("/core/object/".length));
+          const commit = HISTORY.find((entry) => entry.oid === requestedOid);
           const subject = commit ?? {
-            oid,
+            oid: requestedOid,
             subject: "add auth middleware",
             author: "Rune Baek",
             daysAgo: 0,
           };
-          return json({
-            oid,
+          return json(Contract.RawObject, {
+            oid: requestedOid,
             type: "commit",
             size: rawCommit(subject).length,
             content: base64(rawCommit(subject)),
@@ -277,14 +239,14 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           });
         }
         if (path.startsWith("/core/commits/")) {
-          return json({
+          return json(Contract.CommitPage, {
             items: HISTORY.map((entry) => ({ oid: entry.oid, message: `${entry.subject}\n` })),
             next_cursor: null,
             has_more: false,
           });
         }
         if (path.startsWith("/core/log/")) {
-          return json({
+          return json(Contract.LogResponse, {
             commits: [
               { oid: OID_MAIN, message: "merge CR-18: update pipeline config\n\nbody" },
               { oid: OID_BRANCH, message: "earlier" },
@@ -292,7 +254,27 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           });
         }
         if (path === "/core/diff" && request.method === "POST") {
-          return json({
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of request) chunks.push(Buffer.from(chunk));
+            const input: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            const payload = Schema.decodeUnknownSync(Contract.DiffRequest)(input);
+            // CR-15 is the valid empty-diff case. CR-14 is deliberately slower
+            // so the live suite can prove an older request cannot overwrite it.
+            if (payload.to === "refs/heads/atran/login-ui") {
+              return json(Contract.DiffResponse, { files: [] });
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          } catch (cause) {
+            response.writeHead(400, { "content-type": "application/json" });
+            return response.end(
+              JSON.stringify({
+                _tag: "Invalid",
+                reason: cause instanceof Error ? cause.message : String(cause),
+              }),
+            );
+          }
+          return json(Contract.DiffResponse, {
             files: [{ path: "src/server/Api.ts", status: "modified", binary: false, patch: "" }],
           });
         }
@@ -311,6 +293,62 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
   });
   await new Promise<void>((resolve) => server.listen(port, resolve));
   return server;
+};
+
+/** Exercise the actual `ui:dev` proxy, including its one-shot request stream. */
+const verifyProxy = async (upstream: string, port: number): Promise<void> => {
+  console.info("\nproxy");
+  const proxyOut = await mkdtemp(join(tmpdir(), "git-plus-ui-proxy-"));
+  const child = spawn(process.execPath, [join(here, "build.ts"), "--serve"], {
+    cwd: join(here, ".."),
+    env: {
+      ...process.env,
+      GIT_API: upstream,
+      GIT_UI_OUTDIR: proxyOut,
+      PORT: String(port),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`dev proxy did not start:\n${output}`)),
+        10_000,
+      );
+      const append = (chunk: Buffer): void => {
+        output += chunk.toString("utf8");
+        if (!output.includes("git+ UI on")) return;
+        clearTimeout(timeout);
+        resolve();
+      };
+      child.stdout.on("data", append);
+      child.stderr.on("data", append);
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (!output.includes("git+ UI on")) {
+          clearTimeout(timeout);
+          reject(new Error(`dev proxy exited ${String(code)}:\n${output}`));
+        }
+      });
+    });
+    const response = await fetch(`http://127.0.0.1:${String(port)}/core/diff`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from: "refs/heads/main", to: `refs/heads/${BRANCH}` }),
+    });
+    check(
+      "the development proxy preserves POST bodies",
+      response.status === 200,
+      `${String(response.status)} ${await response.text()}`,
+    );
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, "exit");
+    }
+    await rm(proxyOut, { force: true, recursive: true });
+  }
 };
 
 const shot = async (page: Page, name: string): Promise<void> => {
@@ -543,6 +581,21 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     "the source pane shows content from /file",
     (await page.getByText("Live from the API.").count()) > 0,
   );
+  const rendererTheme = (): Promise<string> =>
+    page.evaluate(
+      () =>
+        document
+          .querySelector("diffs-container")
+          ?.shadowRoot?.querySelector("style[data-theme-css]")?.textContent ?? "",
+    );
+  const themeBefore = await rendererTheme();
+  await page.click(".gp-theme-toggle");
+  await page.waitForTimeout(500);
+  const themeAfter = await rendererTheme();
+  check(
+    "a mounted source renderer follows theme changes",
+    themeBefore !== "" && themeAfter !== "" && themeBefore !== themeAfter,
+  );
   await shot(page, "live-code");
 
   // --- the branch picker, over the real ref list -------------------------
@@ -567,6 +620,45 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     "and the explorer refetches at the new ref",
     (await page.locator('[data-item-path="src/server/Api.ts"]').count()) > 0,
   );
+
+  // Start a slow switch to main, then immediately choose the already-visible
+  // branch again. Only the second request is allowed to commit its snapshot.
+  await page.route("**/core/files?*", async (route) => {
+    const ref = new URL(route.request().url()).searchParams.get("ref");
+    await new Promise((resolve) => setTimeout(resolve, ref === "refs/heads/main" ? 450 : 20));
+    await route.continue();
+  });
+  await page.locator("ui-menu.gp-branch-menu").evaluate((menu, branch) => {
+    menu.dispatchEvent(
+      new CustomEvent("menu-select", { bubbles: true, detail: { value: "main" } }),
+    );
+    menu.dispatchEvent(
+      new CustomEvent("menu-select", { bubbles: true, detail: { value: branch } }),
+    );
+  }, BRANCH);
+  await page.waitForTimeout(1200);
+  check(
+    "an older branch request cannot overwrite the latest selection",
+    ((await page.textContent(".gp-branch-trigger")) ?? "").includes(BRANCH) &&
+      ((await page.textContent(".gp-commit-bar")) ?? "").includes("add auth middleware"),
+  );
+  await page.unroute("**/core/files?*");
+
+  // A slow first blob must not be painted under the second path's heading.
+  await page.route("**/core/file?*", async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path");
+    await new Promise((resolve) => setTimeout(resolve, path === "src/server/Api.ts" ? 450 : 20));
+    await route.continue();
+  });
+  await page.locator('[data-item-path="src/server/Api.ts"]').click();
+  await page.locator('[data-item-path="src/git/Store.ts"]').click();
+  await page.waitForTimeout(1000);
+  check(
+    "an older file request cannot overwrite the latest selection",
+    ((await page.textContent(".gp-card-head")) ?? "").includes("src/git/Store.ts") &&
+      (await page.getByText("export const store = 2;").count()) > 0,
+  );
+  await page.unroute("**/core/file?*");
   await shot(page, "live-code-switched");
 
   await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "networkidle" });
@@ -588,6 +680,25 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   check("the removed side rendered", (await page.getByText("export const api = 1;").count()) > 0);
   check("the added side rendered", (await page.getByText("export const api = 2;").count()) > 0);
   await shot(page, "live-diff");
+
+  // Start the deliberately slow CR-14 request, navigate away, then load a
+  // legitimate empty diff. The old response must not replace the new state,
+  // and an empty live result must never fall through to fixture content.
+  await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "domcontentloaded" });
+  await page.click('.gp-tab[value="diff"]');
+  await page.evaluate(() => {
+    globalThis.location.hash = "#/detail/CR-15";
+  });
+  await page.waitForFunction(
+    () => document.querySelector(".gp-detail-title")?.textContent?.trim() === "Add login UI",
+  );
+  await page.click('.gp-tab[value="diff"]');
+  await page.waitForTimeout(900);
+  check(
+    "an empty live diff is explicit and rejects a stale prior request",
+    ((await page.textContent(".gp-empty")) ?? "").includes("No textual changes") &&
+      (await page.locator(".gp-diff-static").count()) === 0,
+  );
 
   // --- Activity, from real commit history --------------------------------
   await page.goto(`${origin}/#/activity`, { waitUntil: "networkidle" });
@@ -622,6 +733,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
 
 const offline = await serve(false, 8131);
 const online = await serve(true, 8132);
+await verifyProxy("http://127.0.0.1:8132", 8133);
 const browser = await chromium.launch(
   executable === undefined ? {} : { executablePath: executable },
 );

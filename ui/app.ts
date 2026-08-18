@@ -16,6 +16,7 @@ import { customElement, state } from "lit/decorators.js";
 import { clientFromDocument, type GitApi } from "./api.ts";
 import { GitPlusElement, NAVIGATE, NavigateEvent, type Screen } from "./base.ts";
 import { tasks } from "./fixtures.ts";
+import { current as currentTheme, THEME_CHANGE, ThemeChangeEvent, type Theme } from "./theme.ts";
 
 import "./nav.sidebar.ts";
 import "./screen.activity.ts";
@@ -44,19 +45,30 @@ const isScreen = (value: string): value is Screen => SCREENS.includes(value);
 export class GpApp extends GitPlusElement {
   @state() private accessor screen: Screen = "code";
   @state() private accessor selected = "T-12";
+  @state() private accessor theme: Theme = currentTheme();
 
   readonly #api: GitApi = clientFromDocument();
 
   override connectedCallback(): void {
     super.connectedCallback();
     this.addEventListener(NAVIGATE, this.#onNavigate);
-    // A theme flip changes what `@pierre/trees` and `@pierre/diffs` should
-    // paint, and they live behind shadow roots Lit does not touch — so the
-    // screens are asked to re-render explicitly.
-    this.addEventListener("gp-theme-change", () => this.requestUpdate());
+    this.addEventListener(THEME_CHANGE, this.#onThemeChange);
     this.#fromHash();
-    globalThis.addEventListener("hashchange", () => this.#fromHash());
+    globalThis.addEventListener("hashchange", this.#onHashChange);
   }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.removeEventListener(NAVIGATE, this.#onNavigate);
+    this.removeEventListener(THEME_CHANGE, this.#onThemeChange);
+    globalThis.removeEventListener("hashchange", this.#onHashChange);
+  }
+
+  #onHashChange = (): void => this.#fromHash();
+
+  #onThemeChange = (event: Event): void => {
+    if (event instanceof ThemeChangeEvent) this.theme = event.detail;
+  };
 
   #onNavigate = (event: Event): void => {
     if (!(event instanceof NavigateEvent)) return;
@@ -81,7 +93,12 @@ export class GpApp extends GitPlusElement {
   protected override render(): TemplateResult {
     return html`
       <div class="gp-shell">
-        <gp-sidebar .screen=${this.screen} .openCount=${OPEN} .api=${this.#api}></gp-sidebar>
+        <gp-sidebar
+          .screen=${this.screen}
+          .openCount=${OPEN}
+          .api=${this.#api}
+          .theme=${this.theme}
+        ></gp-sidebar>
         ${this.#screen()}
       </div>
     `;
@@ -93,14 +110,14 @@ export class GpApp extends GitPlusElement {
         // `gp-code` owns both the explorer column and the main column, because
         // the explorer is a sibling of the content in the design's layout, not
         // a child of it.
-        return html`<gp-code .api=${this.#api}></gp-code>`;
+        return html`<gp-code .api=${this.#api} .theme=${this.theme}></gp-code>`;
       case "activity":
         return html`<div class="gp-main"><gp-activity .api=${this.#api}></gp-activity></div>`;
       case "tasks":
         return html`<div class="gp-main"><gp-tasks></gp-tasks></div>`;
       case "detail":
         return html`<div class="gp-main">
-          <gp-detail .api=${this.#api} .taskId=${this.selected}></gp-detail>
+          <gp-detail .api=${this.#api} .taskId=${this.selected} .theme=${this.theme}></gp-detail>
         </div>`;
       case "settings":
         return html`<div class="gp-main"><gp-settings .api=${this.#api}></gp-settings></div>`;

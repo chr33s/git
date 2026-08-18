@@ -11,7 +11,15 @@
  * by the time the first template using one is stamped.
  */
 import "./tokens.css";
-import "./app.css";
+import "./styles/base.css";
+import "./styles/sidebar.css";
+import "./styles/primitives.css";
+import "./styles/screen.code.css";
+import "./styles/screen.activity.css";
+import "./styles/screen.tasks.css";
+import "./styles/screen.detail.css";
+import "./styles/screen.settings.css";
+import "./styles/a11y.css";
 
 import { REGISTERED } from "./elements.ts";
 import { restore } from "./theme.ts";

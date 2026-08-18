@@ -7,7 +7,7 @@
  * "light DOM, no shadow root, so consumer CSS applies directly and cross-root
  * ARIA (`aria-controls`, `aria-activedescendant`, `aria-labelledby`) resolves
  * against elements the page owns". A `ui-tabs` whose panels live behind a
- * shadow boundary cannot wire that ARIA, and `app.css` could not reach it.
+ * shadow boundary cannot wire that ARIA, and the global styles could not reach it.
  *
  * So: Lit supplies the reactive rendering, `base-wc` supplies the behaviour,
  * and a single global stylesheet supplies the look. The two libraries agree
