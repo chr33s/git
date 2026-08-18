@@ -155,13 +155,66 @@ describe("what an event's declared trust head can cost", () => {
 
         return {
           whole: (yield* Log.ancestry(head)).size,
-          bounded: (yield* Log.ancestry(head).pipe(Effect.provide(Log.ceiling(3)))).size,
+          bounded: yield* Log.ancestry(head).pipe(
+            Effect.provide(Log.ceiling(3)),
+            Effect.as(null),
+            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          ),
         };
       }),
     );
 
     assert.equal(outcome.whole, 7, "the whole chain is reachable when nothing bounds it");
-    assert.equal(outcome.bounded, 0, "and past the ceiling it reaches nothing this host will name");
+    // Refused, not answered empty. "Reaches nothing" is not the conservative
+    // reading: it makes every forward-only revocation invisible, so an event
+    // naming such a head would count rather than being turned away. The
+    // callers turn this failure into a denial of that one event.
+    assert.match(outcome.bounded ?? "", /more than 3 commits/);
+  });
+
+  it("refuses an event whose declared head it cannot walk, rather than counting it", async () => {
+    // The denial is what makes the refusal above the conservative answer. Read
+    // as "reaches nothing", a revoked signer's event would show no revocation
+    // in its ancestry and count; read as a refusal, the event is turned away
+    // and the revocation stands.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["hub.comment"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+        const head = yield* repository.resolve(Log.LOG_REF);
+        const projection = yield* project(genesis);
+
+        const bytes = new TextEncoder().encode("a statement");
+        const made = { at: new Date(1_700_000_000_000), trustHead: head };
+        const signed = [yield* fingerprint(member.publicKey)];
+        const judged = (ceiling: number) =>
+          Verify.authorize({
+            projection,
+            bytes,
+            signatures: [],
+            signed,
+            capability: "hub.comment",
+            made,
+          }).pipe(Effect.provide(Log.ceiling(ceiling)));
+
+        return { walkable: yield* judged(64), beyond: yield* judged(0) };
+      }),
+    );
+
+    assert.equal(outcome.walkable.ok, true, "an ordinary head is walked and the grant found");
+    assert.equal(outcome.beyond.ok, false, "and one this host will not walk shows no grant");
   });
 });
 

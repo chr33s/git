@@ -383,12 +383,6 @@ export const ancestry = Effect.fn("trust.Log.ancestry")(function* (from: Oid) {
     genesis,
     (oid) => isTrustCommit(oid),
     yield* ceilingOf(),
-  ).pipe(
-    // A history past the ceiling is a history this host will not read, and
-    // "reaches nothing I can name" is the conservative answer: `reaches`
-    // treats an unreachable revocation as reaching the event, and `held`
-    // treats an unreachable grant as not held.
-    Effect.catchTag("Invalid", () => Effect.succeed(new Map<Oid, ReadonlyArray<Oid>>())),
   );
   return new Set(reachable.keys());
 });

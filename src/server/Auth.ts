@@ -184,13 +184,16 @@ export const nonceStore = (): Nonces["Service"] => {
   let key: Promise<CryptoKey> | null = null;
 
   const tag = async (body: string): Promise<string> => {
-    key ??= crypto.subtle.importKey(
-      "raw",
-      secret.slice().buffer,
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"],
-    );
+    // A *rejected* promise is not cached. Kept, one transient import failure
+    // would be replayed for the life of the host — and these methods declare
+    // no error channel, so it arrives as a defect and every later request
+    // becomes a 500 rather than the 401 the caller should have got.
+    key ??= crypto.subtle
+      .importKey("raw", secret.slice().buffer, { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+      .catch(() => {
+        key = null;
+        throw new Error("the nonce store could not import its signing key");
+      });
     const mac = await crypto.subtle.sign("HMAC", await key, encoder.encode(body));
     return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   };

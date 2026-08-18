@@ -130,7 +130,15 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   // Every window, not merely the latest: a key revoked, let back in and
   // revoked again was out for two separate intervals, and an event made in the
   // first is not rescued by the second. It is enough to fall inside one.
-  const visible = yield* seen(made.trustHead);
+  // A head whose ancestry this host will not walk is a head it cannot show
+  // anything about — including that the event predates a revocation. Read as
+  // "reaches nothing", the answer is not conservative but the opposite: every
+  // forward-only revocation becomes invisible and the event counts. So an
+  // ancestry it cannot compute is an event this refuses.
+  const visible = yield* seen(made.trustHead).pipe(
+    Effect.catchTag("Invalid", () => Effect.succeed(null)),
+  );
+  if (visible === null) return true;
   for (const revocation of revocations) {
     // A revocation that a later grant ended still covers its own window. An
     // event that can show it was made after the key came back is outside it;
@@ -189,7 +197,12 @@ const held = Effect.fn("trust.Verify.held")(function* (
   // stop — that made a renewal un-authorize everything signed before it, and
   // a downgrade stricter than a revocation. `history` is in log order, so the
   // last reachable entry is the one in force.
-  const ancestors = yield* seen(made.trustHead);
+  // As in `reaches`, and to the same end: an ancestry this host will not walk
+  // shows no grant, and a grant it cannot show is one the event does not get.
+  const ancestors = yield* seen(made.trustHead).pipe(
+    Effect.catchTag("Invalid", () => Effect.succeed(null)),
+  );
+  if (ancestors === null) return false;
   for (let at = member.history.length - 1; at >= 0; at--) {
     const record = member.history[at]!;
     if (record.commit !== made.trustHead && !ancestors.has(record.commit)) continue;
