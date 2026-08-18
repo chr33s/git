@@ -15,6 +15,7 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { readGenesis } from "../trust/Genesis.ts";
+import * as Memory from "../hub/Memory.ts";
 import * as Session from "../hub/Session.ts";
 import { readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
@@ -398,8 +399,38 @@ const enable = Command.make(
     }),
 );
 
+const memoryShow = Command.make(
+  "memory",
+  {
+    root: rootFlag,
+    distill: Flag.boolean("distill").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Rebuild it from the sessions first"),
+    ),
+    repo: repoArgument,
+  },
+  ({ distill, repo, root }) =>
+    Effect.gen(function* () {
+      const note = yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          if (!distill) return yield* Memory.read();
+          // Rebuilt rather than merged: the sessions are the record, and a
+          // view of them that could drift from what it cites would be worse
+          // than no view at all.
+          const fresh = yield* Memory.distill();
+          const text = Memory.render(fresh.entries, fresh.sessions);
+          yield* Memory.write(text);
+          return text;
+        }),
+      );
+      yield* Console.log(note ?? "no memory yet; run with --distill");
+    }),
+);
+
 export const sessionCommand = Command.make("session", {}, () =>
-  Console.log("chr33s-git session <open|produce|show|ask|answer|enable> — see --help"),
+  Console.log("chr33s-git session <open|produce|show|ask|answer|enable|memory> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record who was instructed, and what they were asked")),
@@ -408,5 +439,8 @@ export const sessionCommand = Command.make("session", {}, () =>
     ask.pipe(Command.withDescription("Record a question only a person can answer")),
     answer.pipe(Command.withDescription("Answer one, which unblocks the session that asked")),
     enable.pipe(Command.withDescription("Install the harness hooks that record sessions")),
+    memoryShow.pipe(
+      Command.withDescription("What agents have learned here, distilled from their sessions"),
+    ),
   ]),
 );

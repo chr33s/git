@@ -319,6 +319,49 @@ describe("cli session", () => {
     assert.equal(fsSync.existsSync(path.join(work, ".chr33s", "session.id")), false);
   });
 
+  it("compounds what sessions learned, and forgets what their source lost", async () => {
+    const note = async (text: string) => {
+      const session = await openSession("some work");
+      await cli([
+        "session",
+        "produce",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--session",
+        session,
+        "--note",
+        text,
+        "project",
+      ]);
+      return session;
+    };
+
+    await note("gotcha: run npm install before typecheck; postinstall applies patches");
+    await note("gotcha: run npm install before typecheck; postinstall applies patches");
+    const only = await note("convention: tests colocate as *.test.ts beside sources");
+
+    const memory = await cli(["session", "memory", "--root", root, "--distill", "project"]);
+
+    // Ordered by how often a thing was observed, which is also the eviction
+    // rule: the twice-seen gotcha outranks the once-seen convention.
+    assert.match(memory, /gotcha: run npm install/);
+    assert.match(memory, /2 observation\(s\)/);
+    assert.match(memory, /convention: tests colocate/);
+    assert.ok(
+      memory.indexOf("gotcha:") < memory.indexOf("convention:"),
+      `what was seen more often comes first: ${memory}`,
+    );
+
+    // Cited, so a reader can check it against the record rather than trust it.
+    assert.ok(memory.includes(only), `entries name the sessions they came from: ${memory}`);
+
+    // Read back without distilling: it is a note now, not a computation.
+    const stored = await cli(["session", "memory", "--root", root, "project"]);
+    assert.equal(stored.trim(), memory.trim());
+  });
+
   it("refuses to record a session against a repository that has no identity", async () => {
     await cli(["init", "--root", root, "plain"]);
     const refused = await failing([

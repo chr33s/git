@@ -1228,8 +1228,9 @@ the trust graph verifies.
 
 ### 22. Memory
 
-Session records capture learnings one session at a time; nothing yet
-compounds them. Repository memory is the aggregation: a distillation of
+Session records capture learnings one session at a time; nothing else
+compounds them. Repository memory is the aggregation, and this is **built**
+(`session memory --distill`): a distillation of
 `session.closed` summaries across the fleet — what agents have learned
 about this repository, the machine-maintained sibling of a hand-written
 `CLAUDE.md`.
@@ -1244,6 +1245,13 @@ Because every future session reads it, memory is the highest-value
 injection target in the system. The §8 rule applies doubly — memory is
 data, cited not obeyed — and regeneration from the signed records it
 cites is the audit path when its content is doubted.
+
+It is **rebuilt rather than merged**, which the sketch left open and the
+implementation settled: the sessions are the record, so regenerating costs
+a walk and buys the two properties that matter — a view that cannot drift
+from what it cites, and one where anything whose source was redacted
+simply stops appearing. Nothing is signed, because what it says is not
+evidence of anything the sessions do not already say.
 
 #### The loop
 
