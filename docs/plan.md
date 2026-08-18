@@ -138,15 +138,15 @@ check at the boundary, with the batch's own session commands counted
 before its source commands, so a branch and the record of what produced it
 travel in one receive-pack. What remains:
 
-**Decisions and budgets have landed** — `decision.requested` /
+**Memory, decisions and budgets have landed** — memory as a note on the
+genesis commit, rebuilt from the sessions it cites and capped so eviction
+is forced; — `decision.requested` /
 `decision.resolved` in the session DAG with `session ask|answer`, and
 `maxUsageTokens` over what sessions report, surfaced by `whoami` rather
 than enforced at the boundary because what it counts is self-reported.
 What remains:
 
 ```text
-memory                  a distiller job (agent-side) + notes
-                        read/write helpers; no server change
 secret scanning         a Policy.ts payload filter, layers 1–6
 provenance remote       Remotes.ts sync config: per-remote
                         refspecs excluding sessions by default
