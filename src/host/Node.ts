@@ -154,7 +154,13 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const guardLayer = (repo: string) =>
     GitRepository.layer.pipe(
       Layer.provide(GitRepository.hooksNoop),
-      Layer.provide(stores(path.join(options.root, repo))),
+      // `provideMerge`, not `provide`: the stores carry the repository's
+      // `Storage` identity, and `provide` consumes a layer's outputs without
+      // re-exporting them — so the memos keyed on it saw `null` on every host,
+      // and an origin and its mirror under one root shared every entry again.
+      // The aliasing was invisible because nothing fails: the wrong answer is
+      // a well-formed one.
+      Layer.provideMerge(stores(path.join(options.root, repo))),
     );
 
   const stateFor = (repo: string): RepoState => {
@@ -181,7 +187,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // `forkDetach` is the node stand-in for `waitUntil` — delivery outlives
       // the response without the push waiting on a slow receiver.
       Layer.provide(Webhooks.hooksFetch().pipe(Layer.provide(subscribers))),
-      Layer.provide(stores(path.join(options.root, repo))),
+      // As `guardLayer` above: `provide` would swallow `Storage`.
+      Layer.provideMerge(stores(path.join(options.root, repo))),
     );
 
     // Built once per repository, not once per request. The requester stays

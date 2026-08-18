@@ -132,7 +132,9 @@ export class GitRepo extends DurableObject<TestEnv> {
             ),
         }).pipe(Layer.provide(this.#registry(repo))),
       ),
-      Layer.provide(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
+      // `provideMerge`: `provide` would swallow the `Storage` identity the
+      // cross-request memos key on.
+      Layer.provideMerge(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
     );
     return this.#layer;
   }

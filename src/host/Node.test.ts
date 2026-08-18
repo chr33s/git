@@ -122,3 +122,48 @@ describe("a memoised router", () => {
     assert.equal((await write(writer.credential)).status, 200);
   });
 });
+
+/**
+ * Two repositories under one root are two repositories, whatever they say
+ * about themselves.
+ *
+ * A mirror is made by copying `refs/meta/trust/*`, so it has the same genesis
+ * bytes and the same RepoID as its origin — and the memos that keep every
+ * request from re-folding the trust log are keyed by repository. Keyed by what
+ * the repository *says it is*, the two share every entry, and what they can
+ * actually read need not agree: refs are applied without a connectivity check,
+ * so a replica can hold a head whose objects never arrived and fold to no
+ * members at all. Served for the origin, that answer is every revocation gone
+ * and a private repository reporting itself as public.
+ */
+describe("a mirror beside its origin", () => {
+  it("does not answer for the repository next to it", async () => {
+    const origin = "origin";
+    const member = await enableHubUnder(root, origin, ["repo.read"]);
+
+    // A mirror whose replication was interrupted: every ref arrived, and the
+    // commit the trust log points at did not. Refs are applied without a
+    // connectivity check, so this is a state a replica really reaches.
+    const mirror = path.join(root, "mirror");
+    await fs.cp(path.join(root, origin), mirror, { recursive: true });
+    const head = (
+      await fs.readFile(path.join(mirror, "refs", "meta", "trust", "log"), "utf8")
+    ).trim();
+    await fs.rm(path.join(mirror, "objects", head.slice(0, 2), head.slice(2)), { force: true });
+
+    // The mirror folds first, and folds to nothing it can read.
+    await fetch(`${server.url}/mirror/refs`);
+
+    // The origin must still be judged on its own trust log: it has a member,
+    // that member holds `repo.read`, and nobody granted it to anonymous.
+    assert.equal((await fetch(`${server.url}/${origin}/refs`)).status, 401);
+    assert.equal(
+      (
+        await fetch(`${server.url}/${origin}/refs`, {
+          headers: { authorization: `Bearer ${member.credential}` },
+        })
+      ).status,
+      200,
+    );
+  });
+});

@@ -107,7 +107,10 @@ export default Repo.make(
                 ),
             }).pipe(Layer.provide(subscribers(repo))),
           ),
-          Layer.provide(stores({ bucket: r2, repo, storage: state.raw.storage })),
+          // `provideMerge`: `provide` would swallow the `Storage` identity the
+          // cross-request memos key on, and two repositories in one namespace
+          // would share every entry.
+          Layer.provideMerge(stores({ bucket: r2, repo, storage: state.raw.storage })),
         );
         layers.set(repo, built);
         return built;
