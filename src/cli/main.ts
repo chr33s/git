@@ -306,14 +306,18 @@ const credentialHelper = Command.make(
       }
 
       // git gives the path without a leading slash, and a repository here is
-      // one directory under the root.
-      const named =
-        repo === ""
-          ? ((fields.get("path") ?? "")
-              .split("/")
-              .filter((part) => part !== "")
-              .at(-1) ?? "")
-          : repo;
+      // one directory under the root — spelled the way the *server* reads it,
+      // trailing `.git` and all. Taken verbatim, a push to `host/repo.git`
+      // looked for a directory called `repo.git` and reported the repository as
+      // not hub-enabled, while the same push to `host/repo` worked.
+      const supplied =
+        (fields.get("path") ?? "")
+          .split("/")
+          .filter((part) => part !== "")
+          .at(-1) ?? "";
+      const wanted = repo === "" ? supplied : repo;
+      // Only the trailing `.git` is a suffix; `my.git.repo` keeps its name.
+      const named = wanted.endsWith(".git") ? wanted.slice(0, -4) : wanted;
       if (named === "") {
         return yield* new Invalid({
           field: "repo",

@@ -132,9 +132,13 @@ describe("cli", () => {
       assert.notEqual(blind, null, "no repository named is a refusal, not a guess");
       assert.match(blind ?? "", /useHttpPath/);
 
+      // Spelled the way git spells a clone URL, trailing `.git` and all. The
+      // server strips that suffix before it looks for a directory, so a helper
+      // that does not reports every `host/repo.git` push as a repository with
+      // no identity while the same push to `host/repo` works.
       const answered = await withStdin(
         ["credential-helper", "--root", root, "--key", keyFile, "get"],
-        "protocol=http\nhost=git.example.com\npath=helped\n\n",
+        "protocol=http\nhost=git.example.com\npath=helped.git\n\n",
       );
 
       assert.match(answered, /^username=/m);
