@@ -1199,9 +1199,9 @@ Ref cardinality is O(tasks), with §10's mitigations and §13's honesty.
 
 ### 21. Decisions
 
-Agents block on questions only humans can answer, and today the only
-channel is a free-text comment. A decision is a first-class event pair in
-the session DAG:
+Agents block on questions only humans can answer, and the only channel was
+a free-text comment. A decision is a first-class event pair in the session
+DAG, and this is **built** (`session ask`, `session answer`):
 
 ```text
 decision.requested   the question, the options, and the
@@ -1321,10 +1321,12 @@ note, `memory distill` runs one pass by hand, and the wake rule
 
 ### 23. Budgets
 
-`session.closed` records usage (§5); a budget is policy reading it:
+`session.produced` records usage (§5); a budget is policy reading it, and
+this is **built** — `whoami` reports what is left:
 
 ```text
-maxUsage: { tokens: 50000000, windowSeconds: 604800 }
+maxUsageTokens: 50000000
+usageWindowSeconds: 604800
 ```
 
 in the branch-rules document at `refs/meta/policy`, per subject or per
