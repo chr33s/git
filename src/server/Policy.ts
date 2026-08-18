@@ -25,7 +25,7 @@
  * is a race with a name: the approvals counted a moment ago were for a head
  * that has since moved.
  */
-import { Effect, Option, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import * as Dag from "../git/Dag.ts";
 import { Invalid, type StorageFailure } from "../git/Error.ts";
@@ -204,32 +204,62 @@ export type FoldCache = Map<string, PullRequestState>;
 export type MentionCache = Map<string, ReadonlySet<string>>;
 
 /**
- * Every revision one pull request has proposed, kept across requests.
+ * The hub refs one batch has already been allowed to create.
+ *
+ * A push is judged in full before any of it is applied, so a bound read from
+ * the store is the same number for every command in the batch. Anything that
+ * bounds how many of something a repository may hold therefore has to count
+ * what this push is adding as well as what it already holds. The caller's,
+ * like the caches above, because it is state about one push and not about the
+ * host.
+ */
+export type Openings = Set<string>;
+
+/**
+ * Every revision each pull request has proposed, kept across requests.
  *
  * `MentionCache` is per batch, which is the right lifetime for a decision and
  * the wrong one for a walk: this reads a pull request's whole event DAG, and
  * it is asked about *every* pull request the repository has on *every*
- * protected-branch push. Keyed by repository and pull request, holding the
- * ref's value as state to compare, so a moved ref is a miss and a stale answer
- * is not possible — the same shape as the redaction memos. Bounded by pull
- * requests, least-recently-used — and bounded
- * well above what a busy repository holds at once, because the miss *is* the
- * walk this exists to avoid: sized below the population a repository may
- * reach, the pre-filter stops helping exactly where it is needed and a
- * protected-branch push re-reads thousands of event DAGs synchronously. Each
- * entry is the handful of revisions one pull request proposed, so this ceiling
- * costs megabytes rather than the tens the population bound would.
+ * protected-branch push. Within a repository the answer is kept per pull
+ * request, with the ref's value held as state to compare rather than keyed on,
+ * so a moved ref is a miss, a stale answer is impossible, and an append
+ * overwrites instead of adding.
+ *
+ * Two levels, because the question is asked one repository at a time and a
+ * flat map is bounded by the wrong thing. One protected-branch push sweeps
+ * every pull request the repository has, so a flat ceiling smaller than the
+ * population a repository may reach — which the boundary lets reach 65 536 —
+ * is smaller than a single sweep: every push then misses on every key and
+ * re-walks every event DAG synchronously, which is the cost this exists to
+ * remove, arrived at through the memo itself. And a flat map is shared by
+ * every repository the host serves, so one busy repository evicts the rest.
+ * Keyed by repository first, a sweep always fits and eviction happens at the
+ * granularity a host actually idles at: whole repositories, least recently
+ * used, the same shape and the same ceiling as the redaction memos.
  */
-const MENTIONS = 16_384;
-const mentions = new Map<string, { readonly state: string; readonly heads: ReadonlySet<string> }>();
+export const REPOSITORIES = 256;
+type Mentions = Map<string, { readonly state: string; readonly heads: ReadonlySet<string> }>;
+const mentions = new Map<Oid | null, Mentions>();
+
+/** How many repositories the mention memo keeps answers for; see `REPOSITORIES`. */
+export class MemoSize extends Context.Service<MemoSize, number>()("server/Policy/MemoSize") {}
+
+export const memo = (repositories: number): Layer.Layer<MemoSize> =>
+  Layer.succeed(MemoSize)(repositories);
+
+const memoOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(MemoSize), () => REPOSITORIES);
+});
 
 /**
- * How many pull requests the mention memo is holding.
+ * How many pull requests the mention memo is holding for one repository.
  *
- * Exported for the suite that guards the memo's ceiling against counting
- * revisions instead of pull requests. Nothing reads it in production.
+ * Exported for the suite that guards the memo's shape: that its ceiling counts
+ * pull requests rather than the revisions they propose, and that it counts
+ * repositories rather than pull requests. Nothing reads it in production.
  */
-export const mentionsHeld = (): number => mentions.size;
+export const mentionsHeld = (identity: Oid | null): number => mentions.get(identity)?.size ?? 0;
 
 /** Whether a pull request's events ever named this revision as a head. */
 const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, cache: MentionCache) {
@@ -239,31 +269,28 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
   if (known !== undefined) return known.has(to);
 
   const at = yield* repository.resolve(Event.refOf(pr));
-  // The ceiling belongs in the key. A host that will not walk a pull request
-  // that size answers "it proposes nothing", and two hosts with the same ref
-  // and different ceilings are two different answers — one of which refuses an
-  // approved protected-branch push. The repository does not: this answer is a
-  // pure function of the event DAG the oid names, so two repositories holding
-  // the same one hold the same answer.
-  // One entry per pull request, and the head oid is *compared* rather than
-  // keyed on — the shape the redaction memos already use. Keyed on the oid,
-  // every append left the answer for the head before it behind, so the ceiling
-  // counted revisions rather than pull requests: a repository well inside the
-  // population bound turned the memo over on ordinary activity, and the walk
-  // this exists to avoid came back on the synchronous receive-pack path.
-  // Compared, an append overwrites.
+  // The head oid and the ceiling are *compared*, not keyed on. Keyed on the
+  // head, every append left the answer for the head before it behind, so the
+  // bound counted revisions rather than pull requests and a repository well
+  // inside the population bound turned its own entry over on ordinary
+  // activity. The ceiling has to be in there too: a host that will not walk a
+  // pull request that size answers "it proposes nothing", and two hosts with
+  // the same ref and different ceilings hold two different answers, one of
+  // which refuses an approved protected-branch push.
   //
-  // The repository keys it too. This map outlives one request and one
+  // The repository is the outer key. This map outlives one request and one
   // repository, and a host serves many: two of them number their pull requests
   // from one, so `pr` alone is not a name — and a fork and its parent point at
   // the same commits under different refs, which the oid does not separate
   // either.
-  const key = `${yield* repository.resolve(GENESIS_REF)}\u0000${pr}`;
+  const identity = yield* repository.resolve(GENESIS_REF);
   const state = `${at}\u0000${yield* Event.ceilingOf()}`;
-  const remembered = mentions.get(key);
-  if (remembered !== undefined && remembered.state === state) {
-    mentions.delete(key);
-    mentions.set(key, remembered);
+  const kept = mentions.get(identity);
+  const remembered = kept?.get(pr);
+  if (kept !== undefined && remembered !== undefined && remembered.state === state) {
+    // Re-inserted so iteration order is least-recently-used first.
+    mentions.delete(identity);
+    mentions.set(identity, kept);
     cache.set(pr, remembered.heads);
     return remembered.heads.has(to);
   }
@@ -291,9 +318,11 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
     if (head !== null) heads.add(head);
   }
   cache.set(pr, heads);
-  mentions.delete(key);
-  mentions.set(key, { state, heads });
-  while (mentions.size > MENTIONS) {
+  const held = kept ?? new Map();
+  held.set(pr, { state, heads });
+  mentions.delete(identity);
+  mentions.set(identity, held);
+  while (mentions.size > (yield* memoOf())) {
     const oldest = mentions.keys().next();
     if (oldest.done === true) break;
     mentions.delete(oldest.value);
@@ -370,6 +399,8 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   readonly folds?: FoldCache;
   /** As `folds`, for the walk that decides which pull requests to fold. */
   readonly mentions?: MentionCache;
+  /** As `folds`, for the bounds a batch could otherwise outrun; see `Openings`. */
+  readonly opening?: Openings;
 }) {
   const repository = yield* Repository;
   const { update } = input;
@@ -377,6 +408,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // direct caller outside `gate` is.
   const folds: FoldCache = input.folds ?? new Map();
   const mentions: MentionCache = input.mentions ?? new Map();
+  const opening: Openings = input.opening ?? new Set();
   const current = yield* repository.resolve(update.name);
   // Two readings of "what the ref is now", and they differ for a symbolic ref.
   // Reachability wants the commit it resolves to; the compare-and-swap wants
@@ -433,7 +465,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
         "this repository has no membership to authorize a write; run `hub init` to give it one",
       );
     }
-    const namespace = yield* namespaceRules(update, current, stored, held);
+    const namespace = yield* namespaceRules(update, current, stored, held, opening);
     if (!namespace.ok || !isProtected(input.rules, update.name)) return namespace;
 
     // Branch protection still applies to a repository with no identity. The
@@ -505,7 +537,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     return refused(update.name, `writing ${RULES_REF} needs policy.write`);
   }
 
-  const namespace = yield* namespaceRules(update, current, stored, held);
+  const namespace = yield* namespaceRules(update, current, stored, held, opening);
   if (!namespace.ok) return namespace;
 
   // An event's trust head is written by its own signer, and the only thing the
@@ -555,6 +587,8 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   stored: Oid | null,
   /** What the ref already reaches, walked at most once per push; see `alreadyHeld`. */
   held: Effect.Effect<ReadonlySet<Oid>, StorageFailure, Repository>,
+  /** The hub refs this same batch has already been allowed to create; see `Openings`. */
+  opening: Openings,
 ) {
   // The client's own old-oid wins when it declared one. A push that names the
   // value it believes the ref holds is asserting something, and replacing that
@@ -603,9 +637,15 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   // protected-branch push, a collection and a deepening fetch each have to
   // make, which is otherwise chosen by anybody holding `hub.create-pr`.
   if (current === null && update.name.startsWith("refs/hub/")) {
-    const held = (yield* Event.pullRequests()).length;
-    if (held >= (yield* Event.populationOf())) {
-      return refused(update.name, `this repository already holds ${held} pull requests`);
+    // The batch's own creates count. A push is judged in full before any of it
+    // is applied, so every create in one receive-pack read the same pre-push
+    // count and every one of them passed: the bound said 65 536 and one push
+    // could open as many pull requests as it liked. `refs/hub/*` is
+    // undeletable, so what that costs every later protected-branch push,
+    // collection and deepening fetch is permanent.
+    const count = (yield* Event.pullRequests()).length + opening.size;
+    if (count >= (yield* Event.populationOf())) {
+      return refused(update.name, `this repository already holds ${count} pull requests`);
     }
   }
 
@@ -637,6 +677,10 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
       `${update.name} is append-only: ${grafted.commit} ${grafted.reason}`,
     );
   }
+
+  // Counted once it has passed everything here, so a create this function goes
+  // on to refuse does not consume a slot from the one beside it.
+  if (current === null && update.name.startsWith("refs/hub/")) opening.add(update.name);
 
   return allowed;
 });
@@ -1323,6 +1367,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
   const decisions: Decision[] = [];
   const folds: FoldCache = new Map();
   const mentions: MentionCache = new Map();
+  const opening: Openings = new Set();
   for (const update of updates) {
     // A native client signed an envelope naming the refs it was moving and
     // where to. Checking it here rather than in the guard is not a weakening:
@@ -1349,6 +1394,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
         rules,
         folds,
         mentions,
+        opening,
       }),
     );
   }

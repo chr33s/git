@@ -16,7 +16,7 @@ import { ObjectStore, type Oid, type RefUpdate } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Certificate from "../trust/Certificate.ts";
-import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
+import { create, type Genesis, GENESIS_REF, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
 import { type Member, project as projectTrust } from "../trust/Projection.ts";
 import * as Auth from "./Auth.ts";
@@ -1273,6 +1273,41 @@ describe("Policy", () => {
       assert.match(outcome.fresh.ok === false ? outcome.fresh.reason : "", /already holds 1/);
     });
 
+    it("counts what one push is opening, not only what the repository holds", async () => {
+      // The bound is read from the store, and a push is judged in full before
+      // any of it is applied — so every create in one receive-pack saw the same
+      // pre-push count and every one of them passed. The bound said 65 536 and
+      // one push could open as many pull requests as it liked, on a namespace
+      // nothing can delete, which makes the cost to every later
+      // protected-branch push, collection and deepening fetch permanent.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // One held, a ceiling of two: room for exactly one more, whether it
+          // arrives on its own or with company.
+          return yield* gateAs(
+            where,
+            ["a", "b", "c"].map((id) => ({ name: `refs/hub/pr/${id}`, value: head! })),
+            false,
+          ).pipe(Effect.provide(Event.population(2)));
+        }),
+      );
+
+      assert.equal(outcome.updates.length, 1, "one create fits under the ceiling");
+      assert.equal(outcome.refused.length, 2, "and the rest of the batch does not");
+      assert.match(outcome.refused[0]?.reason ?? "", /already holds 2/);
+    });
+
     it("allows a join that keeps both heads it already had", async () => {
       // The rule is about *new* roots, not about joins: two members appending
       // concurrently is the ordinary case, and the join that reconciles them
@@ -1405,7 +1440,8 @@ describe("Policy", () => {
             key: where.dev,
           });
 
-          const before = Policy.mentionsHeld();
+          const identity = yield* repository.resolve(GENESIS_REF);
+          const before = Policy.mentionsHeld(identity);
           // Each round moves the pull request's head and then asks the
           // boundary about the protected branch, which is what walks it.
           for (const head of [second, first, second, first, second]) {
@@ -1414,12 +1450,51 @@ describe("Policy", () => {
           }
           // Sanity: the rounds really did move the ref each time.
           const at = yield* repository.resolve(Event.refOf(pr));
-          return { grew: Policy.mentionsHeld() - before, at, opened: first };
+          return { grew: Policy.mentionsHeld(identity) - before, at, opened: first };
         }),
       );
 
       assert.notEqual(outcome.at, null);
       assert.equal(outcome.grew, 1, "five revisions of one pull request are one entry");
+    });
+
+    it("bounds the mention memo by repositories, so one sweep always fits", async () => {
+      // The memo exists so a protected-branch push does not re-walk every pull
+      // request's event DAG, and one such push sweeps *all* of them. Bounded
+      // flat — one ceiling shared by every repository the host serves, and set
+      // below the population the boundary lets a repository reach — the LRU
+      // was smaller than a single sweep: every push then missed on every key
+      // and re-walked every DAG synchronously, which is the cost the memo
+      // exists to remove, reached through the memo itself. One busy repository
+      // also evicted every other one the host served. Bounded by repositories,
+      // a sweep always fits and eviction happens at the granularity a host
+      // idles at.
+      const held = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "hub.create-pr"]);
+          const { second } = yield* history("refs/heads/main");
+          for (const title of ["one", "two", "three"]) {
+            yield* PullRequest.open({
+              repo: where.genesis.repoId,
+              title,
+              base: "refs/heads/main",
+              head: second,
+              key: where.dev,
+            });
+          }
+
+          const repository = yield* Repository;
+          const identity = yield* repository.resolve(GENESIS_REF);
+          // One push, which walks every pull request the repository has — with
+          // room in the memo for one repository, not for one pull request.
+          yield* judge(where, { name: "refs/heads/main", value: second }, guarded).pipe(
+            Effect.provide(Policy.memo(1)),
+          );
+          return Policy.mentionsHeld(identity);
+        }),
+      );
+
+      assert.equal(held, 3, "every pull request the sweep walked is still remembered");
     });
 
     it("passes over a pull request this replica cannot fold", async () => {

@@ -111,8 +111,17 @@ const readOnly = (capabilities: ReadonlyArray<string>): boolean =>
  * `history` and `log` are GET endpoints and so are not here: the last line
  * already charges a GET `repo.read`, and naming them would only widen the set
  * of words a future DELETE route could collide with.
+ *
+ * `fsck` is not here either, and that is about cost rather than mutation. It
+ * changes nothing, but it reads *every object in the store* — not one
+ * revision's tree, which is what bounds `diff` and `grep`, and not one
+ * history, which is what bounds `bisect`. Charged `repo.read`, it was
+ * anonymously reachable on exactly the repositories that most want to be
+ * readable — an open-source repository whose members hold no read capability,
+ * or one with no genesis at all — and drivable in a loop. What it costs is a
+ * maintenance operation, so it is charged like one.
  */
-const READ_ONLY_POSTS = new Set(["diff", "grep", "bisect", "fsck"]);
+const READ_ONLY_POSTS = new Set(["diff", "grep", "bisect"]);
 
 // -- nonces ---------------------------------------------------------------------
 

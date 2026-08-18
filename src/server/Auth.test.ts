@@ -209,6 +209,22 @@ describe("Auth", () => {
       ]);
     });
 
+    it("charges a whole-store read like the maintenance operation it costs", () => {
+      // `fsck` mutates nothing, which is why it was grouped with `diff` and
+      // `grep` — but what bounds those is one revision's tree, and what bounds
+      // `bisect` is one history. `fsck` reads every object in the store.
+      // Charged `repo.read`, it was anonymously reachable on exactly the
+      // repositories that most want to be readable — one whose members hold no
+      // read capability, or one with no genesis at all — and drivable in a
+      // loop.
+      assert.deepEqual(requiredCapability(request("r/fsck", { method: "POST" })), [
+        "source.push",
+        "source.delete",
+      ]);
+      // The bounded neighbours stay readable.
+      assert.deepEqual(requiredCapability(request("r/bisect", { method: "POST" })), ["repo.read"]);
+    });
+
     it("charges the LFS batch endpoint a read, POST or not", () => {
       // A reader must be able to clone a repository that uses LFS; the upload
       // it may negotiate is a separate PUT, charged separately.
