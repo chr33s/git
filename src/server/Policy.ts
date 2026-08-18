@@ -383,7 +383,7 @@ const refused = (ref: string, reason: string): Decision => ({ ok: false, ref, re
  * it. Two patterns that overlap *anywhere* are treated as a match, which is the
  * conservative reading and the only one a namespace-wide write can be held to.
  */
-const isProtected = (rules: Rules, ref: string): boolean => {
+export const isProtected = (rules: Rules, ref: string): boolean => {
   const asked = ref.endsWith("*") ? ref.slice(0, -1) : null;
   return rules.protected.some((pattern) => {
     if (!pattern.endsWith("*")) return asked === null ? ref === pattern : pattern.startsWith(asked);

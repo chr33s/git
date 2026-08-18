@@ -19,25 +19,30 @@ independent; everything else depends on 1.
 
 ---
 
-## Phase 0 — `hub whoami` (small; ships alone)
+## Phase 0 — `hub whoami` — **the local half has landed**
 
 The read-only join of the trust projection and the policy document
 (agents.md Part I).
 
 ```text
-src/server/Api.ts      one JSON verb: answer capabilities, expiry
-                       and per-branch push verdicts for the
-                       presented credential or challenge key
-src/cli/hub.ts         `whoami` subcommand following the existing
-                       enable/status pattern; --key signs a
-                       challenge, --token presents a credential
+done   src/cli/hub.ts      `whoami <repo> --key <path>`: capabilities,
+                           expiry, trust freshness and per-branch push
+                           verdicts, as JSON, for either half of a key
+done   src/cli/shared.ts   readAnyPublicKey — a private key carries its
+                           own public half, and an agent's sandbox holds
+                           the private one
+done   src/server/Policy.ts  isProtected exported, so the CLI answers by
+                           the boundary's own rule rather than a copy
+next   src/server/Api.ts   the same answer over the wire, for a
+                           credential presented to a remote
 ```
 
-Reads `src/trust/Projection.ts` `project()` and `src/server/Policy.ts`
-rules; invents nothing. Tests: unit against the Policy fixtures
-(member/non-member/expired; protected/unprotected branch), one Api test.
+Five end-to-end tests in `src/cli/hub.test.ts` cover a member, a
+protected branch naming its requirements, a stranger, a revoked key, and a
+repository with no genesis. `npm run check` and all 816 tests pass.
 
-**Exit:** an agent can ask "what may I do here?" before doing anything.
+**Exit:** an agent can ask "what may I do here?" before doing anything —
+locally today, over the wire once the Api verb lands.
 
 ## Phase 1 — session capture (the core)
 
@@ -143,6 +148,34 @@ None of these changes a Phase 1 wire or event format — that invariant
 (agents.md §15) is what makes this ordering safe.
 
 ---
+
+## Running alongside foundation work
+
+While the foundation is still being fixed on its own branch, the phases
+above split cleanly into lanes by how much existing code they touch.
+
+```text
+safe in parallel — new files, or additive edges:
+  Phase 0    a new CLI verb and (next) a new Api verb; every fix to
+             the projection it reads makes its answers more correct
+  Phase 3    wake.ts and session enable are new files against the
+             Hooks.postReceive seam, which the foundation work has
+             not touched
+  trailers   convention only, no code
+
+hold, or land inside the foundation branch instead:
+  the Event.ts ref generalization and the Policy.ts session gate —
+  both modify files the foundation work is actively reworking, so a
+  fork of them is a standing rebase conflict. Both are small
+  (a caller-supplied ref class; one capability in the list), which
+  makes them cheaper to propose there than to carry here.
+```
+
+Two working rules follow. Branch implementation off the foundation
+branch's head rather than the default branch, and rebase onto it often —
+its commits are semantic fixes rather than structural moves, so additive
+work rebases cheaply. And keep each phase's tests runnable in isolation,
+so a rebase that breaks something says which phase it broke.
 
 ## Sizing and sequence
 

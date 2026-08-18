@@ -16,7 +16,12 @@ import * as readline from "node:readline/promises";
 import { Console, Effect, Layer } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import { type Fingerprint, formatPublicKey, isFingerprint } from "../crypto/SshSignature.ts";
+import {
+  type Fingerprint,
+  fingerprint,
+  formatPublicKey,
+  isFingerprint,
+} from "../crypto/SshSignature.ts";
 import { fetchRepository, lsRemote } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
@@ -47,9 +52,18 @@ import {
 import { layer as knownRepos } from "../trust/KnownRepos.node.ts";
 import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
-import { openWindow, project } from "../trust/Projection.ts";
+import { openWindow, project, type Projection as TrustProjection } from "../trust/Projection.ts";
+import * as Verify from "../trust/Verify.ts";
+import * as Policy from "../server/Policy.ts";
 import { reconcile } from "../server/Replication.ts";
-import { readPrivateKey, readPublicKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
+import {
+  readAnyPublicKey,
+  readPrivateKey,
+  readPublicKey,
+  repoArgument,
+  rootFlag,
+  withRepo,
+} from "./shared.ts";
 
 /**
  * One repository's stores *and* the domain service over them.
@@ -353,6 +367,207 @@ const confirmRevoked = Effect.fn("hub.confirmRevoked")(function* (
   }
 });
 
+// -- what a key may do here -------------------------------------------------
+
+/** What one key holds here, and why it may not write at all. */
+interface Standing {
+  readonly capabilities: ReadonlyArray<string>;
+  readonly expiresAt: Date | null;
+  readonly refusal: string | null;
+}
+
+/** The standing of a key this repository has never heard of, or cannot use. */
+const withoutMembership = (refusal: string): Standing => ({
+  capabilities: [],
+  expiresAt: null,
+  refusal,
+});
+
+/**
+ * Why this key may not write at all, and what it holds.
+ *
+ * Expiry is judged here rather than read off the projection, because the
+ * projection keeps expired members on purpose — a record signed while a grant
+ * was live stays authorized by it — and the question this command asks is the
+ * other one: what may this key do *now*.
+ */
+const standingOf = (projection: TrustProjection, subject: Fingerprint, now: Date): Standing => {
+  const member = projection.members.get(subject);
+  if (member === undefined) {
+    const windows = projection.revoked.get(subject);
+    const out = windows === undefined ? null : openWindow(windows);
+    return withoutMembership(
+      out === null
+        ? "this key is not a member of this repository"
+        : `this key is revoked (${out.reason})`,
+    );
+  }
+  return {
+    capabilities: member.capabilities,
+    expiresAt: member.expiresAt,
+    refusal:
+      member.expiresAt !== null && member.expiresAt.getTime() <= now.getTime()
+        ? `this grant expired ${member.expiresAt.toISOString()}; ask for a fresh one`
+        : null,
+  };
+};
+
+/** Whether a push to one ref would get through, and what it answers to. */
+interface Verdict {
+  readonly push: "allowed" | "refused";
+  readonly why: ReadonlyArray<string>;
+}
+
+/** What a protected branch asks of a push, in the order a caller meets them. */
+const requirementsOf = (rules: Policy.Rules): ReadonlyArray<string> => {
+  const why: Array<string> = [];
+  if (rules.requirePullRequest) why.push("requirePullRequest");
+  if (rules.requiredApprovals > 0) why.push(`requiredApprovals: ${rules.requiredApprovals}`);
+  if (rules.requiredChecks.length > 0) {
+    why.push(`requiredChecks: [${rules.requiredChecks.join(", ")}]`);
+  }
+  if (rules.requireResolvedThreads) why.push("requireResolvedThreads");
+  return why;
+};
+
+/**
+ * Whether a push to one ref would get through, and what it would answer to.
+ *
+ * Answered by name and before the fact, so it is the *standing* verdict: a
+ * protected branch with requirements refuses a direct push whatever the
+ * revision is, and one with none still refuses a delete or a force. What this
+ * cannot say is whether a particular revision satisfies an approval or a check
+ * — that is a question about a push that does not exist yet.
+ */
+const verdictFor = (input: {
+  readonly rules: Policy.Rules;
+  readonly protectedRef: boolean;
+  readonly standing: Standing;
+  readonly stale: string | null;
+}): Verdict => {
+  if (input.standing.refusal !== null) return { push: "refused", why: [input.standing.refusal] };
+  if (input.stale !== null) return { push: "refused", why: [input.stale] };
+  if (!Certificate.permits(input.standing.capabilities, "source.push")) {
+    return { push: "refused", why: ["source.push is not granted to this key"] };
+  }
+  if (!input.protectedRef) return { push: "allowed", why: [] };
+
+  const requirements = requirementsOf(input.rules);
+  return requirements.length === 0
+    ? { push: "allowed", why: ["protected: no force-push, no deletion"] }
+    : {
+        push: "refused",
+        why: [...requirements, "a direct push meets none of these; open a pull request"],
+      };
+};
+
+/**
+ * The answer, as one read of this repository's own refs.
+ *
+ * Rules are read whether or not there is a genesis: a repository may publish
+ * branch rules before it has an identity, and the boundary honours them, so an
+ * answer that skipped them would understate what a push has to satisfy.
+ */
+const standing = Effect.fn("hub.standing")(function* (subject: Fingerprint) {
+  const stored = yield* readGenesis();
+  const rules = yield* Policy.rulesOf();
+  const now = new Date();
+
+  const projection = stored === null ? null : yield* project(stored.genesis);
+
+  // A repository with no genesis has no membership to grant anything, so the
+  // honest answer names the host's `--open` rather than claiming an authority
+  // that cannot exist here.
+  const held =
+    projection === null
+      ? withoutMembership(
+          "this repository has no genesis, so it has no membership: writes are refused unless the host serves --open",
+        )
+      : standingOf(projection, subject, now);
+
+  const freshness =
+    projection === null || rules.maxTrustAgeSeconds <= 0
+      ? null
+      : Verify.fresh(projection, rules.maxTrustAgeSeconds * 1000, now);
+  const stale = freshness === null || freshness.ok ? null : freshness.reason;
+
+  const branches: Record<string, { readonly push: string; readonly why: ReadonlyArray<string> }> =
+    {};
+  for (const pattern of rules.protected) {
+    branches[pattern] = verdictFor({
+      rules,
+      protectedRef: true,
+      standing: held,
+      stale,
+    });
+  }
+  // Asked as its own case rather than by matching a wildcard: `isProtected`
+  // treats two overlapping prefixes as a match, which is right for a write
+  // that names a whole namespace and wrong here — it would report every
+  // unprotected branch as protected the moment one branch under it was.
+  branches["(any other ref)"] = verdictFor({
+    rules,
+    protectedRef: false,
+    standing: held,
+    stale,
+  });
+
+  // Every key is present on every answer, `null` where it does not apply,
+  // rather than appearing only when there is something to say. The reader is a
+  // program deciding what to do next, and a field that vanishes is a field it
+  // has to guess the meaning of.
+  return {
+    repo: stored === null ? null : stored.genesis.repoId,
+    subject,
+    member: held.refusal === null,
+    why: held.refusal,
+    capabilities: held.capabilities,
+    expiresAt: held.expiresAt === null ? null : held.expiresAt.toISOString(),
+    trust:
+      freshness === null
+        ? null
+        : {
+            maxTrustAgeSeconds: rules.maxTrustAgeSeconds,
+            fresh: freshness.ok,
+            reason: freshness.ok ? null : freshness.reason,
+          },
+    branches,
+  };
+});
+
+/**
+ * What this key may do here, and what its push will be judged by.
+ *
+ * The answer a client otherwise learns by being refused. Membership says what
+ * the repository has granted; the branch rules say what a granted push still
+ * has to satisfy — and a caller that reads both before it works branches
+ * correctly and opens the pull request the rules ask for, instead of
+ * discovering each rule one refusal at a time. That is a poor trade for
+ * anybody and a bad one for an agent, which pays for the discovery in context
+ * and tokens.
+ *
+ * Read-only: it moves nothing, invents no capability, and answers out of the
+ * same projection and rules document the boundary itself reads.
+ */
+const whoami = Command.make(
+  "whoami",
+  {
+    root: rootFlag,
+    key: Flag.string("key").pipe(
+      Flag.withDescription("Path to the SSH key to answer for; either half will do"),
+    ),
+    repo: repoArgument,
+  },
+  ({ key, repo, root }) =>
+    Effect.gen(function* () {
+      const subject = yield* fingerprint(yield* readAnyPublicKey(key));
+      const answer = yield* withRepo(root, repo, standing(subject));
+      // JSON because the caller is usually a hook piping this into an agent's
+      // context, and prose would have to be parsed back out of it.
+      yield* Console.log(JSON.stringify(answer, null, 2));
+    }),
+);
+
 const mustBeEnabled = Effect.fn("hub.mustBeEnabled")(function* (repo: string) {
   const stored = yield* readGenesis();
   if (stored === null) {
@@ -641,7 +856,7 @@ const forget = Command.make("forget", { url: Argument.string("url") }, ({ url })
 
 export const hubCommand = Command.make("hub", {}, () =>
   Console.log(
-    "chr33s-git hub <init|grant|revoke|members|enable|disable|status|forget> — see --help",
+    "chr33s-git hub <init|grant|revoke|members|whoami|enable|disable|status|forget> — see --help",
   ),
 ).pipe(
   Command.withSubcommands([
@@ -649,6 +864,7 @@ export const hubCommand = Command.make("hub", {}, () =>
     grant.pipe(Command.withDescription("Issue a membership certificate")),
     revoke.pipe(Command.withDescription("Revoke a member's key")),
     members.pipe(Command.withDescription("Who this repository trusts, and with what")),
+    whoami.pipe(Command.withDescription("What one key may do here, and what will judge its push")),
     enable.pipe(Command.withDescription("Trust a remote repository and fetch its hub state")),
     disable.pipe(Command.withDescription("Stop synchronizing a repository's hub state")),
     status.pipe(Command.withDescription("What identity is pinned for a URL")),

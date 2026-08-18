@@ -1182,6 +1182,155 @@ describe("cli hub", () => {
     }
   });
 
+  describe("whoami", () => {
+    /**
+     * Branch rules, written the way a repository publishes them.
+     *
+     * There is no CLI verb for this yet, so the test writes the document
+     * itself — which is also the honest fixture: `whoami` reads whatever is at
+     * `refs/meta/policy`, however it got there.
+     */
+    const publishRules = (directory: string, rules: Policy.Rules): Promise<void> =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* GitRepository.Repository;
+          const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "policy\n",
+            author: { name: "ops", email: "ops@example.com", at: new Date(0), offset: 0 },
+          });
+          yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provide(nodeStores(directory)),
+            ),
+          ),
+        ),
+      );
+
+    const enrol = async (capabilities: string) => {
+      await cli(["init", "--root", root, "project"]);
+      await writeKeyPair(path.join(root, "id_root"), "root@example.com");
+      await writeKeyPair(path.join(root, "id_agent"), "agent@example.com");
+      await cli(["hub", "init", "--root", root, "--key", path.join(root, "id_root"), "project"]);
+      await cli([
+        "hub",
+        "grant",
+        "--root",
+        root,
+        "--key",
+        path.join(root, "id_root"),
+        "--subject",
+        path.join(root, "id_agent.pub"),
+        "--capability",
+        capabilities,
+        "project",
+      ]);
+    };
+
+    const whoami = async (key: string) =>
+      JSON.parse(await cli(["hub", "whoami", "--root", root, "--key", key, "project"]));
+
+    it("answers for a member from the private half alone", async () => {
+      await enrol("repo.read,source.push,hub.create-pr");
+
+      // The private key, with no `.pub` beside it in the answer's path: what a
+      // secret store injects into an agent's sandbox is the private half.
+      const answer = await whoami(path.join(root, "id_agent"));
+
+      assert.equal(answer.member, true);
+      assert.equal(answer.why, null);
+      assert.match(answer.repo, /^SHA256:/);
+      assert.match(answer.subject, /^SHA256:/);
+      assert.deepEqual(
+        [...answer.capabilities].sort((a: string, b: string) => a.localeCompare(b)),
+        ["hub.create-pr", "repo.read", "source.push"],
+      );
+      assert.equal(answer.branches["(any other ref)"].push, "allowed");
+    });
+
+    it("names what a protected branch will judge the push by", async () => {
+      await enrol("repo.read,source.push");
+      await publishRules(path.join(root, "project"), {
+        ...Policy.OPEN,
+        protected: ["refs/heads/main"],
+        requiredApprovals: 1,
+        requiredChecks: ["test"],
+        requirePullRequest: true,
+      });
+
+      const answer = await whoami(path.join(root, "id_agent"));
+      const main = answer.branches["refs/heads/main"];
+
+      assert.equal(main.push, "refused");
+      assert.ok(
+        main.why.some((why: string) => why.includes("requiredApprovals: 1")),
+        `the approval count should be named: ${JSON.stringify(main.why)}`,
+      );
+      assert.ok(
+        main.why.some((why: string) => why.includes("test")),
+        `the required check should be named: ${JSON.stringify(main.why)}`,
+      );
+
+      // The point of asking before working: the branch the agent may actually
+      // push is still open, so it knows to work there and open a pull request.
+      assert.equal(answer.branches["(any other ref)"].push, "allowed");
+    });
+
+    it("refuses a key the repository never granted, and says which key it asked about", async () => {
+      await enrol("repo.read,source.push");
+      await writeKeyPair(path.join(root, "id_stranger"), "stranger@example.com");
+
+      const answer = await whoami(path.join(root, "id_stranger"));
+
+      assert.equal(answer.member, false);
+      assert.match(answer.why, /not a member/);
+      assert.deepEqual(answer.capabilities, []);
+      assert.equal(answer.branches["(any other ref)"].push, "refused");
+    });
+
+    it("reports a revoked key as revoked rather than as a stranger", async () => {
+      await enrol("repo.read,source.push");
+      const answer = await whoami(path.join(root, "id_agent"));
+      await cli([
+        "hub",
+        "revoke",
+        "--root",
+        root,
+        "--key",
+        path.join(root, "id_root"),
+        "--subject",
+        answer.subject,
+        "--reason",
+        "compromised",
+        "project",
+      ]);
+
+      const after = await whoami(path.join(root, "id_agent"));
+      assert.equal(after.member, false);
+      assert.match(after.why, /revoked \(compromised\)/);
+    });
+
+    it("says a repository with no genesis has no membership to grant", async () => {
+      await cli(["init", "--root", root, "project"]);
+      await writeKeyPair(path.join(root, "id_agent"), "agent@example.com");
+
+      const answer = await whoami(path.join(root, "id_agent"));
+
+      assert.equal(answer.repo, null);
+      assert.equal(answer.member, false);
+      assert.match(answer.why, /no genesis/);
+      assert.equal(answer.branches["(any other ref)"].push, "refused");
+    });
+  });
+
   describe("the client's view of a remote", () => {
     it("reports a url nothing is pinned for", async () => {
       const out = await cli(["hub", "status", "https://git.example.com/nobody"]);
