@@ -1308,6 +1308,57 @@ describe("Policy", () => {
       assert.match(outcome.refused[0]?.reason ?? "", /already holds 2/);
     });
 
+    it("gives back the population slot of a create it goes on to refuse", async () => {
+      // The namespace rules record a create as soon as they have passed it,
+      // and they are not the last word — the rules after them refuse too. A
+      // create the batch does not actually get was still spending a slot the
+      // create beside it was entitled to.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // `refs/hub/pr/blocked` is protected, so it passes the namespace
+          // rules and is refused after them.
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({
+              ...OPEN,
+              protected: ["refs/hub/pr/blocked"],
+              requirePullRequest: true,
+              requiredApprovals: 1,
+            }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          yield* repository.setRef({
+            name: Policy.RULES_REF,
+            to: yield* repository.commitTree({ tree, parents: [], message: "policy\n", author }),
+          });
+
+          // One held, a ceiling of two: room for exactly one more create.
+          return yield* gateAs(
+            where,
+            ["blocked", "wanted"].map((id) => ({ name: `refs/hub/pr/${id}`, value: head! })),
+            false,
+          ).pipe(Effect.provide(Event.population(2)));
+        }),
+      );
+
+      assert.equal(outcome.updates.length, 1);
+      assert.equal(outcome.updates[0]?.name, "refs/hub/pr/wanted", "the one that was not refused");
+      assert.equal(outcome.refused.length, 1);
+      assert.doesNotMatch(outcome.refused[0]?.reason ?? "", /already holds/);
+    });
+
     it("allows a join that keeps both heads it already had", async () => {
       // The rule is about *new* roots, not about joins: two members appending
       // concurrently is the ordinary case, and the join that reconciles them
@@ -1495,6 +1546,52 @@ describe("Policy", () => {
       );
 
       assert.equal(held, 3, "every pull request the sweep walked is still remembered");
+    });
+
+    it("caps what the mention memo retains in total, evicting whole repositories", async () => {
+      // Bounding only the number of repositories left the entries within one
+      // unbounded: a repository pushed to the population bound had every one
+      // of its pull requests memoised by a single sweep, retained for as many
+      // repositories as the outer bound allows. The total is capped too — and
+      // what the cap evicts is a whole repository, never an entry belonging to
+      // the sweep that is running, which is the flat cap's failure.
+      //
+      // Room for plenty of repositories and two entries, so only the total can
+      // bite.
+      const bounded = Policy.memo(4096, 2);
+
+      const swept = Effect.fn("test.swept")(function* (titles: ReadonlyArray<string>) {
+        const repository = yield* Repository;
+        const where = yield* world(["source.push", "hub.create-pr"]);
+        const { second } = yield* history("refs/heads/main");
+        for (const title of titles) {
+          yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title,
+            base: "refs/heads/main",
+            head: second,
+            key: where.dev,
+          });
+        }
+        const identity = yield* repository.resolve(GENESIS_REF);
+        yield* judge(where, { name: "refs/heads/main", value: second }, guarded).pipe(
+          Effect.provide(bounded),
+        );
+        return { identity, held: Policy.mentionsHeld(identity) };
+      });
+
+      // Two repositories, one after the other: separate stores, one memo.
+      const first = await scenario(swept(["one", "two", "three"]));
+      const second = await scenario(swept(["theirs"]));
+
+      assert.notEqual(first.identity, second.identity, "two repositories, not one twice");
+      assert.equal(first.held, 3, "the sweep that is running is kept whole");
+      assert.equal(second.held, 1);
+      assert.equal(
+        Policy.mentionsHeld(first.identity),
+        0,
+        "and the one that went idle is evicted whole, not entry by entry",
+      );
     });
 
     it("passes over a pull request this replica cannot fold", async () => {

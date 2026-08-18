@@ -229,27 +229,41 @@ export type Openings = Set<string>;
  * Two levels, because the question is asked one repository at a time and a
  * flat map is bounded by the wrong thing. One protected-branch push sweeps
  * every pull request the repository has, so a flat ceiling smaller than the
- * population a repository may reach — which the boundary lets reach 65 536 —
- * is smaller than a single sweep: every push then misses on every key and
- * re-walks every event DAG synchronously, which is the cost this exists to
- * remove, arrived at through the memo itself. And a flat map is shared by
- * every repository the host serves, so one busy repository evicts the rest.
- * Keyed by repository first, a sweep always fits and eviction happens at the
- * granularity a host actually idles at: whole repositories, least recently
- * used, the same shape and the same ceiling as the redaction memos.
+ * population a repository may reach — which the boundary lets reach
+ * `MAX_PULL_REQUESTS` — is smaller than a single sweep: every push then misses
+ * on every key and re-walks every event DAG synchronously, which is the cost
+ * this exists to remove, arrived at through the memo itself. And a flat map is
+ * shared by every repository the host serves, so one busy repository evicts the
+ * rest.
+ *
+ * So both bounds are kept, and they bound different things. `ENTRIES` is the
+ * hard cap on what the memo retains in total; it is the population bound
+ * exactly, which is what makes one sweep always fit. `REPOSITORIES` bounds how
+ * many hosts' worth of answers are kept at once. Whichever is exceeded, what is
+ * evicted is a **whole repository**, least recently used — never an entry from
+ * the repository being asked about, which is how a flat cap turned a sweep into
+ * a sweep of misses. A single repository at the population bound can therefore
+ * sit slightly over `ENTRIES` on its own, and nothing else is kept beside it.
  */
+export const ENTRIES = Event.MAX_PULL_REQUESTS;
 export const REPOSITORIES = 256;
 type Mentions = Map<string, { readonly state: string; readonly heads: ReadonlySet<string> }>;
 const mentions = new Map<Oid | null, Mentions>();
 
-/** How many repositories the mention memo keeps answers for; see `REPOSITORIES`. */
-export class MemoSize extends Context.Service<MemoSize, number>()("server/Policy/MemoSize") {}
+/** What the mention memo may keep; see `ENTRIES` and `REPOSITORIES`. */
+export class MemoSize extends Context.Service<
+  MemoSize,
+  { readonly repositories: number; readonly entries: number }
+>()("server/Policy/MemoSize") {}
 
-export const memo = (repositories: number): Layer.Layer<MemoSize> =>
-  Layer.succeed(MemoSize)(repositories);
+export const memo = (repositories: number, entries = ENTRIES): Layer.Layer<MemoSize> =>
+  Layer.succeed(MemoSize)({ repositories, entries });
 
 const memoOf = Effect.fnUntraced(function* () {
-  return Option.getOrElse(yield* Effect.serviceOption(MemoSize), () => REPOSITORIES);
+  return Option.getOrElse(yield* Effect.serviceOption(MemoSize), () => ({
+    repositories: REPOSITORIES,
+    entries: ENTRIES,
+  }));
 });
 
 /**
@@ -322,9 +336,15 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
   held.set(pr, { state, heads });
   mentions.delete(identity);
   mentions.set(identity, held);
-  while (mentions.size > (yield* memoOf())) {
+  let total = [...mentions.values()].reduce((count, each) => count + each.size, 0);
+  // Never down to nothing: one repository at the population bound is allowed
+  // to exceed `ENTRIES` by itself, because the alternative is evicting the
+  // sweep that is running.
+  const bound = yield* memoOf();
+  while (mentions.size > 1 && (mentions.size > bound.repositories || total > bound.entries)) {
     const oldest = mentions.keys().next();
     if (oldest.done === true) break;
+    total -= mentions.get(oldest.value)?.size ?? 0;
     mentions.delete(oldest.value);
   }
   return heads.has(to);
@@ -1385,18 +1405,22 @@ export const gate = Effect.fn("Policy.gate")(function* (
       decisions.push(covered);
       continue;
     }
-    decisions.push(
-      yield* evaluate({
-        update,
-        principal: { member: who.principal, capabilities: who.capabilities },
-        genesis: stored?.genesis ?? null,
-        trust,
-        rules,
-        folds,
-        mentions,
-        opening,
-      }),
-    );
+    const decision = yield* evaluate({
+      update,
+      principal: { member: who.principal, capabilities: who.capabilities },
+      genesis: stored?.genesis ?? null,
+      trust,
+      rules,
+      folds,
+      mentions,
+      opening,
+    });
+    // The namespace rules record a create as soon as they have passed it, and
+    // they are not the last word: the rules after them refuse too. A create
+    // this batch does not actually get would otherwise spend a population slot
+    // the create beside it was entitled to.
+    if (!decision.ok) opening.delete(update.name);
+    decisions.push(decision);
   }
 
   const refusals = decisions.flatMap((decision) => (decision.ok ? [] : [decision]));
