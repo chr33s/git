@@ -116,6 +116,32 @@ describe("Auth", () => {
       assert.equal(outcome.garbage, false);
     });
 
+    it("refuses rather than forgetting that a nonce was spent", async () => {
+      // Evicting the oldest record looks harmless — one client's retry — but
+      // the record it drops is the one saying a nonce has been used, and
+      // dropping that re-opens the replay window inside the nonce's own
+      // lifetime. Refused instead: the request fails closed, and every entry
+      // falls out on its own within the lifetime it was issued for.
+      const layer = noncesInMemory(4);
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* Nonces;
+          const first = yield* store.issue(300);
+          yield* store.consume(first);
+          // Past the ceiling, which is the moment the old design started
+          // forgetting.
+          const beyond: boolean[] = [];
+          for (let index = 0; index < 8; index++) {
+            beyond.push(yield* store.consume(yield* store.issue(300)));
+          }
+          return { replayed: yield* store.consume(first), refused: beyond.includes(false) };
+        }).pipe(Effect.provide(layer)),
+      );
+
+      assert.equal(outcome.refused, true, "a full store refuses rather than making room");
+      assert.equal(outcome.replayed, false, "and a nonce spent long ago is still spent");
+    });
+
     it("spends a nonce exactly once", async () => {
       const layer = noncesInMemory();
       const outcome = await Effect.runPromise(

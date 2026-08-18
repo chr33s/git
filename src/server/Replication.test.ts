@@ -15,6 +15,7 @@ import * as Certificate from "../trust/Certificate.ts";
 import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
+import * as Policy from "./Policy.ts";
 import { reconcile } from "./Replication.ts";
 
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
@@ -269,5 +270,44 @@ describe("Replication", () => {
     // The developer from `world`, plus both concurrently granted members:
     // neither grant may be lost by the join.
     assert.equal(outcome, 3);
+  });
+
+  it("takes the source's rules file rather than reporting it as a divergence", async () => {
+    // The rules file is neither append-only nor a branch: it is what the
+    // repository publishes about itself. Lumping it in with branches left a
+    // replica enforcing rules the source had already superseded — a branch
+    // still protected after the protection was lifted — and reported as a
+    // divergence a person was expected to resolve by hand on every replica.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+
+        const ours = yield* repository.commitTree({
+          tree: EMPTY_TREE_OID,
+          parents: [],
+          message: "our rules",
+          author,
+        });
+        yield* repository.setRef({ name: Policy.RULES_REF, to: ours, expected: null });
+
+        // Written independently on the source: no ancestry between the two.
+        const theirs = yield* repository.commitTree({
+          tree: EMPTY_TREE_OID,
+          parents: [],
+          message: "their rules",
+          author,
+        });
+
+        const divergence = yield* reconcile(Policy.RULES_REF, theirs);
+        return {
+          diverged: divergence.diverged,
+          at: yield* repository.resolve(Policy.RULES_REF),
+          theirs,
+        };
+      }),
+    );
+
+    assert.equal(outcome.diverged, false, "the source's rules are not a conflict to escalate");
+    assert.equal(outcome.at, outcome.theirs, "and the replica now enforces them");
   });
 });

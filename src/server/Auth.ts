@@ -145,7 +145,21 @@ export class Nonces extends Context.Service<
  * native authentication can never succeed. The store has to outlive the
  * provide, so it is constructed here and handed over by `Layer.succeed`.
  */
-export const nonceStore = (): Nonces["Service"] => {
+/**
+ * A ceiling on the spent set.
+ *
+ * Reached only by genuinely authenticated requests, and the ceiling *refuses*
+ * rather than evicting. Evicting the oldest looks harmless — one client's
+ * retry — but the record it drops is the one saying a nonce has been used,
+ * and dropping that re-opens the replay window the record exists to close,
+ * inside the nonce's own lifetime. Refusing fails the request closed
+ * instead, and every entry falls out on its own within the lifetime it was
+ * issued for, so the ceiling is really a rate: this many authenticated
+ * requests per nonce lifetime.
+ */
+const CAPACITY = 65_536;
+
+export const nonceStore = (capacity = CAPACITY): Nonces["Service"] => {
   /**
    * Nonces that have been *spent*, until they would have expired anyway.
    *
@@ -159,15 +173,6 @@ export const nonceStore = (): Nonces["Service"] => {
    * has already been verified against it.
    */
   const spent = new Map<string, number>();
-
-  /**
-   * A ceiling on the spent set.
-   *
-   * Reached only by genuinely authenticated requests, which is what makes it
-   * safe to evict the oldest: an attacker who can fill this can already
-   * authenticate, and the cost of eviction is one client's retry.
-   */
-  const CAPACITY = 4096;
 
   /**
    * The tag that makes a nonce self-certifying.
@@ -198,14 +203,9 @@ export const nonceStore = (): Nonces["Service"] => {
     return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   };
 
+  /** Drops what has expired, and nothing else. */
   const prune = (now: number) => {
     for (const [nonce, expiry] of spent) if (expiry <= now) spent.delete(nonce);
-    // Insertion-ordered, so the front of the map is the oldest.
-    while (spent.size > CAPACITY) {
-      const oldest = spent.keys().next();
-      if (oldest.done === true) break;
-      spent.delete(oldest.value);
-    }
   };
 
   return Nonces.of({
@@ -229,7 +229,7 @@ export const nonceStore = (): Nonces["Service"] => {
         if (!Number.isFinite(expiry) || expiry <= now) return false;
 
         prune(now);
-        if (spent.has(nonce)) return false;
+        if (spent.has(nonce) || spent.size >= capacity) return false;
         spent.set(nonce, expiry);
         return true;
       }),
@@ -246,7 +246,8 @@ export const nonceStore = (): Nonces["Service"] => {
  * the store outlive the provide; `Layer.sync` would rebuild it per request and
  * no challenge could ever be answered.
  */
-export const noncesInMemory = (): Layer.Layer<Nonces> => Layer.succeed(Nonces)(nonceStore());
+export const noncesInMemory = (capacity = CAPACITY): Layer.Layer<Nonces> =>
+  Layer.succeed(Nonces)(nonceStore(capacity));
 
 // -- payloads --------------------------------------------------------------------
 

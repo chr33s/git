@@ -949,7 +949,7 @@ describe("Policy", () => {
       // stayed reachable and clonable for good.
       const outcome = await scenario(
         Effect.gen(function* () {
-          const where = yield* world(["source.push"]);
+          const where = yield* world(["source.push", "hub.create-pr"]);
           const repository = yield* Repository;
 
           const secret = yield* repository.writeBlob(new TextEncoder().encode("hunter2\n"));
@@ -985,7 +985,7 @@ describe("Policy", () => {
       // push and, before this, allowed on the one that creates it.
       const outcome = await scenario(
         Effect.gen(function* () {
-          const where = yield* world(["source.push"]);
+          const where = yield* world(["source.push", "hub.create-pr"]);
           const repository = yield* Repository;
           const one = yield* repository.commitTree({
             tree: EMPTY_TREE_OID,
@@ -1014,6 +1014,38 @@ describe("Policy", () => {
       assert.equal(outcome.two.ok, false);
       assert.match(outcome.two.ok === false ? outcome.two.reason : "", /second history/);
       assert.equal(outcome.one.ok, true, "one beginning is what a create is");
+    });
+
+    it("refuses an append from somebody who holds no capability of that kind", async () => {
+      // Both namespaces read an empty tree as a join, so a chain of commits
+      // onto either need carry no statement at all. Charged `source.push`
+      // alone, an ordinary contributor could run a pull request or the trust
+      // log to the ceiling a fold will walk and — on a namespace with no way
+      // back — leave it refusing every later push: the revocation of the
+      // padder, the checkpoint that lifts a staleness bound, the approval a
+      // protected branch was waiting on.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const repository = yield* Repository;
+          const log = yield* repository.resolve(Log.LOG_REF);
+          const padding = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [log!],
+            message: "join\n",
+            author,
+          });
+          return {
+            trust: yield* judge(where, { name: Log.LOG_REF, value: padding }),
+            hub: yield* judge(where, { name: "refs/hub/pr/padded", value: padding }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.trust.ok, false);
+      assert.match(outcome.trust.ok === false ? outcome.trust.reason : "", /trust\.\* capability/);
+      assert.equal(outcome.hub.ok, false);
+      assert.match(outcome.hub.ok === false ? outcome.hub.reason : "", /hub\.\* capability/);
     });
 
     it("refuses a hub ref that does not name a pull request", async () => {

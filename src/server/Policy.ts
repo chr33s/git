@@ -435,6 +435,27 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     return refused(update.name, "authentication required to write refs");
   }
 
+  // These namespaces are written by the hub and by trust operations, not by
+  // whoever may push source. Charged `source.push` alone, an ordinary
+  // contributor could chain commits onto either — both read an empty tree as a
+  // join, so none of it need be a statement — until the ref hit the ceiling a
+  // fold will walk, and then, on a namespace with no way back, it refused
+  // every later push: the revocation of the padder, the checkpoint that lifts
+  // a staleness bound, the approval a protected branch was waiting on.
+  //
+  // *Some* capability of the right kind, not a particular one: which event or
+  // record a commit carries is settled by the fold, which reads the payload
+  // this boundary has not got. The point here is that the door belongs to
+  // members of the hub rather than to everyone who may push.
+  if (update.value !== null && Refspec.isAppendOnly(update.name)) {
+    const kind = update.name.startsWith("refs/hub/") ? "hub." : "trust.";
+    if (
+      !input.principal.capabilities.some((held) => held.startsWith(kind) || held === "repo.admin")
+    ) {
+      return refused(update.name, `appending to ${update.name} needs a ${kind}* capability`);
+    }
+  }
+
   const deleting = update.value === null;
   const forced = !deleting && current !== null && !(yield* contains(current, update.value!));
 
