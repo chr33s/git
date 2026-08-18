@@ -1440,6 +1440,8 @@ Policy answers: `is this particular state transition allowed now?`
 
 There is a race between evaluating the projection (head, approvals, checks) and applying the ref update. Policy-gated updates MUST pass the evaluated old OID as `expected` to `RefStore.apply` — the compare-and-swap already in the `RefUpdate` contract — so a head that moved between evaluation and application fails the swap instead of merging stale approvals.
 
+A refused atomic batch MUST report each ref with its own reason where the boundary gave it one, and the rest with the fact that the batch failed. Stamping the first refusal onto every command tells a user their clean ref failed for something that was never about it, and throws away every other refusal's reason — which on a batch refused for two different things is the half they needed.
+
 A Durable Object is additionally single-threaded per repository, which serializes evaluate-then-apply; the Node backend has no such guarantee and relies on the CAS. The CAS is therefore mandatory, not an optimization.
 
 ### Append-only enforcement

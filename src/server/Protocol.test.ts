@@ -618,6 +618,15 @@ describe("an atomic push the policy refuses", () => {
       `atomic means none of them applied: ${named.join(" | ")}`,
     );
     assert.notEqual(report.now, null, "and nothing was deleted");
+
+    // Each with its own reason. Stamping the first refusal onto all of them
+    // told a user their clean ref had failed for something that was never
+    // about it — here, that `refs/heads/topic` is part of the trust namespace.
+    const genesis = named.find((line) => line.includes("refs/meta/trust/genesis")) ?? "";
+    const topic = named.find((line) => line.includes("refs/heads/topic")) ?? "";
+    assert.doesNotMatch(genesis, /^ng \S+ atomic push refused/, `own reason: ${genesis}`);
+    assert.doesNotMatch(topic, /trust namespace/);
+    assert.match(topic, /atomic/, `the clean ref failed because the batch did: ${topic}`);
   });
 });
 

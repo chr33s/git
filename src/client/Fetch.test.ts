@@ -245,6 +245,40 @@ describe("Fetch", () => {
     assert.notEqual(outcome, null, "a replication that fetched nothing must not report success");
   });
 
+  it("writes one update per local ref, whatever the refspecs overlap on", async () => {
+    // Two refspecs can name one local ref from different remote ones. Both
+    // updates then go into a single `apply` batch judged against the value the
+    // ref held before either — so the store takes both, the second silently
+    // wins, and nothing is reported as rejected. Whichever the caller listed
+    // first is the one that lands.
+    const source = path.join(root, "overlap-source");
+    const head = await commitFile(source, "a.txt", "one\n", "one");
+    await inRepo(
+      source,
+      Effect.flatMap(Repository, (repository) =>
+        repository.setRef({ name: "refs/heads/other", to: head }),
+      ),
+    );
+
+    const target = path.join(root, "overlap-target");
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const stores_ = { objects: yield* ObjectStore, refs: yield* RefStore };
+        const fetched = yield* fetchRepository({
+          url: `${server.url}/overlap-source`,
+          stores: stores_,
+          refspecs: [
+            { force: false, source: "refs/heads/main", destination: "refs/heads/landed" },
+            { force: false, source: "refs/heads/other", destination: "refs/heads/landed" },
+          ],
+        });
+        return fetched.refs.filter((ref) => ref.name === "refs/heads/landed").length;
+      }).pipe(Effect.provide(stores(target))),
+    );
+
+    assert.equal(outcome, 1, "one destination, one update");
+  });
+
   it("clones an empty target whole, and sends no haves doing it", async () => {
     await commitFile(path.join(root, "clone-source"), "a.txt", "one\n", "one");
     await commitFile(path.join(root, "clone-source"), "b.txt", "two\n", "two");

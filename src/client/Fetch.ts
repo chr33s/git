@@ -570,6 +570,14 @@ export const fetchRepository = (options: {
       if (ref.name === "HEAD" || ref.name.endsWith("^{}")) continue;
       const resolved = Refspec.resolve(specs, ref.name);
       if (resolved === null) continue;
+      // One update per *destination*, not per source. Two refspecs can name
+      // the same local ref from different remote ones, and both updates then
+      // go into a single `apply` batch judged against the value the ref held
+      // before either — so the store takes both, the second silently wins,
+      // and nothing is reported as rejected. Whichever the caller listed
+      // first is the one that lands, which is the rule a refspec list already
+      // implies.
+      if (picked.some((held) => held.destination === resolved.destination)) continue;
       picked.push({
         name: ref.name,
         oid: ref.oid,

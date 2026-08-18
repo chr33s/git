@@ -938,7 +938,27 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       // refusal in it has *no* allowed updates, so reporting on those produces
       // no `ng` lines at all — a push refused in complete silence. Atomic means
       // every command failed, and the report has to say so for each of them.
-      return respond(allFailed(updates, judged.refused[0]!.reason), "ok");
+      //
+      // Each with its *own* reason where the gate gave it one. Stamping the
+      // first refusal onto all of them told a user their clean ref had failed
+      // for something that was never about it — and threw away every other
+      // refusal's reason, which on a batch refused for two different things is
+      // the half they needed. A ref the gate did not decline failed because
+      // the batch did, and says so.
+      const own = new Map(judged.refused.map((entry) => [entry.ref, entry.reason]));
+      const together = `atomic push refused: ${judged.refused[0]!.reason}`;
+      return respond(
+        updates
+          .filter((update) => !refused.some((entry) => entry.ref === update.name))
+          .map((update) => ({
+            ref: update.name,
+            from: update.expected ?? null,
+            to: null,
+            ok: false,
+            reason: own.get(update.name) ?? together,
+          })),
+        "ok",
+      );
     }
     // Non-atomic: the refusals ride back in the same report as the `ok`s, so a
     // client is told which refs the policy declined and why, rather than
