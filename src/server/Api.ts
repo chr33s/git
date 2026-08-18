@@ -627,9 +627,16 @@ const FetchedRef = Schema.Struct({
 
 const repo = HttpApiGroup.make("repo")
   .add(
-    // Answered for whoever is asking, so it needs no capability of its own:
-    // a request may always be told what it may do, and an anonymous one is
-    // told that it may do nothing rather than being refused the question.
+    // Answered for whoever is asking: an anonymous request is told that it may
+    // do nothing rather than being refused the question, and a credential is
+    // told what that credential may do rather than what its key was granted.
+    //
+    // Charged `repo.read` all the same, because the guard charges every GET
+    // one and this is a GET. On a private repository that is a real edge: a
+    // key granted `source.push` and nothing else cannot ask this over the
+    // wire, and has to use the CLI form or be granted `repo.read` as well —
+    // which agents.md tells operators to do anyway, since such a key cannot
+    // clone either.
     HttpApiEndpoint.get("whoami", "/whoami", {
       params: RepoParam,
       success: Whoami.Answer,
@@ -1418,6 +1425,17 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const requester = yield* Effect.serviceOption(Auth.Requester);
         const who = Option.getOrUndefined(requester);
 
+        // A delegated credential narrows what this *request* may do, and that
+        // narrowing is the answer its holder is asking for — but only where
+        // the guard actually authorized the signer. On the anonymous-read
+        // fallback it reports the literal `repo.read` beside a real signer,
+        // because the request was served as a public read rather than as that
+        // member; taken as the credential's scope, a member holding
+        // `source.push` on a public repository was told every push would be
+        // refused, while the boundary would have accepted it. `principal` is
+        // what separates the two: null there means nobody was authorized.
+        const scoped = who?.principal === null ? undefined : who?.capabilities;
+
         const held =
           stored === null
             ? Whoami.withoutMembership(
@@ -1427,10 +1445,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
               ? Whoami.withoutMembership(
                   "this request proved possession of no key; present a credential to be told more",
                 )
-              : // The credential's own scope, not the member's full grant: a
-                // delegated credential narrows what this *request* may do, and
-                // that narrowing is the answer its holder is asking for.
-                Whoami.standingOf(who.projection, who.signer, new Date(), who.capabilities);
+              : Whoami.standingOf(who.projection, who.signer, new Date(), scoped);
 
         // Fails closed on unreadable rules, for the reason `Policy.rulesOf`
         // gives: rules that will not parse leave the repository's stated
@@ -1440,7 +1455,12 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         return yield* Whoami.answer({
           subject: who?.signer ?? null,
           repoId: stored === null ? null : stored.genesis.repoId,
-          projection: who?.projection ?? null,
+          // The empty projection a genesis-less repository carries is not a
+          // membership view, and answering freshness against it produced a
+          // `trust` block here where the CLI, handed no projection at all,
+          // reports none. Two answers to one question is the drift this
+          // shares an implementation to avoid.
+          projection: stored === null ? null : (who?.projection ?? null),
           held,
         }).pipe(
           Effect.catchTags({

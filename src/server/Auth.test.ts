@@ -580,6 +580,37 @@ describe("Auth", () => {
       assert.equal(outcome.denied, null);
     });
 
+    it("does not spend a nonce for a signer this repository never granted", async () => {
+      // A signature proves possession, not membership, so this envelope is as
+      // well-formed as a member's. Spending the nonce on it let anyone with a
+      // throwaway key write into the spent set — and 4096 of them evicted a
+      // captured envelope's nonce back out of it, reopening the replay window
+      // inside its own TTL. The nonce must still be there afterwards.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis } = yield* hub(["source.push"]);
+          const stranger = yield* generate("stranger@example.com");
+          const nonces = yield* Nonces;
+          const nonce = yield* nonces.issue(300);
+          const header = yield* signEnvelope(stranger, {
+            type: "auth.request",
+            version: 1,
+            repo: genesis.repoId,
+            operation: "git-receive-pack",
+            commands: [{ ref: "refs/heads/main", from: null, to: "a".repeat(40) }],
+            nonce,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+          const denied = yield* guard(
+            request("r/git-receive-pack", { method: "POST", headers: { authorization: header } }),
+          );
+          return { denied: denied.denied !== null, unspent: yield* nonces.consume(nonce) };
+        }),
+      );
+      assert.equal(outcome.denied, true, "a stranger's envelope is refused");
+      assert.equal(outcome.unspent, true, "and it cost the spent set nothing");
+    });
+
     it("refuses the same envelope twice", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {
