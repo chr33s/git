@@ -523,8 +523,16 @@ const enable = Command.make(
  * `[remote "origin"]`. This client keeps no per-remote configuration — every
  * fetch names its refspecs — so what `enable` durably leaves behind is the
  * pinned identity and the refs it fetched, and removing "only the refspecs
- * chr33s-git manages" is removing only the refs it manages: `refs/hub/*` and
- * `refs/meta/trust/*`, never a branch or a tag.
+ * chr33s-git manages" is removing only the refs it manages.
+ *
+ * Which is `HUB_FETCH` itself, and `hub enable`'s scratch ref, and nothing
+ * else. Listing the namespaces by hand instead left `refs/meta/policy` behind:
+ * the origin's branch rules outliving the identity that could have changed
+ * them, on a repository where nothing holds `policy.write` any more. And the
+ * ref a presented genesis lands in while it is still only a claim is this
+ * command's to clean up too — hidden from the advertisement, rooted by
+ * collection, pinning the identity of a repository the user has just stopped
+ * synchronizing with.
  *
  * Guarded by the pin rather than by a flag. Those refs are undeletable *on a
  * server* for good reasons — a pull request nothing can remove, an identity
@@ -561,7 +569,11 @@ const disable = Command.make(
         const held = yield* refs.list("refs/");
         const managed = held
           .map(([name]) => name)
-          .filter((name) => name.startsWith("refs/hub/") || name.startsWith("refs/meta/trust/"));
+          .filter(
+            (name) =>
+              name === PRESENTED_REF ||
+              Refspec.HUB_FETCH.some((spec) => Refspec.map(spec, name) !== null),
+          );
         if (managed.length > 0) {
           yield* refs.apply(managed.map((name) => ({ name, value: null, reason: "hub disable" })));
         }

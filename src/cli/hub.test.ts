@@ -22,6 +22,7 @@ import { Effect, Layer } from "effect";
 import { formatPublicKey } from "../crypto/SshSignature.ts";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
+import * as Policy from "../server/Policy.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { serve } from "../host/Node.ts";
 import { enableHubUnder, grantMemberUnder, shortOfQuorum, writeKeyPair } from "../testing/Hub.ts";
@@ -536,6 +537,41 @@ describe("cli hub", () => {
       const member = await enableHubUnder(path.join(root, "served"), "shared", ["repo.read"]);
       const url = `${server.url}/shared`;
 
+      // The origin publishes rules, so there is something under
+      // `refs/meta/policy` for the clone to fetch and then have to drop.
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* GitRepository.Repository;
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({ ...Policy.OPEN, protected: ["refs/heads/main"] }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          yield* repository.setRef({
+            name: Policy.RULES_REF,
+            to: yield* repository.commitTree({
+              tree,
+              parents: [],
+              message: "policy\n",
+              author: {
+                name: "Root",
+                email: "root@example.com",
+                at: new Date(1_700_000_000_000),
+                offset: 0,
+              },
+            }),
+          });
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provideMerge(nodeStores(path.join(root, "served", "shared"))),
+            ),
+          ),
+        ),
+      );
+
       await cli([
         "hub",
         "enable",
@@ -562,11 +598,22 @@ describe("cli hub", () => {
       assert.match(disabled, /hub\/trust ref\(s\) removed/);
 
       const left = await refsOf();
+      // Everything `enable` manages, which is the fetch refspecs themselves
+      // plus the scratch ref a presented genesis lands in. Listed by hand, the
+      // rules file was left behind — the origin's branch protection outliving
+      // the identity that could have changed it — and so was the scratch ref,
+      // hidden from the advertisement and rooting collection on a repository
+      // the user had just stopped synchronizing with.
       assert.equal(
-        left.filter((line) => line.includes("refs/hub/") || line.includes("refs/meta/trust/"))
-          .length,
+        left.filter(
+          (line) =>
+            line.includes("refs/hub/") ||
+            line.includes("refs/meta/trust/") ||
+            line.includes("refs/meta/policy") ||
+            line.includes("refs/meta/presented/"),
+        ).length,
         0,
-        `hub and trust refs are gone: ${left.join(", ")}`,
+        `nothing chr33s-git manages is left: ${left.join(", ")}`,
       );
 
       // The identity is a separate decision, and `hub forget` is the command

@@ -854,3 +854,71 @@ describe("Repository.canServe", () => {
     assert.equal(served, true);
   });
 });
+
+describe("hooks composed as one", () => {
+  it("refuses as soon as any of them refuses", async () => {
+    // A refusal is an answer, and the rest of the chain has nothing to add to
+    // it — nor should a hook that comes after a "no" get to run its side
+    // effects on a push that is not happening.
+    const ran: string[] = [];
+    const chain = GitRepository.hooksAll([
+      {
+        preReceive: () => Effect.sync(() => ran.push("first")).pipe(Effect.asVoid),
+        update: () => Effect.void,
+        postReceive: () => Effect.void,
+      },
+      {
+        preReceive: () => Effect.fail(new HookRejected({ hook: "pre-receive", message: "no" })),
+        update: () => Effect.void,
+        postReceive: () => Effect.void,
+      },
+      {
+        preReceive: () => Effect.sync(() => ran.push("third")).pipe(Effect.asVoid),
+        update: () => Effect.void,
+        postReceive: () => Effect.void,
+      },
+    ]);
+
+    const outcome = await Effect.runPromise(
+      chain.preReceive([]).pipe(
+        Effect.as("allowed"),
+        Effect.catchTag("HookRejected", (error) => Effect.succeed(error.message)),
+      ),
+    );
+
+    assert.equal(outcome, "no");
+    assert.deepEqual(ran, ["first"], "and the one after the refusal never ran");
+  });
+
+  it("tells every hook about a push even when one of them dies", async () => {
+    // `postReceive` has no error channel, so the only way it stops is a defect
+    // — and a defect that skipped the rest would be silent. This is what stood
+    // between a webhook delivery going wrong and a mirror never being told a
+    // push had landed.
+    const told: string[] = [];
+    const chain = GitRepository.hooksAll([
+      {
+        preReceive: () => Effect.void,
+        update: () => Effect.void,
+        postReceive: () => Effect.sync(() => told.push("first")).pipe(Effect.asVoid),
+      },
+      {
+        preReceive: () => Effect.void,
+        update: () => Effect.void,
+        postReceive: () =>
+          Effect.sync(() => {
+            throw new Error("the receiver blew up");
+          }),
+      },
+      {
+        preReceive: () => Effect.void,
+        update: () => Effect.void,
+        postReceive: () => Effect.sync(() => told.push("third")).pipe(Effect.asVoid),
+      },
+    ]);
+
+    await Effect.runPromise(chain.postReceive([]));
+
+    assert.deepEqual(told, ["first", "third"]);
+  });
+});

@@ -496,7 +496,9 @@ export const hooksAll = (all: ReadonlyArray<Hooks["Service"]>): Hooks["Service"]
     Effect.forEach(all, (hooks) => hooks.preReceive(updates), { discard: true }),
   update: (update) => Effect.forEach(all, (hooks) => hooks.update(update), { discard: true }),
   postReceive: (results) =>
-    Effect.forEach(all, (hooks) => hooks.postReceive(results), { discard: true }),
+    Effect.forEach(all, (hooks) => hooks.postReceive(results).pipe(Effect.ignoreCause), {
+      discard: true,
+    }),
 });
 
 /** No-op hooks, which is what a server without policy wants. */
