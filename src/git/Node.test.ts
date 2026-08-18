@@ -796,7 +796,7 @@ describe("pack descriptors", () => {
   /**
    * Descriptors this process holds against `.pack` files, by `/proc`.
    *
-   * Substring, not suffix: an unlinked file's link reads `…​.pack (deleted)`,
+   * Substring, not suffix: an unlinked file's link reads `..._.pack (deleted)`,
    * and a descriptor on a deleted pack — the one still pinning its blocks — is
    * the entire thing these tests are looking for.
    */

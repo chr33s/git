@@ -24,6 +24,12 @@
       "new_sqlite_classes": ["GitRepo"]
     }
   ],
+  "alias": {
+    "@effect/platform-bun/BunHttpServer": "./src/testing/PlatformBunStub.ts",
+    "@effect/platform-bun/BunRuntime": "./src/testing/PlatformBunStub.ts",
+    "@effect/platform-bun/BunServices": "./src/testing/PlatformBunStub.ts",
+    "@effect/platform-bun/BunSocket": "./src/testing/PlatformBunStub.ts"
+  },
   "vars": {
     "ENABLE_CONFORMANCE": "1",
     "ALLOW_ANONYMOUS_WRITES": "1"
