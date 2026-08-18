@@ -6,9 +6,9 @@
 /**
  * Stylesheets imported for their side effect.
  *
- * `main.ts` imports `tokens.css` and `app.css` so that esbuild emits them as
- * one `main.css` beside the bundle. There is no value to import — the module
- * exists only so the CSS joins the build graph.
+ * `main.ts` imports the tokens and ownership-based files in `styles/` so that
+ * esbuild emits them as one `main.css` beside the bundle. There is no value to
+ * import — the modules exist only so the CSS joins the build graph.
  */
 declare module "*.css";
 

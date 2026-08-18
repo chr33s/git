@@ -1,22 +1,18 @@
 /**
  * A browser client for the repository's JSON API.
  *
- * The endpoints, paths and payload shapes here mirror `src/server/Api.ts`,
- * which is the source of truth: one `HttpApi` value carrying both the `repo`
- * and `remotes` groups, each prefixed `/:repo`. The types below are transcribed
- * from those `Schema.Struct`s.
+ * The endpoints and paths mirror `src/server/Api.ts`; their shared response
+ * shapes come from the contract that module uses.
  *
- * They are transcribed rather than derived on purpose. `HttpApiClient.make(api)`
- * would give a client that cannot drift — but `api` is declared in the same
- * module as its handlers, deliberately ("the declaration is one value on
- * purpose"), and those handlers reach `Repository`, `Policy`, `Auth`,
- * `FileSystem` and `Path`. Importing the declaration would pull the whole
- * server into the browser bundle. Until the declaration is separable, a hand
- * transcription is the cheaper half of the trade.
- *
- * Everything is decoded at this boundary and handed on as a domain value, so no
- * screen ever touches a raw response.
+ * The browser-safe response schemas live in `src/server/UiApiContract.ts` and
+ * are also used by the HTTP declaration. Everything is decoded against those
+ * schemas at this boundary and handed on as a domain value, so a server/client
+ * drift is an explicit `InvalidResponse` rather than an unsafe assertion.
  */
+
+import { Option, Schema } from "effect";
+
+import * as Contract from "../src/server/UiApiContract.ts";
 
 /** Thrown for any non-2xx answer, carrying the server's tagged error name. */
 export class ApiError extends Error {
@@ -59,48 +55,12 @@ export const describe = (error: Unavailable): string =>
     ? `the git+ API answered ${error.tag}: ${error.message}`
     : "the git+ API is not running";
 
-/** A ref as `/refs` and `/branches` return it. */
-export interface Ref {
-  readonly name: string;
-  readonly oid: string;
-}
-
-/** One entry of `/files`: a blob, with the tree path that reaches it. */
-export interface FileEntry {
-  readonly path: string;
-  readonly mode: string;
-  readonly oid: string;
-}
-
-/** `/file`: content always arrives base64, because the server cannot know a
- * blob is text and guessing would corrupt the bytes that are not. */
-export interface FileContent {
-  readonly path: string;
-  readonly mode: string;
-  readonly oid: string;
-  readonly content: string;
-  readonly encoding: "base64";
-  readonly size: number;
-}
-
-/** One file of a `/diff` answer, carrying a real unified patch. */
-export interface DiffFile {
-  readonly path: string;
-  readonly status: "added" | "removed" | "modified";
-  readonly binary: boolean;
-  readonly patch: string;
-}
-
-export interface CommitSummary {
-  readonly oid: string;
-  readonly message: string;
-}
-
-export interface Commit {
-  readonly message: string;
-  readonly parents: readonly string[];
-  readonly tree: string;
-}
+export type Ref = Contract.Ref;
+export type FileEntry = Contract.FileEntry;
+export type FileContent = Contract.FileContent;
+export type DiffFile = Contract.DiffFile;
+export type CommitSummary = Contract.CommitSummary;
+export type Commit = Contract.Commit;
 
 /**
  * A commit with its author and date.
@@ -135,58 +95,15 @@ export interface RawObject {
  * genesis `member` is false with `why` explaining it — so the UI shows a real
  * identity when there is one and says nothing rather than inventing one.
  */
-export interface Whoami {
-  readonly repo: string | null;
-  readonly subject: string | null;
-  readonly member: boolean;
-  readonly why: string | null;
-  readonly capabilities: readonly string[];
-}
-
-interface RefsResponse {
-  readonly refs: readonly Ref[];
-}
-
-interface FilesResponse {
-  readonly files: readonly FileEntry[];
-}
-
-/** The `/diff` request payload, as `src/server/Api.ts` declares it. */
-interface DiffRequest {
-  readonly from: string;
-  readonly to: string;
-  readonly path?: string;
-}
-
-interface DiffResponse {
-  readonly files: readonly DiffFile[];
-}
-
-interface LogResponse {
-  readonly commits: readonly CommitSummary[];
-}
-
-interface ObjectResponse {
-  readonly oid: string;
-  readonly type: "blob" | "tree" | "commit" | "tag";
-  readonly size: number;
-  readonly content: string;
-  readonly encoding: "base64";
-}
-
-interface PageResponse<A> {
-  readonly items: readonly A[];
-  readonly next_cursor: string | null;
-  readonly has_more: boolean;
-}
+export type Whoami = Contract.WhoamiAnswer;
 
 /** A tagged error body, as `git/Error.ts` puts it on the wire. */
-interface ErrorBody {
-  readonly _tag?: string;
-  readonly message?: string;
+const ErrorBody = Schema.Struct({
+  _tag: Schema.optional(Schema.String),
+  message: Schema.optional(Schema.String),
   /** `Invalid` carries the detail here rather than in `message`. */
-  readonly reason?: string;
-}
+  reason: Schema.optional(Schema.String),
+});
 
 const OID = /^[0-9a-f]{40}$/;
 
@@ -277,33 +194,46 @@ export class GitApi {
     return `${this.#base}/${encodeURIComponent(this.repo)}${path}${search}`;
   }
 
-  async #json<A>(url: string, init?: RequestInit): Promise<A> {
+  async #json<S extends Schema.ConstraintDecoder<unknown>>(
+    url: string,
+    schema: S,
+    init?: RequestInit,
+  ): Promise<S["Type"]> {
     const response = await fetch(url, init);
     if (!response.ok) {
-      // SAFETY: an error body is JSON on every path that produces one; a
-      // parse failure falls through to the status-only message below.
-      const body = (await response.json().catch(() => ({}) as ErrorBody)) as ErrorBody;
+      const decoded = Schema.decodeUnknownOption(ErrorBody)(
+        await response.json().catch((): undefined => undefined),
+      );
+      const body = Option.isSome(decoded) ? decoded.value : undefined;
       throw new ApiError(
-        body._tag ?? "HttpError",
+        body?._tag ?? "HttpError",
         response.status,
-        body.message ?? `${response.status} ${response.statusText}`,
+        body?.message ?? body?.reason ?? `${response.status} ${response.statusText}`,
       );
     }
-    // SAFETY: the endpoint's success schema, transcribed above. The server
-    // encodes through that schema, so a well-formed 2xx matches `A`.
-    return (await response.json()) as A;
+    const body: unknown = await response.json();
+    try {
+      return Schema.decodeUnknownSync(schema)(body);
+    } catch (cause) {
+      throw new ApiError(
+        "InvalidResponse",
+        response.status,
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
   }
 
   /** Every ref, unpaged — the shape the smart-HTTP advertisement needs. */
   async refs(): Promise<readonly Ref[]> {
-    const body = await this.#json<RefsResponse>(this.#url("/refs"));
+    const body = await this.#json(this.#url("/refs"), Contract.RefsResponse);
     return body.refs;
   }
 
   /** Branches, paged; one page is enough for a branch picker. */
   async branches(limit = "100"): Promise<readonly Ref[]> {
-    const body = await this.#json<PageResponse<Ref>>(
+    const body = await this.#json(
       this.#url("/branches", new URLSearchParams({ limit })),
+      Contract.RefPage,
     );
     return body.items;
   }
@@ -318,14 +248,15 @@ export class GitApi {
   async files(ref: string, path?: string): Promise<readonly FileEntry[]> {
     const query = new URLSearchParams({ ref: qualify(ref) });
     if (path !== undefined) query.set("path", path);
-    const body = await this.#json<FilesResponse>(this.#url("/files", query));
+    const body = await this.#json(this.#url("/files", query), Contract.FilesResponse);
     return body.files;
   }
 
   /** One blob's content, already decoded from base64. */
   async file(ref: string, path: string): Promise<string> {
-    const body = await this.#json<FileContent>(
+    const body = await this.#json(
       this.#url("/file", new URLSearchParams({ ref: qualify(ref), path })),
+      Contract.FileContent,
     );
     return decodeContent(body.content);
   }
@@ -340,9 +271,9 @@ export class GitApi {
   async diff(from: string, to: string, path?: string): Promise<readonly DiffFile[]> {
     const from_ = qualify(from);
     const to_ = qualify(to);
-    const payload: DiffRequest =
+    const payload: Contract.DiffRequest =
       path === undefined ? { from: from_, to: to_ } : { from: from_, to: to_, path };
-    const body = await this.#json<DiffResponse>(this.#url("/diff"), {
+    const body = await this.#json(this.#url("/diff"), Contract.DiffResponse, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
@@ -352,12 +283,12 @@ export class GitApi {
 
   /** Who the server thinks is asking. */
   async whoami(): Promise<Whoami> {
-    return await this.#json<Whoami>(this.#url("/whoami"));
+    return await this.#json(this.#url("/whoami"), Contract.WhoamiAnswer);
   }
 
   /** One raw object, decoded to text. */
   async object(oid: string): Promise<RawObject> {
-    const body = await this.#json<ObjectResponse>(this.#url(`/object/${oid}`));
+    const body = await this.#json(this.#url(`/object/${oid}`), Contract.RawObject);
     return { oid: body.oid, type: body.type, text: decodeContent(body.content) };
   }
 
@@ -375,27 +306,29 @@ export class GitApi {
    * that makes it N+1.
    */
   async recentCommits(oid: string, limit = 30): Promise<readonly CommitDetail[]> {
-    const page = await this.#json<PageResponse<CommitSummary>>(
+    const page = await this.#json(
       this.#url(`/commits/${oid}`, new URLSearchParams({ limit: String(limit) })),
+      Contract.CommitPage,
     );
     return await Promise.all(page.items.map((item) => this.commitDetail(item.oid)));
   }
 
   /** Commit history from a starting oid, newest first. */
   async log(oid: string): Promise<readonly CommitSummary[]> {
-    const body = await this.#json<LogResponse>(this.#url(`/log/${oid}`));
+    const body = await this.#json(this.#url(`/log/${oid}`), Contract.LogResponse);
     return body.commits;
   }
 
   /** One commit's message, parents and tree. */
   async commit(oid: string): Promise<Commit> {
-    return await this.#json<Commit>(this.#url(`/commit/${oid}`));
+    return await this.#json(this.#url(`/commit/${oid}`), Contract.Commit);
   }
 
   /** Commits touching one path, newest first. */
   async history(oid: string, path: string, limit = "20"): Promise<readonly CommitSummary[]> {
-    const body = await this.#json<PageResponse<CommitSummary>>(
+    const body = await this.#json(
       this.#url(`/history/${oid}`, new URLSearchParams({ path, limit })),
+      Contract.HistoryPage,
     );
     return body.items;
   }

@@ -8,12 +8,10 @@
  */
 import { Context, Effect, type Layer, Option, Stream } from "effect";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "./Error.ts";
+import { isOid, type Oid } from "./Oid.ts";
 
-/** A 40-char lowercase hex object id. Branded so a ref name cannot pass as one. */
-export type Oid = string & { readonly Oid: unique symbol };
+export { isOid, type Oid };
 export type ObjectType = "blob" | "tree" | "commit" | "tag";
-
-export const isOid = (value: string): value is Oid => /^[0-9a-f]{40}$/.test(value);
 
 export interface RawObject {
   readonly type: ObjectType;

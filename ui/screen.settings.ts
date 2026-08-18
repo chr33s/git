@@ -4,7 +4,8 @@
  * The merge-policy toggles are `ui-switch` from `@chr33s/base-wc`, authored the
  * native-first way its contract asks for: a real `<input type="checkbox">`
  * inside the element. The component overlays it and mirrors state onto
- * `data-state`, which `app.css` styles into the design's pill-and-knob — and
+ * `data-state`, which `styles/screen.settings.css` turns into the design's
+ * pill-and-knob — and
  * because the native input is the value, the form still submits with JS off.
  */
 import { html, type TemplateResult } from "lit";

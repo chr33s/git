@@ -41,7 +41,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pwd = dirname(fileURLToPath(import.meta.url));
-const outdir = join(pwd, "..", "dist", "ui");
+const outdir = process.env["GIT_UI_OUTDIR"] ?? join(pwd, "..", "dist", "ui");
 
 /** See the note above: reached by file path because the package does not
  * export it. Located relative to the `.` entry — which the package *does*
@@ -165,9 +165,11 @@ if (watch || serve) {
     let warned = false;
     const port = Number(process.env["PORT"] ?? 8000);
 
-    const forward = async (to: string, request: Parameters<RequestListener>[0]) => {
-      const body =
-        request.method === "GET" || request.method === "HEAD" ? undefined : await collect(request);
+    const forward = async (
+      to: string,
+      request: Parameters<RequestListener>[0],
+      body: Uint8Array<ArrayBuffer> | undefined,
+    ) => {
       return await fetch(new URL(request.url ?? "/", to), {
         method: request.method,
         headers: headersOf(request.headers),
@@ -178,11 +180,18 @@ if (watch || serve) {
     createServer((request, response) => {
       void (async () => {
         try {
-          // Ask the bundle first; anything it does not have is an API path.
-          // Deciding by 404 rather than by pattern means no list of routes here
-          // can drift from the one the server actually serves.
-          let answer = await forward(`http://127.0.0.1:${String(assets.port)}`, request);
-          if (answer.status === 404) answer = await forward(upstream, request);
+          const assetRequest = request.method === "GET" || request.method === "HEAD";
+          const body = assetRequest ? undefined : await collect(request);
+          // Static assets are necessarily GET/HEAD. Mutations go directly to
+          // the API, so their one-shot request streams are consumed exactly
+          // once. Reads still ask the bundle first and fall through on 404,
+          // avoiding a duplicated list of server routes.
+          let answer = assetRequest
+            ? await forward(`http://127.0.0.1:${String(assets.port)}`, request, body)
+            : await forward(upstream, request, body);
+          if (assetRequest && answer.status === 404) {
+            answer = await forward(upstream, request, body);
+          }
           response.writeHead(answer.status, Object.fromEntries(answer.headers));
           response.end(Buffer.from(await answer.arrayBuffer()));
         } catch (cause) {

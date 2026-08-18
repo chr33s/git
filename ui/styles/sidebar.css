@@ -1,0 +1,335 @@
+/* ----------------------------------------------------------------- sidebar */
+
+.gp-sidebar {
+  width: 224px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--gp-surface);
+  border-right: 1px solid var(--gp-border);
+  transition: width 0.18s ease;
+}
+
+.gp-sidebar[data-collapsed] {
+  width: 64px;
+}
+
+.gp-logo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 16px 18px;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.gp-sidebar[data-collapsed] .gp-logo-row {
+  justify-content: center;
+  gap: 0;
+  padding: 20px 0 18px;
+}
+
+.gp-logo-mark {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: var(--gp-radius);
+  background: var(--gp-surface-hover);
+  border: 1px solid var(--gp-border-strong);
+  display: grid;
+  place-items: center;
+}
+
+.gp-logo-text {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.gp-logo-text > span {
+  color: var(--gp-accent);
+}
+
+.gp-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 12px 8px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--gp-border-strong);
+  background: var(--gp-surface-input);
+  color: var(--gp-fg-muted);
+  font-size: 13px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.gp-search:hover {
+  border-color: var(--gp-border-hover);
+  color: var(--gp-fg-secondary);
+}
+
+.gp-sidebar[data-collapsed] .gp-search {
+  width: 36px;
+  height: 36px;
+  margin: 0 auto 6px;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  background: none;
+}
+
+.gp-search-kbd {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--gp-fg-faint);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-family: var(--gp-mono);
+}
+
+.gp-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 12px;
+}
+
+.gp-sidebar[data-collapsed] .gp-nav-list {
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+}
+
+.gp-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  box-sizing: border-box;
+  color: var(--gp-fg-muted);
+  border: 1px solid transparent;
+  background: none;
+  font-family: inherit;
+  width: 100%;
+  text-align: left;
+}
+
+.gp-nav-item:hover {
+  background: var(--gp-surface-hover);
+  color: var(--gp-fg);
+}
+
+.gp-nav-item[aria-current="page"] {
+  background: var(--gp-surface-selected);
+  color: var(--gp-fg);
+  border-color: var(--gp-border-strong);
+}
+
+.gp-sidebar[data-collapsed] .gp-nav-item {
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  gap: 0;
+}
+
+.gp-nav-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--gp-fg-muted);
+  background: var(--gp-surface-hover);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius-pill);
+  padding: 1px 8px;
+}
+
+.gp-sidebar-foot {
+  margin-top: auto;
+  padding: 14px 20px;
+  border-top: 1px solid var(--gp-border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.gp-sidebar[data-collapsed] .gp-sidebar-foot {
+  padding: 14px 0;
+  justify-content: center;
+}
+
+.gp-user-avatar {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--gp-radius-pill);
+  background: linear-gradient(135deg, var(--gp-accent), #3d8f74);
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gp-accent-fg);
+}
+
+.gp-user-name {
+  font-size: 13px;
+  color: var(--gp-fg-secondary);
+}
+
+/* The prototype hid every label with `display:none` when collapsed. */
+.gp-sidebar[data-collapsed] .gp-nav-label,
+.gp-sidebar[data-collapsed] .gp-logo-text,
+.gp-sidebar[data-collapsed] .gp-nav-badge,
+.gp-sidebar[data-collapsed] .gp-search-kbd,
+.gp-sidebar[data-collapsed] .gp-user-name {
+  display: none;
+}
+
+.gp-theme-toggle {
+  margin-left: auto;
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--gp-fg-muted);
+  cursor: pointer;
+}
+
+.gp-theme-toggle:hover {
+  background: var(--gp-surface-hover);
+  color: var(--gp-fg);
+}
+
+.gp-sidebar[data-collapsed] .gp-theme-toggle {
+  display: none;
+}
+
+/* ------------------------------------------------------------- repo header */
+
+.gp-repo-header {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px;
+}
+
+.gp-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.gp-breadcrumb-owner {
+  color: var(--gp-fg-muted);
+}
+
+.gp-breadcrumb-sep {
+  color: var(--gp-border-hover);
+}
+
+.gp-breadcrumb-name {
+  font-weight: 600;
+}
+
+.gp-pill-outline {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--gp-fg-muted);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius-pill);
+  padding: 2px 9px;
+  margin-left: 4px;
+}
+
+.gp-repo-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gp-branch-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--gp-fg-secondary);
+  background: var(--gp-surface-input);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius);
+  padding: 6px 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.gp-branch-trigger:hover:not(:disabled) {
+  border-color: var(--gp-border-hover);
+}
+
+/* One branch means nothing to pick; the design's button, minus the affordance. */
+.gp-branch-trigger:disabled {
+  cursor: default;
+}
+
+.gp-branch-menu {
+  display: contents;
+}
+
+/* base-wc puts the popup in the top layer via the Popover API, so it escapes
+   the header's overflow; position and look are ours. */
+.gp-menu-popup {
+  position: absolute;
+  margin: 0;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 5px;
+  background: var(--gp-surface);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.16);
+  z-index: 40;
+}
+
+.gp-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--gp-radius-sm);
+  font-size: 13px;
+  font-family: var(--gp-mono);
+  color: var(--gp-fg-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.gp-menu-item[data-highlighted],
+.gp-menu-item:hover {
+  background: var(--gp-surface-hover);
+  color: var(--gp-fg);
+}
+
+.gp-menu-item[data-current] {
+  color: var(--gp-accent);
+}

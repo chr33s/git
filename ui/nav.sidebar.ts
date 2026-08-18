@@ -11,7 +11,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { ApiError, type GitApi } from "./api.ts";
 import { GitPlusElement, navigate, type Screen } from "./base.ts";
 import * as icons from "./icons.ts";
-import * as theme from "./theme.ts";
+import * as palette from "./theme.ts";
+import { ThemeChangeEvent, type Theme } from "./theme.ts";
 import { initials } from "./time.ts";
 
 @customElement("gp-sidebar")
@@ -20,6 +21,8 @@ export class GpSidebar extends GitPlusElement {
   @property({ type: String }) accessor screen: Screen = "code";
 
   @property({ type: Boolean, reflect: true }) accessor collapsed = false;
+
+  @property({ type: String }) accessor theme: Theme = palette.current();
 
   /** Open Task and Change Request count, shown as the Tasks badge. */
   @property({ type: Number }) accessor openCount = 8;
@@ -75,7 +78,7 @@ export class GpSidebar extends GitPlusElement {
   }
 
   protected override render(): TemplateResult {
-    const mode = theme.current();
+    const mode = this.theme;
     return html`
       <nav class="gp-sidebar" ?data-collapsed=${this.collapsed} aria-label="Primary">
         <button
@@ -114,9 +117,7 @@ export class GpSidebar extends GitPlusElement {
             title=${mode === "dark" ? "Switch to light" : "Switch to dark"}
             aria-label=${mode === "dark" ? "Switch to light theme" : "Switch to dark theme"}
             @click=${() => {
-              theme.toggle();
-              this.requestUpdate();
-              this.dispatchEvent(new CustomEvent("gp-theme-change", { bubbles: true }));
+              this.dispatchEvent(new ThemeChangeEvent(palette.toggle()));
             }}
           >
             ${mode === "dark" ? icons.sun() : icons.moon()}

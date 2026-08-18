@@ -39,6 +39,21 @@ import { permits } from "../trust/Certificate.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
+import {
+  Commit as CommitResponse,
+  CommitPage,
+  DiffRequest,
+  DiffResponse,
+  FileContent,
+  FilesResponse,
+  HistoryPage,
+  LogResponse,
+  OidString,
+  Page,
+  RawObject as RawObjectResponse,
+  Ref,
+  RefsResponse,
+} from "./UiApiContract.ts";
 
 /** `NewRemote` under construction: built field by field, handed over as one. */
 interface RemoteRequest {
@@ -50,14 +65,6 @@ interface RemoteRequest {
 }
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 import { fetchFrom, pull, remoteFor } from "./Sync.ts";
-
-/**
- * An oid on the wire, decoded to the domain's branded `Oid` outright: the
- * refinement carries `isOid`'s type predicate, so a validated payload needs
- * no `as Oid` at the use sites — the schema is the one place the brand is
- * earned.
- */
-const OidString = Schema.String.pipe(Schema.refine(isOid));
 
 /** JSON has no `Date`: `at` crosses as an ISO string, `offset` in minutes. */
 const SignatureWire = Schema.Struct({
@@ -101,20 +108,10 @@ const ReplayOutcomeWire = Schema.Struct({
   ),
 });
 
-/** Written once; every list endpoint reuses it instead of re-deriving it. */
-const Page = <A extends Schema.Top>(item: A) =>
-  Schema.Struct({
-    items: Schema.Array(item),
-    next_cursor: Schema.NullOr(Schema.String),
-    has_more: Schema.Boolean,
-  });
-
 const Cursor = {
   cursor: Schema.optional(Schema.String),
   limit: Schema.optional(Schema.String),
 };
-
-const Ref = Schema.Struct({ name: Schema.String, oid: OidString });
 
 /**
  * Blob content crosses as text by default and base64 when asked, because a
@@ -710,27 +707,21 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("read", "/commit/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        message: Schema.String,
-        parents: Schema.Array(OidString),
-        tree: OidString,
-      }),
+      success: CommitResponse,
       error: ObjectNotFound,
     }),
   )
   .add(
     HttpApiEndpoint.get("log", "/log/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        commits: Schema.Array(Schema.Struct({ message: Schema.String, oid: OidString })),
-      }),
+      success: LogResponse,
       error: ObjectNotFound,
     }),
   )
   .add(
     HttpApiEndpoint.get("refs", "/refs", {
       params: RepoParam,
-      success: Schema.Struct({ refs: Schema.Array(Ref) }),
+      success: RefsResponse,
     }),
   )
   .add(
@@ -896,23 +887,8 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.post("diff", "/diff", {
       params: RepoParam,
-      payload: Schema.Struct({
-        /** Refs, oids or trees. */
-        from: Schema.String,
-        to: Schema.String,
-        path: Schema.optional(Schema.String),
-        context: Schema.optional(Schema.Finite),
-      }),
-      success: Schema.Struct({
-        files: Schema.Array(
-          Schema.Struct({
-            path: Schema.String,
-            status: Schema.Literals(["added", "removed", "modified"]),
-            binary: Schema.Boolean,
-            patch: Schema.String,
-          }),
-        ),
-      }),
+      payload: DiffRequest,
+      success: DiffResponse,
       error: [ObjectNotFound, Invalid],
     }),
   )
@@ -920,11 +896,7 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("files", "/files", {
       params: RepoParam,
       query: { ref: Schema.optional(Schema.String), path: Schema.optional(Schema.String) },
-      success: Schema.Struct({
-        files: Schema.Array(
-          Schema.Struct({ path: Schema.String, mode: Schema.String, oid: OidString }),
-        ),
-      }),
+      success: FilesResponse,
       error: [ObjectNotFound, Invalid],
     }),
   )
@@ -932,27 +904,14 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("file", "/file", {
       params: RepoParam,
       query: { ref: Schema.optional(Schema.String), path: Schema.String },
-      success: Schema.Struct({
-        path: Schema.String,
-        mode: Schema.String,
-        oid: OidString,
-        content: Schema.String,
-        encoding: Schema.Literals(["base64"]),
-        size: Schema.Finite,
-      }),
+      success: FileContent,
       error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.get("object", "/object/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        oid: OidString,
-        type: Schema.Literals(["blob", "tree", "commit", "tag"]),
-        size: Schema.Finite,
-        content: Schema.String,
-        encoding: Schema.Literals(["base64"]),
-      }),
+      success: RawObjectResponse,
       error: ObjectNotFound,
     }),
   )
@@ -1066,7 +1025,7 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("commits", "/commits/:oid", {
       params: { ...RepoParam, oid: OidString },
       query: Cursor,
-      success: Page(Schema.Struct({ message: Schema.String, oid: OidString })),
+      success: CommitPage,
       // `Invalid` because a cursor or a limit that is not a whole number is
       // the client's mistake, and answering an empty page would hide it.
       error: [ObjectNotFound, Invalid],
@@ -1077,14 +1036,7 @@ const repo = HttpApiGroup.make("repo")
       params: { ...RepoParam, oid: OidString },
       /** `path` is the point of the endpoint, so it is not optional. */
       query: { ...Cursor, path: Schema.String },
-      success: Page(
-        Schema.Struct({
-          oid: OidString,
-          message: Schema.String,
-          /** The path's blob here; `null` where the commit deleted it. */
-          blob: Schema.NullOr(OidString),
-        }),
-      ),
+      success: HistoryPage,
       error: [ObjectNotFound, Invalid],
     }),
   )
