@@ -12,7 +12,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { Context, Effect, Layer } from "effect";
-import { HttpRouter } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpRouter } from "effect/unstable/http";
 
 import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
@@ -25,6 +25,7 @@ import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Remotes from "../server/Remotes.ts";
+import * as Sending from "../server/Sending.ts";
 import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
@@ -118,20 +119,60 @@ export class GitRepo extends DurableObject<TestEnv> {
 
   /** Built once per instance: the DO is the unit of isolation, not the request. */
   #live(repo: string): Layer.Layer<Repository> {
-    this.#layer ??= GitRepository.layer.pipe(
+    // Delivery runs in `waitUntil`, and so does forwarding: a remote that is
+    // down must not touch a push that has already been accepted.
+    const detached = <A, E>(effect: Effect.Effect<A, E>) =>
+      // `runPromiseWith` rather than `runPromise`: the work is detached from
+      // this fiber, not from its services, and a fresh runtime would drop the
+      // ones it was handed.
+      Effect.context<never>().pipe(
+        Effect.map((context) => {
+          this.ctx.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
+        }),
+      );
+
+    // `function*` does not carry `this`, and the forward needs the bindings.
+    const bucket = this.env.GIT_OBJECTS;
+    const storage = this.ctx.storage;
+
+    const afterPush = Layer.effect(
+      GitRepository.Hooks,
+      Effect.gen(function* () {
+        const subscribed = yield* Subscribers.Subscribers;
+        const client = yield* HttpClient.HttpClient;
+        const registry = yield* Remotes.Remotes;
+        return GitRepository.hooksAll([
+          Webhooks.service({
+            subscribers: subscribed,
+            client,
+            options: { background: detached },
+          }),
+          // The repository a forward pushes from is built when the push lands,
+          // not when this layer is: it cannot be a dependency of the hooks the
+          // repository itself depends on. See `Sending`.
+          Sending.service({
+            remotes: registry,
+            using: (effect) =>
+              effect.pipe(
+                Effect.provide(
+                  GitRepository.layer.pipe(
+                    Layer.provide(GitRepository.hooksNoop),
+                    Layer.provideMerge(stores({ bucket, repo, storage })),
+                  ),
+                ),
+              ),
+            options: { background: detached },
+          }),
+        ]);
+      }),
+    ).pipe(
       Layer.provide(
-        Webhooks.hooksFetch({
-          background: (effect) =>
-            // `runPromiseWith` rather than `runPromise`: the delivery is
-            // detached from this fiber, not from its services, and a fresh
-            // runtime would drop the ones it was handed.
-            Effect.context<never>().pipe(
-              Effect.map((context) => {
-                this.ctx.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
-              }),
-            ),
-        }).pipe(Layer.provide(this.#registry(repo))),
+        Layer.mergeAll(this.#registry(repo), this.#remoteRegistry(repo), FetchHttpClient.layer),
       ),
+    );
+
+    this.#layer ??= GitRepository.layer.pipe(
+      Layer.provide(afterPush),
       // `provideMerge`: `provide` would swallow the `Storage` identity the
       // cross-request memos key on.
       Layer.provideMerge(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),

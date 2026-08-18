@@ -117,8 +117,21 @@ describe("cli", () => {
         mode: 0o600,
       });
 
-      // Exactly what git writes, path and all — no `--repo`, so the
-      // repository is the one it is asking about.
+      // What git writes once `credential.useHttpPath` is on. Off — which is
+      // its default — there is no `path` line, and a credential scoped to one
+      // repository cannot be minted from protocol and host alone. The refusal
+      // has to say which knob turns it on, or the helper fails obscurely on
+      // every stock clone.
+      const blind = await withStdin(
+        ["credential-helper", "--root", root, "--key", keyFile, "get"],
+        "protocol=http\nhost=git.example.com\n\n",
+      ).then(
+        () => null,
+        (error: Error) => error.message,
+      );
+      assert.notEqual(blind, null, "no repository named is a refusal, not a guess");
+      assert.match(blind ?? "", /useHttpPath/);
+
       const answered = await withStdin(
         ["credential-helper", "--root", root, "--key", keyFile, "get"],
         "protocol=http\nhost=git.example.com\npath=helped\n\n",

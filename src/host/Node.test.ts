@@ -14,6 +14,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
+import { Effect, Layer } from "effect";
+
+import { push } from "../client/Push.ts";
+import { EMPTY_TREE_OID } from "../git/Format.ts";
+import { stores as memoryStores } from "../git/Memory.ts";
+import * as GitRepository from "../git/Repository.ts";
+import { Repository } from "../git/Repository.ts";
 import { enableHubUnder, grantMemberUnder } from "../testing/Hub.ts";
 import { serve, type Server } from "./Node.ts";
 
@@ -165,5 +172,84 @@ describe("a mirror beside its origin", () => {
       ).status,
       200,
     );
+  });
+});
+
+/**
+ * A standing instruction, end to end on a real host.
+ *
+ * The forwarding hook is composed beside webhook delivery rather than instead
+ * of it, and the repository it pushes *from* is built when the push lands
+ * rather than when the hook layer is. Both are the sort of wiring that
+ * typechecks either way and silently does nothing when it is wrong, so this
+ * pushes to one repository and waits for the other one to have it.
+ */
+describe("a remote configured to be sent to", () => {
+  it("gets what a push landed, without anybody asking", async () => {
+    const sender = `${server.url}/sender`;
+    const receiver = `${server.url}/receiver`;
+
+    // The receiver has to exist before anything is forwarded to it.
+    const seeded = await post(`${receiver}/blob`, { content: "hello\n" });
+    assert.equal(seeded.status, 200);
+
+    const registered = await fetch(`${sender}/remotes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "downstream",
+        url: receiver,
+        sync: { mode: "push", refs: ["refs/heads/*"] },
+      }),
+    });
+    assert.equal(registered.status, 200);
+
+    // A real push, because `post-receive` is what forwarding hangs off — the
+    // same trigger webhook delivery uses, and the only moment at which a ref
+    // has moved because somebody else said so.
+    const made = await Effect.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const commit = yield* repository.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "forward me\n",
+          author: {
+            name: "Alice",
+            email: "alice@example.com",
+            at: new Date(1_700_000_000_000),
+            offset: 0,
+          },
+        });
+        yield* push({
+          url: sender,
+          refs: [{ local: "refs/heads/main", remote: "refs/heads/main" }],
+        });
+        return commit;
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provideMerge(memoryStores),
+          ),
+        ),
+      ),
+    );
+
+    // Forwarding is detached from the response, so this is a wait rather than
+    // an assertion on what has already happened.
+    const deadline = Date.now() + 10_000;
+    let arrived: string | undefined;
+    while (arrived === undefined && Date.now() < deadline) {
+      const listed = await fetch(`${receiver}/refs`);
+      // SAFETY: the endpoint answers its own `refs` shape.
+      const { refs } = (await listed.json()) as {
+        readonly refs: ReadonlyArray<{ readonly name: string; readonly oid: string }>;
+      };
+      arrived = refs.find((ref) => ref.name === "refs/heads/main")?.oid;
+      if (arrived === undefined) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    assert.equal(arrived, made, "the branch the push moved is on the downstream remote");
   });
 });

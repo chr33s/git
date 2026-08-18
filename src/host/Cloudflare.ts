@@ -14,7 +14,13 @@
 import * as Alchemy from "alchemy/Cloudflare";
 import type * as Http from "alchemy/Http";
 import { Config, Context, Effect, Layer } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
 import { type GitError, statusOf } from "../git/Error.ts";
@@ -31,6 +37,7 @@ import * as Policy from "../server/Policy.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
+import * as Sending from "../server/Sending.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 import { Objects } from "../objects.ts";
@@ -91,22 +98,58 @@ export default Repo.make(
       const live = (repo: string): Layer.Layer<Repository> => {
         const existing = layers.get(repo);
         if (existing !== undefined) return existing;
+        // Delivery runs in `waitUntil`, so a slow receiver never adds its
+        // latency to the push that triggered it — and so does forwarding, for
+        // the same reason and under the same rule: a remote that is down must
+        // not touch the push that has already been accepted.
+        const detached = <A, E>(effect: Effect.Effect<A, E>) =>
+          // `runPromiseWith` rather than `runPromise`: the work is detached
+          // from this fiber, not from its services, and a fresh runtime would
+          // drop the ones it was handed.
+          Effect.context<never>().pipe(
+            Effect.map((context) => {
+              state.raw.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
+            }),
+          );
+
+        const afterPush = Layer.effect(
+          GitRepository.Hooks,
+          Effect.gen(function* () {
+            const subscribed = yield* Subscribers.Subscribers;
+            const client = yield* HttpClient.HttpClient;
+            const registry = yield* Remotes.Remotes;
+            return GitRepository.hooksAll([
+              Webhooks.service({
+                subscribers: subscribed,
+                client,
+                options: { background: detached },
+              }),
+              // The repository a forward pushes from is built when the push
+              // lands, not when this layer is: it cannot be a dependency of
+              // the hooks the repository itself depends on. See `Sending`.
+              Sending.service({
+                remotes: registry,
+                using: (effect) =>
+                  effect.pipe(
+                    Effect.provide(
+                      GitRepository.layer.pipe(
+                        Layer.provide(GitRepository.hooksNoop),
+                        Layer.provideMerge(
+                          stores({ bucket: r2, repo, storage: state.raw.storage }),
+                        ),
+                      ),
+                    ),
+                  ),
+                options: { background: detached },
+              }),
+            ]);
+          }),
+        ).pipe(
+          Layer.provide(Layer.mergeAll(subscribers(repo), remotes(repo), FetchHttpClient.layer)),
+        );
+
         const built = GitRepository.layer.pipe(
-          // Delivery runs in `waitUntil`, so a slow receiver never adds its
-          // latency to the push that triggered it.
-          Layer.provide(
-            Webhooks.hooksFetch({
-              background: (effect) =>
-                // `runPromiseWith` rather than `runPromise`: the delivery is
-                // detached from this fiber, not from its services, and a
-                // fresh runtime would drop the ones it was handed.
-                Effect.context<never>().pipe(
-                  Effect.map((context) => {
-                    state.raw.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
-                  }),
-                ),
-            }).pipe(Layer.provide(subscribers(repo))),
-          ),
+          Layer.provide(afterPush),
           // `provideMerge`: `provide` would swallow the `Storage` identity the
           // cross-request memos key on, and two repositories in one namespace
           // would share every entry.

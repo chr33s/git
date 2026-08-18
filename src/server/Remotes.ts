@@ -25,9 +25,16 @@ import type { Sql } from "../git/Sql.ts";
  * What this repository does about a remote on its own.
  *
  * `manual` is the default and the old behaviour: a remote is somewhere a
- * person or a job fetches from when they say so. The others are the standing
- * instruction — `fetch` pulls on a schedule somebody else drives, `push`
- * sends what lands here, `mirror` does both.
+ * person or a job fetches from when they say so. `push` and `mirror` are the
+ * standing instruction this implementation acts on: what lands here is
+ * forwarded, on the `post-receive` that made it durable.
+ *
+ * `fetch` is the half with no trigger. Pulling on a schedule needs a
+ * scheduler, and nothing here has one — so storing it would leave a remote
+ * configured to do something that never happens, which is worse than saying
+ * no. It stays in the vocabulary because the shape is the spec's and the
+ * trigger is the only thing missing; `mirror` is accepted for its push half,
+ * and its fetch half waits on the same scheduler.
  *
  * `refs` is what the standing instruction covers, as ref patterns. Empty means
  * everything the mode would otherwise carry, which is the reading that makes
@@ -106,6 +113,17 @@ export const validate = (input: NewRemote): Effect.Effect<NewRemote, Invalid> =>
       // SAFETY: widened to compare a caller-supplied string against the
       // literal union; the comparison is the check, and nothing is narrowed by
       // it.
+      // Refused rather than stored: nothing drives a scheduled fetch here, so
+      // a remote configured for one would sit doing nothing while its
+      // configuration said otherwise.
+      if (input.sync.mode === "fetch") {
+        return Effect.fail(
+          new Invalid({
+            field: "sync",
+            reason: "scheduled fetch is not implemented; use 'manual' and pull, or 'push'",
+          }),
+        );
+      }
       const known: ReadonlyArray<string> = MODES;
       if (!known.includes(input.sync.mode)) {
         return Effect.fail(

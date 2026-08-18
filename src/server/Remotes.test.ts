@@ -142,6 +142,33 @@ describe("Remotes", () => {
     }).pipe(Effect.provide(Remotes.memory)),
   );
 
+  it.effect("refuses a standing instruction nothing here can carry out", () =>
+    Effect.gen(function* () {
+      // Nothing drives a scheduled fetch, so storing one would leave a remote
+      // configured to do something that never happens — configuration that
+      // reads as working and is not. `push` is the half that has a trigger.
+      const registry = yield* Remotes.Remotes;
+      const refused = yield* registry
+        .add({
+          name: "scheduled",
+          url: "https://example.com/repo.git",
+          sync: { mode: "fetch", refs: [] },
+        })
+        .pipe(
+          Effect.as(null),
+          Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+        );
+      const taken = yield* registry.add({
+        name: "forwarded",
+        url: "https://example.com/other.git",
+        sync: { mode: "push", refs: [] },
+      });
+
+      assert.match(refused ?? "", /not implemented/);
+      assert.equal(taken.sync?.mode, "push", "the half that does have a trigger is stored");
+    }).pipe(Effect.provide(Remotes.memory)),
+  );
+
   it.effect("refuses a second remote under the same name", () =>
     Effect.gen(function* () {
       const registry = yield* Remotes.Remotes;

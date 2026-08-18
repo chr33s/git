@@ -242,10 +242,18 @@ const readStdin = Effect.promise(
  * a line protocol at it — `key=value` lines on stdin, a blank line, and the
  * answer the same way on stdout. Configured as
  *
+ *   git config credential.useHttpPath true
  *   git config credential.helper '!chr33s-git credential-helper --key ~/.ssh/id_ed25519 --root .'
  *
  * git appends the operation, so `get` arrives as an argument and a push picks
  * the credential up with nothing else to remember.
+ *
+ * `useHttpPath` is not a nicety. A credential here is scoped to one
+ * repository — the RepoID is inside the signed bytes — and git's default is to
+ * identify a credential by protocol and host alone, so without it the helper
+ * is never told *which* repository is being pushed to. `--repo` names it
+ * instead where a helper line is per repository; with neither, the refusal
+ * says so rather than failing obscurely.
  *
  * `store` and `erase` succeed and do nothing, which is not laziness: there is
  * nothing to store. The credential is minted from the key on every ask, it
@@ -301,7 +309,8 @@ const credentialHelper = Command.make(
       if (named === "") {
         return yield* new Invalid({
           field: "repo",
-          reason: "no repository to mint for: pass --repo, or let git supply a path",
+          reason:
+            "no repository to mint for: pass --repo, or set credential.useHttpPath=true so git says which repository it is asking about",
         });
       }
 

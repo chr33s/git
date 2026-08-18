@@ -201,8 +201,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         const registry = yield* Remotes.Remotes;
         return GitRepository.hooksAll([
           Webhooks.service({ subscribers: subscribed, client }),
-          // The repository to push *from* is built when a push lands, not
-          // when this layer is: it cannot be a dependency of the hooks the
+          // The repository a forward pushes from is built when the push lands,
+          // not when this layer is: it cannot be a dependency of the hooks the
           // repository itself depends on. `guardLayer` is the no-hooks one.
           Sending.service({
             remotes: registry,
