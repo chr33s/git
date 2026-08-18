@@ -1707,6 +1707,42 @@ describe("Policy", () => {
       assert.match(refused.refused.at(0)?.reason ?? "", /not by a push/);
     });
 
+    it("honours it at the JSON verbs too, not only at receive-pack", async () => {
+      // The two doors disagreed about the same file on the same repository:
+      // receive-pack, `reset` and a branch or tag delete honoured
+      // `refs/meta/policy` while `commit`, `branch`, `tagCreate`, a merge,
+      // rebase or cherry-pick with `into`, `fetch`, `pull` and commit-pack
+      // ignored it — because the name-only gate returned as soon as it saw a
+      // repository with no identity.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({ ...OPEN, protected: ["refs/heads/main"] }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "policy\n",
+            author,
+          });
+          yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+
+          const open = Policy.anonymousWrites(true);
+          return {
+            guarded: yield* gateWriteAs(null, "refs/heads/main").pipe(Effect.provide(open)),
+            other: yield* gateWriteAs(null, "refs/heads/topic").pipe(Effect.provide(open)),
+          };
+        }),
+      );
+
+      assert.match(outcome.guarded ?? "", /protected/);
+      assert.equal(outcome.other, null, "an unprotected branch still moves");
+    });
+
     it("still honours the branch protection it publishes", async () => {
       // The genesis-less branch returned before `input.rules` was ever
       // consulted, so a published `refs/meta/policy` was inert on exactly the

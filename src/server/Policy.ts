@@ -1049,9 +1049,11 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
   const stored = yield* readGenesis();
   if (stored === null) {
     const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
-    return Option.getOrElse(open, () => false)
-      ? null
-      : "this repository has no membership to authorize a write; run `hub init` to give it one";
+    if (!Option.getOrElse(open, () => false)) {
+      return "this repository has no membership to authorize a write; run `hub init` to give it one";
+    }
+
+    return null;
   }
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
@@ -1089,9 +1091,21 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     // pull and commit-pack all still wrote refs — every door but the one that
     // was locked.
     const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
-    return Option.getOrElse(open, () => false)
-      ? null
-      : "this repository has no membership to authorize a write; run `hub init` to give it one";
+    if (!Option.getOrElse(open, () => false)) {
+      return "this repository has no membership to authorize a write; run `hub init` to give it one";
+    }
+
+    // And the branch rules the repository publishes, which `evaluate` already
+    // applies on this path. Left out, the two doors disagreed about the same
+    // file on the same repository: receive-pack, `reset` and a branch or tag
+    // delete honoured `refs/meta/policy` while `commit`, `branch`,
+    // `tagCreate`, a merge, rebase or cherry-pick with `into`, `fetch`,
+    // `pull` and commit-pack ignored it. These verbs name a branch rather
+    // than a revision, so what a protected branch has to say to them is that
+    // it does not move this way at all.
+    return isProtected(yield* rulesOf(), ref)
+      ? `${ref} is protected and does not move by this route`
+      : null;
   }
 
   const requester = yield* Effect.serviceOption(Auth.Requester);

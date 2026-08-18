@@ -472,6 +472,77 @@ describe("hub projection", () => {
       assert.equal(approvals(outcome.state).length, 0, "so it authorizes nothing on the new base");
     });
 
+    it("resolves a thread whose id somebody else claimed later", async () => {
+      // Two claimants on one id used to answer "ambiguous", so every later
+      // `comment.resolved` naming it was rejected — for good, on a ref that
+      // only grows. Any `hub.comment` holder could pick a thread's id, open a
+      // comment under it, and leave a branch requiring resolved threads unable
+      // ever to be satisfied. Whichever claim came *first* is the one the
+      // references were written about, and first here is descent: an append is
+      // written onto the ref's head, so the later duplicate descends from the
+      // original.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          const thread = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "this needs a look",
+            key: where.reviewer,
+          });
+          const { events } = yield* Event.entries(pr);
+          const id = events.find((entry) => entry.commit === thread)?.payload?.id ?? "";
+
+          // Somebody else's comment, under the same id, appended the ordinary
+          // way — so it descends from the thread it is colliding with.
+          const bytes = Event.encode({
+            version: 1,
+            type: "comment.created",
+            repo: where.genesis.repoId,
+            pr,
+            id,
+            issuedAt: new Date(1_700_000_001_000).toISOString(),
+            trustHead: yield* repository.resolve(Log.LOG_REF),
+            body: "me too",
+            head: null,
+            path: null,
+            side: null,
+            line: null,
+            contextHash: null,
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "comment.created collision\n",
+            }),
+          });
+
+          yield* PullRequest.resolve({
+            repo: where.genesis.repoId,
+            pr,
+            thread: id,
+            key: where.reviewer,
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(outcome.threads.length, 2, "both claims are folded");
+      assert.equal(
+        outcome.threads.filter((thread) => thread.resolved).length,
+        1,
+        "and the one the reference was written about is resolved",
+      );
+    });
+
     it("counts approvers, not approval events", async () => {
       const state = await scenario(
         Effect.gen(function* () {

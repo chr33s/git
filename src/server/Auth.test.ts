@@ -557,6 +557,54 @@ describe("Auth", () => {
       assert.equal(outcome.denied?.status, 401, "a nonce is single use");
     });
 
+    it("does not let a stranger's key burn nonces", async () => {
+      // Single use is enforced by a bounded store of *spent* nonces. Spending
+      // on a signature alone meant anybody with a throwaway key could fill
+      // that store and evict the record of a genuine spend — re-opening the
+      // replay window inside the nonce's own lifetime. Behind the membership
+      // check the only keys that can fill it are keys this repository granted.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { genesis, member } = yield* hub(["source.push"]);
+          const stranger = yield* generate("stranger@example.com");
+          const nonces = yield* Nonces;
+
+          const envelope = (nonce: string) => ({
+            type: "auth.request" as const,
+            version: 1 as const,
+            repo: genesis.repoId,
+            operation: "git-receive-pack",
+            commands: [],
+            nonce,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+
+          // The stranger presents a well-formed, correctly signed envelope on
+          // a nonce this server issued. They are not a member, so it is
+          // refused — and it must leave the nonce unspent.
+          const shared = yield* nonces.issue(300);
+          const burned = yield* guard(
+            request("r/git-receive-pack", {
+              method: "POST",
+              headers: { authorization: yield* signEnvelope(stranger, envelope(shared)) },
+            }),
+          );
+
+          // The member's own request, on that same nonce.
+          const honest = yield* guard(
+            request("r/git-receive-pack", {
+              method: "POST",
+              headers: { authorization: yield* signEnvelope(member, envelope(shared)) },
+            }),
+          );
+          return { burned: burned.denied?.status, honest: honest.denied };
+        }),
+      );
+
+      assert.equal(outcome.burned, 403, "a key this repository never granted gets nowhere");
+      assert.equal(outcome.honest, null, "and it spent nothing on the way");
+    });
+
     it("refuses an envelope signed for another operation", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {

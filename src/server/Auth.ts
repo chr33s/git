@@ -499,10 +499,14 @@ export interface Proved {
 }
 
 /**
- * Check an envelope: signature, repository, operation, freshness and nonce.
+ * Check an envelope: signature, repository, operation and freshness.
  *
- * The nonce is consumed here, which is why this cannot be a pure function —
- * and why a valid envelope presented twice fails the second time.
+ * The nonce is *not* spent here. Spending it is what enforces single use, and
+ * the store that records a spent one is bounded — so spending on a signature
+ * alone let anybody with a throwaway key turn that store over and evict the
+ * record of a genuine spend, re-opening the replay window it exists to close.
+ * A key this repository never granted can now burn nothing: the caller spends
+ * the nonce once membership has been established.
  */
 export const openEnvelope = Effect.fn("Auth.openEnvelope")(function* (input: {
   readonly payload: string;
@@ -536,9 +540,6 @@ export const openEnvelope = Effect.fn("Auth.openEnvelope")(function* (input: {
     Effect.catchTag("Invalid", () => Effect.succeed(null)),
   );
   if (key === null) return null;
-
-  const nonces = yield* Nonces;
-  if (!(yield* nonces.consume(envelope.nonce))) return null;
 
   return { signer: yield* fingerprint(key), envelope };
 });
@@ -726,6 +727,23 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
       } as const;
     }
     return { ok: false, status: 403, reason: authorized.reason } as const;
+  }
+
+  // Spent here, and not where the envelope was opened: single use is enforced
+  // by a bounded store, and a store an unauthenticated caller can fill is one
+  // whose oldest entries fall out — taking with them the record that a genuine
+  // nonce had been used, inside its own lifetime. Behind the membership check
+  // the only keys that can fill it are keys this repository granted.
+  if ("envelope" in identified) {
+    const spent = yield* nonces.consume(identified.envelope.nonce);
+    if (!spent) {
+      return {
+        ok: false,
+        status: 401,
+        reason: "this request has already been made",
+        nonce: yield* nonces.issue(300),
+      } as const;
+    }
   }
 
   // A delegated credential narrows: the holder gets the intersection of what

@@ -720,6 +720,8 @@ Signatures MUST bind authentication to the request being authorized. The envelop
 
 Each command carries an old OID and a new OID, and **both** MUST be checked against the command line the client actually sent. Checking only the new one leaves the compare-and-swap unsigned: a signed "move `main` from A to B" replays as an unconditional "set `main` to B", which lands the push on a branch that has moved on since the client looked — the exact race the old OID exists to lose.
 
+A nonce MUST NOT be recorded as spent until the signer has been established as a member. Single use is enforced by a bounded store of spent nonces, so a store an unauthenticated caller can fill is one whose oldest entries fall out — taking with them the record that a genuine nonce was used, inside its own lifetime. Issuing costs nothing to remember: a nonce carries its own expiry and a tag only its issuer can make, so "did I issue this, and is it still good?" needs no memory at all.
+
 The signed envelope MUST include:
 
 ```text
@@ -872,7 +874,7 @@ Hosts MAY offer an explicit opt-in for scratch servers (`serve --open`), and it
 MUST be off by default — "no policy" is not "no protection", and the operator
 who wants an open write endpoint should have to say so.
 
-An open repository is still subject to the branch rules it publishes. The
+An open repository is still subject to the branch rules it publishes, and so is every door onto it. Applied at receive-pack alone, the two disagreed about the same file on the same repository: `reset` and a branch or tag delete honoured `refs/meta/policy` while `commit`, `branch`, `tagCreate`, a merge, rebase or cherry-pick with `into`, `fetch`, `pull` and commit-pack ignored it. Those verbs name a branch rather than a revision, so what a protected branch has to say to them is that it does not move that way at all. The
 approval half of protection cannot apply — there is no membership for a review
 to come from — but "this branch may not be deleted" and "this branch may not be
 force-pushed" ask nothing of trust, and a boundary that stops consulting
@@ -1014,7 +1016,7 @@ Where several commits carry one record — the same statement committed twice, w
 
 For the same reason authority is checked against the **union of the signatures every copy carried** — they all sign the same bytes, so they are all endorsements of the same statement, and requiring them to be in the winning copy would let a copy that _drops_ the signatures strip a revocation's authority by winning descent. Descent alone is not enough, because a replay has to arrive as a join over both copies and a join descends from both: where the targeted record is the log head the counts tie, and the decision falls to an OID whoever writes the replay can grind. Depth breaks the tie — the genuine record hangs off the log's history, and a copy grafted in beside it cannot be given that history without becoming a descendant of the record it is trying to displace.
 
-An ID is chosen by whoever writes the record, so "already applied" MUST be keyed on the ID **together with the record's bytes**, and a hub event's ID additionally on its signer. Keyed on the bare ID, re-using one becomes a weapon rather than a mistake: on the trust log, any member holding a trust capability publishes a record they are entitled to make under the ID of a revocation naming them, and the revocation is discarded as a duplicate on a ref that can never be rewound. Two records sharing an ID but not their content are two different claims, and each is answered on its own authority; what the ID check exists for is the same statement committed twice.
+An ID is chosen by whoever writes the record, so "already applied" MUST be keyed on the ID **together with the record's bytes**, and a hub event's ID additionally on its signer. Keyed on the bare ID, re-using one becomes a weapon rather than a mistake: on the trust log, any member holding a trust capability publishes a record they are entitled to make under the ID of a revocation naming them, and the revocation is discarded as a duplicate on a ref that can never be rewound. Two records sharing an ID but not their content are two different claims, and each is answered on its own authority; what the ID check exists for is the same statement committed twice. A cross-reference to an ID two events claim resolves to **whichever claim the others descend from** — an append is written onto the ref's head, and a push may not graft a beginning beside it, so a later duplicate descends from the original. Refusing such a reference outright instead let any `hub.comment` holder pick a thread's ID, comment under it, and leave every later `comment.resolved` for it rejected for good: a branch requiring resolved threads could never be satisfied again.
 
 An ID slot is taken by an event the projection **accepted**, and by no other. An
 event refused on its own terms — one whose capability check or whose per-type

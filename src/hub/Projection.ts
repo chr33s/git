@@ -66,6 +66,8 @@ export interface Comment {
 
 export interface Thread {
   readonly id: string;
+  /** The event commit, which is how a duplicate claim on its id is settled. */
+  readonly commit: Oid;
   readonly path: string | null;
   readonly side: "old" | "new" | null;
   readonly line: number | null;
@@ -236,17 +238,35 @@ const keyOf = (signer: Fingerprint, id: string): string => `${signer}\u0000${id}
  * the first one's replies, which is the eviction this keying exists to stop,
  * wearing another shape.
  */
-const byEventId = <A extends { readonly id: string }>(
+const byEventId = <A extends { readonly id: string; readonly commit: Oid }>(
   entries: ReadonlyMap<string, A>,
   id: string,
+  ancestors: ReadonlyMap<Oid, Ancestors>,
 ): { readonly key: string; readonly value: A } | "ambiguous" | null => {
-  let found: { readonly key: string; readonly value: A } | null = null;
+  const claimants: Array<{ readonly key: string; readonly value: A }> = [];
   for (const [key, value] of entries) {
-    if (value.id !== id) continue;
-    if (found !== null) return "ambiguous";
-    found = { key, value };
+    if (value.id === id) claimants.push({ key, value });
   }
-  return found;
+  if (claimants.length <= 1) return claimants[0] ?? null;
+
+  // Two claimants is not a tie to refuse: whichever came first is the one the
+  // references were written about, and "first" here is descent, which nobody
+  // can grind. An append to a hub ref is written onto its head, and a push may
+  // not graft a beginning beside it — so a later duplicate descends from the
+  // original, and the original is an ancestor of every other claim.
+  //
+  // Refused outright, as this did, any `hub.comment` holder could re-use a
+  // thread's id and leave every later `comment.resolved` for it rejected for
+  // good, on a ref that only grows: a branch requiring resolved threads could
+  // never be satisfied again.
+  const first = claimants.filter((claimant) =>
+    claimants.every(
+      (other) =>
+        other.value.commit === claimant.value.commit ||
+        ancestors.get(other.value.commit)?.has(claimant.value.commit) === true,
+    ),
+  );
+  return first.length === 1 ? first[0]! : "ambiguous";
 };
 
 /**
@@ -988,7 +1008,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // this dropped every review sharing it, so a `hub.review` holder could
         // nullify an `hub.approve` holder's approval by posting a review that
         // re-used its id and then dismissing that.
-        const found = byEventId(reviews, payload.review);
+        const found = byEventId(reviews, payload.review, ancestors);
         if (found === null || found === "ambiguous") {
           rejected.push({
             commit: entry.commit,
@@ -1016,6 +1036,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
       case "comment.created":
         threads.set(mine, {
           id: payload.id,
+          commit: entry.commit,
           path: payload.path,
           side: payload.side,
           line: payload.line,
@@ -1026,7 +1047,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         break;
 
       case "comment.replied": {
-        const found = byEventId(threads, payload.thread);
+        const found = byEventId(threads, payload.thread, ancestors);
         // A reply to a thread that does not exist is not a thread: dropping it
         // is what keeps a projection from inventing one out of a typo. And a
         // reference that two threads answer to is a reference to neither —
@@ -1051,7 +1072,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
 
       case "comment.resolved":
       case "comment.reopened": {
-        const found = byEventId(threads, payload.thread);
+        const found = byEventId(threads, payload.thread, ancestors);
         // Said out loud, like every other cross-reference: a pull request held
         // shut by `requireResolvedThreads` needs somewhere to show why.
         if (found === null || found === "ambiguous") {
