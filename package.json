@@ -18,24 +18,31 @@
   "type": "module",
   "scripts": {
     "build:sea": "node src/cli/sea.build.ts",
-    "check": "oxfmt --check && oxlint && tsc -b --noEmit",
+    "check": "oxfmt --check && oxlint && tsc -b --noEmit && tsc -p ui --noEmit",
     "fix": "oxlint --fix && oxfmt --write",
     "postinstall": "patch-package && npx wrangler types -c wrangler.test.json && npm run fix",
     "prepare": "effect-tsgo patch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ui:build": "node ui/build.ts",
+    "ui:dev": "node ui/build.ts --serve",
+    "ui:verify": "node ui/build.ts && node ui/verify.ts"
   },
   "dependencies": {
     "effect": "4.0.0-rc.110"
   },
   "devDependencies": {
+    "@chr33s/base-wc": "github:chr33s/base-wc",
     "@effect/platform-bun": "4.0.0-rc.110",
     "@effect/platform-node": "4.0.0-rc.110",
     "@effect/tsgo": "0.36.5",
     "@effect/vitest": "4.0.0-rc.110",
     "@oxlint/plugins": "1.78.0",
+    "@pierre/diffs": "1.3.5",
+    "@pierre/trees": "1.0.0-beta.6",
     "@types/node": "26.2.0",
     "alchemy": "2.0.0-beta.72",
     "esbuild": "0.28.2",
+    "lit": "3.3.3",
     "oxfmt": "0.63.0",
     "oxlint": "1.78.0",
     "oxlint-tsgolint": "7.0.2001",

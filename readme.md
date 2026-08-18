@@ -152,6 +152,22 @@ history (`log`, `history`, `show`, `diff`, `grep`, `bisect`, `files`), refs
 `rebase`), transport (`push`, `archive`), and maintenance (`fsck`, `gc`).
 `npx chr33s-git --help` lists them; every command takes `--help`.
 
+## Web UI
+
+`ui/` is a browser interface for a hosted repository — a file explorer and code
+view over the JSON API, plus Tasks and Change Requests. Built with Lit,
+[`@chr33s/base-wc`](https://github.com/chr33s/base-wc) and Pierre's tree and
+diff components; light and dark.
+
+```sh
+npm run ui:build          # bundle to dist/ui
+node ui/build.ts --serve  # and serve it on :8000
+npm run ui:verify         # drive it in a browser
+```
+
+See [`ui/readme.md`](ui/readme.md) for what is wired to the server and what is
+still fixture data.
+
 ## Single binary
 
 `npm run build:sea` (node 26+) compiles the CLI into one self-contained
