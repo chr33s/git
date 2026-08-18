@@ -1619,7 +1619,6 @@ export const layer = Layer.effect(
           Effect.gen(function* () {
             if (input.into !== undefined && kind !== "up-to-date") {
               // The caller's snapshot wins when it took one; see `expected`.
-              // The caller's snapshot wins when it took one; see `expected`.
               const expected =
                 input.expected !== undefined
                   ? input.expected

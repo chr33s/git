@@ -177,15 +177,20 @@ export const nonceStore = (): Nonces["Service"] => {
    * which is the retry the service already documents.
    */
   const secret = crypto.getRandomValues(new Uint8Array(32));
-  const key = crypto.subtle.importKey(
-    "raw",
-    secret.slice().buffer,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
+  // Imported on first use, not here. A promise created at construction with no
+  // handler until the first challenge is an unhandled rejection if the import
+  // fails — which takes the host down at start-up, before it has served
+  // anything, for a key it may never need.
+  let key: Promise<CryptoKey> | null = null;
 
   const tag = async (body: string): Promise<string> => {
+    key ??= crypto.subtle.importKey(
+      "raw",
+      secret.slice().buffer,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
     const mac = await crypto.subtle.sign("HMAC", await key, encoder.encode(body));
     return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   };

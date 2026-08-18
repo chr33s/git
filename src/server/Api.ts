@@ -310,7 +310,13 @@ export const discards = Effect.fn("Api.discards")(function* (
   if (tip === null) return { rewrites: false, swap } as const;
   for (const base of bases) {
     const oid = yield* at(base);
-    if (oid === null) continue;
+    // A base this repository cannot resolve is not evidence of a rewrite. The
+    // verb is about to fail on that revision anyway, and claiming a rewrite
+    // here turns "unknown revision" into a `source.force-push` refusal — an
+    // answer that is both wrong and only given to callers who lack that
+    // capability, so the same request reports two different problems depending
+    // on who asks it.
+    if (oid === null) return { rewrites: false, swap } as const;
     if (oid === tip) return { rewrites: false, swap } as const;
     const reaches = yield* repository.isAncestor(tip, oid).pipe(
       Effect.catchTags({

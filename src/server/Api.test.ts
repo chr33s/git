@@ -170,6 +170,13 @@ describe("Api", () => {
           named: (yield* Api.discards("refs/heads/main", ["refs/heads/main"])).swap,
           spelled: (yield* Api.discards(first, [first])).swap,
           absent: (yield* Api.discards("refs/heads/nowhere", ["refs/heads/main"])).swap,
+          // A base this repository cannot resolve is not evidence of a
+          // rewrite: the verb is about to fail on that revision anyway, and
+          // claiming one turns "unknown revision" into a `source.force-push`
+          // refusal — an answer that is wrong, and given only to callers who
+          // lack that capability, so one request reports two different
+          // problems depending on who asks it.
+          unknown: (yield* Api.discards("refs/heads/main", ["refs/heads/nowhere"])).rewrites,
         };
       }).pipe(Effect.provide(repository)),
     );
@@ -177,6 +184,7 @@ describe("Api", () => {
     assert.equal(outcome.named, outcome.first, "a ref swaps against its own value");
     assert.equal(outcome.spelled, undefined, "an oid destination is no ref to swap against");
     assert.equal(outcome.absent, null, "and a ref that does not exist swaps against nothing");
+    assert.equal(outcome.unknown, false, "an unresolvable base is not a rewrite to charge for");
   });
 
   it("charges a rewrite only when the destination would lose commits", async () => {
