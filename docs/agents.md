@@ -51,7 +51,7 @@ repository only ever sees the public half; the fingerprint
 (`ssh-keygen -lf ~/.ssh/agent-claude.pub`) is how the member appears in
 `hub members` and how it is revoked.
 
-One key per agent *role* is the useful granularity. A "claude" key and a
+One key per agent _role_ is the useful granularity. A "claude" key and a
 "codex" key make `hub members` readable and let each be revoked alone; a key
 per sandbox is usually too fine — prefer one durable key per agent injected
 into each sandbox, or, for truly disposable environments, a fresh key granted
@@ -73,12 +73,12 @@ npx chr33s-git hub grant my-repo --key ~/.ssh/hub \
 Capabilities are the authorization primitive, so grant the task rather than a
 role:
 
-| agent           | capabilities                                     |
-| --------------- | ------------------------------------------------ |
-| coding agent    | `repo.read,source.push,hub.create-pr,hub.comment` |
-| review agent    | `repo.read,hub.comment,hub.review`               |
-| CI runner       | `repo.read,hub.check:test`                       |
-| merge bot       | `repo.read,hub.merge`                            |
+| agent        | capabilities                                      |
+| ------------ | ------------------------------------------------- |
+| coding agent | `repo.read,source.push,hub.create-pr,hub.comment` |
+| review agent | `repo.read,hub.comment,hub.review`                |
+| CI runner    | `repo.read,hub.check:test`                        |
+| merge bot    | `repo.read,hub.merge`                             |
 
 Three deliberate omissions. `hub.approve` is the capability merge policy
 counts, so granting it to an agent means agent approvals satisfy
@@ -122,37 +122,56 @@ one — the private key is the durable secret, the credential is disposable.
 
 ### Knowing what you hold: hub whoami
 
-*Proposed — the trust projection and the policy document it reads both
-exist; the verb is the missing join between them.*
+Everything above tells the operator how to authorize an agent. The other
+half is the question the agent needs answered before it acts: _what may I
+do here, and what will my push be judged by?_ Without a verb for that, the
+discovery mechanism is failure — push, get refused, parse the refusal,
+retry — which is the most expensive possible protocol for a token-metered
+actor.
 
-Everything above tells the operator how to authorize an agent. Nothing yet
-lets the agent ask the question it needs answered before every action:
-*what may I do here, and what will my push be judged by?* Without a verb
-for that, the discovery mechanism is failure — push, get refused, parse the
-refusal, retry — which is the most expensive possible protocol for a
-token-metered actor.
-
-`hub whoami` answers for the key or credential presented, as one
-read-only join of the trust projection and `refs/meta/policy`:
+`hub whoami` answers for one key, as a read-only join of the trust
+projection and the branch rules at `refs/meta/policy`:
 
 ```sh
-$ chr33s-git hub whoami http://127.0.0.1:8080/project --key ~/.ssh/agent-claude
+$ chr33s-git hub whoami --root . --key ~/.ssh/agent-claude project
 {
-  "repo": "SHA256:bJd3cN8...",
-  "subject": "SHA256:claude-key-fingerprint",
+  "repo": "SHA256:uPHtrtbp5Pi++/nNoJu5g64eYs0PgrULnh5m+T253cI",
+  "subject": "SHA256:DaOBdHEQqJ4foVREyhYZaOWu3JrzvKVDLmvZMFEPudw",
   "member": true,
+  "why": null,
   "capabilities": ["repo.read", "source.push", "hub.create-pr", "hub.comment"],
-  "expiresAt": "2026-11-15T00:00:00Z",
+  "expiresAt": "2026-11-16T02:47:39.811Z",
+  "trust": null,
   "branches": {
-    "main":     { "push": "refused", "why": ["requiredApprovals: 1", "requiredChecks: [test]"] },
-    "claude/*": { "push": "allowed" }
+    "refs/heads/main": {
+      "push": "refused",
+      "why": ["requirePullRequest", "requiredApprovals: 1", "requiredChecks: [test]",
+              "a direct push meets none of these; open a pull request"]
+    },
+    "(any other ref)": { "push": "allowed", "why": [] }
   }
 }
 ```
 
-It invents nothing: no new refs, no new event kinds, no new capability —
-gated by `repo.read` like any other read, served by the CLI and as a JSON
-verb answering for the presented credential.
+Either half of the key works — a private key carries its own public half,
+and what a secret store injects into a sandbox is the private one. Every
+field is present on every answer, `null` where it does not apply: the
+reader is a program deciding what to do next, and a field that vanishes is
+one it has to guess the meaning of. `why` names the single thing standing
+between this key and a write — non-membership, revocation, an expired
+grant, a trust view too stale for the rules in force.
+
+It invents nothing: no new refs, no new event kinds, no new capability. It
+reads the same projection and the same rules document the policy boundary
+reads, which is what keeps the answer and the enforcement from drifting
+apart. `(any other ref)` is asked as its own case rather than by matching a
+wildcard, because the boundary counts two overlapping prefixes as a match —
+right for a write that names a whole namespace, wrong here, where it would
+report every unprotected branch as protected the moment one branch under it
+was.
+
+_Answering the same question over the wire — for a credential presented to
+a remote — is the natural next step, and is not built yet._
 
 Call it from the session-start hook and drop the output into the agent's
 context. An agent that knows before working that `main` takes a pull
@@ -164,13 +183,13 @@ stops going stale; and because `expiresAt` is queryable, a harness warns or
 re-enrolls before a grant's cliff instead of failing mysteriously mid-task.
 
 The principle is the repository's own, read from the other side: authority
-is offline-verifiable — so the *subject* of that authority should be able
+is offline-verifiable — so the _subject_ of that authority should be able
 to read its own standing the same way. The repository already knows the
 answer; this is the verb that asks.
 
 ### Signed commits
 
-Membership answers who may *push*; a commit signature answers who *authored*.
+Membership answers who may _push_; a commit signature answers who _authored_.
 They are separate layers and the same key serves both. Configure stock git in
 the agent's clone to sign with the agent's key:
 
@@ -224,9 +243,10 @@ Then tell the agent what it holds, in `CLAUDE.md`:
 
 ```markdown
 ### Repository access
+
 Your SSH key is ~/.ssh/agent-claude; commits are signed with it
 automatically. To push, mint a credential first:
-  chr33s-git credential <repo> --key ~/.ssh/agent-claude --capability source.push --ttl 3600
+chr33s-git credential <repo> --key ~/.ssh/agent-claude --capability source.push --ttl 3600
 and use it as the password in the remote URL. Your membership grants
 repo.read, source.push, hub.create-pr and hub.comment — nothing else.
 ```
@@ -461,7 +481,7 @@ lookup.
 ```
 
 This is the binding the `Session:` trailer is checked against (§9): a commit
-is *provenanced* when an accepted `session.produced` in the session its
+is _provenanced_ when an accepted `session.produced` in the session its
 trailer names lists that commit's OID.
 
 #### `session.planned`, `session.resumed`, `session.closed`
@@ -590,7 +610,7 @@ refused.
 The record the resuming agent reads is also the sharpest edge in this
 spec: any member holding `hub.session` can write text a successor will
 ingest as context, and a signature verifies who wrote it — never that it
-is safe to obey. A harness MUST therefore present projected records — 
+is safe to obey. A harness MUST therefore present projected records —
 prompts, plans, summaries, comments, review bodies — to its model as
 untrusted content, framed as data rather than direction. Instructions to
 act come from exactly two places: the operator (including a
@@ -632,7 +652,7 @@ A receive-pack may carry several ref commands, and the signed envelope
 `refs/hub/session/**` commands in the same push **before** judging source
 commands against rule 3, so the standard flow — one push moving both the
 session ref and the branch — satisfies the rule atomically. A
-`session.produced` arriving in a *later* push than the commits it names
+`session.produced` arriving in a _later_ push than the commits it names
 fails rule 3 for that earlier push; the agent's client is expected to push
 provenance with, or before, the source it covers.
 
@@ -724,7 +744,7 @@ opt-in, per repository:
 ```
 
 One structural advantage over any client-side design: this spec owns a
-server-side policy boundary (hub §26), so a tripped scan *refuses* the push
+server-side policy boundary (hub §26), so a tripped scan _refuses_ the push
 before the bytes replicate, instead of rewriting history after they have.
 Scanning stays SHOULD, not MUST, because it is heuristic — low-entropy
 secrets and novel formats get through — and the normative protection
@@ -753,7 +773,7 @@ has the strongest motive to erase its own record.
 **A signed prompt is a claim.** Nothing verifies that the named commits were
 caused by the recorded prompt, that the stated model produced them, or that
 the transcript matches what the agent actually did. The signature proves
-*which member key* stands behind the account — the same standard commit
+_which member key_ stands behind the account — the same standard commit
 messages meet, made cryptographic. Verifiable inference attestation is out
 of scope and probably out of reach; the spec says so rather than gesturing
 at it.
@@ -820,7 +840,7 @@ have to be deleted.
 
 The labels deserve emphasis, because they are the part research pipelines
 usually lack: whether a trajectory's code actually merged, passed the named
-check, or was approved by a key belonging to a *different* model is exactly
+check, or was approved by a key belonging to a _different_ model is exactly
 the curation signal distillation datasets need, and here it is
 cryptographically bound to the trajectory's session ID rather than scraped
 from a forge API after the fact.
@@ -832,7 +852,7 @@ consent/licensing metadata declared in `session.opened` at capture time
 (§16). Two limits survive any extension, and are stated rather than
 deferred: a redaction tombstone cannot reach a dataset already exported
 from a transcript — removal ends at the repository boundary — and volume
-means the research store is always a separate storage tier *joined* to the
+means the research store is always a separate storage tier _joined_ to the
 canonical refs by session ID, never the refs themselves.
 
 ---
@@ -1127,7 +1147,7 @@ decision.resolved    the chosen option, an optional note,
 
 `decision.requested` is appended by the session's author like any other
 event. `decision.resolved` is exempt from §7's authorship rule exactly as
-`session.resumed` is — the point is that somebody *other* than the author
+`session.resumed` is — the point is that somebody _other_ than the author
 answers — and any member may append it; what the answer authorizes is
 still judged downstream, at the policy boundary, on the push it leads to.
 
@@ -1179,7 +1199,7 @@ new session
 
 The distiller is an agent job like any other — a member key, woken by the
 same hooks as everything else, summarizing with a model. It signs the
-memory it writes, but the signature is provenance for *who distilled*,
+memory it writes, but the signature is provenance for _who distilled_,
 not authority for the content: verification of memory is citation
 checking, never signature checking.
 
@@ -1213,9 +1233,9 @@ each carry their own audit trail:
 
 An entry without citations is invalid — the distiller MUST NOT write one,
 and a reader treats one as noise. The kinds worth distilling are few:
-*convention* (how this repository does things), *gotcha* (what bit an
-agent), *decision* (a human's answer worth not re-asking — §21), and
-*friction* (where sessions burned time). Everything else belongs in the
+_convention_ (how this repository does things), _gotcha_ (what bit an
+agent), _decision_ (a human's answer worth not re-asking — §21), and
+_friction_ (where sessions burned time). Everything else belongs in the
 session records themselves.
 
 #### Forgetting is a feature
@@ -1407,7 +1427,7 @@ lives in `src/hub/` today).
 ### 6. Review and checks — human and ci
 
 CI fetches the branch, runs the suite, and signs a result it is only
-*able* to sign for the check named in its grant:
+_able_ to sign for the check named in its grant:
 
 ```sh
 ▹ chr33s-git check complete project --key ~/.ssh/agent-ci \

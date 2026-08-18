@@ -16,6 +16,7 @@ import {
   parsePrivateKey,
   parsePublicKey,
   type PrivateKey,
+  type PublicKey,
 } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
 import type { Signature } from "../git/Format.ts";
@@ -101,6 +102,33 @@ export const readPrivateKey = (location: string): Effect.Effect<PrivateKey, Inva
       catch: () => new Invalid({ field: "key", reason: `cannot read ${location}` }),
     });
     const parsed = parsePrivateKey(contents);
+    return Result.isFailure(parsed)
+      ? yield* new Invalid({ field: "key", reason: `${location}: ${parsed.failure.reason}` })
+      : parsed.success;
+  });
+
+/**
+ * The public half of a key, from whichever half the caller has on disk.
+ *
+ * A private key carries its own public half — `hub init` leans on the same
+ * thing — and the `.pub` beside it often does not exist on the machine an
+ * agent runs on, because what a secret store injects is the private key alone.
+ * A command that only reads what it needs to *identify* a key should not make
+ * the caller produce a file to be identified by.
+ */
+export const readAnyPublicKey = (location: string): Effect.Effect<PublicKey, Invalid> =>
+  Effect.gen(function* () {
+    const contents = yield* Effect.try({
+      try: () => fs.readFileSync(location, "utf8"),
+      catch: () => new Invalid({ field: "key", reason: `cannot read ${location}` }),
+    });
+    const secret = parsePrivateKey(contents);
+    if (Result.isSuccess(secret)) return secret.success.publicKey;
+
+    // Reported against the public parse, not the private one: a caller who
+    // passed a public key wants to hear what is wrong with it as a public key,
+    // and one who passed a mangled private key learns the file is neither.
+    const parsed = parsePublicKey(contents.trim());
     return Result.isFailure(parsed)
       ? yield* new Invalid({ field: "key", reason: `${location}: ${parsed.failure.reason}` })
       : parsed.success;
