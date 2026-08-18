@@ -1236,6 +1236,32 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
  * its own next attempt included. Whoever may publish the rules may repair
  * them, which is the same door either way.
  */
+/**
+ * The membership graph as it stands *now*, reusing the guard's fold when it can.
+ *
+ * The guard folded the log a moment ago to decide who this is, and the fold is
+ * an Ed25519 verification per signature per record — so reusing it halves the
+ * cost of every write. What makes reuse safe is the head, not the repository:
+ * between the guard and this boundary sits the whole pack upload, and on a
+ * host that queues per repository, the queue as well. A revocation that lands
+ * in that window was invisible, so a member revoked while their push was in
+ * flight was authorized by it — against `signedByRevoked`'s own premise, that
+ * the boundary knows whose keys are revoked *now*.
+ *
+ * Re-folding when the head has moved costs one ref read to find out, and
+ * `Auth.folded` is memoised by that same head, so the fold itself is usually
+ * already done.
+ */
+const membership = Effect.fn("Policy.membership")(function* (
+  genesis: Genesis,
+  reached: TrustProjection,
+) {
+  const repository = yield* Repository;
+  if (reached.repoId !== genesis.repoId) return yield* project(genesis);
+  const head = yield* repository.resolve(Log.LOG_REF);
+  return reached.head === head ? reached : yield* project(genesis);
+});
+
 const repairable = (ref: string, principal: Principal, open: boolean): boolean =>
   ref === RULES_REF && (open || may(principal, "policy.write"));
 
@@ -1322,10 +1348,7 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   // against a membership view of any age — which is most of the ways a ref
   // moves.
   if (rules.maxTrustAgeSeconds > 0 && boundApplies(ref)) {
-    const trust =
-      who.projection.repoId === stored.genesis.repoId
-        ? who.projection
-        : yield* project(stored.genesis);
+    const trust = yield* membership(stored.genesis, who.projection);
     const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
     if (!stale.ok) return stale.reason;
   }
@@ -1413,12 +1436,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
   // is an Ed25519 verification per signature per record. Reusing what it
   // reached — when it is the same repository's — halves the cost of every
   // write instead of paying it twice on the hot path.
-  const trust =
-    stored === null
-      ? null
-      : who.projection.repoId === stored.genesis.repoId
-        ? who.projection
-        : yield* project(stored.genesis);
+  const trust = stored === null ? null : yield* membership(stored.genesis, who.projection);
 
   // Unreadable is refused per ref, not for the batch, so the one push that can
   // fix it still lands; see `repairable`. A rules file that will not parse

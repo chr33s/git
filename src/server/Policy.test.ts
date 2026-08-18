@@ -1238,6 +1238,89 @@ describe("Policy", () => {
       assert.match(outcome.ok === false ? outcome.reason : "", /is not part of this history/);
     });
 
+    it("judges a push against the log as it stands, not as the guard last saw it", async () => {
+      // The guard folds the log to decide who is asking, and the boundary
+      // reuses that fold because it is an Ed25519 verification per signature
+      // per record. What makes the reuse safe is the *head*: between the two
+      // sits the whole pack upload, and on a host that queues per repository
+      // the queue as well. A revocation landing in that window was invisible
+      // — so an approval from a key compromised in the meantime still
+      // satisfied a protected branch, against the premise this same boundary
+      // states elsewhere, that it knows whose keys are revoked now.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world(["source.push", "hub.create-pr"]);
+          const { second } = yield* history("refs/heads/main");
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "please",
+            base: "refs/heads/main",
+            head: second,
+            key: where.dev,
+          });
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: second,
+            decision: "approve",
+            key: where.reviewer,
+          });
+
+          // What the guard reached, a moment ago: the approval counts.
+          const asOfTheGuard = yield* trustOf(where);
+
+          // And then the reviewer's key turns out to have been compromised
+          // all along, which is the revocation that reaches backwards.
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          // The rules are read from the repository, so they are published
+          // here rather than passed.
+          const blob = yield* repository.writeBlob(
+            Policy.encodeRules({
+              ...OPEN,
+              protected: ["refs/heads/main"],
+              requirePullRequest: true,
+              requiredApprovals: 1,
+            }),
+          );
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: blob },
+          ]);
+          yield* repository.setRef({
+            name: Policy.RULES_REF,
+            to: yield* repository.commitTree({ tree, parents: [], message: "policy\n", author }),
+          });
+
+          const asked = (projection: typeof asOfTheGuard) =>
+            Policy.gate([{ name: "refs/heads/main", value: second }], false).pipe(
+              Effect.provide(
+                Auth.requester({
+                  principal: where.principal.member,
+                  signer: null,
+                  capabilities: where.principal.capabilities,
+                  projection,
+                  envelope: null,
+                }),
+              ),
+            );
+
+          return { stale: yield* asked(asOfTheGuard), fresh: yield* asked(yield* trustOf(where)) };
+        }),
+      );
+
+      assert.equal(outcome.stale.updates.length, 0, "the revocation reaches the push it raced");
+      assert.equal(outcome.fresh.updates.length, 0, "as it does when the fold is taken fresh");
+    });
+
     it("refuses a name under refs/meta/trust that is not the log or the genesis", async () => {
       // The namespace holds two things, and the rules know both. Anything else
       // under it is not append-only, so nothing bounds it — and the JSON verbs

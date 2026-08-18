@@ -61,10 +61,17 @@ const forward = Effect.fn("Sending.forward")(function* (
   const carried = covered(remote, results);
   if (carried.length === 0) return;
 
+  // Sent as the *value* the push landed, not as the ref's name. A forward is
+  // detached from the push that caused it, so by the time it runs a ref may
+  // have moved again or been deleted — and `push` resolves a name at send
+  // time and fails the whole call when one is gone, which dropped every other
+  // ref in the batch on account of one. An oid cannot go stale that way: what
+  // is forwarded is exactly what was accepted, and a later push forwards the
+  // later value.
   const refs: PushRef[] = carried.map((result) =>
     result.to === null
       ? { local: result.ref, remote: result.ref, delete: true }
-      : { local: result.ref, remote: result.ref },
+      : { local: result.to, remote: result.ref },
   );
 
   // Never forced. A standing instruction is not a licence to overwrite what
