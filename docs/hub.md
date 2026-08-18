@@ -801,7 +801,7 @@ encoded compactly and presented as the Basic password (or Bearer token). Verific
 chr33s-git credential --capability source.push --ttl 1h
 ```
 
-and can act as a `git credential` helper so stock git picks it up transparently.
+and can act as a `git credential` helper so stock git picks it up transparently. git does not take a password on a command line: it runs a helper and speaks a line protocol at it — `key=value` on stdin, a blank line, the answer the same way — with the operation as an argument. The helper MUST answer `get` with a freshly minted credential, and MUST succeed silently on `store` and `erase`: there is nothing to store, since the credential is minted from the key on every ask and expires by itself, and exiting non-zero there reports a failure for a push that worked. Where the caller names no repository the helper MUST take the one git is asking about, from the `path` it supplies, so a single configured helper serves every repository on a host.
 
 Properties:
 
@@ -930,7 +930,7 @@ chr33s-git hub disable
 chr33s-git hub status
 ```
 
-`hub disable` removes only the refspecs managed by `chr33s-git`.
+`hub disable` removes only the refspecs managed by `chr33s-git`. A client that keeps no per-remote configuration — where every fetch names its own refspecs — has no refspecs to remove, and there the same rule reads as the refs: it MUST remove `refs/hub/*` and `refs/meta/trust/*` from the local repository and nothing else, never a branch or a tag. Deleting those refs is the one place this client does what the policy boundary refuses a push, so it MUST be guarded by the pin: a repository this client enabled against a URL got that state from somewhere else, and one that `hub init` created has no pin naming itself. The pin survives — dropping trust is `hub forget`, and a repository whose hub state you have stopped fetching is not one whose identity you have stopped believing.
 
 ### Trust establishment
 

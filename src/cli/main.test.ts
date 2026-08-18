@@ -16,7 +16,7 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { serve } from "../host/Node.ts";
-import { enableHubUnder } from "../testing/Hub.ts";
+import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "main.ts");
@@ -28,6 +28,28 @@ const cli = async (args: string[], env?: Record<string, string>) => {
   });
   return result.stdout;
 };
+
+/** The same, for the one command whose input is a stream rather than a flag. */
+const withStdin = (args: ReadonlyArray<string>, input: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const child = spawn("node", [entry, ...args], { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      out += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      err += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(`exit ${String(code)}: ${err}${out}`));
+    });
+    child.stdin.end(input);
+  });
 
 const author = {
   name: "Alice",
@@ -77,6 +99,58 @@ describe("cli", () => {
       assert.ok(logOut.includes(first));
 
       await assert.rejects(cli(["log", "--root", root, "basic", "--ref", "bogus"]));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("answers git's credential helper protocol on stdin", async () => {
+    // git does not take a password on a command line: it runs a helper and
+    // speaks a line protocol at it. Without this, "mint a credential" was a
+    // thing a person did by hand and pasted, which is the manual step the
+    // delegated path exists to remove.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-helper-"));
+    try {
+      const member = await enableHubUnder(root, "helped", ["repo.read", "source.push"]);
+      const keyFile = path.join(root, "member.key");
+      await fs.writeFile(keyFile, opensshPrivateKey(member.member, "member@example.com"), {
+        mode: 0o600,
+      });
+
+      // Exactly what git writes, path and all — no `--repo`, so the
+      // repository is the one it is asking about.
+      const answered = await withStdin(
+        ["credential-helper", "--root", root, "--key", keyFile, "get"],
+        "protocol=http\nhost=git.example.com\npath=helped\n\n",
+      );
+
+      assert.match(answered, /^username=/m);
+      const password = /^password=(.+)$/m.exec(answered)?.[1] ?? "";
+      assert.notEqual(password, "", `no credential in: ${answered}`);
+
+      // And it is the real thing: the server takes it.
+      const server = await serve({ root });
+      try {
+        const refused = await fetch(`${server.url}/helped/info/refs?service=git-upload-pack`);
+        assert.equal(refused.status, 401, "the repository is not public");
+        const allowed = await fetch(`${server.url}/helped/info/refs?service=git-upload-pack`, {
+          headers: { authorization: `Basic ${btoa(`x:${password}`)}` },
+        });
+        assert.equal(allowed.status, 200, "and the minted credential opens it");
+      } finally {
+        await server.close();
+      }
+
+      // `store` and `erase` are asked for after a push and must succeed
+      // silently: exiting non-zero there reports a failure for a push that
+      // worked.
+      assert.equal(
+        await withStdin(
+          ["credential-helper", "--root", root, "--key", keyFile, "store"],
+          "protocol=http\npath=helped\n\n",
+        ),
+        "",
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

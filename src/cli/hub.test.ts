@@ -525,6 +525,81 @@ describe("cli hub", () => {
     }
   });
 
+  it("stops synchronizing hub state without touching the source", async () => {
+    // The counterpart to `enable`. The spec writes it as removing the fetch
+    // refspecs `enable` added; this client keeps no per-remote configuration,
+    // so what it removes is the refs it manages — `refs/hub/*` and
+    // `refs/meta/trust/*` — and nothing else. A branch it deleted on the way
+    // past would be somebody's work.
+    const server = await serve({ root: path.join(root, "served"), allowAnonymousWrites: true });
+    try {
+      const member = await enableHubUnder(path.join(root, "served"), "shared", ["repo.read"]);
+      const url = `${server.url}/shared`;
+
+      await cli([
+        "hub",
+        "enable",
+        "--root",
+        root,
+        "--as",
+        "clone",
+        "--yes",
+        "--token",
+        member.credential,
+        url,
+      ]);
+
+      const refsOf = async () => {
+        const listed = await cli(["refs", "--root", root, "clone"]);
+        return listed.split("\n").filter((line) => line.trim() !== "");
+      };
+      assert.ok(
+        (await refsOf()).some((line) => line.includes("refs/meta/trust/")),
+        "enable brought trust refs in",
+      );
+
+      const disabled = await cli(["hub", "disable", "--root", root, "--as", "clone", url]);
+      assert.match(disabled, /hub\/trust ref\(s\) removed/);
+
+      const left = await refsOf();
+      assert.equal(
+        left.filter((line) => line.includes("refs/hub/") || line.includes("refs/meta/trust/"))
+          .length,
+        0,
+        `hub and trust refs are gone: ${left.join(", ")}`,
+      );
+
+      // The identity is a separate decision, and `hub forget` is the command
+      // for it.
+      assert.match(await cli(["hub", "status", url]), /pinned/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses to disable a repository it was never enabled against", async () => {
+    // The refs this deletes are undeletable on a server for good reasons — a
+    // pull request nothing can remove, an identity nothing can rewrite — so it
+    // must not be pointable at a repository that is the origin of its own
+    // trust. A pin says this clone got that state from somewhere else, and a
+    // repository `hub init` created has no pin naming itself.
+    const failed = await cli([
+      "hub",
+      "disable",
+      "--root",
+      root,
+      "--as",
+      "clone",
+      "http://never.example.com/mine",
+    ]).then(
+      () => null,
+      (error: { stderr?: string; stdout?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
+    );
+
+    assert.notEqual(failed, null, "an un-enabled URL must not be disabled");
+    assert.match(failed ?? "", /not enabled/);
+  });
+
   it("will not pin an identity whose own roots never signed it", async () => {
     // Trust on first use is where an identity is *adopted*, so this is the
     // check that matters most: `presented()` loaded the remote's genesis

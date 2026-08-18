@@ -516,6 +516,64 @@ const enable = Command.make(
     }).pipe(Effect.provide(knownRepos)),
 );
 
+/**
+ * Stop synchronizing a repository's hub state, and keep its source.
+ *
+ * The spec writes this as removing the fetch refspecs `hub enable` added to
+ * `[remote "origin"]`. This client keeps no per-remote configuration — every
+ * fetch names its refspecs — so what `enable` durably leaves behind is the
+ * pinned identity and the refs it fetched, and removing "only the refspecs
+ * chr33s-git manages" is removing only the refs it manages: `refs/hub/*` and
+ * `refs/meta/trust/*`, never a branch or a tag.
+ *
+ * Guarded by the pin rather than by a flag. Those refs are undeletable *on a
+ * server* for good reasons — a pull request nothing can remove, an identity
+ * nothing can rewrite — and this deletes them, so it must not be pointable at
+ * a repository that is the origin of its own trust. A pinned identity for the
+ * URL is what says this clone got that state from somewhere else, and a
+ * repository that `hub init` created has no pin naming itself. The pin stays:
+ * dropping trust is `hub forget`, and a repository whose hub state you have
+ * stopped fetching is not one whose identity you have stopped believing.
+ */
+const disable = Command.make(
+  "disable",
+  {
+    root: rootFlag,
+    name: Flag.string("as").pipe(
+      Flag.withDefault("origin"),
+      Flag.withDescription("Local repository directory to disable"),
+    ),
+    url: Argument.string("url"),
+  },
+  ({ name, root, url }) =>
+    Effect.gen(function* () {
+      const key = yield* canonicalUrl(url);
+      const store = yield* KnownRepos;
+      if ((yield* store.lookup(key)) === null) {
+        return yield* new Invalid({
+          field: "url",
+          reason: `${key} is not enabled; nothing to disable`,
+        });
+      }
+
+      const removed = yield* Effect.gen(function* () {
+        const refs = yield* RefStore;
+        const held = yield* refs.list("refs/");
+        const managed = held
+          .map(([name]) => name)
+          .filter((name) => name.startsWith("refs/hub/") || name.startsWith("refs/meta/trust/"));
+        if (managed.length > 0) {
+          yield* refs.apply(managed.map((name) => ({ name, value: null, reason: "hub disable" })));
+        }
+        return managed.length;
+      }).pipe(Effect.provide(localRepository(`${root}/${name}`)));
+
+      yield* Console.log(`${key}`);
+      yield* Console.log(`  ${removed} hub/trust ref(s) removed from ${root}/${name}`);
+      yield* Console.log("  source refs untouched; identity still pinned (hub forget drops it)");
+    }).pipe(Effect.provide(knownRepos)),
+);
+
 const status = Command.make("status", { url: Argument.string("url") }, ({ url }) =>
   Effect.gen(function* () {
     const key = yield* canonicalUrl(url);
@@ -537,7 +595,9 @@ const forget = Command.make("forget", { url: Argument.string("url") }, ({ url })
 );
 
 export const hubCommand = Command.make("hub", {}, () =>
-  Console.log("chr33s-git hub <init|grant|revoke|members|enable|status|forget> — see --help"),
+  Console.log(
+    "chr33s-git hub <init|grant|revoke|members|enable|disable|status|forget> — see --help",
+  ),
 ).pipe(
   Command.withSubcommands([
     init.pipe(Command.withDescription("Give a repository an identity and a root quorum")),
@@ -545,6 +605,7 @@ export const hubCommand = Command.make("hub", {}, () =>
     revoke.pipe(Command.withDescription("Revoke a member's key")),
     members.pipe(Command.withDescription("Who this repository trusts, and with what")),
     enable.pipe(Command.withDescription("Trust a remote repository and fetch its hub state")),
+    disable.pipe(Command.withDescription("Stop synchronizing a repository's hub state")),
     status.pipe(Command.withDescription("What identity is pinned for a URL")),
     forget.pipe(Command.withDescription("Drop a pinned repository identity")),
   ]),

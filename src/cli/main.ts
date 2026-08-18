@@ -213,6 +213,126 @@ const credential = Command.make(
     }),
 );
 
+/**
+ * Everything git wrote before it stopped writing.
+ *
+ * The helper protocol ends its request with a blank line, but git also closes
+ * the stream, so reading to end-of-input is both simpler and correct — and a
+ * helper that waits for a blank line it has already been given hangs the push
+ * that called it.
+ */
+const readStdin = Effect.promise(
+  () =>
+    new Promise<string>((resolve) => {
+      let text = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk: string) => {
+        text += chunk;
+      });
+      process.stdin.on("end", () => {
+        resolve(text);
+      });
+    }),
+);
+
+/**
+ * The same credential, in the shape stock `git` asks for one.
+ *
+ * git does not take a password on a command line: it runs a helper and speaks
+ * a line protocol at it — `key=value` lines on stdin, a blank line, and the
+ * answer the same way on stdout. Configured as
+ *
+ *   git config credential.helper '!chr33s-git credential-helper --key ~/.ssh/id_ed25519 --root .'
+ *
+ * git appends the operation, so `get` arrives as an argument and a push picks
+ * the credential up with nothing else to remember.
+ *
+ * `store` and `erase` succeed and do nothing, which is not laziness: there is
+ * nothing to store. The credential is minted from the key on every ask, it
+ * expires by itself, and it is not revocable except by revoking the member —
+ * so a cache would only be a copy that outlives the question it answered.
+ * Exiting non-zero there would make git report a failure for a push that
+ * worked.
+ *
+ * The repository comes from `--repo` when given and otherwise from the
+ * `path` git supplies, which is the last segment of the URL being pushed to:
+ * one helper line then serves every repository on a host.
+ */
+const credentialHelper = Command.make(
+  "credential-helper",
+  {
+    root: rootFlag,
+    key: Flag.string("key").pipe(Flag.withDescription("Path to the SSH private key to sign with")),
+    capability: Flag.string("capability").pipe(
+      Flag.withDefault("repo.read,source.push"),
+      Flag.withDescription("Capabilities to scope the credential to (repeatable as a,b)"),
+      Flag.withAlias("c"),
+    ),
+    ttl: Flag.integer("ttl").pipe(
+      Flag.withDefault(3600),
+      Flag.withDescription("Seconds until the credential expires"),
+    ),
+    repo: Flag.string("repo").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("Repository to mint for; defaults to the path git asks about"),
+    ),
+    operation: Argument.string("operation"),
+  },
+  ({ capability, key, operation, repo, root, ttl }) =>
+    Effect.gen(function* () {
+      if (operation !== "get") return;
+
+      const asked = yield* readStdin;
+      const fields = new Map<string, string>();
+      for (const line of asked.split("\n")) {
+        const cut = line.indexOf("=");
+        if (cut > 0) fields.set(line.slice(0, cut), line.slice(cut + 1).trim());
+      }
+
+      // git gives the path without a leading slash, and a repository here is
+      // one directory under the root.
+      const named =
+        repo === ""
+          ? ((fields.get("path") ?? "")
+              .split("/")
+              .filter((part) => part !== "")
+              .at(-1) ?? "")
+          : repo;
+      if (named === "") {
+        return yield* new Invalid({
+          field: "repo",
+          reason: "no repository to mint for: pass --repo, or let git supply a path",
+        });
+      }
+
+      const signer = yield* readPrivateKey(key);
+      const minted = yield* withRepo(
+        root,
+        named,
+        Effect.gen(function* () {
+          const stored = yield* readGenesis();
+          if (stored === null) {
+            return yield* new Invalid({
+              field: "repo",
+              reason: `${named} is not hub-enabled; run \`hub init\` first`,
+            });
+          }
+          return yield* mintDelegation({
+            key: signer,
+            repo: stored.genesis.repoId,
+            capabilities: capability.split(",").map((value) => value.trim()),
+            ttlSeconds: ttl,
+          });
+        }),
+      );
+
+      // The username is not read — the credential is the whole claim — but git
+      // asks for one, and a helper that answers only a password makes it
+      // prompt for the name it was trying to avoid asking for.
+      yield* Console.log(`username=chr33s-git\npassword=${minted}`);
+    }),
+);
+
 const serveCommand = Command.make(
   "serve",
   {
@@ -769,6 +889,7 @@ const git = Command.make("chr33s-git").pipe(
     ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
     credential.pipe(Command.withDescription("Mint a short-lived credential stock git can present")),
+    credentialHelper.pipe(Command.withDescription("Answer git's credential helper protocol")),
   ]),
 );
 
