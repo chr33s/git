@@ -57,6 +57,7 @@ import {
   rootFlag,
   withRepo,
 } from "./shared.ts";
+import { wakeCommand } from "./wake.ts";
 import * as work from "./work.ts";
 
 /** One repository's stores as raw instances, for code that needs them directly. */
@@ -912,6 +913,7 @@ const git = Command.make("chr33s-git").pipe(
       Command.withDescription("Check out a branch, replacing index and work tree"),
     ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
+    wakeCommand,
     credential.pipe(Command.withDescription("Mint a short-lived credential stock git can present")),
     credentialHelper.pipe(Command.withDescription("Answer git's credential helper protocol")),
   ]),

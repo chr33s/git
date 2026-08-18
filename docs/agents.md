@@ -1057,31 +1057,59 @@ fast-forward of `refs/hub/pr/<id>`; a session append moves its session
 ref; a task claim (§20) moves a task ref. Git's own hook point sees every
 state transition there is.
 
-The seam already exists on every host: `RefStore.apply → postReceive`
-drives replication today (hub §25), surfaced as filesystem hooks on the
-node host and as signed webhooks with retries on the Workers host. A wake
-dispatcher is a consumer of that seam:
+`chr33s-git wake` is that dispatcher, and it is **built**. Rules live in
+`wake.json` beside the bare repository:
 
-```text
-ref update arrives (push, or replication fetch)
-    → post-receive: (ref, old, new)
-    → for refs/hub/**, walk old..new and read the
-      typed, signed event commits
-    → match local rules:
-      ref pattern × event kind × predicate
-      ("refs/hub/pr/*, review.submitted,
-        pr author == my key")
-    → spawn the harness (resume context, Part III §8)
-    → advance a cursor ref to the processed head
+```json
+{
+  "rules": [
+    {
+      "ref": "refs/hub/pr/*",
+      "on": ["review.submitted", "check.completed"],
+      "run": ["claude", "-p", "Address the review on the pull request I opened."]
+    }
+  ]
+}
 ```
 
-Two properties make hooks sufficient. The hook carries no payload — the
-`old..new` range names signed event commits the dispatcher reads from the
-repository, so **the notification is a hint and the refs are the truth**.
-And because state is durable in refs, a cursor ref recording the last
-processed head turns git's at-most-once hook into at-least-once
-processing: on startup, reconcile from cursor to tip and every event that
-fired while the dispatcher was down is handled.
+```sh
+chr33s-git wake --root . project             # run what is due, advance
+chr33s-git wake --root . --dry-run project   # say what would run
+```
+
+It **pulls rather than takes a push**, which is the decision that makes
+the rest work. Each run walks from its bookmark to each hub ref's tip,
+matches rules, spawns commands, and advances — so a post-receive hook can
+call it, and so can a timer, and so can a person. A missed hook becomes a
+late wake rather than a lost one, and git's at-most-once hook becomes
+at-least-once processing. The seam is already there on every host:
+`RefStore.apply → postReceive` drives replication today (hub §25),
+surfaced as filesystem hooks on the node host and as signed webhooks with
+retries on the Workers host.
+
+The bookmark is a **file beside the repository, not a ref inside it**. A
+ref would replicate — turning one replica's progress into everybody's —
+and would have to answer to the append-only rules and the advertisement
+besides. None of that is what a bookmark is: it is local, it moves
+backwards when an operator wants a replay, and losing it costs a re-run
+rather than a fact.
+
+What a woken command is told arrives as environment variables —
+`CHR33S_GIT_EVENT`, `CHR33S_GIT_REF`, `CHR33S_GIT_COMMIT`,
+`CHR33S_GIT_REPO` — and never as arguments, with no shell. This is §8's
+rule at the dispatcher: what an event says is chosen by whoever may append
+to the ref, the lowest hub capability there is, so an event that could
+reach a shell would make `hub.comment` a way to run commands on every
+replica that watches. The payload names what happened; the command decides
+what to do about it, and re-reads the refs to find out. **The notification
+is a hint and the refs are the truth.**
+
+Failure keeps the bookmark where it was, so the batch replays: a woken
+command re-reads the refs anyway, which makes arriving twice a wasted
+start while never arriving costs the work. An event this version cannot
+decode is stepped over — one unreadable event must not stop a walk — but
+it is reported rather than skipped in silence, because a rule that never
+fires looks exactly like a rule with nothing to do.
 
 Wake rules are **local to each replica** and not replicated: each host
 decides who it wakes, exactly as each host decides what it serves.
