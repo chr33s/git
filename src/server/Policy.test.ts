@@ -472,81 +472,14 @@ describe("Policy", () => {
       );
     });
 
-    it("still takes a since-revoked member's comments, and not their verdicts", async () => {
-      // A push is not a claim about when its events were written. A replica
-      // seeded from elsewhere, or a client that has been offline, pushes a
-      // pull request whose history is entirely honest and entirely old —
-      // refusing all of it because one past reviewer has since been revoked
-      // makes that pull request unpushable for good on a namespace that only
-      // grows, which is the outcome this rule exists to prevent. So it is
-      // narrowed to what converts into authority: a verdict unlocks a
-      // protected branch and a tombstone destroys bytes; a comment does
-      // neither.
-      const outcome = await scenario(
-        Effect.gen(function* () {
-          const where = yield* world(["repo.admin"]);
-          const repository = yield* Repository;
-          const { pr } = yield* PullRequest.open({
-            repo: where.genesis.repoId,
-            title: "t",
-            base: "refs/heads/main",
-            head: EMPTY_TREE_OID,
-            key: where.dev,
-          });
-          const opened = yield* repository.resolve(`refs/hub/pr/${pr}`);
-          yield* PullRequest.comment({
-            repo: where.genesis.repoId,
-            pr,
-            body: "looks reasonable to me",
-            key: where.reviewer,
-          });
-          const spoken = yield* repository.resolve(`refs/hub/pr/${pr}`);
-          yield* PullRequest.review({
-            repo: where.genesis.repoId,
-            pr,
-            head: EMPTY_TREE_OID,
-            decision: "approve",
-            key: where.reviewer,
-          });
-          const approved = yield* repository.resolve(`refs/hub/pr/${pr}`);
-          // Rewound, so both read as new to the boundary.
-          yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: opened! });
-
-          yield* Log.issue(
-            Certificate.revoke({
-              repo: where.genesis.repoId,
-              subject: yield* fingerprint(where.reviewer.publicKey),
-              reason: "compromised",
-              id: Log.newId(),
-            }),
-            [where.root],
-          );
-          const trust = yield* projectTrust(where.genesis);
-          const judged = (value: Oid) =>
-            evaluate({
-              update: { name: `refs/hub/pr/${pr}`, value },
-              principal: where.principal,
-              genesis: where.genesis,
-              trust,
-              rules: OPEN,
-            });
-
-          return { comment: yield* judged(spoken!), verdict: yield* judged(approved!) };
-        }),
-      );
-
-      assert.equal(outcome.comment.ok, true, "an old comment is not a claim on anything");
-      assert.equal(outcome.verdict.ok, false);
-      assert.match(outcome.verdict.ok === false ? outcome.verdict.reason : "", /has been revoked/);
-    });
-
-    it("refuses a since-revoked member's check result, which a branch rule reads", async () => {
-      // Whole families were exempted as inert, but `requiredChecks` is
-      // satisfied by `check.completed` and `requireResolvedThreads` by
-      // `comment.resolved` — both decide whether a protected branch may move,
-      // exactly as a verdict does. A relayed success from a revoked key
-      // cleared the branch's checks on a pull request with no later floor to
-      // catch it.
+    it("refuses every event a since-revoked key adds, whatever it says", async () => {
+      // Three attempts at an exemption list — "grants authority", then "moves
+      // authority", then a list of families — each sprang a leak, because
+      // almost everything here feeds a branch rule by some path. `checks` is
+      // keyed by name and head, so a `check.started` *replaces* a completed
+      // success and flips the branch's checks to failing; a `comment.created`
+      // opens an unresolved thread and fails `requireResolvedThreads`. What is
+      // already on the ref was judged when it arrived and is not re-judged.
       const outcome = await scenario(
         Effect.gen(function* () {
           const where = yield* world(["repo.admin"]);
@@ -576,6 +509,7 @@ describe("Policy", () => {
             key: where.reviewer,
           });
           const checked = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          // Rewound to the opening, so both read as new to the boundary.
           yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: opened! });
 
           yield* Log.issue(
@@ -596,12 +530,17 @@ describe("Policy", () => {
               trust,
               rules: OPEN,
             });
-          return { said: yield* judged(said!), checked: yield* judged(checked!) };
+          return {
+            settled: yield* judged(opened!),
+            said: yield* judged(said!),
+            checked: yield* judged(checked!),
+          };
         }),
       );
 
-      assert.equal(outcome.said.ok, true, "an old comment still says nothing a rule reads");
-      assert.equal(outcome.checked.ok, false);
+      assert.equal(outcome.settled.ok, true, "what the ref already held is left alone");
+      assert.equal(outcome.said.ok, false, "a comment opens a thread a branch rule reads");
+      assert.equal(outcome.checked.ok, false, "and a check result is read by another");
       assert.match(outcome.checked.ok === false ? outcome.checked.reason : "", /has been revoked/);
     });
 

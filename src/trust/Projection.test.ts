@@ -13,6 +13,7 @@ import {
   sign,
 } from "../crypto/SshSignature.ts";
 import type { Invalid, StorageFailure } from "../git/Error.ts";
+import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -124,6 +125,44 @@ const below = Effect.fn("test.below")(function* (
     if (commit < target) return commit;
   }
   return null;
+});
+
+describe("what an event's declared trust head can cost", () => {
+  it("walks no further from a declared head than it would from the log", async () => {
+    // The oid is written by the event's own signer, and a branch of commits
+    // carrying a record — or empty trees, which is what a join looks like —
+    // passes the namespace test. Unbounded, one such branch is walked again on
+    // every protected-branch push, every collection and every deepening fetch
+    // that reads that event.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        // A chain of joins: hub-and-trust-shaped, and none of it in the log.
+        let head = yield* repository.commitTree({
+          tree: EMPTY_TREE_OID,
+          parents: [],
+          message: "join\n",
+          author: Record.identityAt(new Date(1_700_000_000_000)),
+        });
+        for (let index = 0; index < 6; index++) {
+          head = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head],
+            message: `join ${index}\n`,
+            author: Record.identityAt(new Date(1_700_000_000_000)),
+          });
+        }
+
+        return {
+          whole: (yield* Log.ancestry(head)).size,
+          bounded: (yield* Log.ancestry(head).pipe(Effect.provide(Log.ceiling(3)))).size,
+        };
+      }),
+    );
+
+    assert.equal(outcome.whole, 7, "the whole chain is reachable when nothing bounds it");
+    assert.equal(outcome.bounded, 0, "and past the ceiling it reaches nothing this host will name");
+  });
 });
 
 describe("trust projection", () => {

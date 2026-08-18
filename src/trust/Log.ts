@@ -372,7 +372,24 @@ export const ancestry = Effect.fn("trust.Log.ancestry")(function* (from: Oid) {
   const repository = yield* Repository;
 
   const genesis = yield* repository.resolve(GENESIS_REF);
-  const reachable = yield* Dag.reachable(from, genesis, (oid) => isTrustCommit(oid));
+  // Bounded like every other walk of this namespace. `from` is an oid an
+  // *event* declared, so it is chosen by whoever wrote the event — and a
+  // branch of commits carrying a record, or empty trees, passes the
+  // namespace test. Unbounded, one such branch is walked again on every
+  // protected-branch push, every collection and every deepening fetch that
+  // reads that event.
+  const reachable = yield* Dag.reachable(
+    from,
+    genesis,
+    (oid) => isTrustCommit(oid),
+    yield* ceilingOf(),
+  ).pipe(
+    // A history past the ceiling is a history this host will not read, and
+    // "reaches nothing I can name" is the conservative answer: `reaches`
+    // treats an unreachable revocation as reaching the event, and `held`
+    // treats an unreachable grant as not held.
+    Effect.catchTag("Invalid", () => Effect.succeed(new Map<Oid, ReadonlyArray<Oid>>())),
+  );
   return new Set(reachable.keys());
 });
 

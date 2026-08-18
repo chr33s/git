@@ -211,9 +211,15 @@ export type MentionCache = Map<string, ReadonlySet<string>>;
  * it is asked about *every* pull request the repository has on *every*
  * protected-branch push. Keyed by the ref's value, so a moved ref is a
  * different answer and a stale one is not possible — the same shape as the
- * redaction memos. Bounded by pull requests, least-recently-used.
+ * redaction memos. Bounded by pull requests, least-recently-used — and bounded
+ * well above what a busy repository holds at once, because the miss *is* the
+ * walk this exists to avoid: sized below the population a repository may
+ * reach, the pre-filter stops helping exactly where it is needed and a
+ * protected-branch push re-reads thousands of event DAGs synchronously. Each
+ * entry is the handful of revisions one pull request proposed, so this ceiling
+ * costs megabytes rather than the tens the population bound would.
  */
-const MENTIONS = 1024;
+const MENTIONS = 16_384;
 const mentions = new Map<string, ReadonlySet<string>>();
 
 /** Whether a pull request's events ever named this revision as a head. */
@@ -715,37 +721,25 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     const signed = yield* Verify.signers(record.payload, record.signatures);
     const payload = yield* Event.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
 
-    // Only the events that *move* authority. A push is not a claim about when
-    // its events were written: a replica seeded from elsewhere, or a client
-    // that has been offline, pushes a pull request whose history is entirely
-    // honest and entirely old. Refusing all of it because one past reviewer
-    // has since been revoked would make that pull request unpushable for
-    // good, which is the outcome this rule exists to prevent rather than a
-    // second way to arrive at it.
+    // Every event, without an exemption list. Three attempts at one — first
+    // "grants authority", then "moves authority", then a list of families —
+    // each sprang a leak, because almost everything here feeds a branch rule
+    // by some path: `checks` is keyed by name and head, so a `check.started`
+    // *replaces* a completed success and flips the branch's checks to failing;
+    // a `comment.created` opens an unresolved thread and fails
+    // `requireResolvedThreads`; `pr.closed` makes the pull request authorize
+    // nothing at all. A rule that has to enumerate the safe cases is a rule
+    // that will be wrong again.
     //
-    // Listed as what is *safe* rather than as what is dangerous. Granting is
-    // not the only way to move authority: `pr.closed` takes it away —
-    // `protectedBranch` skips a pull request that is not open, so a relayed
-    // one from a revoked key freezes the branch until a `hub.merge` holder
-    // reopens it — and `pr.updated` stales every approval by moving the head.
-    // A comment, a thread and a check say nothing about whether a branch may
-    // move, and they are the bulk of any history.
-    // Whole families are not safe: `requiredChecks` is satisfied by
-    // `check.completed`, and `requireResolvedThreads` by `comment.resolved`,
-    // so both decide whether a protected branch may move exactly as a verdict
-    // does. What is left says nothing a branch rule reads — starting a check
-    // claims no result, and a comment is a comment.
-    const inert =
-      payload === null ||
-      payload.type === "comment.created" ||
-      payload.type === "comment.replied" ||
-      payload.type === "check.started" ||
-      (payload.type === "review.submitted" && payload.decision === "comment");
-    if (!inert) {
-      for (const signer of signed) {
-        if (openWindow(trust.revoked.get(signer)) !== null) {
-          return `${signer} has been revoked and may not add a ${payload?.type ?? "event"}`;
-        }
+    // The cost is the one the tombstone gate below already carries and is
+    // worth stating in the same breath: a history that is entirely honest and
+    // entirely old — a replica seeded from elsewhere, a client that has been
+    // offline — stops being *pushable* once one of its past participants is
+    // revoked. Replication is not gated here, so it still arrives by fetch;
+    // what it cannot do is arrive by push.
+    for (const signer of signed) {
+      if (openWindow(trust.revoked.get(signer)) !== null) {
+        return `${signer} has been revoked and may not add a ${payload?.type ?? "event"}`;
       }
     }
 
