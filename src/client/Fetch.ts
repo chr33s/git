@@ -544,9 +544,7 @@ export const fetchRepository = (options: {
     // Refspecs that reach into a namespace the v0 advertisement withholds
     // need a second, explicit ask. Anything already advertised wins, so a ref
     // that appears in both is taken once.
-    const hidden = [
-      ...new Set(specs.flatMap((spec) => Refspec.hiddenPrefixes(spec.source.replace(/\*$/, "")))),
-    ];
+    const hidden = [...new Set(specs.flatMap(Refspec.probes))];
     // Not swallowed: `lsRefsV2` already answers with an empty list for a
     // remote that has no v2 to offer, so a *failure* here is a real one and
     // reporting success without it would be reporting a replication that did

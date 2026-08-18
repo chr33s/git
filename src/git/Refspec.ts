@@ -212,3 +212,17 @@ export const hiddenPrefixes = (prefix: string): ReadonlyArray<string> =>
   HIDDEN.flatMap((namespace) =>
     prefix.startsWith(namespace) ? [prefix] : namespace.startsWith(prefix) ? [namespace] : [],
   );
+
+/**
+ * The `ls-refs` prefixes one refspec has to ask for by name.
+ *
+ * The literal head of the source, and then whichever hidden namespaces that
+ * head touches. Cut at the **first** wildcard, not at a trailing one: a source
+ * may put its `*` in the middle — `map` supports exactly that — and a prefix
+ * that kept the `*` in it matched nothing, because `ls-refs` compares a prefix
+ * with `startsWith`. The ask came back empty and the fetch reported a
+ * replication of zero refs as a success, which is the one failure this whole
+ * path exists to make visible.
+ */
+export const probes = (spec: Refspec): ReadonlyArray<string> =>
+  hiddenPrefixes(spec.source.split("*")[0] ?? spec.source);

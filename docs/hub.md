@@ -1340,6 +1340,8 @@ QUARANTINED — held, excluded from projection — and re-validated
 when the trust log advances, rather than rejected permanently
 ```
 
+The explicit `ref-prefix` a hub-aware fetch sends is built from the literal head of each refspec source, cut at the **first** wildcard. A source may put its `*` in the middle, and a prefix is compared with `startsWith` — so a probe that kept the `*` matched nothing, the ask came back empty, and the fetch reported a replication of zero refs as a success, which is the one failure this path exists to make visible.
+
 ### Advertisement hygiene
 
 `refs/hub/*` and `refs/meta/trust/*` MUST be excluded from the protocol v0 ref advertisement served to source-only clients (the moral equivalent of `transfer.hideRefs`), except `refs/meta/trust/genesis`, which stays visible so any client can compute the RepoID. Hub-aware clients fetch hub refs explicitly via their refspecs; implementations SHOULD serve them over protocol v2 with `ref-prefix` filtering so a hub fetch names the namespaces it wants instead of receiving everything.

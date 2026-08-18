@@ -1267,6 +1267,55 @@ describe("hub projection", () => {
       assert.ok(checksPassed(state, ["test"]));
     });
 
+    it("does not let a late start undo a finish for the same revision", async () => {
+      // The two share one slot, keyed by check name and revision, and are
+      // applied in fold order — topological with an oid tie-break. So a
+      // `check.started` written on another replica and brought back by a join
+      // could land *after* the completion it belongs with, turn a recorded
+      // success into "started", and hold the protected branch shut on every
+      // replica until somebody signed a fresh completion. Re-running a check
+      // is what replaces its answer, and that arrives as another finish.
+      const state = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const ci = yield* generate("ci@example.com");
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(ci.publicKey),
+              capabilities: ["hub.check:test"],
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          const { pr } = yield* opened(where);
+          yield* PullRequest.checkCompleted({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            name: "test",
+            provider: "buildkite",
+            status: "success",
+            key: ci,
+          });
+          // The start arrives afterwards, which is what a join makes possible.
+          yield* PullRequest.checkStarted({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            name: "test",
+            provider: "buildkite",
+            key: ci,
+          });
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(state.checks[0]?.status, "success");
+      assert.ok(checksPassed(state, ["test"]), "the branch is not held shut by a stale start");
+    });
+
     it("refuses a check signed by a bot trusted for a different check", async () => {
       const state = await scenario(
         Effect.gen(function* () {

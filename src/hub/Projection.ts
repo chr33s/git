@@ -1203,7 +1203,22 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         if (head === null) break;
         // Keyed by name and revision: a check re-run against the same head
         // replaces its own result, and one against a new head is a new answer.
-        checks.set(`${payload.name}@${head}`, {
+        //
+        // A *start* never replaces a finish for the same name and revision.
+        // The two share a slot and are applied in fold order, which is
+        // topological with an oid tie-break — so a `check.started` that
+        // arrived on another replica and came back through a join could land
+        // after the `check.completed` it belongs with, turn a recorded success
+        // back into "started", and hold the protected branch shut on every
+        // replica until somebody signed a fresh completion. A finish is the
+        // answer; re-running the check is what replaces it, and that arrives
+        // as another finish.
+        const slot = `${payload.name}@${head}`;
+        const held = checks.get(slot);
+        if (payload.type === "check.started" && held !== undefined && held.status !== "started") {
+          break;
+        }
+        checks.set(slot, {
           name: payload.name,
           provider: payload.provider,
           head,

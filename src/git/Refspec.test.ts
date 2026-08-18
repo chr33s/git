@@ -120,4 +120,27 @@ describe("Refspec", () => {
     assert.deepEqual(Refspec.hiddenPrefixes("refs/heads/"), []);
     assert.deepEqual(Refspec.hiddenPrefixes("refs/tags/"), []);
   });
+
+  it("asks for the head of a source, wherever its wildcard is", () => {
+    // A refspec may put its `*` in the middle — `map` supports exactly that —
+    // and the probe is a *prefix*, which `ls-refs` compares with `startsWith`.
+    // Cut at the last character instead of the first wildcard, the ask kept
+    // its `*`, matched nothing, and the fetch reported a replication of zero
+    // refs as a success.
+    const spec = (text: string): Refspec.Refspec => {
+      const parsed = Refspec.parse(text);
+      assert.ok(Result.isSuccess(parsed), text);
+      return parsed.success;
+    };
+
+    assert.deepEqual(Refspec.probes(spec("refs/hub/*/head:refs/local/*")), ["refs/hub/"]);
+    assert.deepEqual(Refspec.probes(spec("refs/hub/*:refs/hub/*")), ["refs/hub/"]);
+    assert.deepEqual(Refspec.probes(spec("refs/*:refs/*")), ["refs/hub/", "refs/meta/"]);
+    // A source with no wildcard is its own head — and the rules file is
+    // hidden from the advertisement too, so it is asked for by name.
+    assert.deepEqual(Refspec.probes(spec("refs/meta/policy:refs/meta/policy")), [
+      "refs/meta/policy",
+    ]);
+    assert.deepEqual(Refspec.probes(spec("refs/heads/*:refs/heads/*")), []);
+  });
 });
