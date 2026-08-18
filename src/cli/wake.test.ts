@@ -258,6 +258,22 @@ describe("cli wake", () => {
     }
   });
 
+  it("refuses a rule for a ref it never walks, and says when one matches nothing", async () => {
+    await withPullRequest();
+
+    // A rule outside the one namespace a wake walks can never fire, so it is
+    // refused where it is written rather than accepted and ignored.
+    await writeRules([{ ref: "refs/heads/main", on: ["*"], run: [process.execPath, "-e", ""] }]);
+    const refused = await failing(["wake", "--root", root, "project"]);
+    assert.match(refused, /watches a ref this never walks/);
+
+    // And one that is in the namespace but matches nothing here — a typo the
+    // file cannot catch — is reported instead of passing as "nothing to do".
+    await writeRules([{ ref: "refs/hub/prs/*", on: ["*"], run: [process.execPath, "-e", ""] }]);
+    const quiet = await cli(["wake", "--root", root, "project"]);
+    assert.match(quiet, /watches nothing here/);
+  });
+
   it("refuses rules it cannot read rather than treating them as none", async () => {
     await withPullRequest();
     await fs.writeFile(path.join(project, "wake.json"), "{ this is not json");

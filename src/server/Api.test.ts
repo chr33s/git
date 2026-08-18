@@ -356,6 +356,90 @@ describe("Api", () => {
     ),
   );
 
+  it.live("reports what a key holds when the request was served as a public read", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["source.push"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+        yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "first",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(member.publicKey);
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        // What the guard hands a member who holds no `repo.read` on a
+        // repository anonymous readers may clone: a real signer, no principal,
+        // and the literal capability the *read* was served under. Read as the
+        // credential's scope, this told a member holding `source.push` that
+        // every push would be refused — an answer the boundary contradicts.
+        const answer = yield* client.repo.whoami({ params: { repo: "r" } }).pipe(
+          Effect.provideService(Auth.Requester, {
+            principal: null,
+            signer,
+            capabilities: ["repo.read"],
+            projection,
+            envelope: null,
+          }),
+        );
+
+        assert.equal(answer.member, true);
+        assert.deepEqual(answer.capabilities, ["source.push"]);
+        assert.equal(answer.branches["(any other ref)"]?.push, "allowed");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("says nothing about trust freshness for a repository with no identity", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const blob = yield* git.writeBlob(
+          Policy.encodeRules({ ...Policy.OPEN, maxTrustAgeSeconds: 60 }),
+        );
+        const tree = yield* git.writeTree([{ mode: "100644", name: "policy.json", oid: blob }]);
+        const commit = yield* git.commitTree({
+          tree,
+          parents: [],
+          message: "policy\n",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+        yield* git.setRef({ name: Policy.RULES_REF, to: commit });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        // `Auth.anonymous` is what the guard hands a request to a repository
+        // with no genesis, and it carries the *empty* projection rather than
+        // none at all — which is the whole point of this case.
+        const answer = yield* client.repo
+          .whoami({ params: { repo: "r" } })
+          .pipe(Effect.provideService(Auth.Requester, Auth.anonymous));
+
+        // That empty projection is not a membership view, and judging its
+        // staleness reported a bound the CLI — handed no projection at all —
+        // says nothing about.
+        assert.equal(answer.repo, null);
+        assert.equal(answer.trust, null);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
   it.live("drives the derived client end to end, typed errors included", () =>
     dispatched(
       Effect.gen(function* () {

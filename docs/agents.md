@@ -1121,6 +1121,12 @@ decode is stepped over — one unreadable event must not stop a walk — but
 it is reported rather than skipped in silence, because a rule that never
 fires looks exactly like a rule with nothing to do.
 
+A rule may only watch `refs/hub/*`, which is all a wake walks; anything else
+is refused where it is written rather than accepted and silently never run.
+A pattern inside that namespace matching no ref this repository holds is
+reported for the same reason — "nothing matched" and "nothing to do" read
+identically otherwise.
+
 Wake rules are **local to each replica** and not replicated: each host
 decides who it wakes, exactly as each host decides what it serves.
 Replicated subscriptions would be new spec surface for no v1 need — an

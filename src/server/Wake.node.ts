@@ -52,11 +52,23 @@ type Rule = (typeof RuleDocument)["Type"];
 const decodeRules = Schema.decodeUnknownEffect(RulesDocument);
 const decodeCursors = Schema.decodeUnknownEffect(CursorDocument);
 
+/** The one namespace a wake walks; see `dispatch`. */
+const HUB = "refs/hub/";
+
 const RULES_FILE = "wake.json";
 const CURSOR_FILE = "wake.cursor.json";
 
 /** A first run, and what an unreadable bookmark is read as. */
 const NO_CURSORS: Record<string, string> = {};
+
+/**
+ * How long one woken command may take before it is killed.
+ *
+ * Generous, because what these start is an agent: a review answered properly
+ * takes minutes, and a bound that cut that short would be worse than none. It
+ * exists for the command that will *never* finish, not the slow one.
+ */
+const TIMEOUT = 30 * 60 * 1000;
 
 /**
  * Where a replica keeps its bookmark.
@@ -114,6 +126,17 @@ const rulesOf = (location: string): Effect.Effect<ReadonlyArray<Rule>, Invalid> 
           reason: `the rule for ${rule.ref} has nothing to run`,
         });
       }
+      // Hub refs are the only ones this walks, so a rule for anything else is
+      // one that can never fire. Refused rather than accepted and ignored: a
+      // typo like `refs/hub/prs/*` otherwise reported "0 rule(s) would run"
+      // and exited 0, which reads exactly like a repository with nothing to
+      // do — the one answer that must not be silently wrong.
+      if (!matchesRef(rule.ref, HUB) && !rule.ref.startsWith(HUB)) {
+        return yield* new Invalid({
+          field: "wake",
+          reason: `the rule for ${rule.ref} watches a ref this never walks; patterns start with ${HUB}`,
+        });
+      }
     }
     return document.rules;
   });
@@ -146,20 +169,41 @@ const run = (
       new Promise((resolve) => {
         const child = spawn(rule.run[0]!, rule.run.slice(1), {
           env: { ...process.env, ...environment },
-          stdio: "inherit",
+          // Output is inherited so an operator sees what a rule said, but
+          // *input* is not: a woken command inheriting a server's stdin can
+          // read from it and block there for good, and a pass that never
+          // finishes leaves this repository's wake switched off for as long as
+          // the process lives.
+          stdio: ["ignore", "inherit", "inherit"],
           shell: false,
         });
+
+        // The same hazard from the other side. A rule that hangs on a socket
+        // or a prompt is indistinguishable from one still working, so it is
+        // given a bound rather than trusted: killed, reported as a failure,
+        // and — because a failure holds the bookmark — tried again next pass.
+        const bound = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, TIMEOUT);
+        const settle = (outcome: { readonly ok: boolean; readonly code: number }) => {
+          clearTimeout(bound);
+          resolve(outcome);
+        };
+
         // A command that cannot start is a rule that did not fire, which is
-        // the same outcome as one that failed: reported, and the cursor stays
-        // where it was so the next run tries again.
-        child.on("error", () => resolve({ ok: false, code: -1 }));
-        child.on("close", (code) => resolve({ ok: code === 0, code: code ?? -1 }));
+        // the same outcome as one that failed: reported, and the bookmark
+        // stays where it was so the next run tries again.
+        child.on("error", () => settle({ ok: false, code: -1 }));
+        child.on("close", (code) => settle({ ok: code === 0, code: code ?? -1 }));
       }),
   );
 
 /** Every hub event between a ref's cursor and its tip, oldest first. */
 const since = Effect.fn("wake.since")(function* (ref: string, tip: Oid, cursor: Oid | null) {
-  const parents = yield* Dag.reachable(tip, cursor, Event.isHubCommit, Event.MAX_EVENTS);
+  // The ceiling this repository is held to, which an operator may have raised
+  // or lowered — reading the constant behind it meant a wake walked further
+  // than the fold that judges the same refs.
+  const parents = yield* Dag.reachable(tip, cursor, Event.isHubCommit, yield* Event.ceilingOf());
   const found: Array<{ readonly commit: Oid; readonly type: string }> = [];
   const unreadable: Array<Oid> = [];
 
@@ -188,7 +232,7 @@ const since = Effect.fn("wake.since")(function* (ref: string, tip: Oid, cursor: 
     found.push({ commit, type: payload.type });
   }
 
-  return { ref, found, unreadable };
+  return { ref, found, unreadable, failed: false };
 });
 
 /** What one run did, for a caller that reports or fails on it. */
@@ -222,11 +266,13 @@ export const dispatch = Effect.fn("Wake.dispatch")(function* (input: {
   let fired = 0;
   let failed = 0;
 
-  const heads = (yield* repository.refs).filter(([name]) => name.startsWith("refs/hub/"));
+  const heads = (yield* repository.refs).filter(([name]) => name.startsWith(HUB));
+  const matched = new Set<string>();
 
   for (const [ref, tip] of heads) {
     const watching = rules.filter((rule) => matchesRef(rule.ref, ref));
     if (watching.length === 0) continue;
+    for (const rule of watching) matched.add(rule.ref);
 
     // A bookmark that is not an object id is one no walk can stop at, so it is
     // read as no bookmark and the ref replays.
@@ -234,7 +280,21 @@ export const dispatch = Effect.fn("Wake.dispatch")(function* (input: {
     const cursor = recorded !== undefined && isOid(recorded) ? recorded : null;
     if (cursor === tip) continue;
 
-    const walked = yield* since(ref, tip, cursor);
+    // One ref's walk failing is one ref that does not advance, not a pass that
+    // throws away what the others earned: the bookmark is written once at the
+    // end, so an escaping failure discarded advances already made and those
+    // refs then re-fired their rules on every wake, for good.
+    const walked = yield* since(ref, tip, cursor).pipe(
+      Effect.catchCause((cause) =>
+        Console.error(`! ${ref}: could not be walked: ${String(cause)}`).pipe(
+          Effect.as({ ref, found: [], unreadable: [], failed: true } as const),
+        ),
+      ),
+    );
+    if (walked.failed === true) {
+      failed++;
+      continue;
+    }
     for (const commit of walked.unreadable) {
       yield* Console.error(`! ${ref}: no rule can be matched against ${commit}, unreadable`);
     }
@@ -265,6 +325,18 @@ export const dispatch = Effect.fn("Wake.dispatch")(function* (input: {
     }
 
     if (clean && !dry) advanced[ref] = tip;
+  }
+
+  // A pattern that matches nothing this repository holds — `refs/hub/prs/*`
+  // for `refs/hub/pr/…` — is accepted by the rules file and then fires for
+  // nothing, which reads exactly like a repository with nothing to do. Said
+  // out loud instead, but only once there is something it could have matched:
+  // before the first pull request, matching nothing is simply the truth.
+  if (heads.length > 0) {
+    for (const rule of rules) {
+      if (matched.has(rule.ref)) continue;
+      yield* Console.error(`! no ref matches ${rule.ref}; that rule watches nothing here`);
+    }
   }
 
   if (!dry) {
