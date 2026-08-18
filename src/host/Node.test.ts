@@ -176,6 +176,53 @@ describe("a mirror beside its origin", () => {
 });
 
 /**
+ * What a repository will tell a member who is not an administrator.
+ *
+ * The registries are the two places a repository says where it sends things.
+ * Registering is charged `repo.admin` on both; reading them was charged
+ * nothing at all, so anybody the repository let in at any level could read
+ * every delivery URL and every remote it pushes to.
+ */
+describe("the administrative registries", () => {
+  it("does not show a reader where this repository sends things", async () => {
+    const repo = "private-registries";
+    const admin = await enableHubUnder(root, repo, ["repo.read", "repo.admin"]);
+    const reader = await grantMemberUnder(root, repo, admin.root, admin.repoId, ["repo.read"]);
+    const base = `${server.url}/${repo}`;
+
+    const registered = await fetch(`${base}/webhooks`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${admin.credential}`,
+      },
+      body: JSON.stringify({
+        url: "https://receiver.internal/hook",
+        secret: "a-secret-long-enough",
+      }),
+    });
+    assert.equal(registered.status, 200, await registered.clone().text());
+
+    const asReader = await fetch(`${base}/webhooks`, {
+      headers: { authorization: `Bearer ${reader.credential}` },
+    });
+    assert.notEqual(asReader.status, 200, "a reader is not shown the delivery URLs");
+    assert.equal((await asReader.text()).includes("receiver.internal"), false);
+
+    const asAdmin = await fetch(`${base}/webhooks`, {
+      headers: { authorization: `Bearer ${admin.credential}` },
+    });
+    assert.equal(asAdmin.status, 200, "and an administrator still is");
+    assert.ok((await asAdmin.text()).includes("receiver.internal"));
+
+    const remotes = await fetch(`${base}/remotes`, {
+      headers: { authorization: `Bearer ${reader.credential}` },
+    });
+    assert.notEqual(remotes.status, 200, "nor the list of where it pushes");
+  });
+});
+
+/**
  * A standing instruction, end to end on a real host.
  *
  * The forwarding hook is composed beside webhook delivery rather than instead
@@ -202,7 +249,7 @@ describe("a remote configured to be sent to", () => {
         sync: { mode: "push", refs: ["refs/heads/*"] },
       }),
     });
-    assert.equal(registered.status, 200);
+    assert.equal(registered.status, 200, await registered.clone().text());
 
     // A real push, because `post-receive` is what forwarding hangs off — the
     // same trigger webhook delivery uses, and the only moment at which a ref

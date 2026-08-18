@@ -1012,6 +1012,9 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("webhookList", "/webhooks", {
       params: RepoParam,
       success: Schema.Struct({ webhooks: Schema.Array(WebhookWire) }),
+      // `Invalid` when the caller may not ask: where a repository sends its
+      // pushes is administrative, not public.
+      error: Invalid,
     }),
   )
   .add(
@@ -1096,6 +1099,8 @@ const remotes = HttpApiGroup.make("remotes")
     HttpApiEndpoint.get("remoteList", "/remotes", {
       params: RepoParam,
       success: Schema.Struct({ remotes: Schema.Array(RemoteWire) }),
+      // As `webhookList`: administrative, not public.
+      error: Invalid,
     }),
   )
   .add(
@@ -1896,6 +1901,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("webhookList", () =>
       Effect.gen(function* () {
+        // Charged what registering one is charged. Listing looks like a read
+        // and is not: what it hands back is every receiver's delivery URL —
+        // where this repository's pushes are already being sent, and often an
+        // internal address that was never meant to be published. On a
+        // repository nobody granted `repo.read`, which is how an open-source
+        // repository is served, it was readable by anyone who could reach it.
+        yield* requireCapability("repo.admin");
         const subscribers = yield* Subscribers;
         const rows = yield* subscribers.list.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { webhooks: rows.map(redact) };
@@ -1996,6 +2008,11 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("remoteList", () =>
       Effect.gen(function* () {
+        // As `webhookList`: every remote's URL, whether it holds a credential,
+        // and the standing instruction that says what this repository sends
+        // there. Administrative either way, and charged like the registration
+        // that put it there.
+        yield* requireCapability("repo.admin");
         const registry = yield* Remotes;
         const rows = yield* registry.list.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { remotes: rows.map(redactRemote) };
