@@ -127,9 +127,13 @@ v0 cut says.
 
 Each slots into a file that exists by Phase 3, in rough value order:
 
+**Tasks and claims have landed** — `src/hub/Task.ts` beside `Session.ts`,
+the `hub.task` capability, a third shape at the namespace boundary counted
+as its own class, and `src/cli/task.ts`. A claim is a lease judged against
+the caller's clock, because the events carry no trustworthy one of their
+own. What remains:
+
 ```text
-tasks and claims        Session.ts sibling class + hub.task
-                        capability; the lease-expiry projection
 requireProvenance       Policy.ts: trailer → produced check,
                         session commands judged before source
                         commands in one receive-pack

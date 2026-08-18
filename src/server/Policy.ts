@@ -41,6 +41,7 @@ import {
 } from "../trust/Projection.ts";
 import * as Event from "../hub/Event.ts";
 import * as Session from "../hub/Session.ts";
+import * as Task from "../hub/Task.ts";
 import {
   approvals,
   checksPassed,
@@ -660,9 +661,10 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   if (
     update.name.startsWith("refs/hub/") &&
     Event.prOf(update.name) === null &&
-    Session.sessionOf(update.name) === null
+    Session.sessionOf(update.name) === null &&
+    Task.taskOf(update.name) === null
   ) {
-    return refused(update.name, `${update.name} does not name a pull request or a session`);
+    return refused(update.name, `${update.name} does not name a pull request, session or task`);
   }
 
   // And its value is a commit of this namespace's own kind. Nothing else here
@@ -700,17 +702,24 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // let a fleet's ordinary week exhaust what a repository's pull requests
     // are allowed, and a session ref is exactly as undeletable as a pull
     // request's.
-    const session = Session.sessionOf(update.name) !== null;
-    const held = session ? yield* Session.sessions() : yield* Event.pullRequests();
-    const opened = [...opening].filter(
-      (name) => (Session.sessionOf(name) !== null) === session,
-    ).length;
+    const classOf = (name: string): "sessions" | "tasks" | "pull requests" =>
+      Session.sessionOf(name) !== null
+        ? "sessions"
+        : Task.taskOf(name) !== null
+          ? "tasks"
+          : "pull requests";
+
+    const kind = classOf(update.name);
+    const held =
+      kind === "sessions"
+        ? yield* Session.sessions()
+        : kind === "tasks"
+          ? yield* Task.tasks()
+          : yield* Event.pullRequests();
+    const opened = [...opening].filter((name) => classOf(name) === kind).length;
     const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
-      return refused(
-        update.name,
-        `this repository already holds ${count} ${session ? "sessions" : "pull requests"}`,
-      );
+      return refused(update.name, `this repository already holds ${count} ${kind}`);
     }
   }
 
