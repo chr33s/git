@@ -99,6 +99,16 @@ export interface Rules {
    * with a hole in it is worse than one an operator turned on knowingly.
    */
   readonly requireProvenance: boolean;
+  /**
+   * What a repository will accept being told it cost, per window.
+   *
+   * Observability and advisory restraint, not defence: usage is self-reported
+   * by the signer, so this bounds what the repository *accepts* rather than
+   * what anybody spent. The wallet is bounded where the tokens are actually
+   * counted, which is not here. `0` is unbounded, and the default.
+   */
+  readonly maxUsageTokens: number;
+  readonly usageWindowSeconds: number;
 }
 
 /** Re-exported where the boundary reads it; defined beside the guard. */
@@ -113,6 +123,8 @@ export const OPEN: Rules = {
   requirePullRequest: false,
   maxTrustAgeSeconds: 0,
   requireProvenance: false,
+  maxUsageTokens: 0,
+  usageWindowSeconds: 0,
 };
 
 /** Where a repository keeps its branch rules, if it has any. */
@@ -130,6 +142,8 @@ const RulesDocument = Schema.Struct({
   maxTrustAgeSeconds: Schema.optional(Schema.Int),
   /** Optional, so a rules file written before this existed still decodes. */
   requireProvenance: Schema.optional(Schema.Boolean),
+  maxUsageTokens: Schema.optional(Schema.Int),
+  usageWindowSeconds: Schema.optional(Schema.Int),
 });
 
 const decodeRules = Schema.decodeUnknownEffect(RulesDocument);
@@ -148,6 +162,8 @@ export const encodeRules = (rules: Rules): Uint8Array =>
         requirePullRequest: rules.requirePullRequest,
         maxTrustAgeSeconds: rules.maxTrustAgeSeconds,
         requireProvenance: rules.requireProvenance,
+        maxUsageTokens: rules.maxUsageTokens,
+        usageWindowSeconds: rules.usageWindowSeconds,
       },
       null,
       2,
@@ -200,6 +216,8 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     requirePullRequest: loaded.requirePullRequest,
     maxTrustAgeSeconds: loaded.maxTrustAgeSeconds ?? 0,
     requireProvenance: loaded.requireProvenance ?? false,
+    maxUsageTokens: loaded.maxUsageTokens ?? 0,
+    usageWindowSeconds: loaded.usageWindowSeconds ?? 0,
   };
 });
 
