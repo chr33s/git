@@ -89,6 +89,16 @@ export interface Rules {
    * and a bound nobody asked for is a bound that breaks working repositories.
    */
   readonly maxTrustAgeSeconds: number;
+  /**
+   * Whether every commit a push introduces must name the session that made it.
+   *
+   * Off by default, and a real cost when on: it is a rule about *every* new
+   * commit, so on a repository where people push directly it asks people to
+   * publish session records too. Scoping it by signer would be kinder and is
+   * deferred — an unsigned commit would become the way around it, and a rule
+   * with a hole in it is worse than one an operator turned on knowingly.
+   */
+  readonly requireProvenance: boolean;
 }
 
 /** Re-exported where the boundary reads it; defined beside the guard. */
@@ -102,6 +112,7 @@ export const OPEN: Rules = {
   requireResolvedThreads: false,
   requirePullRequest: false,
   maxTrustAgeSeconds: 0,
+  requireProvenance: false,
 };
 
 /** Where a repository keeps its branch rules, if it has any. */
@@ -117,6 +128,8 @@ const RulesDocument = Schema.Struct({
   requirePullRequest: Schema.Boolean,
   /** Optional, so a rules file written before this existed still decodes. */
   maxTrustAgeSeconds: Schema.optional(Schema.Int),
+  /** Optional, so a rules file written before this existed still decodes. */
+  requireProvenance: Schema.optional(Schema.Boolean),
 });
 
 const decodeRules = Schema.decodeUnknownEffect(RulesDocument);
@@ -134,6 +147,7 @@ export const encodeRules = (rules: Rules): Uint8Array =>
         requireResolvedThreads: rules.requireResolvedThreads,
         requirePullRequest: rules.requirePullRequest,
         maxTrustAgeSeconds: rules.maxTrustAgeSeconds,
+        requireProvenance: rules.requireProvenance,
       },
       null,
       2,
@@ -185,6 +199,7 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     requireResolvedThreads: loaded.requireResolvedThreads,
     requirePullRequest: loaded.requirePullRequest,
     maxTrustAgeSeconds: loaded.maxTrustAgeSeconds ?? 0,
+    requireProvenance: loaded.requireProvenance ?? false,
   };
 });
 
@@ -397,6 +412,65 @@ export const isProtected = (rules: Rules, ref: string): boolean => {
   });
 };
 
+/**
+ * How far a provenance check will walk a push.
+ *
+ * The rule is about every commit a push introduces, and a push chooses how
+ * many that is. Bounded for the reason every other walk on this path is: an
+ * unbounded one is a push that never returns rather than a push that is
+ * refused, and the refusal says which bound it hit.
+ */
+const MAX_PROVENANCE = 4096;
+
+/**
+ * Whether every commit this push introduces names the session that made it.
+ *
+ * The session refs of the *same push* count. A branch and the record of what
+ * produced it arrive in one receive-pack — that is the flow the rule is for —
+ * so reading the session as it stands on disk would refuse exactly the push
+ * that did everything right.
+ */
+const provenanceOf = Effect.fn("Policy.provenanceOf")(function* (input: {
+  readonly update: RefUpdate;
+  readonly current: Oid | null;
+  readonly sessions: ReadonlyMap<string, Oid>;
+}) {
+  const repository = yield* Repository;
+  const to = input.update.value;
+  if (to === null) return null;
+
+  const introduced = yield* Dag.reachable(to, input.current, undefined, MAX_PROVENANCE).pipe(
+    Effect.catchTag("Invalid", () => Effect.succeed(null)),
+  );
+  if (introduced === null) {
+    return `${input.update.name} introduces more than ${MAX_PROVENANCE} commits, which is more than a provenance check will walk`;
+  }
+
+  // Walked once per session named, not once per commit: a push of fifty
+  // commits from one session reads that session's events once.
+  const produced = new Map<string, ReadonlySet<string>>();
+  for (const commit of introduced.keys()) {
+    const info = yield* repository.readCommit(commit);
+    const named = Session.trailerOf(info.message);
+    if (!("session" in named)) {
+      return `${commit} has ${named.reason}; this branch requires one`;
+    }
+
+    if (!produced.has(named.session)) {
+      const head = input.sessions.get(named.session) ?? null;
+      produced.set(
+        named.session,
+        head === null ? new Set<string>() : yield* Session.producedBy(head),
+      );
+    }
+    if (produced.get(named.session)?.has(commit) !== true) {
+      return `session ${named.session} does not say it produced ${commit}`;
+    }
+  }
+
+  return null;
+});
+
 export interface Principal {
   /** `null` for an anonymous request, which may never write. */
   readonly member: Member | null;
@@ -427,6 +501,11 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
    * ref. The map is the caller's, so nothing survives the request that built
    * it, and a fold cannot go stale inside one.
    */
+  /**
+   * Where each session named by this push stands, the push's own moves
+   * included; see `provenanceOf`.
+   */
+  readonly sessions?: ReadonlyMap<string, Oid>;
   readonly folds?: FoldCache;
   /** As `folds`, for the walk that decides which pull requests to fold. */
   readonly mentions?: MentionCache;
@@ -602,6 +681,22 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   if (update.name.startsWith("refs/hub/") && update.value !== null) {
     const refusal = yield* signedByRevoked(update.value, current, input.trust, held);
     if (refusal !== null) return refused(update.name, refusal);
+  }
+
+  // Asked of every branch this rule covers, before protection is considered:
+  // provenance is about what a commit *is*, not about which branch it landed
+  // on, and a repository that turned this on meant all of them.
+  if (
+    input.rules.requireProvenance &&
+    update.name.startsWith("refs/heads/") &&
+    update.value !== null
+  ) {
+    const missing = yield* provenanceOf({
+      update,
+      current,
+      sessions: input.sessions ?? new Map(),
+    });
+    if (missing !== null) return refused(update.name, missing);
   }
 
   if (!isProtected(input.rules, update.name)) return namespace;
@@ -1538,6 +1633,27 @@ export const gate = Effect.fn("Policy.gate")(function* (
     };
   }
 
+  // Built once for the batch, and only where the rule is on: it is a read of
+  // every session ref, which a repository that does not require provenance
+  // should not pay for on every push.
+  const sessions = new Map<string, Oid>();
+  if (rules.requireProvenance) {
+    const repository = yield* Repository;
+    for (const [name, value] of yield* repository.refs) {
+      const id = Session.sessionOf(name);
+      if (id !== null) sessions.set(id, value);
+    }
+    // The push's own session commands, over what is on disk. A branch and the
+    // record of what produced it travel together, so the record has to count
+    // before the branch is judged against it.
+    for (const update of updates) {
+      const id = Session.sessionOf(update.name);
+      if (id === null) continue;
+      if (update.value === null) sessions.delete(id);
+      else sessions.set(id, update.value);
+    }
+  }
+
   const decisions: Decision[] = [];
   const folds: FoldCache = new Map();
   const mentions: MentionCache = new Map();
@@ -1565,6 +1681,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
       genesis: stored?.genesis ?? null,
       trust,
       rules,
+      sessions,
       folds,
       mentions,
       opening,

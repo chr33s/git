@@ -641,7 +641,8 @@ does not direct it.
 
 ### 9. Policy: requiring provenance
 
-The branch-rules document at `refs/meta/policy` gains one field:
+The branch-rules document at `refs/meta/policy` gains one field, and this
+is **built**:
 
 ```text
 requireProvenance: boolean     default false
