@@ -1214,7 +1214,7 @@ reach. Deleting the loose copy the moment a tombstone is written cannot answer
 that question without reproducing the walk, and a packed copy needed `gc`
 anyway, since a pack cannot give up one object without being rewritten.
 
-Because Git is content-addressed, absence composes: the commit references the tree, the tree references the blob's hash, and the blob object is simply gone. Verifiers treat a missing blob as valid **only** when a valid tombstone covers that event; a missing blob without a tombstone is corruption.
+Because Git is content-addressed, absence composes: the commit references the tree, the tree references the blob's hash, and the blob object is simply gone. Verifiers treat a missing blob as valid **only** when a valid tombstone covers that event; a missing blob without a tombstone is corruption. That applies to **both ends of a transfer**: a strict object closure over a hub ref fails the moment anything in it has been redacted, so the side building a pack — the server answering a fetch and the client packing a push alike — walks strictly first and retries once against what the tombstones account for. Computing the exclusion up front instead would fold the trust log on every transfer, including the overwhelming majority that touch no hub ref at all; an absence no tombstone covers fails the retry too, which is the corruption it is.
 
 Redaction removes content, never structure: the event's existence and position in history remain visible, and the tombstone naming it is itself a permanent record that something was removed. Destroying structure would break the hash chain and is not offered.
 

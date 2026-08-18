@@ -98,19 +98,7 @@ export const planFor = (request: {
  * dropped an object the pack genuinely needs, and the client rebuilt a tree
  * pointing at nothing.
  */
-const missing = Effect.fn("Protocol.missing")(function* () {
-  const repository = yield* Repository;
-  // Every payload a tombstone *names*, not only those a tombstone that still
-  // counts names. A removal is irreversible and its authorization is not:
-  // expiry is judged against the clock and a compromise reaches backwards, so
-  // the strict set can empty while the bytes stay gone, and every fetch of
-  // `refs/hub/*` then fails forever with nothing to explain the absence.
-  const covered = yield* Redaction.covered();
-
-  const gone = new Set<Oid>();
-  for (const oid of covered) if (!(yield* repository.contains(oid))) gone.add(oid);
-  return gone;
-});
+const missing = Redaction.absent;
 
 /** A text pkt-line, the conventional trailing newline stripped. */
 const text = (payload: Uint8Array): string => {

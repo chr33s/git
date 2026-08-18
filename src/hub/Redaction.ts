@@ -225,6 +225,29 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
   return found;
 });
 
+/**
+ * What a tombstone covers *and this repository no longer holds*.
+ *
+ * The exclusion `gc` takes says "stop protecting this"; this one says "this is
+ * not here, walk past it". They are not the same set, because git dedupes by
+ * content: a redacted payload can be the very object a branch's tree names,
+ * and `gc` keeps that one. Handing the whole set to a pack walk would drop an
+ * object the pack genuinely needs, and the other end would rebuild a tree
+ * pointing at nothing.
+ *
+ * Both ends of a transfer need it — the server serving a fetch, and a client
+ * packing a hub ref for a push — so it lives beside the set it filters rather
+ * than in either of them.
+ */
+export const absent = Effect.fn("hub.Redaction.absent")(function* () {
+  const repository = yield* Repository;
+  // Every payload a tombstone *names*, not only those a tombstone that still
+  // counts names; see `covered`.
+  const gone = new Set<Oid>();
+  for (const oid of yield* covered()) if (!(yield* repository.contains(oid))) gone.add(oid);
+  return gone;
+});
+
 /** The pull requests carrying anything that *might* be a tombstone. */
 const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: ReadonlyArray<string>) {
   const found: string[] = [];
