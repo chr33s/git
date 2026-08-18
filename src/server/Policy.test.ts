@@ -540,6 +540,71 @@ describe("Policy", () => {
       assert.match(outcome.verdict.ok === false ? outcome.verdict.reason : "", /has been revoked/);
     });
 
+    it("refuses a since-revoked member's check result, which a branch rule reads", async () => {
+      // Whole families were exempted as inert, but `requiredChecks` is
+      // satisfied by `check.completed` and `requireResolvedThreads` by
+      // `comment.resolved` — both decide whether a protected branch may move,
+      // exactly as a verdict does. A relayed success from a revoked key
+      // cleared the branch's checks on a pull request with no later floor to
+      // catch it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const opened = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "just talking",
+            key: where.reviewer,
+          });
+          const said = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.checkCompleted({
+            repo: where.genesis.repoId,
+            pr,
+            head: EMPTY_TREE_OID,
+            name: "build",
+            provider: "ci",
+            status: "success",
+            key: where.reviewer,
+          });
+          const checked = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: opened! });
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.reviewer.publicKey),
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+          const trust = yield* projectTrust(where.genesis);
+          const judged = (value: Oid) =>
+            evaluate({
+              update: { name: `refs/hub/pr/${pr}`, value },
+              principal: where.principal,
+              genesis: where.genesis,
+              trust,
+              rules: OPEN,
+            });
+          return { said: yield* judged(said!), checked: yield* judged(checked!) };
+        }),
+      );
+
+      assert.equal(outcome.said.ok, true, "an old comment still says nothing a rule reads");
+      assert.equal(outcome.checked.ok, false);
+      assert.match(outcome.checked.ok === false ? outcome.checked.reason : "", /has been revoked/);
+    });
+
     it("refuses a since-revoked member's close, which takes authority away", async () => {
       // Granting is not the only way to move authority. `protectedBranch`
       // skips a pull request that is not open, so a relayed `pr.closed` from a
@@ -586,6 +651,80 @@ describe("Policy", () => {
 
       assert.equal(outcome.ok, false);
       assert.match(outcome.ok === false ? outcome.reason : "", /has been revoked/);
+    });
+
+    it("refuses a pushed tombstone from a member whose grant has expired", async () => {
+      // A permanent verdict does not consult expiry — it cannot, or the answer
+      // would move on a wall clock and the host that acted on it would fold a
+      // history no replica agrees with. So the only place an expired redactor
+      // is turned away is the door, and the door was not looking: a relayed
+      // tombstone from a membership that lapsed was honoured, and `gc`
+      // destroyed the payload it named.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(where.dev.publicKey),
+              capabilities: ["hub.create-pr", "hub.comment", "hub.redact"],
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const said = yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "the deploy key is hunter2",
+            key: where.dev,
+          });
+          const before = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === said)?.payload?.id ?? "";
+          yield* PullRequest.redact({
+            repo: where.genesis.repoId,
+            pr,
+            target,
+            reason: "sensitive-content",
+            key: where.dev,
+          });
+          const after = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* repository.setRef({ name: `refs/hub/pr/${pr}`, to: before! });
+
+          // Re-granted with an expiry already behind us: they still hold
+          // `hub.redact`, and the grant carrying it has lapsed.
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: where.genesis.repoId,
+              publicKey: formatPublicKey(where.dev.publicKey),
+              capabilities: ["hub.create-pr", "hub.comment", "hub.redact"],
+              expiresAt: new Date(1_700_000_000_000),
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          return yield* evaluate({
+            update: { name: `refs/hub/pr/${pr}`, value: after },
+            principal: where.principal,
+            genesis: where.genesis,
+            trust: yield* projectTrust(where.genesis),
+            rules: OPEN,
+          });
+        }),
+      );
+
+      assert.equal(outcome.ok, false);
+      assert.match(outcome.ok === false ? outcome.reason : "", /unexpired hub\.redact/);
     });
 
     it("refuses a pushed tombstone from a member whose hub.redact was narrowed away", async () => {
@@ -663,7 +802,7 @@ describe("Policy", () => {
       );
 
       assert.equal(outcome.ok, false);
-      assert.match(outcome.ok === false ? outcome.reason : "", /needs hub\.redact/);
+      assert.match(outcome.ok === false ? outcome.reason : "", /needs an unexpired hub\.redact/);
     });
 
     it("holds the trust log to a ceiling of its own", async () => {

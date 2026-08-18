@@ -224,7 +224,13 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
   if (known !== undefined) return known.has(to);
 
   const at = yield* repository.resolve(Event.refOf(pr));
-  const key = `${pr}\u0000${at}`;
+  // The ceiling belongs in the key. A host that will not walk a pull request
+  // that size answers "it proposes nothing", and two hosts with the same ref
+  // and different ceilings are two different answers — one of which refuses an
+  // approved protected-branch push. The repository does not: this answer is a
+  // pure function of the event DAG the oid names, so two repositories holding
+  // the same one hold the same answer.
+  const key = `${pr}\u0000${at}\u0000${yield* Event.ceilingOf()}`;
   const remembered = mentions.get(key);
   if (remembered !== undefined) {
     mentions.delete(key);
@@ -724,10 +730,16 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // reopens it — and `pr.updated` stales every approval by moving the head.
     // A comment, a thread and a check say nothing about whether a branch may
     // move, and they are the bulk of any history.
+    // Whole families are not safe: `requiredChecks` is satisfied by
+    // `check.completed`, and `requireResolvedThreads` by `comment.resolved`,
+    // so both decide whether a protected branch may move exactly as a verdict
+    // does. What is left says nothing a branch rule reads — starting a check
+    // claims no result, and a comment is a comment.
     const inert =
       payload === null ||
-      payload.type.startsWith("comment.") ||
-      payload.type.startsWith("check.") ||
+      payload.type === "comment.created" ||
+      payload.type === "comment.replied" ||
+      payload.type === "check.started" ||
       (payload.type === "review.submitted" && payload.decision === "comment");
     if (!inert) {
       for (const signer of signed) {
@@ -748,10 +760,18 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // against a stale head accepted — sending somebody else's payload to `gc`.
     // The boundary is where "now" is knowable, so it is where that is refused.
     if (payload?.type !== "event.redacted") continue;
-    const holds = signed.some((signer) =>
-      permits(trust.members.get(signer)?.capabilities ?? [], "hub.redact"),
-    );
-    if (!holds) return "a redaction needs hub.redact";
+    // Expiry as well as the capability. A permanent verdict does not consult
+    // expiry — it cannot, or the answer would move on a wall clock and the
+    // host that acted on it would fold a history no replica agrees with — so
+    // the *only* place an expired redactor is turned away is here. Left out,
+    // a relayed tombstone from a membership that lapsed years ago was
+    // honoured and `gc` destroyed the payload it named.
+    const holds = signed.some((signer) => {
+      const member = trust.members.get(signer);
+      if (member === undefined || !permits(member.capabilities, "hub.redact")) return false;
+      return member.expiresAt === null || member.expiresAt.getTime() > Date.now();
+    });
+    if (!holds) return "a redaction needs an unexpired hub.redact";
   }
   return null;
 });

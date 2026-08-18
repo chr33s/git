@@ -89,6 +89,33 @@ describe("Auth", () => {
       assert.equal(consumed, true);
     });
 
+    it("survives a flood of challenges nobody answers", async () => {
+      // Every 401 issues a nonce, and 401s are what unauthenticated traffic
+      // produces. Remembering every issued one meant noise alone could turn
+      // the store over — evicting the challenge an honest client was about to
+      // answer, host-wide, for as long as the flood lasted. A nonce carries
+      // its own expiry and a tag only this store can make, so issuing writes
+      // nothing and only a *spent* one is remembered.
+      const layer = noncesInMemory();
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* Nonces;
+          const honest = yield* store.issue(300);
+          // Far past any ceiling the store could keep.
+          for (let index = 0; index < 8192; index++) yield* store.issue(300);
+          return {
+            honest: yield* store.consume(honest),
+            forged: yield* store.consume("9999999999999.deadbeef.0000"),
+            garbage: yield* store.consume("not-a-nonce"),
+          };
+        }).pipe(Effect.provide(layer)),
+      );
+
+      assert.equal(outcome.honest, true, "the challenge issued first is still answerable");
+      assert.equal(outcome.forged, false, "and one this store never made is not");
+      assert.equal(outcome.garbage, false);
+    });
+
     it("spends a nonce exactly once", async () => {
       const layer = noncesInMemory();
       const outcome = await Effect.runPromise(

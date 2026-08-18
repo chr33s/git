@@ -146,44 +146,83 @@ export class Nonces extends Context.Service<
  * provide, so it is constructed here and handed over by `Layer.succeed`.
  */
 export const nonceStore = (): Nonces["Service"] => {
-  const issued = new Map<string, number>();
+  /**
+   * Nonces that have been *spent*, until they would have expired anyway.
+   *
+   * Issuance writes nothing. Every 401 issues a nonce, and 401s are what
+   * unauthenticated traffic produces — so a store that remembered every issued
+   * one could be turned over at will by noise, evicting the challenges honest
+   * clients were about to answer and starving native authentication host-wide.
+   * A nonce carries its own expiry and a tag only this store can make, so
+   * "did I issue this, and is it still good?" needs no memory; only "has it
+   * been used already?" does, and an entry lands here only after a signature
+   * has already been verified against it.
+   */
+  const spent = new Map<string, number>();
 
   /**
-   * How many unspent nonces to keep.
+   * A ceiling on the spent set.
    *
-   * Every 401 issues one, and 401s are what unauthenticated traffic produces
-   * — so without a ceiling the map grows for the whole expiry window on
-   * nothing but noise, inside a Durable Object with 128 MiB. Evicting the
-   * oldest costs a client its challenge, which is a retry.
+   * Reached only by genuinely authenticated requests, which is what makes it
+   * safe to evict the oldest: an attacker who can fill this can already
+   * authenticate, and the cost of eviction is one client's retry.
    */
   const CAPACITY = 4096;
 
+  /**
+   * The tag that makes a nonce self-certifying.
+   *
+   * Random per store and never leaves it, so a nonce cannot be forged; and
+   * because it is per store, a restart invalidates outstanding challenges,
+   * which is the retry the service already documents.
+   */
+  const secret = crypto.getRandomValues(new Uint8Array(32));
+  const key = crypto.subtle.importKey(
+    "raw",
+    secret.slice().buffer,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const tag = async (body: string): Promise<string> => {
+    const mac = await crypto.subtle.sign("HMAC", await key, encoder.encode(body));
+    return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+
   const prune = (now: number) => {
-    for (const [nonce, expiry] of issued) if (expiry <= now) issued.delete(nonce);
+    for (const [nonce, expiry] of spent) if (expiry <= now) spent.delete(nonce);
     // Insertion-ordered, so the front of the map is the oldest.
-    while (issued.size > CAPACITY) {
-      const oldest = issued.keys().next();
+    while (spent.size > CAPACITY) {
+      const oldest = spent.keys().next();
       if (oldest.done === true) break;
-      issued.delete(oldest.value);
+      spent.delete(oldest.value);
     }
   };
 
   return Nonces.of({
     issue: (ttlSeconds) =>
-      Effect.sync(() => {
-        const now = Date.now();
-        prune(now);
-        const nonce = crypto.randomUUID();
-        issued.set(nonce, now + ttlSeconds * 1000);
-        return nonce;
+      Effect.promise(async () => {
+        const body = `${Date.now() + ttlSeconds * 1000}.${crypto.randomUUID()}`;
+        return `${body}.${await tag(body)}`;
       }),
     consume: (nonce) =>
-      Effect.sync(() => {
+      Effect.promise(async () => {
+        const cut = nonce.lastIndexOf(".");
+        if (cut <= 0) return false;
+        const body = nonce.slice(0, cut);
+        // Constant-time is not the property that matters here: forging the tag
+        // needs the secret, and a wrong one is rejected whatever the timing
+        // tells the caller about how wrong it was.
+        if (nonce.slice(cut + 1) !== (await tag(body))) return false;
+
+        const expiry = Number(body.slice(0, body.indexOf(".")));
         const now = Date.now();
+        if (!Number.isFinite(expiry) || expiry <= now) return false;
+
         prune(now);
-        const expiry = issued.get(nonce);
-        if (expiry === undefined || expiry <= now) return false;
-        issued.delete(nonce);
+        if (spent.has(nonce)) return false;
+        spent.set(nonce, expiry);
         return true;
       }),
   });
