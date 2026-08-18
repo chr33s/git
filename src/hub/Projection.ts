@@ -20,7 +20,7 @@
  * than dropped — "why is my approval not counting?" is the first question
  * anybody asks.
  */
-import { Effect } from "effect";
+import { Effect, Exit } from "effect";
 
 import type { Fingerprint } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
@@ -288,13 +288,31 @@ const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
  * so one walk per distinct head is all that is ever needed.
  */
 const trustReach = () => {
-  const walked = new Map<Oid, ReadonlySet<Oid>>();
+  const walked = new Map<
+    Oid,
+    Exit.Exit<ReadonlySet<Oid>, Invalid | ObjectNotFound | StorageFailure>
+  >();
 
-  /** The memo itself, which `Verify.authorize` takes so it walks the log once too. */
+  /**
+   * The memo itself, which `Verify.authorize` takes so it walks the log once too.
+   *
+   * The *outcome* is remembered, not the answer: recording only success left
+   * the one head worth remembering — the one whose ancestry this host refuses
+   * to walk — walked again from scratch on every ask, several times per event
+   * and once per event per fold, each ask reading the whole ceiling before
+   * refusing. A chain of empty-tree commits one commit past the ceiling costs
+   * one push to write and nothing to reference, so nothing that inspects refs
+   * ever sees it; naming it as the trust head of one event then charged every
+   * later protected-branch push, collection and deepening fetch millions of
+   * synchronous object reads. Sound for the same reason remembering the
+   * successes is: the log does not move while a projection is being built.
+   */
   const ancestry: Verify.Ancestry = Effect.fnUntraced(function* (head: Oid) {
-    const seen = walked.get(head) ?? (yield* Log.ancestry(head));
-    walked.set(head, seen);
-    return seen;
+    const known = walked.get(head);
+    if (known !== undefined) return yield* known;
+    const outcome = yield* Effect.exit(Log.ancestry(head));
+    walked.set(head, outcome);
+    return yield* outcome;
   });
 
   /**
@@ -774,9 +792,17 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     // pre-pass verdict, which is what stops the two passes disagreeing and
     // leaving the pull request with a winner it can read no `base` from.
     const decided = entry.commit === opening.commit ? settled.get(entry.commit) : undefined;
-    const authorized =
-      decided ??
-      (yield* Verify.authorize({
+    // A tombstone is the one event this repository acts on irreversibly, so
+    // its verdict must not move afterwards. Judged like the rest, an expiring
+    // grant made `redacted` shrink on a wall clock: `gc` stopped excluding a
+    // payload the operator had been told was gone and went back to protecting
+    // and serving it, the second pass stopped reading the target as absent,
+    // and the host that had already deleted the blob folded a pull request no
+    // replica agreed with — on the boundary that decides whether the branch
+    // behind it may move.
+    const irreversible = payload.type === "event.redacted";
+    const judge = (permanent: boolean) =>
+      Verify.authorize({
         projection: trust,
         bytes: entry.bytes,
         signatures: entry.signatures,
@@ -785,29 +811,36 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         made: { at: new Date(payload.issuedAt), trustHead: effective },
         seen: ancestry,
         contains: inTrustLog,
-        // A tombstone is the one event this repository acts on irreversibly,
-        // so its verdict must not move afterwards. Judged like the rest, an
-        // expiring grant made `redacted` shrink on a wall clock: `gc` stopped
-        // excluding a payload the operator had been told was gone and went
-        // back to protecting and serving it, the second pass stopped reading
-        // the target as absent, and the host that had already deleted the
-        // blob folded a pull request no replica agreed with — on the boundary
-        // that decides whether the branch behind it may move.
-        permanent: payload.type === "event.redacted",
-      }));
+        permanent,
+      });
+    const authorized = decided ?? (yield* judge(irreversible));
+
+    // Recorded when the head it names is a commit this replica's trust log
+    // actually holds — a fabricated one passes its own floor check, having no
+    // ancestors to be behind, and would then become a floor nothing can reach,
+    // since `Log.ancestry` of a commit nobody has is empty — and when the
+    // event is authorized under the reading that cannot move.
+    //
+    // That reading, not the ordinary one, because the floor is what a
+    // *permanent* verdict is judged against, and a floor built from verdicts
+    // that move is not permanent at all. An ancestor refused on the wall clock
+    // — its signer's grant lapsed — was written by a member in good standing
+    // and is part of what the conversation had seen; dropped from the floor it
+    // lowers the floor for every descendant, and a tombstone judged today
+    // against a late floor is judged next month against its own older declared
+    // head and refused. The host that already deleted the payload is then
+    // folding a history no replica agrees with, which is the divergence
+    // `permanent` exists to remove, reached with no attacker at all. Raising
+    // the floor is the conservative direction in any case: an event that falls
+    // short of it is read as having seen it, never refused for it.
+    const durable = authorized.ok || irreversible ? authorized.ok : (yield* judge(true)).ok;
+    if (durable && effective !== null && (yield* inTrustLog(effective))) {
+      heads.set(entry.commit, effective);
+    }
+
     if (!authorized.ok) {
       rejected.push({ commit: entry.commit, reason: authorized.reason });
       continue;
-    }
-
-    // Recorded only once the event counts, and only when the head it names is
-    // a commit this replica's trust log actually holds. A fabricated one
-    // passes its own floor check — it has no ancestors to be behind — and
-    // would then become the floor for everything after it, which nothing can
-    // reach: `Log.ancestry` of a commit nobody has is empty, so every later
-    // event is refused forever on a ref that only grows.
-    if (effective !== null && (yield* inTrustLog(effective))) {
-      heads.set(entry.commit, effective);
     }
 
     const signer = authorized.principal.fingerprint;

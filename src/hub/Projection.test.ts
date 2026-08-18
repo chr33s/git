@@ -15,7 +15,7 @@ import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { ObjectStore, type Oid } from "../git/Store.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import * as Record from "../trust/Record.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
@@ -33,6 +33,42 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
         GitRepository.layer.pipe(
           Layer.provide(GitRepository.hooksNoop),
           Layer.provideMerge(stores),
+        ),
+      ),
+    ),
+  );
+
+/**
+ * The same, with every object read recorded.
+ *
+ * A memo that saves a walk is only doing its job if the walk happens once, and
+ * the only honest way to ask that is to count what the store was asked for.
+ */
+const counting = (reads: Array<string>) =>
+  Layer.effect(
+    ObjectStore,
+    Effect.gen(function* () {
+      const inner = yield* ObjectStore;
+      return ObjectStore.of({
+        ...inner,
+        read: (oid) =>
+          Effect.andThen(
+            Effect.sync(() => {
+              reads.push(oid);
+            }),
+            inner.read(oid),
+          ),
+      });
+    }),
+  ).pipe(Layer.provideMerge(stores));
+
+const watched = <A, E>(effect: Effect.Effect<A, E, Repository>, reads: Array<string>) =>
+  Effect.runPromise(
+    effect.pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(counting(reads)),
         ),
       ),
     ),
@@ -616,6 +652,79 @@ describe("hub projection", () => {
       );
 
       assert.equal(outcome, null, "the pull request still folds");
+    });
+
+    it("walks a head it refuses exactly once, not once per ask", async () => {
+      // The memo in front of the log walk recorded successes only, so the one
+      // head worth remembering — the one whose ancestry this host will not
+      // walk — was walked again from scratch on every ask, several times per
+      // event and once per event per fold, each ask reading the whole ceiling
+      // before refusing. The chain costs one push to write and is referenced
+      // by nothing, so no rule that inspects refs ever sees it; named as a
+      // trust head it charged every later protected-branch push, collection
+      // and deepening fetch for the walk, synchronously.
+      const reads: Array<string> = [];
+      const sprawl = await watched(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          const chain = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: Array.from(
+              { length: 40 },
+              // SAFETY: forty lowercase hex characters, which is what `Oid`
+              // brands; they name nothing, which is the point.
+              (_, index) => `${index}`.padStart(40, "c") as Oid,
+            ),
+            message: "join\n",
+            author: Record.identityAt(new Date(1_700_000_000_000)),
+          });
+
+          // Several events, every one of them naming that same head.
+          for (let index = 0; index < 6; index++) {
+            const bytes = Event.encode({
+              version: 1,
+              type: "comment.created",
+              repo: where.genesis.repoId,
+              pr,
+              id: Event.newId(),
+              issuedAt: new Date(1_700_000_001_000 + index).toISOString(),
+              trustHead: chain,
+              body: `naming a head nobody can walk (${index})`,
+              head: null,
+              path: null,
+              side: null,
+              line: null,
+              contextHash: null,
+            });
+            const ref = Event.refOf(pr);
+            const head = yield* repository.resolve(ref);
+            yield* repository.setRef({
+              name: ref,
+              to: yield* Record.write({
+                name: Event.RECORD,
+                payload: bytes,
+                signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+                parents: [head!],
+                message: "comment.created sprawling\n",
+              }),
+            });
+          }
+
+          // Counted from here, so writing the history above is not in it.
+          reads.length = 0;
+          yield* projectionOf(where, pr).pipe(Effect.provide(Log.ceiling(8)));
+          return chain;
+        }),
+        reads,
+      );
+
+      // Two, because the redaction fold runs twice and each pass folds with a
+      // memo of its own — not twelve, which is once per event per pass.
+      const walks = reads.filter((oid) => oid === sprawl).length;
+      assert.equal(walks, 2, "six events naming one unwalkable head is one refused walk per pass");
     });
 
     it("counts approvers, not approval events", async () => {
@@ -2787,6 +2896,112 @@ describe("hub projection", () => {
         outcome.before.threads.length,
         "and still is, whatever has since become of the key that said so",
       );
+    });
+
+    it("keeps honouring a tombstone after an ancestor's grant lapses", async () => {
+      // A tombstone's verdict is permanent because honouring it deletes bytes.
+      // But it is judged against the *floor*, and the floor was built only
+      // from events that were authorized under the ordinary reading — which
+      // consults the wall clock. So an ancestor whose author's grant expired
+      // silently dropped out of the floor, the floor fell back to the
+      // tombstone's own older declared head, and a redaction this repository
+      // had already acted on became unauthorized: `redacted` stopped naming
+      // the blob, `gc` went back to protecting a payload the operator had been
+      // told was gone, and the host that deleted it folded a history no
+      // replica agreed with. No attacker is needed — only a grant with an
+      // expiry and the passage of time.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+
+          const root = yield* generate("root@example.com");
+          const author = yield* generate("author@example.com");
+          const lapsed = yield* generate("lapsed@example.com");
+          const redactor = yield* generate("redactor@example.com");
+
+          const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+          yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+
+          const grant = (key: PrivateKey, capabilities: ReadonlyArray<string>, expiresAt?: Date) =>
+            Effect.flatMap(
+              Certificate.grant({
+                repo: genesis.repoId,
+                publicKey: formatPublicKey(key.publicKey),
+                capabilities,
+                expiresAt: expiresAt ?? null,
+                id: Log.newId(),
+              }),
+              (payload) => Log.issue(payload, [root]),
+            );
+
+          yield* grant(author, ["hub.create-pr", "hub.comment"]);
+          // Granted with an expiry that has already passed: the fold below is
+          // the one that happens "next month".
+          yield* grant(lapsed, ["hub.comment"], new Date(1_700_000_500_000));
+
+          const where = { genesis, root, author, reviewer: redactor } satisfies World;
+          const { pr } = yield* PullRequest.open({
+            repo: genesis.repoId,
+            title: "Add a thing",
+            base: "refs/heads/main",
+            head: REVISION,
+            key: author,
+          });
+          // What the tombstone names, and the head it will declare: the log as
+          // it stood before `hub.redact` was granted at all.
+          const stale = yield* repository.resolve(Log.LOG_REF);
+          const commit = yield* PullRequest.comment({
+            repo: genesis.repoId,
+            pr,
+            body: "ordinary",
+            key: author,
+          });
+          const { events } = yield* Event.entries(pr);
+          const target = events.find((entry) => entry.commit === commit)?.payload?.id ?? "";
+
+          yield* grant(redactor, ["hub.redact"]);
+          // The ancestor that carries the floor forward — and the one whose
+          // author's grant has lapsed.
+          yield* PullRequest.comment({
+            repo: genesis.repoId,
+            pr,
+            body: "carries the floor",
+            key: lapsed,
+          });
+
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          const bytes = Event.encode({
+            version: 1,
+            type: "event.redacted",
+            repo: genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_000_000).toISOString(),
+            // Behind the grant of `hub.redact`: only the floor lifts it.
+            trustHead: stale,
+            target,
+            targetCommit: Event.qualify(commit),
+            reason: "gone",
+          });
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(redactor, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "event.redacted under a stale head\n",
+            }),
+            expected: head,
+          });
+
+          const state = yield* projectionOf(where, pr);
+          return { redacted: state.redacted.size, threads: state.threads.length };
+        }),
+      );
+
+      assert.equal(outcome.redacted, 1, "the redaction this host may already have acted on stands");
     });
 
     it("does not let a member without hub.redact decide it either", async () => {
