@@ -51,8 +51,15 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
 
   const found = new Set<Oid>();
   for (const pr of only ?? (yield* tombstoned(yield* Event.pullRequests()))) {
-    const state = yield* project(genesis, trust, pr);
-    if (state.redacted.size === 0) continue;
+    // One pull request this host cannot fold is one pull request. `tombstoned`
+    // above already treats an unwalkable history that way, and leaving this
+    // one unguarded put the whole repository's collection behind a single
+    // pull request — including the purge that is how a redacted payload
+    // actually leaves the object store.
+    const state = yield* project(genesis, trust, pr).pipe(
+      Effect.catchTag("Invalid", () => Effect.succeed(null)),
+    );
+    if (state === null || state.redacted.size === 0) continue;
 
     // By commit, not by event id: an id belongs to its author here, and a
     // tombstone matched by bare id would take every same-id event with it —

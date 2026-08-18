@@ -11,6 +11,7 @@ import {
   type PrivateKey,
   sign,
 } from "../crypto/SshSignature.ts";
+import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -541,6 +542,80 @@ describe("hub projection", () => {
         1,
         "and the one the reference was written about is resolved",
       );
+    });
+
+    it("folds on when an event names a trust head this host will not walk", async () => {
+      // A head whose ancestry exceeds the log's ceiling is *refused* rather
+      // than answered empty, and that refusal must not take the fold down. One
+      // commit with an empty tree and enough fabricated parents, named as an
+      // event's trust head by anybody holding `hub.comment`, would otherwise
+      // make this pull request unfoldable for good — and a pull request the
+      // boundary cannot fold is a protected branch that can never be pushed
+      // again, on a ref the event cannot be removed from.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: REVISION,
+            decision: "approve",
+            key: where.reviewer,
+          });
+
+          // Trust-log-shaped and enormous: an empty tree reads as a join, and
+          // the parents are oids this repository has never held.
+          const sprawl = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: Array.from(
+              { length: 40 },
+              // SAFETY: forty lowercase hex characters, which is what `Oid`
+              // brands; they name nothing, which is the point.
+              (_, index) => `${index}`.padStart(40, "b") as Oid,
+            ),
+            message: "join\n",
+            author: Record.identityAt(new Date(1_700_000_000_000)),
+          });
+
+          const bytes = Event.encode({
+            version: 1,
+            type: "comment.created",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_001_000).toISOString(),
+            trustHead: sprawl,
+            body: "naming a head nobody can walk",
+            head: null,
+            path: null,
+            side: null,
+            line: null,
+            contextHash: null,
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "comment.created sprawling\n",
+            }),
+          });
+
+          return yield* projectionOf(where, pr).pipe(
+            Effect.provide(Log.ceiling(8)),
+            Effect.as(null),
+            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          );
+        }),
+      );
+
+      assert.equal(outcome, null, "the pull request still folds");
     });
 
     it("counts approvers, not approval events", async () => {

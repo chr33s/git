@@ -1839,6 +1839,42 @@ describe("Policy", () => {
       assert.match(outcome.refused.at(0)?.reason ?? "", /checkpoint/);
     });
 
+    it("still lets the pushes that would lift the bound through", async () => {
+      // A checkpoint is how a stale view stops being stale, and it lands on
+      // the trust log; the bound itself lives in the rules file. Refusing
+      // those alongside everything else made the flag a one-way door — the
+      // repository became unwritable over the network and neither push that
+      // would recover it could be made. Both are charged their own capability
+      // elsewhere, so exempting them from *this* check opens nothing.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "policy.write"]);
+          const repository = yield* Repository;
+          const { second } = yield* history("refs/heads/topic");
+          yield* withMaxAge(3600);
+          const log = yield* repository.resolve(Log.LOG_REF);
+          const rules = yield* repository.resolve(Policy.RULES_REF);
+
+          return {
+            ordinary: yield* gateAs(where, [{ name: "refs/heads/topic", value: second }]),
+            recovery: yield* gateAs(where, [
+              { name: Log.LOG_REF, value: log },
+              { name: Policy.RULES_REF, value: rules },
+            ]),
+          };
+        }),
+      );
+
+      assert.equal(outcome.ordinary.updates.length, 0, "an ordinary push is still refused");
+      assert.match(outcome.ordinary.refused.at(0)?.reason ?? "", /checkpoint/);
+      // Whatever else these two are held to — a trust record needs its own
+      // capability, and `refs/meta/policy` needs `policy.write` — the answer
+      // is never "your view is stale", which is the door this closes.
+      for (const entry of outcome.recovery.refused) {
+        assert.doesNotMatch(entry.reason, /checkpoint/, entry.ref);
+      }
+    });
+
     it("allows it once a recent checkpoint exists", async () => {
       const outcome = await scenario(
         Effect.gen(function* () {

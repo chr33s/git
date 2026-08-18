@@ -1063,6 +1063,22 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
   return may(principal, capability) ? null : `this needs ${capability}`;
 });
 
+/**
+ * Whether a staleness bound has anything to say about this ref.
+ *
+ * It has nothing to say about the two refs that *lift* it. A checkpoint is how
+ * a membership view stops being stale, and it lands on the trust log; the
+ * bound itself lives in the rules file. Refusing those alongside everything
+ * else made the flag a one-way door: the repository became unwritable over the
+ * network and neither push that would recover it could be made, which is not
+ * the bound `Verify.fresh` describes but a repository lost to it. Both are
+ * charged their own capability elsewhere — a trust record needs a trust
+ * capability, and `refs/meta/policy` needs `policy.write` — so exempting them
+ * from *this* check opens nothing.
+ */
+const boundApplies = (ref: string): boolean =>
+  ref !== RULES_REF && ref !== Refspec.TRUST_LOG && !ref.startsWith("refs/meta/trust/log/");
+
 export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   ref: string,
   /**
@@ -1128,7 +1144,7 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   // `tagCreate`, `merge`, `rebase`, `cherry-pick`, `pull` and commit-pack
   // against a membership view of any age — which is most of the ways a ref
   // moves.
-  if (rules.maxTrustAgeSeconds > 0) {
+  if (rules.maxTrustAgeSeconds > 0 && boundApplies(ref)) {
     const trust =
       who.projection.repoId === stored.genesis.repoId
         ? who.projection
@@ -1238,7 +1254,14 @@ export const gate = Effect.fn("Policy.gate")(function* (
     trust === null || rules.maxTrustAgeSeconds <= 0
       ? null
       : Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
-  if (stale !== null && !stale.ok) {
+  // Refused per ref rather than for the batch, so the two refs that lift the
+  // bound are still reachable while it holds; see `boundApplies`.
+  const withheld = new Set(
+    stale === null || stale.ok
+      ? []
+      : updates.filter((update) => boundApplies(update.name)).map((update) => update.name),
+  );
+  if (stale !== null && !stale.ok && withheld.size === updates.length) {
     return {
       updates: [],
       refused: updates.map(
@@ -1255,6 +1278,11 @@ export const gate = Effect.fn("Policy.gate")(function* (
     // where to. Checking it here rather than in the guard is not a weakening:
     // the guard runs before the push body exists, so this is the first moment
     // the commands are knowable at all — and the last before they are applied.
+    if (withheld.has(update.name) && stale !== null && !stale.ok) {
+      decisions.push({ ok: false, ref: update.name, reason: stale.reason });
+      continue;
+    }
+
     const covered = bindEnvelope
       ? coveredByEnvelope(who.envelope, update)
       : ({ ok: true } as const);

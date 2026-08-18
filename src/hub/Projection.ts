@@ -305,7 +305,24 @@ const trustReach = () => {
    */
   const reaches = Effect.fnUntraced(function* (head: Oid | null, target: Oid) {
     if (head === null || head === target) return true;
-    return (yield* ancestry(head)).has(target);
+    // An ancestry this host will not walk is refused rather than answered
+    // empty, and that refusal must not take the fold down with it. One commit
+    // with an empty tree and enough fabricated parents to pass the log's
+    // ceiling, named as an event's trust head by anybody holding
+    // `hub.comment`, would otherwise make this pull request unfoldable for
+    // good — and a pull request the boundary cannot fold is a protected
+    // branch that can never be pushed again, on a ref the event cannot be
+    // removed from.
+    //
+    // "Reaches nothing" is the conservative answer *here*, where the question
+    // is whether an event's head is at least as new as its ancestors': an
+    // event that cannot show it is behind the floor is read as behind it, and
+    // held to the floor. That is the opposite of `Verify.reaches`, which asks
+    // whether a revocation is visible, and it is why each catches for itself.
+    return yield* ancestry(head).pipe(
+      Effect.map((seen) => seen.has(target)),
+      Effect.catchTag("Invalid", () => Effect.succeed(false)),
+    );
   });
 
   /**

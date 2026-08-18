@@ -16,13 +16,15 @@ import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid } from "../git/Store.ts";
 import { fingerprint } from "../crypto/SshSignature.ts";
 import * as Certificate from "../trust/Certificate.ts";
-import { create, type Genesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
+import { create, type Genesis, readGenesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
 import * as Event from "./Event.ts";
 import * as PullRequest from "./PullRequest.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Redaction from "./Redaction.ts";
+import { blobs } from "./Redaction.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
 
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =>
   Effect.runPromise(
@@ -697,6 +699,47 @@ describe("hub redaction", () => {
 
     assert.equal(outcome.honoured, 1, "the tombstone that records a head counts");
     assert.equal(outcome.headless, 1, "and the one that records none adds nothing");
+  });
+
+  it("keeps collecting when one pull request will not fold", async () => {
+    // The walk that finds tombstones already tolerates a pull request it
+    // cannot read; the fold on the next line did not. One failing pull request
+    // put the whole repository's collection behind it — including the purge
+    // that is how a redacted payload actually leaves the object store.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const first = yield* withASecret(where);
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr: first.pr,
+          target: first.target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        // A second pull request, folded under a ceiling it exceeds.
+        const second = yield* withASecret(where);
+        yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr: second.pr,
+          target: second.target,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const stored = yield* readGenesis();
+        const trust = yield* projectTrust(stored!.genesis);
+        // No `Invalid` to catch: that this type-checks is half the assertion,
+        // since an unfoldable pull request used to fail out of here.
+        return yield* blobs(stored!.genesis, trust, [first.pr, second.pr]).pipe(
+          Effect.provide(Event.ceiling(2)),
+          Effect.map((found) => found.size),
+        );
+      }),
+    );
+
+    assert.equal(outcome, 0, "the set is empty because neither folded, and not because it failed");
   });
 
   it("passes over a pull request this replica cannot walk", async () => {
