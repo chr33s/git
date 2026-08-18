@@ -749,6 +749,90 @@ describe("Policy", () => {
       );
     });
 
+    it("judges edges and signatures alike when a parent commit never arrived", async () => {
+      // What the ref already reaches was answered "nothing I can name" when
+      // the walk met a commit object that never arrived — refs are applied
+      // without a connectivity check, so a replica can hold one. The two rules
+      // that read that answer then went opposite ways, and both were wrong:
+      // the graft rule waved a source edge through onto a ref that can never
+      // be deleted, and the revoked-signer rule re-judged events the ref
+      // already held and refused an ordinary join for good.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const objects = yield* ObjectStore;
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: where.dev,
+          });
+          const opened = yield* repository.resolve(`refs/hub/pr/${pr}`);
+          yield* PullRequest.comment({
+            repo: where.genesis.repoId,
+            pr,
+            body: "more",
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(`refs/hub/pr/${pr}`);
+
+          // The commit object in the middle of the history, gone — not its
+          // tree, the commit itself, which is the case that slipped through.
+          yield* objects.delete(opened!);
+
+          // A source commit, joined in behind the missing one.
+          const blob = yield* repository.writeBlob(new TextEncoder().encode("source\n"));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "file.txt", oid: blob },
+          ]);
+          const source = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "source\n",
+            author,
+          });
+          const grafted = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!, source],
+            message: "join\n",
+            author,
+          });
+
+          // And an ordinary reconciling join, which brings no new edge at all.
+          const sibling = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!],
+            message: "concurrent\n",
+            author,
+          });
+          const joined = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [head!, sibling],
+            message: "join\n",
+            author,
+          });
+
+          return {
+            grafted: yield* judge(where, { name: `refs/hub/pr/${pr}`, value: grafted }),
+            joined: yield* judge(where, { name: `refs/hub/pr/${pr}`, value: joined }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.grafted.ok, false, "the source edge is still refused");
+      assert.match(
+        outcome.grafted.ok === false ? outcome.grafted.reason : "",
+        /is not part of this history/,
+      );
+      assert.equal(
+        outcome.joined.ok === false ? outcome.joined.reason : "allowed",
+        "allowed",
+        "and the ordinary join still lands",
+      );
+    });
+
     it("refuses a hub ref pointed at a commit from outside the namespace", async () => {
       // Nothing else asks. The ceiling walk steps over a foreign head and
       // reports an empty history; the graft walk steps over it too. So a
