@@ -129,6 +129,8 @@ describe("Remotes", () => {
         name: "origin",
         url: "https://example.com/repo.git",
         has_credential: true,
+        // Nothing was asked for, so nothing happens to this remote on its own.
+        sync: null,
         created_at: added.createdAt.toISOString(),
       });
       const rows = yield* registry.list;

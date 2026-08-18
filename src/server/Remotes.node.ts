@@ -16,12 +16,13 @@ import { Effect, Layer } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import { readRows, writeRows } from "./JsonRows.node.ts";
-import { duplicate, type Remote, Remotes, validate } from "./Remotes.ts";
+import { duplicate, type Remote, Remotes, type Sync, validate } from "./Remotes.ts";
 
 interface Stored {
   readonly name: string;
   readonly url: string;
   readonly credential: string | null;
+  readonly sync?: Sync | null;
   readonly createdAt: string;
 }
 
@@ -30,6 +31,9 @@ const read = (file: string): ReadonlyArray<Remote> =>
     name: row.name,
     url: row.url,
     credential: row.credential ?? null,
+    // Absent in a file written before remotes had a standing instruction,
+    // which reads as `manual` — the behaviour that file was written under.
+    sync: row.sync ?? null,
     createdAt: new Date(row.createdAt),
   }));
 
@@ -63,6 +67,7 @@ export const file = (location: string): Layer.Layer<Remotes> =>
                   name: input.name,
                   url: input.url,
                   credential: input.credential ?? null,
+                  sync: input.sync ?? null,
                   createdAt: new Date(),
                 };
                 write(location, [...rows, remote]);

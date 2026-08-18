@@ -16,16 +16,35 @@
  * token in a request body is a token in an access log. It goes in once and
  * has no read path back out — `redact` is what the API is allowed to show.
  */
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
+
+/**
+ * What this repository does about a remote on its own.
+ *
+ * `manual` is the default and the old behaviour: a remote is somewhere a
+ * person or a job fetches from when they say so. The others are the standing
+ * instruction — `fetch` pulls on a schedule somebody else drives, `push`
+ * sends what lands here, `mirror` does both.
+ *
+ * `refs` is what the standing instruction covers, as ref patterns. Empty means
+ * everything the mode would otherwise carry, which is the reading that makes
+ * `{mode: "push"}` mean what it looks like it means.
+ */
+export interface Sync {
+  readonly mode: "manual" | "fetch" | "push" | "mirror";
+  readonly refs: ReadonlyArray<string>;
+}
 
 export interface Remote {
   readonly name: string;
   readonly url: string;
   /** Sent to the remote as a Bearer token, and never returned. */
   readonly credential: string | null;
+  /** `null` is `manual`: nothing happens to this remote unless somebody asks. */
+  readonly sync: Sync | null;
   readonly createdAt: Date;
 }
 
@@ -33,7 +52,14 @@ export interface NewRemote {
   readonly name: string;
   readonly url: string;
   readonly credential?: string | undefined;
+  readonly sync?: Sync | undefined;
 }
+
+export const MODES = ["manual", "fetch", "push", "mirror"] as const;
+
+/** Whether this remote wants what lands here sent on. */
+export const sends = (remote: Remote): boolean =>
+  remote.sync !== null && (remote.sync.mode === "push" || remote.sync.mode === "mirror");
 
 export class Remotes extends Context.Service<
   Remotes,
@@ -72,6 +98,28 @@ export const validate = (input: NewRemote): Effect.Effect<NewRemote, Invalid> =>
     }
     if (input.name.endsWith(".lock"))
       return bad(`bad remote name '${input.name}': reserved suffix`);
+
+    // A mode nobody implements is a remote that quietly does nothing, and a
+    // pattern that is not a ref is one that quietly matches nothing. Both are
+    // refused where they are written rather than discovered as silence.
+    if (input.sync !== undefined) {
+      // SAFETY: widened to compare a caller-supplied string against the
+      // literal union; the comparison is the check, and nothing is narrowed by
+      // it.
+      const known: ReadonlyArray<string> = MODES;
+      if (!known.includes(input.sync.mode)) {
+        return Effect.fail(
+          new Invalid({ field: "sync", reason: `unknown sync mode '${input.sync.mode}'` }),
+        );
+      }
+      for (const pattern of input.sync.refs) {
+        if (!pattern.startsWith("refs/")) {
+          return Effect.fail(
+            new Invalid({ field: "sync", reason: `'${pattern}' is not a ref pattern` }),
+          );
+        }
+      }
+    }
 
     let parsed: URL;
     try {
@@ -112,6 +160,7 @@ export const redact = (remote: Remote) => ({
   // That there is one is worth knowing and cannot be guessed from the URL;
   // the value itself has no way out of this process.
   has_credential: remote.credential !== null,
+  sync: remote.sync,
   created_at: remote.createdAt.toISOString(),
 });
 
@@ -139,8 +188,9 @@ export const none = Layer.succeed(Remotes, {
  */
 export const of = (
   remotes: ReadonlyArray<
-    Omit<Remote, "createdAt" | "credential"> & {
+    Omit<Remote, "createdAt" | "credential" | "sync"> & {
       readonly credential?: string | null;
+      readonly sync?: Sync | null;
       readonly createdAt?: Date;
     }
   >,
@@ -148,6 +198,7 @@ export const of = (
   const rows = remotes.map((remote) => ({
     createdAt: new Date(0),
     credential: null,
+    sync: null,
     ...remote,
   }));
   return Layer.succeed(Remotes, {
@@ -162,6 +213,7 @@ const remoteOf = (input: NewRemote): Remote => ({
   name: input.name,
   url: input.url,
   credential: input.credential ?? null,
+  sync: input.sync ?? null,
   createdAt: new Date(),
 });
 
@@ -196,13 +248,42 @@ interface Row extends Record<string, string | number | null> {
   readonly name: string;
   readonly url: string;
   readonly credential: string | null;
+  /** JSON, because a mode and a pattern list are one decision and travel as one. */
+  readonly sync: string | null;
   readonly created_at: string;
 }
+
+/**
+ * A stored `sync`, or `null` for anything this version cannot read as one.
+ *
+ * Decoded with a schema rather than by hand: a column written by a newer
+ * version, or edited by somebody, is input from outside this process however
+ * it got into the database — and unreadable has to mean `manual`, which is
+ * the behaviour a repository that never configured one already has.
+ */
+const StoredSync = Schema.Struct({
+  mode: Schema.Literals(MODES),
+  refs: Schema.Array(Schema.String),
+});
+
+const decodeSync = Schema.decodeUnknownOption(StoredSync);
+
+const syncOf = (stored: string | null): Sync | null => {
+  if (stored === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {
+    return null;
+  }
+  return Option.getOrElse(decodeSync(parsed), (): Sync | null => null);
+};
 
 const rowOf = (row: Row): Remote => ({
   name: row.name,
   url: row.url,
   credential: row.credential,
+  sync: syncOf(row.sync),
   createdAt: new Date(row.created_at),
 });
 
@@ -223,10 +304,20 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
         name       TEXT NOT NULL,
         url        TEXT NOT NULL,
         credential TEXT,
+        sync       TEXT,
         created_at TEXT NOT NULL,
         PRIMARY KEY (repo, name)
       )
     `);
+
+    // A table that predates standing instructions has no `sync` column, and
+    // recreating it would drop every remote the repository had. Added instead,
+    // and the failure ignored because "already there" is the ordinary case.
+    try {
+      db.exec(`ALTER TABLE remotes ADD COLUMN sync TEXT`);
+    } catch {
+      // The column is already there, which is what we wanted.
+    }
 
     const failed = (operation: string) => (cause: unknown) =>
       new StorageFailure({ operation, path: `remotes/${repo}`, cause });
@@ -259,11 +350,12 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
             try: () => {
               const remote = remoteOf(input);
               db.exec(
-                `INSERT INTO remotes (repo, name, url, credential, created_at) VALUES (?, ?, ?, ?, ?)`,
+                `INSERT INTO remotes (repo, name, url, credential, sync, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
                 repo,
                 remote.name,
                 remote.url,
                 remote.credential,
+                remote.sync === null ? null : JSON.stringify(remote.sync),
                 remote.createdAt.toISOString(),
               );
               return remote;
@@ -290,8 +382,15 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
  * The wire shape of a registration, shared by the API and any host that wants
  * to seed remotes from configuration.
  */
+export const SyncWire = Schema.Struct({
+  mode: Schema.Literals(MODES),
+  /** Empty, or absent, is everything the mode carries. */
+  refs: Schema.optional(Schema.Array(Schema.String)),
+});
+
 export const NewRemoteWire = Schema.Struct({
   name: Schema.String,
   url: Schema.String,
   credential: Schema.optional(Schema.String),
+  sync: Schema.optional(SyncWire),
 });

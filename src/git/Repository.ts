@@ -481,6 +481,24 @@ export class Hooks extends Context.Service<
   }
 >()("git/Hooks") {}
 
+/**
+ * Every one of these, in order, as one.
+ *
+ * `Hooks` is a single service, so a host that wants two things to happen after
+ * a push — deliver a webhook *and* forward to a mirror — cannot provide two
+ * layers and hope. Refusals short-circuit, because a refusal is an answer and
+ * the rest of the chain has nothing to add to it; `postReceive` runs all of
+ * them, because it cannot refuse anything and one silent receiver must not
+ * cost the next one its notification.
+ */
+export const hooksAll = (all: ReadonlyArray<Hooks["Service"]>): Hooks["Service"] => ({
+  preReceive: (updates) =>
+    Effect.forEach(all, (hooks) => hooks.preReceive(updates), { discard: true }),
+  update: (update) => Effect.forEach(all, (hooks) => hooks.update(update), { discard: true }),
+  postReceive: (results) =>
+    Effect.forEach(all, (hooks) => hooks.postReceive(results), { discard: true }),
+});
+
 /** No-op hooks, which is what a server without policy wants. */
 export const hooksNoop = Layer.succeed(Hooks, {
   preReceive: () => Effect.void,

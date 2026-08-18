@@ -1389,7 +1389,9 @@ replication job
 Git push/fetch
 ```
 
-Replication failure MUST NOT roll back the originating write.
+Replication failure MUST NOT roll back the originating write. It runs detached from the response and logs, exactly as webhook delivery does. What it forwards is what the push actually **applied**: a command the receive refused never happened, and sending it would tell the other side something this repository does not hold. An empty `refs` list is everything the mode carries, so `{mode: "push"}` means what it looks like it means. A forward is never forced — a standing instruction is not a licence to overwrite what the other side has, and a ref that will not fast-forward there is a divergence for a person.
+
+The repository a forward pushes _from_ MUST be built with no hooks, and MUST NOT be a dependency of the hook layer. Both halves matter: handed the repository the hook is installed on, a forward would be its own trigger; and asking for that repository while building the hooks it depends on is a cycle the layer system resolves by handing somebody a second instance — which is silent, and which quietly cost the webhook registry its notifications when it happened.
 
 Hub and trust events synchronize active-active (as DAG unions, trust first — §23). Source branches remain subject to directional and fast-forward policy.
 

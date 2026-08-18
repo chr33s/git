@@ -38,6 +38,14 @@ import { permits } from "../trust/Certificate.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
+
+/** `NewRemote` under construction: built field by field, handed over as one. */
+interface RemoteRequest {
+  name: string;
+  url: string;
+  credential?: string;
+  sync?: { mode: "manual" | "fetch" | "push" | "mirror"; refs: ReadonlyArray<string> };
+}
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 import { fetchFrom, pull, remoteFor } from "./Sync.ts";
 
@@ -576,6 +584,8 @@ const RemoteWire = Schema.Struct({
   name: Schema.String,
   url: Schema.String,
   has_credential: Schema.Boolean,
+  /** The standing instruction, or `null` for a remote nothing happens to. */
+  sync: Schema.NullOr(Schema.Struct({ mode: Schema.String, refs: Schema.Array(Schema.String) })),
   created_at: Schema.String,
 });
 
@@ -1970,8 +1980,16 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
         // question, and nothing about it moves a ref for the boundary to judge.
         yield* requireCapability("repo.admin");
         const registry = yield* Remotes;
+        // `refs` is optional on the wire and not in the registry: absent means
+        // everything the mode carries, and saying so once here keeps every
+        // reader from having to know that.
+        const asked: RemoteRequest = { name: payload.name, url: payload.url };
+        if (payload.credential !== undefined) asked.credential = payload.credential;
+        if (payload.sync !== undefined) {
+          asked.sync = { mode: payload.sync.mode, refs: payload.sync.refs ?? [] };
+        }
         const added = yield* registry
-          .add(payload)
+          .add(asked)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return redactRemote(added);
       }),
