@@ -1,9 +1,9 @@
 /**
- * Activity — a fortnight of repository history as a calendar timeline.
+ * Activity — a window of repository history as a calendar timeline.
  *
  * The design went through two shapes here: a plain event feed first, then the
  * calendar-style timeline the user supplied as a reference. This is the second:
- * a 14-column grid, one column per day, with a "now" marker on today.
+ * a grid of day columns with a "now" marker on today.
  *
  * What sits on the grid depends on what the server can answer. Commits are real
  * — `/commits/:oid` for the list, then each commit's raw header for its author
@@ -12,9 +12,17 @@
  * the others from that day; the design's spanning bars belonged to Tasks, which
  * have no HTTP surface yet (see `model.ts`). When the API cannot be reached the
  * screen falls back to the design's own Task timeline and says so.
+ *
+ * The header controls work on the live window: the zoom segments set how many
+ * days it spans (a week, the design's fortnight, or a month) and ‹ › page it
+ * back and forth through history. The fixture timeline is drawn for exactly
+ * the design's fortnight, so in fallback mode those controls disable rather
+ * than pretending to page data that does not move.
  */
 import { html, nothing, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
+
+import { UIToggleGroup } from "@chr33s/base-wc/src/toggle";
 
 import { ApiError, type CommitDetail, describe, type GitApi } from "./api.ts";
 import { GitPlusElement, navigate } from "./base.ts";
@@ -22,8 +30,13 @@ import { byId, timeline } from "./fixtures.ts";
 import { statusToken, type Task } from "./model.ts";
 import { ago, daysBetween, initials, startOfDay } from "./time.ts";
 
-/** How many days the grid shows, and how far back it starts. */
-const SPAN = 14;
+/** How many days each zoom level shows. "Week" is the design's fortnight. */
+type Zoom = "day" | "week" | "month";
+
+const SPANS = { day: 7, week: 14, month: 31 } satisfies Record<Zoom, number>;
+
+/** The design's own fortnight, which the fixture timeline is drawn for. */
+const FIXTURE_SPAN = 14;
 
 interface Day {
   readonly letter: string;
@@ -52,6 +65,9 @@ export class GpActivity extends GitPlusElement {
   /** Why the fallback is showing, in the reader\'s terms. */
   @state() private accessor reason = "";
   @state() private accessor loading = true;
+  @state() private accessor zoom: Zoom = "week";
+  /** How many days back the window's last column sits; 0 means it ends today. */
+  @state() private accessor offset = 0;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -75,7 +91,10 @@ export class GpActivity extends GitPlusElement {
         this.offline = false;
         return;
       }
-      this.commits = await api.recentCommits(main.oid, 40);
+      // One fetch covers paging too: ‹ walks back through what is already
+      // loaded rather than repeating the N+1 header reads per window. 100
+      // commits of history is the bound, and a window past it reads as empty.
+      this.commits = await api.recentCommits(main.oid, 100);
       this.offline = false;
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
@@ -86,31 +105,48 @@ export class GpActivity extends GitPlusElement {
     }
   }
 
-  /** The 14 days ending today, which is the window real commits land in. */
+  /** The design's fortnight when showing fixtures; the chosen zoom when live. */
+  get #span(): number {
+    return this.commits === null ? FIXTURE_SPAN : SPANS[this.zoom];
+  }
+
+  /** The group types its own `value`, so nothing here is asserted. */
+  #onZoom = (event: Event): void => {
+    const group = event.currentTarget;
+    if (!(group instanceof UIToggleGroup)) return;
+    const value = group.value;
+    if (value !== "day" && value !== "week" && value !== "month") return;
+    this.zoom = value;
+    this.offset = 0;
+  };
+
+  /** The `span` days ending `offset` days ago, which real commits land in. */
   #days(): readonly Day[] {
     if (this.commits === null) return FIXTURE_DAYS;
+    const span = this.#span;
     const today = startOfDay(new Date());
-    return Array.from({ length: SPAN }, (_, index) => {
+    return Array.from({ length: span }, (_, index) => {
       const at = new Date(today);
-      at.setDate(at.getDate() - (SPAN - 1 - index));
+      at.setDate(at.getDate() - this.offset - (span - 1 - index));
       return {
         letter: LETTERS[at.getDay()] ?? "M",
         date: at.getDate(),
-        today: index === SPAN - 1,
+        today: this.offset === 0 && index === span - 1,
       };
     });
   }
 
   #month(): string {
     if (this.commits === null) return "August 2026";
-    const today = new Date();
-    const start = new Date(today);
-    start.setDate(start.getDate() - (SPAN - 1));
+    const end = new Date();
+    end.setDate(end.getDate() - this.offset);
+    const start = new Date(end);
+    start.setDate(start.getDate() - (this.#span - 1));
     const month = (at: Date): string =>
       at.toLocaleString(undefined, { month: "long", year: "numeric" });
-    return start.getMonth() === today.getMonth()
-      ? month(today)
-      : `${start.toLocaleString(undefined, { month: "long" })} – ${month(today)}`;
+    return start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear()
+      ? month(end)
+      : `${start.toLocaleString(undefined, { month: "long" })} – ${month(end)}`;
   }
 
   #range(): string {
@@ -123,19 +159,46 @@ export class GpActivity extends GitPlusElement {
 
   protected override render(): TemplateResult {
     const days = this.#days();
+    const live = this.commits !== null;
     return html`
-      <div class="gp-screen">
+      <div class="gp-screen" style="--gp-cal-cols: ${String(this.#span)}">
         <div class="gp-activity-head">
           <h1 class="gp-heading">Activity</h1>
-          <ui-toggle-group class="gp-segmented" aria-label="Timeline zoom">
-            <ui-toggle class="gp-segment" value="day">Day</ui-toggle>
-            <ui-toggle class="gp-segment" value="week" data-active>Week</ui-toggle>
-            <ui-toggle class="gp-segment" value="month">Month</ui-toggle>
+          <ui-toggle-group class="gp-segmented" aria-label="Timeline zoom" @change=${this.#onZoom}>
+            ${(["day", "week", "month"] as const).map(
+              (level) => html`
+                <ui-toggle
+                  class="gp-segment"
+                  value=${level}
+                  ?disabled=${!live}
+                  ?data-active=${this.zoom === level}
+                  >${level.charAt(0).toUpperCase() + level.slice(1)}</ui-toggle
+                >
+              `,
+            )}
           </ui-toggle-group>
           <div class="gp-range">
-            <button type="button" aria-label="Previous fortnight">‹</button>
+            <button
+              type="button"
+              aria-label="Earlier"
+              ?disabled=${!live}
+              @click=${() => {
+                this.offset += this.#span;
+              }}
+            >
+              ‹
+            </button>
             ${this.#range()}
-            <button type="button" aria-label="Next fortnight">›</button>
+            <button
+              type="button"
+              aria-label="Later"
+              ?disabled=${!live || this.offset === 0}
+              @click=${() => {
+                this.offset = Math.max(0, this.offset - this.#span);
+              }}
+            >
+              ›
+            </button>
           </div>
         </div>
 
@@ -147,7 +210,6 @@ export class GpActivity extends GitPlusElement {
 
         <div class="gp-cal-head">
           <div class="gp-cal-month">${this.#month()}</div>
-          <div class="gp-cal-spacer"></div>
           ${days.map(
             (day) => html`
               <div class="gp-cal-day" ?data-today=${day.today}>
@@ -158,8 +220,14 @@ export class GpActivity extends GitPlusElement {
         </div>
 
         <div class="gp-cal-body">
-          <div class="gp-cal-now" style=${this.#nowOffset()} aria-hidden="true"></div>
-          <div class="gp-cal-now-dot" style=${this.#nowOffset()} aria-hidden="true"></div>
+          ${
+            live && this.offset > 0
+              ? nothing
+              : html`
+                  <div class="gp-cal-now" style=${this.#nowOffset()} aria-hidden="true"></div>
+                  <div class="gp-cal-now-dot" style=${this.#nowOffset()} aria-hidden="true"></div>
+                `
+          }
           <div class="gp-cal-grid">${this.#cards()}</div>
         </div>
       </div>
@@ -170,11 +238,13 @@ export class GpActivity extends GitPlusElement {
    * Where the "now" marker sits.
    *
    * The design pinned it mid-column 9 for its fixed fortnight; with a window
-   * that ends today it belongs in the last column instead.
+   * that ends today it belongs in the last column instead, and a window paged
+   * into the past has no "now" to mark at all — the marker is omitted there.
    */
   #nowOffset(): string {
-    const column = this.commits === null ? 8.5 : SPAN - 0.5;
-    return `left: calc(100% / ${String(SPAN)} * ${String(column)})`;
+    const span = this.#span;
+    const column = this.commits === null ? 8.5 : span - 0.5;
+    return `left: calc(100% / ${String(span)} * ${String(column)})`;
   }
 
   #cards(): TemplateResult | readonly TemplateResult[] {
@@ -192,18 +262,19 @@ export class GpActivity extends GitPlusElement {
 
     // Bucket by day, then stack each day's commits into successive grid rows so
     // two commits on one day cannot land on top of each other.
+    const span = this.#span;
     const today = startOfDay(new Date());
     const perDay = new Map<number, number>();
     const cards: TemplateResult[] = [];
     for (const commit of commits) {
-      const offset = SPAN - 1 + daysBetween(today, commit.at);
-      if (offset < 0 || offset >= SPAN) continue;
-      const row = (perDay.get(offset) ?? 0) + 1;
-      perDay.set(offset, row);
-      cards.push(this.#commit(commit, offset + 1, row));
+      const column = span - 1 + daysBetween(today, commit.at) + this.offset;
+      if (column < 0 || column >= span) continue;
+      const row = (perDay.get(column) ?? 0) + 1;
+      perDay.set(column, row);
+      cards.push(this.#commit(commit, column + 1, row));
     }
     if (cards.length === 0) {
-      return html`<div class="gp-empty">No commits in the last ${String(SPAN)} days.</div>`;
+      return html`<div class="gp-empty">No commits in this window.</div>`;
     }
     return cards;
   }

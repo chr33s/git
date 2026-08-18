@@ -4,11 +4,13 @@
  * Two behaviours the design conversation settled on: clicking the git+ logo
  * collapses the rail to a 64px strip of 36px icon squares and back, and the
  * search row carries a ⌘K hint that collapses to a bare icon button with it.
+ * The hint is honoured: ⌘K (or Ctrl+K) focuses the search input, expanding the
+ * rail first if it was collapsed. What is typed there bubbles up as the
+ * field's `search` event and the shell filters the Tasks screen with it.
  */
 import { html, type TemplateResult } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { customElement, property } from "lit/decorators.js";
 
-import { ApiError, type GitApi } from "./api.ts";
 import { GitPlusElement, navigate, type Screen } from "./base.ts";
 import * as icons from "./icons.ts";
 import * as palette from "./theme.ts";
@@ -27,33 +29,36 @@ export class GpSidebar extends GitPlusElement {
   /** Open Task and Change Request count, shown as the Tasks badge. */
   @property({ type: Number }) accessor openCount = 8;
 
-  /** Injected by the shell so every screen shares one client. */
-  api: GitApi | null = null;
-
   /**
-   * Who the server says is asking, from `/whoami`.
-   *
-   * `null` for an unauthenticated caller — which is the common case for a
-   * repository with no genesis — so the rail says "anonymous" rather than
-   * inventing the design's placeholder name.
+   * Who the server says is asking — the shell resolves `/whoami` once and
+   * passes the subject down. `null` for an unauthenticated caller, which is
+   * the common case for a repository with no genesis, so the rail says
+   * "anonymous" rather than inventing the design's placeholder name.
    */
-  @state() private accessor subject: string | null = null;
+  @property({ type: String }) accessor subject: string | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.#identify();
+    globalThis.addEventListener("keydown", this.#onKeydown);
   }
 
-  async #identify(): Promise<void> {
-    const api = this.api;
-    if (api === null) return;
-    try {
-      const who = await api.whoami();
-      this.subject = who.subject;
-    } catch (error) {
-      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
-    }
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    globalThis.removeEventListener("keydown", this.#onKeydown);
   }
+
+  /** The ⌘K the search row advertises. Ctrl+K, for keyboards without a ⌘. */
+  #onKeydown = (event: KeyboardEvent): void => {
+    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+    event.preventDefault();
+    this.#focusSearch();
+  };
+
+  /** Expand the rail if needed — a collapsed rail hides the input — and focus. */
+  #focusSearch = (): void => {
+    this.collapsed = false;
+    this.querySelector<HTMLInputElement>(".gp-search input")?.focus();
+  };
 
   #go(screen: Screen): void {
     navigate(this, { screen });
@@ -94,7 +99,12 @@ export class GpSidebar extends GitPlusElement {
           <span class="gp-logo-text">git<span>+</span></span>
         </button>
 
-        <ui-search-field class="gp-search" debounce="200" title="Search">
+        <ui-search-field
+          class="gp-search"
+          debounce="200"
+          title="Search"
+          @click=${this.#focusSearch}
+        >
           ${icons.search()}
           <span class="gp-nav-label">Search</span>
           <span class="gp-search-kbd">⌘K</span>

@@ -41,11 +41,14 @@ import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
 import {
   Commit as CommitResponse,
+  CommitCreated,
   CommitPage,
   DiffRequest,
   DiffResponse,
+  Encoding,
   FileContent,
   FilesResponse,
+  FileWrite,
   HistoryPage,
   LogResponse,
   OidString,
@@ -119,8 +122,6 @@ const Cursor = {
  * carry a PNG is incomplete. Reads always answer base64: the server cannot
  * know a blob is text, and guessing would corrupt the bytes that are not.
  */
-const Encoding = Schema.Literals(["utf8", "base64"]);
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -149,14 +150,6 @@ const TreeEntryWire = Schema.Struct({
   mode: Schema.String,
   name: Schema.String,
   oid: OidString,
-});
-
-/** A path to write, or — with `content: null` — to remove. */
-const FileWire = Schema.Struct({
-  path: Schema.String,
-  content: Schema.NullOr(Schema.String),
-  encoding: Schema.optional(Encoding),
-  mode: Schema.optional(Schema.String),
 });
 
 /**
@@ -388,7 +381,7 @@ const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
   return judged.updates.at(0) ?? update;
 });
 
-const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArray<FileChange> =>
+const changesOf = (files: ReadonlyArray<(typeof FileWrite)["Type"]>): ReadonlyArray<FileChange> =>
   files.map((file) => {
     const content = file.content === null ? null : decodeContent(file.content, file.encoding);
     return file.mode === undefined
@@ -400,7 +393,7 @@ const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArr
 const writeFilesOf = (
   repository: Repository["Service"],
   base: Oid | undefined,
-  files: ReadonlyArray<(typeof FileWire)["Type"]>,
+  files: ReadonlyArray<(typeof FileWrite)["Type"]>,
 ) => {
   const changes = changesOf(files);
   return base === undefined
@@ -495,7 +488,7 @@ const treeFor = (
   branch: string,
   payload: {
     readonly tree?: Oid | undefined;
-    readonly files?: ReadonlyArray<(typeof FileWire)["Type"]> | undefined;
+    readonly files?: ReadonlyArray<(typeof FileWrite)["Type"]> | undefined;
   },
 ) =>
   Effect.gen(function* () {
@@ -654,9 +647,9 @@ const repo = HttpApiGroup.make("repo")
          * the branch's current tree, or neither for an empty commit.
          */
         tree: Schema.optional(OidString),
-        files: Schema.optional(Schema.Array(FileWire)),
+        files: Schema.optional(Schema.Array(FileWrite)),
       }),
-      success: Schema.Struct({ oid: OidString, tree: OidString }),
+      success: CommitCreated,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -690,7 +683,7 @@ const repo = HttpApiGroup.make("repo")
       payload: Schema.Struct({
         /** Entries as they are, or `files` to build them from paths. */
         entries: Schema.optional(Schema.Array(TreeEntryWire)),
-        files: Schema.optional(Schema.Array(FileWire)),
+        files: Schema.optional(Schema.Array(FileWrite)),
         base: Schema.optional(OidString),
       }),
       success: Schema.Struct({ oid: OidString }),

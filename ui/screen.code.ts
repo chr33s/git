@@ -8,19 +8,34 @@
  * `GET /:repo/file` and renders it with `@pierre/diffs`, which brings Shiki
  * highlighting and a header that matches the design's file card.
  *
+ * The pane edits as well as views. The pencil on the file card opens the blob
+ * in a plain textarea, and the explorer's "+" opens the same editor over a new
+ * path; committing either sends `POST /:repo/commit` with the file layered
+ * onto the branch's current tree and `expected` pinned to the tip the editor
+ * opened at — so a commit that lands mid-edit is a visible conflict, not a
+ * silent overwrite. Deleting is the same request with `content: null`.
+ *
  * When the API cannot be reached the screen falls back to the design's own
  * fixture tree and README, and says so in a quiet inline note. That keeps the
  * branch reviewable without a running worker, and keeps the fallback honest
- * rather than passing stale data off as live.
+ * rather than passing stale data off as live — and read-only, since there is
+ * nothing to write to.
  */
-import { html, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 import type { MenuSelectDetail } from "@chr33s/base-wc/src/menu";
 import { FileTree, type GitStatusEntry } from "@pierre/trees";
 import type { File as DiffsFile } from "@pierre/diffs";
 
-import { ApiError, describe, type GitApi, type Unavailable } from "./api.ts";
+import {
+  ApiError,
+  type CommitFilesRequest,
+  describe,
+  type FileWrite,
+  type GitApi,
+  type Unavailable,
+} from "./api.ts";
 import { GitPlusElement } from "./base.ts";
 import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
@@ -102,6 +117,8 @@ interface CodeSnapshot {
   readonly selected: string | null;
   readonly content: string | null;
   readonly head: HeadCommit | null;
+  /** The tip's full oid — what `expected` pins when an edit commits. */
+  readonly tip: string | null;
   readonly offline: boolean;
   readonly reason: string;
 }
@@ -122,6 +139,17 @@ export class GpCode extends GitPlusElement {
   /** Why the fallback is showing, in the reader\'s terms. */
   @state() private accessor reason = "";
   @state() private accessor loading = true;
+
+  /** `edit` swaps the source pane for a textarea over the same blob. */
+  @state() private accessor mode: "view" | "edit" = "view";
+  /** Editing a path that does not exist yet, from the explorer's "+". */
+  @state() private accessor editingNew = false;
+  @state() private accessor saving = false;
+  /** Why the last commit attempt failed, shown inside the editor. */
+  @state() private accessor editError: string | null = null;
+
+  /** The tip's full oid at last load — the `expected` for the next commit. */
+  #tip: string | null = null;
 
   #tree: FileTree | null = null;
   #treeHost: HTMLElement | null = null;
@@ -184,11 +212,17 @@ export class GpCode extends GitPlusElement {
       .map((ref) => ref.name.slice("refs/heads/".length));
   }
 
-  /** Load one ref without consulting or mutating the component's current ref. */
+  /**
+   * Load one ref without consulting or mutating the component's current ref.
+   *
+   * `keep` names a path to stay on if it still exists — a reload after a
+   * commit should show the file that was just written, not jump to the README.
+   */
   async #snapshot(
     api: GitApi,
     ref: string,
     knownRefs?: Awaited<ReturnType<GitApi["refs"]>>,
+    keep?: string,
   ): Promise<CodeSnapshot> {
     const [refs, files] = await Promise.all([
       knownRefs === undefined ? api.refs() : Promise.resolve(knownRefs),
@@ -196,10 +230,11 @@ export class GpCode extends GitPlusElement {
     ]);
     const paths = files.map((file) => file.path);
     const readme = paths.find((path) => /^readme(\.md|\.txt)?$/i.test(path)) ?? null;
+    const selected = keep !== undefined && paths.includes(keep) ? keep : readme;
     const tip = refs.find((candidate) => candidate.name === `refs/heads/${ref}`);
     const [commit, content] = await Promise.all([
       tip === undefined ? Promise.resolve(null) : api.commitDetail(tip.oid),
-      readme === null ? Promise.resolve(null) : api.file(ref, readme),
+      selected === null ? Promise.resolve(null) : api.file(ref, selected),
     ]);
     const head =
       commit === null
@@ -215,9 +250,10 @@ export class GpCode extends GitPlusElement {
       ref,
       branches: this.#branchNames(refs),
       paths,
-      selected: readme,
+      selected,
       content,
       head,
+      tip: tip?.oid ?? null,
       offline: false,
       reason: "",
     };
@@ -263,6 +299,7 @@ export class GpCode extends GitPlusElement {
         avatar: "RB",
         when: "2h ago",
       },
+      tip: null,
       offline: true,
       reason: error === undefined ? "no API client was provided" : describe(error),
     };
@@ -275,8 +312,12 @@ export class GpCode extends GitPlusElement {
     this.selected = snapshot.selected;
     this.content = snapshot.content;
     this.head = snapshot.head;
+    this.#tip = snapshot.tip;
     this.offline = snapshot.offline;
     this.reason = snapshot.reason;
+    this.mode = "view";
+    this.editingNew = false;
+    this.editError = null;
     this.#viewer = null;
   }
 
@@ -324,6 +365,11 @@ export class GpCode extends GitPlusElement {
     const ref = this.ref;
     this.selected = path;
     this.content = null;
+    // Walking the tree abandons an open editor rather than carrying a draft
+    // of one file over to another.
+    this.mode = "view";
+    this.editingNew = false;
+    this.editError = null;
     const api = this.api;
     if (api === null || this.offline) {
       this.content = path === "README.md" ? FALLBACK_README : `// ${path}`;
@@ -339,6 +385,107 @@ export class GpCode extends GitPlusElement {
       if (generation === this.#fileGeneration && ref === this.ref && path === this.selected) {
         this.content = `// ${path} — ${error.message}`;
       }
+    }
+  }
+
+  /** Open the current blob in the editor. */
+  #edit(): void {
+    if (this.offline || this.loading || this.selected === null || this.content === null) return;
+    this.editingNew = false;
+    this.editError = null;
+    this.mode = "edit";
+  }
+
+  /** The explorer's "+": the same editor, over a path that does not exist. */
+  #newFile(): void {
+    if (this.offline || this.loading || this.api === null) return;
+    this.editingNew = true;
+    this.editError = null;
+    this.mode = "edit";
+  }
+
+  #cancelEdit(): void {
+    this.mode = "view";
+    this.editingNew = false;
+    this.editError = null;
+  }
+
+  /** Re-read the current ref after a write, staying on `keep` if it survived. */
+  async #reload(keep?: string): Promise<void> {
+    const api = this.api;
+    if (api === null) return;
+    const generation = ++this.#loadGeneration;
+    this.#fileGeneration += 1;
+    try {
+      const snapshot = await this.#snapshot(api, this.ref, undefined, keep);
+      if (generation === this.#loadGeneration) this.#commit(snapshot);
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      if (generation === this.#loadGeneration) this.#commit(this.#fallback(error));
+    } finally {
+      if (generation === this.#loadGeneration) this.#mountTree();
+    }
+  }
+
+  /** Commit what the editor holds: the draft content at the chosen path. */
+  async #save(): Promise<void> {
+    if (this.saving) return;
+    const editor = this.querySelector<HTMLTextAreaElement>(".gp-editor");
+    if (editor === null) return;
+    const path = this.editingNew
+      ? (this.querySelector<HTMLInputElement>(".gp-editor-path")?.value ?? "").trim()
+      : this.selected;
+    if (path === null || path === "") {
+      this.editError = "name the file to create";
+      return;
+    }
+    if (this.editingNew && this.#paths.includes(path)) {
+      this.editError = `${path} already exists — select it in the explorer and edit it instead`;
+      return;
+    }
+    const message = (
+      this.querySelector<HTMLInputElement>(".gp-editor-message")?.value ?? ""
+    ).trim();
+    const fallback = `${this.editingNew ? "add" : "update"} ${path}`;
+    await this.#write({ path, content: editor.value }, message === "" ? fallback : message, path);
+  }
+
+  /** Remove the open file — the same commit request, with `content: null`. */
+  async #delete(): Promise<void> {
+    const path = this.selected;
+    if (path === null || this.editingNew || this.saving) return;
+    await this.#write({ path, content: null }, `delete ${path}`, undefined);
+  }
+
+  /**
+   * One commit against the tip the editor opened at, then a reload.
+   *
+   * `expected` pins that tip, so a commit that landed mid-edit answers
+   * `RefConflict` — surfaced as an error the writer can act on — instead of
+   * being silently parented over.
+   */
+  async #write(file: FileWrite, message: string, keep: string | undefined): Promise<void> {
+    const api = this.api;
+    if (api === null) return;
+    this.saving = true;
+    this.editError = null;
+    const options: CommitFilesRequest = {
+      branch: this.ref,
+      message,
+      files: [file],
+    };
+    if (this.#tip !== null) options.expected = this.#tip;
+    try {
+      await api.commitFiles(options);
+      await this.#reload(keep);
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.editError =
+        error instanceof ApiError && error.tag === "RefConflict"
+          ? `someone else committed to ${this.ref} while you were editing — copy your draft, reload, and reapply it`
+          : describe(error);
+    } finally {
+      this.saving = false;
     }
   }
 
@@ -376,7 +523,19 @@ export class GpCode extends GitPlusElement {
       <div class="gp-explorer">
         <div class="gp-explorer-head">
           <div class="gp-explorer-title">Explorer</div>
-          <div class="gp-explorer-actions">${icons.plus()} ${icons.ellipsis()}</div>
+          <div class="gp-explorer-actions">
+            <button
+              class="gp-icon-btn"
+              type="button"
+              title=${this.offline ? "Read-only — the git+ API is not reachable" : "New file"}
+              aria-label="New file"
+              ?disabled=${this.offline || this.loading}
+              @click=${() => this.#newFile()}
+            >
+              ${icons.plus()}
+            </button>
+            ${icons.ellipsis()}
+          </div>
         </div>
         <div class="gp-explorer-tree"></div>
       </div>
@@ -407,23 +566,106 @@ export class GpCode extends GitPlusElement {
 
           <div class="gp-card gp-file-card">
             <div class="gp-card-head">
-              ${icons.document_()} ${this.selected ?? "—"}
-              <button
-                class="gp-icon-btn"
-                type="button"
-                title="View source"
-                aria-label="View source"
-              >
-                ${icons.code(14)}
-              </button>
+              ${icons.document_()}
+              ${
+                this.mode === "edit" && this.editingNew
+                  ? html`<input
+                      class="gp-input gp-editor-path"
+                      placeholder="path/to/file.md"
+                      aria-label="New file path"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />`
+                  : html`${this.selected ?? "—"}`
+              }
+              ${
+                this.mode === "view"
+                  ? html`<button
+                      class="gp-icon-btn"
+                      type="button"
+                      title=${
+                        this.offline ? "Read-only — the git+ API is not reachable" : "Edit file"
+                      }
+                      aria-label="Edit file"
+                      ?disabled=${this.offline || this.loading || this.selected === null}
+                      @click=${() => this.#edit()}
+                    >
+                      ${icons.pencil(14)}
+                    </button>`
+                  : nothing
+              }
             </div>
             ${
               this.loading
                 ? html`<div class="gp-empty">Loading…</div>`
-                : html`<div class="gp-source-host gp-diff-host"></div>`
+                : this.mode === "edit"
+                  ? this.#editor()
+                  : html`<div class="gp-source-host gp-diff-host"></div>`
             }
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  /**
+   * The editor: the blob in a textarea, and a commit bar under it.
+   *
+   * The textarea is uncontrolled on purpose — Lit sets `.value` when the
+   * template's value changes and leaves the user's typing alone otherwise —
+   * and `#save` reads it back at commit time.
+   */
+  #editor(): TemplateResult {
+    return html`
+      <textarea
+        class="gp-editor"
+        spellcheck="false"
+        aria-label="File contents"
+        .value=${this.editingNew ? "" : (this.content ?? "")}
+      ></textarea>
+      ${
+        this.editError === null
+          ? nothing
+          : html`<p class="gp-notice" data-error>${this.editError}</p>`
+      }
+      <div class="gp-editor-bar">
+        <input
+          class="gp-input gp-editor-message"
+          aria-label="Commit message"
+          placeholder=${
+            this.editingNew ? "commit message" : `update ${this.selected ?? "this file"}`
+          }
+          autocomplete="off"
+        />
+        ${
+          this.editingNew
+            ? nothing
+            : html`<button
+                class="gp-btn-quiet"
+                type="button"
+                title="Remove this file in a new commit"
+                ?disabled=${this.saving}
+                @click=${() => void this.#delete()}
+              >
+                Delete file
+              </button>`
+        }
+        <button
+          class="gp-btn-quiet"
+          type="button"
+          ?disabled=${this.saving}
+          @click=${() => this.#cancelEdit()}
+        >
+          Cancel
+        </button>
+        <button
+          class="gp-btn-primary"
+          type="button"
+          ?disabled=${this.saving}
+          @click=${() => void this.#save()}
+        >
+          ${this.saving ? "Committing…" : "Commit"}
+        </button>
       </div>
     `;
   }

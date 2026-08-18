@@ -38,24 +38,36 @@ refresh.
 
 ## Data
 
-**Code and Diff read the server.** The client in `api.ts` calls the endpoints
-declared in `src/server/Api.ts`:
+**Code reads and writes the server.** The client in `api.ts` calls the
+endpoints declared in `src/server/Api.ts`:
 
-| Screen | Endpoint              | Use                                  |
-| ------ | --------------------- | ------------------------------------ |
-| Code   | `GET /:repo/refs`     | Branch list and the tip oid          |
-| Code   | `GET /:repo/files`    | Tree paths for the explorer          |
-| Code   | `GET /:repo/file`     | Blob content for the file view       |
-| Code   | `GET /:repo/log/:oid` | The latest-commit bar                |
-| Detail | `POST /:repo/diff`    | Which files a Change Request touches |
-| Detail | `GET /:repo/file`     | Both sides of each changed file      |
+| Screen | Endpoint              | Use                                       |
+| ------ | --------------------- | ----------------------------------------- |
+| Code   | `GET /:repo/refs`     | Branch list and the tip oid               |
+| Code   | `GET /:repo/files`    | Tree paths for the explorer               |
+| Code   | `GET /:repo/file`     | Blob content for the file view and editor |
+| Code   | `GET /:repo/log/:oid` | The latest-commit bar                     |
+| Code   | `POST /:repo/commit`  | Committing an edit, a new file, a delete  |
+| Detail | `POST /:repo/diff`    | Which files a Change Request touches      |
+| Detail | `GET /:repo/file`     | Both sides of each changed file           |
+
+Editing is the pencil on the file card and the explorer's "+": both open a
+textarea over the blob, and committing sends the file with `expected` pinned
+to the tip the editor opened at — a commit that lands mid-edit answers
+`RefConflict` and is shown as one, never silently overwritten. Offline, the
+editor disables: the sample repository is read-only because there is nothing
+to write to.
 
 **Tasks and Change Requests are still fixtures.** The git-native hub
 (`src/hub/PullRequest.ts`, `src/hub/Projection.ts`) already models pull
 requests, reviews, comments and checks as signed events in `refs/hub/*`, but it
 has no HTTP surface yet — `Api.ts` exposes git itself and nothing else. Until it
 does, `fixtures.ts` carries the design's own data behind the types in
-`model.ts`, so replacing it is a change to one module.
+`model.ts`, and `store.ts` makes that data mutable: creating a Task, filtering
+and searching the list, commenting, and merging a mergeable Change Request all
+work — in this browser tab. Nothing is persisted, deliberately: faking
+durability in `localStorage` would misrepresent a system that has nowhere to
+write yet. When the hub API lands, `store.ts` is the one module that changes.
 
 When the API cannot be reached, Code and Diff fall back to the design's sample
 repository and **say so** in an inline note, rather than passing fixtures off as
@@ -113,8 +125,9 @@ Deployed, no proxy is involved: the Worker serves both the page and the API, and
 
 `verify.ts` runs three suites in Chromium: every screen mounts in both palettes
 with nothing thrown; the behaviours from the design conversation still work
-(nav collapse, tab switching, hierarchy navigation, theme toggle, deep links);
-and Code and Diff really do read the API — that last suite serves the shapes
+(nav collapse, tab switching, hierarchy navigation, theme toggle, deep links,
+the kind filter, task creation, commenting, merging, ⌘K search); and Code and
+Diff really do read the API — that last suite serves the shapes
 from `src/server/Api.ts`, so it fails loudly if this UI and that declaration
 drift apart.
 
@@ -129,6 +142,7 @@ drift apart.
 | `api.ts`         | Typed client for the JSON API        |
 | `model.ts`       | Task / Change Request domain         |
 | `fixtures.ts`    | The design's Task data               |
+| `store.ts`       | The mutable, observable Task store   |
 | `theme.ts`       | Palette choice and persistence       |
 | `icons.ts`       | Inline SVG icon set                  |
 | `highlight.ts`   | Lazy `@pierre/diffs` loader          |

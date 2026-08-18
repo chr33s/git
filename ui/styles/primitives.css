@@ -77,10 +77,15 @@
   color: var(--gp-fg);
 }
 
-.gp-segmented ui-toggle[data-pressed],
+.gp-segmented ui-toggle[pressed],
 .gp-segmented .gp-segment[data-active] {
   background: var(--gp-surface-active);
   color: var(--gp-fg);
+}
+
+.gp-segmented ui-toggle[disabled] {
+  color: var(--gp-fg-fainter);
+  cursor: default;
 }
 
 /* Status pill — `statusStyle(s)` in the prototype. */
@@ -197,4 +202,108 @@
   margin-bottom: 10px;
   border: 1px dashed var(--gp-border-strong);
   border-radius: var(--gp-radius);
+}
+
+/* The variant for something that went wrong, not merely something absent. */
+.gp-notice[data-error] {
+  color: var(--gp-red);
+  border-color: rgb(var(--gp-red-rgb) / 0.45);
+}
+
+.gp-btn-quiet {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gp-fg-secondary);
+  background: none;
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius);
+  padding: 7px 14px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.gp-btn-quiet:hover {
+  background: var(--gp-surface-hover);
+  color: var(--gp-fg);
+}
+
+/* ------------------------------------------------------------ form controls */
+
+.gp-field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gp-fg-muted);
+  margin: 14px 0 6px;
+}
+
+.gp-input,
+.gp-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--gp-fg);
+  background: var(--gp-surface-input);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius);
+  padding: 8px 12px;
+}
+
+.gp-input::placeholder,
+.gp-textarea::placeholder {
+  color: var(--gp-fg-faint);
+}
+
+.gp-input:focus,
+.gp-textarea:focus {
+  outline: none;
+  border-color: var(--gp-accent);
+}
+
+.gp-textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+/* ------------------------------------------------------------------- dialog */
+
+/* `ui-dialog-popup` opens through the Popover API, so it sits in the top
+   layer; the dimmed page behind it is the popover's own `::backdrop`. */
+.gp-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(460px, calc(100vw - 48px));
+  height: fit-content;
+  background: var(--gp-surface-raised);
+  color: var(--gp-fg);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius-lg);
+  padding: 20px 22px;
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.35);
+}
+
+.gp-dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+
+.gp-dialog-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 6px;
+}
+
+.gp-dialog-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--gp-fg-faint);
+  margin: 0 0 4px;
+}
+
+.gp-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
 }

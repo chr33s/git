@@ -13,9 +13,11 @@
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 
-import { clientFromDocument, type GitApi } from "./api.ts";
+import { UISearchField } from "@chr33s/base-wc/src/search-field";
+
+import { ApiError, clientFromDocument, type GitApi } from "./api.ts";
 import { GitPlusElement, NAVIGATE, NavigateEvent, type Screen } from "./base.ts";
-import { tasks } from "./fixtures.ts";
+import { store } from "./store.ts";
 import { current as currentTheme, THEME_CHANGE, ThemeChangeEvent, type Theme } from "./theme.ts";
 
 import "./nav.sidebar.ts";
@@ -24,9 +26,6 @@ import "./screen.code.ts";
 import "./screen.detail.ts";
 import "./screen.settings.ts";
 import "./screen.tasks.ts";
-
-/** Statuses that mean the work is still open, for the nav badge. */
-const OPEN = tasks.filter((task) => task.status !== "Done" && task.status !== "Merged").length;
 
 const SCREENS: readonly string[] = ["activity", "code", "tasks", "detail", "settings"];
 
@@ -46,25 +45,70 @@ export class GpApp extends GitPlusElement {
   @state() private accessor screen: Screen = "code";
   @state() private accessor selected = "T-12";
   @state() private accessor theme: Theme = currentTheme();
+  @state() private accessor openCount = store.openCount();
+  @state() private accessor query = "";
+
+  /**
+   * Who the server says is asking, from `/whoami` — fetched once here and
+   * handed down, so the rail, the Tasks screen and the detail screen agree on
+   * one identity instead of each asking for it. `null` for an unauthenticated
+   * caller, which the screens render as "anonymous" rather than inventing the
+   * design's placeholder name.
+   */
+  @state() private accessor viewer: string | null = null;
 
   readonly #api: GitApi = clientFromDocument();
+
+  #unsubscribe: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
     this.addEventListener(NAVIGATE, this.#onNavigate);
     this.addEventListener(THEME_CHANGE, this.#onThemeChange);
+    this.addEventListener("search", this.#onSearch);
+    this.#unsubscribe = store.subscribe(() => {
+      this.openCount = store.openCount();
+    });
     this.#fromHash();
     globalThis.addEventListener("hashchange", this.#onHashChange);
+    void this.#identify();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.removeEventListener(NAVIGATE, this.#onNavigate);
     this.removeEventListener(THEME_CHANGE, this.#onThemeChange);
+    this.removeEventListener("search", this.#onSearch);
+    this.#unsubscribe?.();
+    this.#unsubscribe = null;
     globalThis.removeEventListener("hashchange", this.#onHashChange);
   }
 
+  async #identify(): Promise<void> {
+    try {
+      this.viewer = (await this.#api.whoami()).subject;
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+    }
+  }
+
   #onHashChange = (): void => this.#fromHash();
+
+  /**
+   * The rail's search, debounced by `ui-search-field`.
+   *
+   * Tasks are what the store can search, so a query shows the Tasks screen
+   * filtered by it; clearing the field clears the filter but stays put.
+   */
+  #onSearch = (event: Event): void => {
+    const field = event.target;
+    if (!(field instanceof UISearchField)) return;
+    this.query = field.value;
+    if (field.value.trim() !== "" && this.screen !== "tasks") {
+      this.screen = "tasks";
+      globalThis.location.hash = "#/tasks";
+    }
+  };
 
   #onThemeChange = (event: Event): void => {
     if (event instanceof ThemeChangeEvent) this.theme = event.detail;
@@ -95,8 +139,8 @@ export class GpApp extends GitPlusElement {
       <div class="gp-shell">
         <gp-sidebar
           .screen=${this.screen}
-          .openCount=${OPEN}
-          .api=${this.#api}
+          .openCount=${this.openCount}
+          .subject=${this.viewer}
           .theme=${this.theme}
         ></gp-sidebar>
         ${this.#screen()}
@@ -114,10 +158,17 @@ export class GpApp extends GitPlusElement {
       case "activity":
         return html`<div class="gp-main"><gp-activity .api=${this.#api}></gp-activity></div>`;
       case "tasks":
-        return html`<div class="gp-main"><gp-tasks></gp-tasks></div>`;
+        return html`<div class="gp-main">
+          <gp-tasks .query=${this.query} .viewer=${this.viewer}></gp-tasks>
+        </div>`;
       case "detail":
         return html`<div class="gp-main">
-          <gp-detail .api=${this.#api} .taskId=${this.selected} .theme=${this.theme}></gp-detail>
+          <gp-detail
+            .api=${this.#api}
+            .taskId=${this.selected}
+            .theme=${this.theme}
+            .viewer=${this.viewer}
+          ></gp-detail>
         </div>`;
       case "settings":
         return html`<div class="gp-main"><gp-settings .api=${this.#api}></gp-settings></div>`;

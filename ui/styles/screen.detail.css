@@ -350,13 +350,19 @@
   margin-top: 4px;
 }
 
-.gp-comment-box {
-  border: 1px solid var(--gp-border-strong);
+.gp-comment-form {
+  margin-top: 6px;
+}
+
+.gp-comment-form .gp-textarea {
   border-radius: var(--gp-radius-lg);
   padding: 12px 16px;
-  font-size: 13.5px;
-  color: var(--gp-fg-faint);
-  margin-top: 6px;
+}
+
+.gp-comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 
 .gp-meta {
