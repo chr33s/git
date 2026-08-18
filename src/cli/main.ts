@@ -366,6 +366,7 @@ const serveCommand = Command.make(
       Flag.withDescription("Serve writes to repositories that have no genesis"),
     ),
     wake: Flag.boolean("wake").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
     ),
   },

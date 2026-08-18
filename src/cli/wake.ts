@@ -20,6 +20,7 @@ const wake = Command.make(
   {
     root: rootFlag,
     dry: Flag.boolean("dry-run").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Say what would run, run nothing, and leave the bookmark alone"),
     ),
     repo: repoArgument,
