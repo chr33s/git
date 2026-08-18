@@ -21,7 +21,7 @@ import { permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Session from "../hub/Session.ts";
 import * as Policy from "./Policy.ts";
-import { WhoamiAnswer, WhoamiVerdict } from "./UiApiContract.ts";
+import { WhoamiAnswer, WhoamiVerdict } from "./ApiContract.ts";
 
 /** Whether a push to one ref would get through, and what it answers to. */
 export const Verdict = WhoamiVerdict;

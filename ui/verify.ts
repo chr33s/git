@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import * as Contract from "../src/server/UiApiContract.ts";
+import * as Contract from "../src/server/ApiContract.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Output lives at the repository root alongside `dist/sea`, not under `ui/`. */
@@ -131,6 +131,32 @@ const CommitPayload = Schema.Struct({
   files: Schema.optional(Schema.Array(Contract.FileWrite)),
 });
 
+/** The slices of the other write payloads the stub honours. */
+const BranchCreatePayload = Schema.Struct({ name: Schema.String, base: Schema.String });
+const TagCreatePayload = Schema.Struct({
+  name: Schema.String,
+  target: Schema.String,
+  message: Schema.optional(Schema.String),
+});
+const ResetPayload = Schema.Struct({ ref: Schema.String, to: Schema.String });
+const MergePayload = Schema.Struct({
+  ours: Schema.String,
+  theirs: Schema.String,
+  into: Schema.optional(Schema.String),
+  message: Schema.optional(Schema.String),
+});
+const GrepPayload = Schema.Struct({
+  pattern: Schema.String,
+  ref: Schema.optional(Schema.String),
+});
+const RemoteAddPayload = Schema.Struct({
+  name: Schema.String,
+  url: Schema.String,
+  credential: Schema.optional(Schema.String),
+});
+const WebhookAddPayload = Schema.Struct({ url: Schema.String, secret: Schema.String });
+const NamePayload = Schema.Struct({ name: Schema.optional(Schema.String) });
+
 /** A fixture tree as a mutable map, dropping the index type's `undefined`. */
 const entries = (tree: Tree): Map<string, string> => {
   const map = new Map<string, string>();
@@ -173,8 +199,23 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
   ]);
   /** Commits written during the run, served back by `/object/:oid`. */
   const written = new Map<string, Stubbed>();
-  const NEXT_TIPS = ["5", "6", "7", "8", "9"] as const;
+  const NEXT_TIPS = ["5", "6", "7", "8", "9", "ab", "cd", "ef"] as const;
   let commitCount = 0;
+  const nextOid = (): Contract.Ref["oid"] => {
+    const digit = NEXT_TIPS[commitCount % NEXT_TIPS.length] ?? "9";
+    commitCount += 1;
+    return oid(digit.repeat(40 / digit.length));
+  };
+  const tags = new Map<string, Contract.Ref["oid"]>();
+  const stubRemotes: { name: string; url: string; has_credential: boolean }[] = [];
+  const stubHooks: { id: string; url: string; created_at: string }[] = [];
+  let hookSerial = 0;
+  /** Resolve a payload's branchish name — `refs/heads/x`, `x`, or an oid. */
+  const tipOf = (name: string): Contract.Ref["oid"] | undefined => {
+    if (/^[0-9a-f]{40}$/.test(name)) return oid(name);
+    const bare = name.startsWith("refs/heads/") ? name.slice("refs/heads/".length) : name;
+    return tips.get(bare);
+  };
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
@@ -187,6 +228,25 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         const decoded = Schema.decodeUnknownSync(schema)(body);
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify(decoded));
+      };
+      /**
+       * The request body, decoded with the schema that endpoint expects.
+       *
+       * Decoding here rather than returning `unknown` is the point: a client
+       * that drifts from the wire fails inside this stub, which is what the
+       * live suite exists to catch.
+       */
+      const body = async <S extends Schema.ConstraintDecoder<unknown>>(
+        schema: S,
+      ): Promise<S["Type"]> => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        const input: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        return Schema.decodeUnknownSync(schema)(input);
+      };
+      const notFound = (): void => {
+        response.writeHead(404, { "content-type": "application/json" });
+        response.end(JSON.stringify({ _tag: "ObjectNotFound" }));
       };
 
       if (api) {
@@ -206,10 +266,10 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             ? name.slice("refs/heads/".length)
             : "main";
         const tree = trees.get(branchOf(ref)) ?? new Map<string, string>();
-        const refsNow = [
-          { name: "refs/heads/main", oid: tips.get("main") ?? OID_MAIN },
-          { name: `refs/heads/${BRANCH}`, oid: tips.get(BRANCH) ?? OID_BRANCH },
-        ];
+        const refsNow = [...tips.entries()].map(([name, tip]) => ({
+          name: `refs/heads/${name}`,
+          oid: tip,
+        }));
 
         if (path === "/core/refs") {
           return json(Contract.RefsResponse, { refs: refsNow });
@@ -285,6 +345,214 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             ],
           });
         }
+        // --- the administration surface the Settings screen drives -------
+        if (request.method === "DELETE") {
+          if (path.startsWith("/core/branches/")) {
+            const name = decodeURIComponent(path.slice("/core/branches/".length));
+            const existed = tips.delete(name);
+            trees.delete(name);
+            return json(Contract.Deleted, { deleted: existed });
+          }
+          if (path.startsWith("/core/tags/")) {
+            const name = decodeURIComponent(path.slice("/core/tags/".length));
+            return json(Contract.Deleted, { deleted: tags.delete(name) });
+          }
+          if (path.startsWith("/core/webhooks/")) {
+            const id = decodeURIComponent(path.slice("/core/webhooks/".length));
+            const at = stubHooks.findIndex((hook) => hook.id === id);
+            if (at !== -1) stubHooks.splice(at, 1);
+            return json(Contract.Deleted, { deleted: at !== -1 });
+          }
+          if (path.startsWith("/core/remotes/")) {
+            const name = decodeURIComponent(path.slice("/core/remotes/".length));
+            const at = stubRemotes.findIndex((remote) => remote.name === name);
+            if (at !== -1) stubRemotes.splice(at, 1);
+            return json(Contract.Deleted, { deleted: at !== -1 });
+          }
+        }
+        if (path === "/core/branches/create" && request.method === "POST") {
+          const payload = await body(BranchCreatePayload);
+          const base = tipOf(payload.base);
+          if (base === undefined) return notFound();
+          tips.set(payload.name, base);
+          trees.set(payload.name, new Map(trees.get(branchOf(payload.base)) ?? trees.get("main")));
+          return json(Contract.Ref, { name: `refs/heads/${payload.name}`, oid: base });
+        }
+        if (path === "/core/tags" && request.method === "GET") {
+          return json(Contract.RefPage, {
+            items: [...tags.entries()].map(([name, tagOid]) => ({
+              name: `refs/tags/${name}`,
+              oid: tagOid,
+            })),
+            next_cursor: null,
+            has_more: false,
+          });
+        }
+        if (path === "/core/tags" && request.method === "POST") {
+          const payload = await body(TagCreatePayload);
+          const target = tipOf(payload.target);
+          if (target === undefined) return notFound();
+          tags.set(payload.name, target);
+          return json(Contract.TagCreated, {
+            ref: `refs/tags/${payload.name}`,
+            oid: target,
+            target,
+          });
+        }
+        if (path === "/core/reset" && request.method === "POST") {
+          const payload = await body(ResetPayload);
+          const bare = branchOf(payload.ref);
+          const previous = tips.get(bare) ?? null;
+          const to = tipOf(payload.to);
+          if (to === undefined) return notFound();
+          tips.set(bare, to);
+          return json(Contract.ResetResult, { ref: `refs/heads/${bare}`, oid: to, previous });
+        }
+        if (path === "/core/merge" && request.method === "POST") {
+          const payload = await body(MergePayload);
+          const ours = tipOf(payload.ours);
+          const theirs = tipOf(payload.theirs);
+          if (ours === undefined || theirs === undefined) return notFound();
+          const commit = nextOid();
+          written.set(commit, {
+            oid: commit,
+            subject: (payload.message ?? "merge").split("\n", 1)[0] ?? "merge",
+            author: "Rune Baek",
+            daysAgo: 0,
+          });
+          if (payload.into !== undefined) tips.set(branchOf(payload.into), commit);
+          return json(Contract.MergeResult, {
+            kind: "merged",
+            commit,
+            tree: oid("a".repeat(40)),
+            base: theirs,
+            conflicts: [],
+          });
+        }
+        if (path === "/core/grep" && request.method === "POST") {
+          const payload = await body(GrepPayload);
+          const target = trees.get(branchOf(payload.ref ?? null)) ?? new Map<string, string>();
+          const needle = payload.pattern.toLowerCase();
+          const matches: { path: string; line: number; text: string }[] = [];
+          for (const [entryPath, content] of target) {
+            content.split("\n").forEach((line, index) => {
+              if (line.toLowerCase().includes(needle)) {
+                matches.push({ path: entryPath, line: index + 1, text: line });
+              }
+            });
+          }
+          return json(Contract.GrepResponse, { matches, truncated: false, skipped: [] });
+        }
+        if (path.startsWith("/core/history/")) {
+          return json(Contract.HistoryPage, {
+            items: HISTORY.slice(0, 2).map((entry) => ({
+              oid: entry.oid,
+              message: `${entry.subject}\n`,
+              blob: null,
+            })),
+            next_cursor: null,
+            has_more: false,
+          });
+        }
+        if (path === "/core/reflog") {
+          return json(Contract.ReflogResponse, {
+            entries: [
+              {
+                from: OID_MAIN,
+                to: tips.get("main") ?? OID_MAIN,
+                at: new Date().toISOString(),
+                message: "commit: moved during the suite",
+              },
+              {
+                from: null,
+                to: OID_MAIN,
+                at: new Date().toISOString(),
+                message: "commit (initial): seed the repository",
+              },
+            ],
+          });
+        }
+        if (path === "/core/fsck" && request.method === "POST") {
+          return json(Contract.FsckReport, {
+            checked: 12,
+            ok: true,
+            problems: [],
+            dangling_refs: [],
+          });
+        }
+        if (path === "/core/gc" && request.method === "POST") {
+          return json(Contract.GcReport, {
+            scanned: 12,
+            reachable: 12,
+            removed: [],
+            retained: [],
+            packed: null,
+            repack_skipped: null,
+          });
+        }
+        if (path === "/core/webhooks" && request.method === "GET") {
+          return json(Contract.WebhookList, { webhooks: stubHooks });
+        }
+        if (path === "/core/webhooks" && request.method === "POST") {
+          const payload = await body(WebhookAddPayload);
+          hookSerial += 1;
+          const hook = {
+            id: `hook-${String(hookSerial)}`,
+            url: payload.url,
+            created_at: new Date().toISOString(),
+          };
+          stubHooks.push(hook);
+          return json(Contract.WebhookWire, hook);
+        }
+        if (path === "/core/remotes" && request.method === "GET") {
+          return json(Contract.RemoteList, {
+            remotes: stubRemotes.map((remote) => ({
+              ...remote,
+              sync: null,
+              created_at: new Date().toISOString(),
+            })),
+          });
+        }
+        if (path === "/core/remotes" && request.method === "POST") {
+          const payload = await body(RemoteAddPayload);
+          const remote = {
+            name: payload.name,
+            url: payload.url,
+            has_credential: payload.credential !== undefined,
+          };
+          stubRemotes.push(remote);
+          return json(Contract.RemoteWire, {
+            ...remote,
+            sync: null,
+            created_at: new Date().toISOString(),
+          });
+        }
+        if (path === "/core/fetch" && request.method === "POST") {
+          const payload = await body(NamePayload);
+          return json(Contract.FetchResult, {
+            remote: `refs/remotes/${payload.name ?? "origin"}`,
+            refs: [],
+            objects: 0,
+          });
+        }
+        if (path === "/core/push" && request.method === "POST") {
+          await body(Schema.Unknown);
+          return json(Contract.PushResult, {
+            refs: [{ ref: "refs/heads/main", ok: true, reason: null }],
+          });
+        }
+        if (path === "/core/pull" && request.method === "POST") {
+          await body(Schema.Unknown);
+          const tip = tips.get("main") ?? OID_MAIN;
+          return json(Contract.PullResult, {
+            kind: "up-to-date",
+            branch: "refs/heads/main",
+            tracking: "refs/remotes/origin/main",
+            from: tip,
+            to: tip,
+            objects: 0,
+          });
+        }
         if (path === "/core/commit" && request.method === "POST") {
           try {
             const chunks: Buffer[] = [];
@@ -315,8 +583,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
               if (file.content === null) target.delete(file.path);
               else target.set(file.path, file.content);
             }
-            const next = oid((NEXT_TIPS[commitCount] ?? "9").repeat(40));
-            commitCount += 1;
+            const next = nextOid();
             tips.set(branch, next);
             written.set(next, {
               oid: next,
@@ -608,19 +875,6 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ["light", "dark"].includes(await page.evaluate(() => localStorage.getItem("gp-theme") ?? "")),
   );
 
-  await page.goto(`${origin}/#/code`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(1200);
-  check(
-    "the editor is read-only against the sample repository",
-    await page.evaluate(
-      () =>
-        document.querySelector<HTMLButtonElement>('.gp-file-card button[aria-label="Edit file"]')
-          ?.disabled === true &&
-        document.querySelector<HTMLButtonElement>('.gp-explorer button[aria-label="New file"]')
-          ?.disabled === true,
-    ),
-  );
-
   await page.goto(`${origin}/#/activity`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(600);
   check("the timeline lays out every event", (await page.locator(".gp-cal-event").count()) === 7);
@@ -728,10 +982,48 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     await page.evaluate(() => document.activeElement?.matches(".gp-search input") === true),
   );
   await page.keyboard.type("auth");
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(900);
+  check("a query opens the Search screen", (await hash()) === "#/search");
+  check("and matches tasks by title", (await page.locator(".gp-search-task-row").count()) === 2);
   check(
-    "typing a query narrows the Tasks list",
-    (await page.locator(".gp-task-row").count()) === 2,
+    "code search says it needs the server when there is none",
+    ((await page.textContent(".gp-notice")) ?? "").includes("Code search needs the server"),
+  );
+
+  // --- what has no endpoint says so, rather than pretending ---------------
+  await page.goto(`${origin}/#/settings`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(700);
+  check(
+    "the danger zone is disabled while it has no endpoint",
+    await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll<HTMLButtonElement>(".gp-danger-btn")];
+      return buttons.length === 2 && buttons.every((button) => button.disabled);
+    }),
+  );
+  check(
+    "and the admin cards name the unreachable API rather than showing nothing",
+    ((await page.textContent('[data-card="remotes"]')) ?? "").includes("not reachable"),
+  );
+
+  await page.goto(`${origin}/#/code`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(1400);
+  check(
+    "the editor is read-only against the sample repository",
+    await page.evaluate(
+      () =>
+        document.querySelector<HTMLButtonElement>('.gp-file-card button[aria-label="Edit file"]')
+          ?.disabled === true &&
+        document.querySelector<HTMLButtonElement>('.gp-explorer button[aria-label="New file"]')
+          ?.disabled === true,
+    ),
+  );
+  check(
+    "and so is the branch picker, with nothing to create against",
+    await page.evaluate(
+      () =>
+        document.querySelector<HTMLButtonElement>(".gp-branch-trigger")?.disabled === true &&
+        document.querySelector("ui-menu.gp-branch-menu") === null,
+    ),
   );
   await page.close();
 };
@@ -741,6 +1033,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   console.info("\nlive");
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+  const hash = (): Promise<string> => page.evaluate(() => globalThis.location.hash);
 
   await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
   await page.waitForTimeout(2500);
@@ -861,6 +1154,74 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   );
   await shot(page, "live-code-edited");
 
+  // --- Clone, over the real origin ---------------------------------------
+  await page.click(".gp-clone [data-dialog-trigger]");
+  await page.waitForTimeout(400);
+  check(
+    "Clone offers the smart-HTTP URL this page is served from",
+    (await page.inputValue(".gp-clone-url")) === `${origin}/core`,
+    await page.inputValue(".gp-clone-url"),
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+
+  // --- history, from /commits and /history --------------------------------
+  await page.click(".gp-commit-bar");
+  await page.waitForTimeout(1200);
+  check(
+    "the commit bar opens the branch's history",
+    (await page.locator(".gp-history-panel .gp-list-row").count()) === HISTORY.length,
+  );
+  await page.click(".gp-commit-bar");
+  await page.waitForTimeout(300);
+  check("and closes it again", (await page.locator(".gp-history-panel").count()) === 0);
+  await page.click('.gp-file-card button[aria-label="File history"]');
+  await page.waitForTimeout(1200);
+  check(
+    "the clock opens the file's own history",
+    (await page.locator(".gp-filelog-row").count()) === 2,
+  );
+  await page.click(".gp-filelog-row:nth-child(2)");
+  await page.waitForTimeout(1200);
+  check(
+    "choosing a commit shows that revision, read-only",
+    ((await page.textContent(".gp-notice[data-history]")) ?? "").includes("read-only") &&
+      (await page.evaluate(
+        () =>
+          document.querySelector<HTMLButtonElement>('.gp-file-card button[aria-label="Edit file"]')
+            ?.disabled === true,
+      )),
+  );
+  await page.click(".gp-notice[data-history] .gp-link-btn");
+  await page.waitForTimeout(1000);
+  check(
+    "and Back to tip restores the editable view",
+    (await page.locator(".gp-notice[data-history]").count()) === 0,
+  );
+  await page.click('.gp-file-card button[aria-label="File history"]');
+  await page.waitForTimeout(300);
+
+  // --- creating a branch, through POST /branches/create -------------------
+  await page.click(".gp-branch-trigger");
+  await page.waitForTimeout(400);
+  await page.click('.gp-menu-item[value="__new-branch"]');
+  await page.waitForTimeout(400);
+  await page.fill("#gp-new-branch-name", "topic/from-the-ui");
+  await page.click(".gp-new-branch button[type='submit']");
+  await page.waitForTimeout(1800);
+  check(
+    "creating a branch switches the screen onto it",
+    ((await page.textContent(".gp-branch-trigger")) ?? "").includes("topic/from-the-ui"),
+  );
+  await page.click(".gp-branch-trigger");
+  await page.waitForTimeout(400);
+  check(
+    "and it joins the picker",
+    (await page.locator(".gp-branch-menu .gp-menu-item:not([data-action])").count()) === 3,
+  );
+  await page.click('.gp-menu-item[value="main"]');
+  await page.waitForTimeout(1500);
+
   // --- the branch picker, over the real ref list -------------------------
   check(
     "the branch picker is a menu when there is more than one branch",
@@ -868,7 +1229,10 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   );
   await page.click(".gp-branch-trigger");
   await page.waitForTimeout(400);
-  check("it lists every branch", (await page.locator(".gp-menu-item").count()) === 2);
+  check(
+    "it lists every branch",
+    (await page.locator(".gp-branch-menu .gp-menu-item:not([data-action])").count()) === 3,
+  );
   await page.click(`.gp-menu-item[value="${BRANCH}"]`);
   await page.waitForTimeout(2000);
   check(
@@ -1011,13 +1375,141 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   );
   await shot(page, "live-activity");
 
-  // --- Settings, from the ref list --------------------------------------
+  // --- search, over /grep -------------------------------------------------
+  await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(1500);
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("export const");
+  await page.waitForTimeout(1500);
+  check(
+    "code search finds real file contents",
+    (await page.locator(".gp-search-hit").count()) >= 2,
+    `${String(await page.locator(".gp-search-hit").count())} hits`,
+  );
+  check(
+    "and names the file and line",
+    ((await page.textContent(".gp-search-hit-path")) ?? "").includes(":1"),
+  );
+  await page.click(".gp-search-hit");
+  await page.waitForTimeout(1800);
+  check("a hit opens the file in Code", (await hash()).startsWith("#/code/"), await hash());
+  check(
+    "and the viewer shows that file",
+    ((await page.textContent(".gp-card-head")) ?? "").includes(".ts"),
+  );
+  await shot(page, "live-search");
+
+  // --- Settings, the administration surface ------------------------------
   await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(1500);
   const fields = await page.locator(".gp-field-value").allTextContents();
   check("settings names the repository the client is pointed at", fields[0]?.trim() === "core");
   check("settings resolves the default branch from /branches", fields[1]?.trim() === "main");
+  check(
+    "the identity card reports what /whoami answered",
+    ((await page.textContent('[data-card="identity"]')) ?? "").includes("no genesis"),
+  );
+  check(
+    "the branch card lists every head",
+    (await page.locator('[data-card="branches"] .gp-admin-row').count()) >= 2,
+  );
+  check(
+    "and refuses to delete the default branch",
+    await page.evaluate(
+      () =>
+        document.querySelector<HTMLButtonElement>('[data-card="branches"] .gp-btn-quiet')
+          ?.disabled === true,
+    ),
+  );
+
+  // A tag, then its removal — the whole round trip through /tags.
+  await page.fill('[data-card="tags"] input[name="name"]', "v0.4.0");
+  await page.fill('[data-card="tags"] input[name="message"]', "identity milestone");
+  await page.click('[data-card="tags"] button[type="submit"]');
+  await page.waitForTimeout(1200);
+  check(
+    "creating a tag reports it and lists it",
+    ((await page.textContent('[data-card-note="tags"]')) ?? "").includes("v0.4.0") &&
+      (await page.locator('[data-card="tags"] .gp-admin-row').count()) === 1,
+  );
+  await page.click('[data-card="tags"] .gp-admin-row .gp-btn-quiet');
+  await page.waitForTimeout(1200);
+  check(
+    "and deleting it empties the list again",
+    (await page.locator('[data-card="tags"] .gp-admin-row').count()) === 0,
+  );
+
+  // Moving a ref, through /reset.
+  await page.fill('[data-card="branches"] input[name="to"]', OID_BRANCH);
+  await page.click('[data-card="branches"] button[type="submit"]');
+  await page.waitForTimeout(1200);
+  check(
+    "moving a branch reports where it went",
+    ((await page.textContent('[data-card-note="branches"]')) ?? "").includes(
+      OID_BRANCH.slice(0, 7),
+    ),
+    (await page.textContent('[data-card-note="branches"]')) ?? "",
+  );
+
+  // A remote, then its sync verbs.
+  await page.fill('[data-card="remotes"] input[name="name"]', "origin");
+  await page.fill('[data-card="remotes"] input[name="url"]', "https://git.example.com/core");
+  await page.click('[data-card="remotes"] button[type="submit"]');
+  await page.waitForTimeout(1200);
+  check(
+    "registering a remote lists it",
+    (await page.locator('[data-card="remotes"] .gp-admin-row').count()) === 1,
+  );
+  await page.click('[data-card="remotes"] .gp-admin-actions .gp-btn-quiet:nth-child(3)');
+  await page.waitForTimeout(1200);
+  check(
+    "pulling reports what the remote had",
+    ((await page.textContent('[data-card-note="remotes"]')) ?? "").includes("up-to-date"),
+    (await page.textContent('[data-card-note="remotes"]')) ?? "",
+  );
+
+  // A webhook.
+  await page.fill('[data-card="webhooks"] input[name="url"]', "https://ci.example.com/hook");
+  await page.fill('[data-card="webhooks"] input[name="secret"]', "s3cret");
+  await page.click('[data-card="webhooks"] button[type="submit"]');
+  await page.waitForTimeout(1200);
+  check(
+    "registering a webhook lists it without its secret",
+    (await page.locator('[data-card="webhooks"] .gp-admin-row').count()) === 1 &&
+      !((await page.textContent('[data-card="webhooks"]')) ?? "").includes("s3cret"),
+  );
+
+  // Maintenance: fsck, gc, reflog.
+  await page.click('[data-card="maintenance"] .gp-btn-quiet:nth-child(1)');
+  await page.waitForTimeout(1000);
+  check(
+    "fsck reports the store sound",
+    ((await page.textContent('[data-card-note="maintenance"]')) ?? "").includes("all sound"),
+  );
+  await page.click('[data-card="maintenance"] .gp-btn-quiet:nth-child(2)');
+  await page.waitForTimeout(1000);
+  check(
+    "a dry-run collection says what would go",
+    ((await page.textContent('[data-card-note="maintenance"]')) ?? "").includes("dry run"),
+  );
+  await page.click('[data-card="maintenance"] .gp-btn-quiet:nth-child(4)');
+  await page.waitForTimeout(1000);
+  check(
+    "the reflog lists where the branch has been",
+    (await page.locator('[data-card="maintenance"] .gp-admin-row').count()) === 2,
+  );
   await shot(page, "live-settings");
+
+  // --- merging a Change Request against the real endpoint -----------------
+  await page.goto(`${origin}/#/detail/CR-19`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(1200);
+  await page.click(".gp-merge-btn");
+  await page.waitForTimeout(1500);
+  check(
+    "a merge the server can run lands without a notice",
+    (await page.textContent(".gp-detail-eyebrow .gp-status"))?.trim() === "Merged" &&
+      (await page.locator(".gp-review .gp-notice").count()) === 0,
+  );
   await page.close();
 };
 

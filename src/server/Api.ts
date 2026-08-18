@@ -40,23 +40,43 @@ import { readGenesis } from "../trust/Genesis.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
 import {
+  BranchCreateRequest,
   Commit as CommitResponse,
   CommitCreated,
   CommitPage,
+  Deleted,
   DiffRequest,
   DiffResponse,
   Encoding,
+  FetchResult,
   FileContent,
   FilesResponse,
   FileWrite,
+  FsckReport,
+  GcReport,
+  GcRequest as GcRequestWire,
+  GrepRequest,
+  GrepResponse,
   HistoryPage,
   LogResponse,
+  MergeResult,
   OidString,
   Page,
+  PullResult,
+  PushResult,
   RawObject as RawObjectResponse,
   Ref,
+  ReflogResponse,
   RefsResponse,
-} from "./UiApiContract.ts";
+  RemoteList,
+  RemoteWire,
+  ResetRequest,
+  ResetResult,
+  TagCreated,
+  TagRead,
+  WebhookList,
+  WebhookWire,
+} from "./ApiContract.ts";
 
 /** `NewRemote` under construction: built field by field, handed over as one. */
 interface RemoteRequest {
@@ -138,13 +158,6 @@ const toBase64 = (bytes: Uint8Array): string => {
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
 };
-
-/** A registered webhook as a client may see it: no secret, ever. */
-const WebhookWire = Schema.Struct({
-  id: Schema.String,
-  url: Schema.String,
-  created_at: Schema.String,
-});
 
 const TreeEntryWire = Schema.Struct({
   mode: Schema.String,
@@ -587,17 +600,6 @@ const matcher = (payload: {
     }
   });
 
-/** A registered remote as a client may see it: no credential, ever. */
-const RemoteWire = Schema.Struct({
-  name: Schema.String,
-  url: Schema.String,
-  has_credential: Schema.Boolean,
-  has_key: Schema.Boolean,
-  /** The standing instruction, or `null` for a remote nothing happens to. */
-  sync: Schema.NullOr(Schema.Struct({ mode: Schema.String, refs: Schema.Array(Schema.String) })),
-  created_at: Schema.String,
-});
-
 /**
  * Which remote an operation acts on: a stored `name`, or a `url` outright.
  * Exactly one — a request that gives both has not said which credential it
@@ -607,13 +609,6 @@ const RemoteTarget = {
   name: Schema.optional(Schema.String),
   url: Schema.optional(Schema.String),
 };
-
-/** A ref after a fetch moved it, and where it was before. */
-const FetchedRef = Schema.Struct({
-  name: Schema.String,
-  oid: OidString,
-  from: Schema.NullOr(OidString),
-});
 
 const repo = HttpApiGroup.make("repo")
   .add(
@@ -729,7 +724,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.post("branch", "/branches/create", {
       params: RepoParam,
-      payload: Schema.Struct({ name: Schema.String, base: Schema.String }),
+      payload: BranchCreateRequest,
       success: Ref,
       error: [RefConflict, Invalid],
     }),
@@ -746,7 +741,7 @@ const repo = HttpApiGroup.make("repo")
         tagger: Schema.optional(SignatureWire),
         force: Schema.optional(Schema.Boolean),
       }),
-      success: Schema.Struct({ ref: Schema.String, oid: OidString, target: OidString }),
+      success: TagCreated,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -760,19 +755,14 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("tagRead", "/tag/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        object: OidString,
-        type: Schema.Literals(["blob", "tree", "commit", "tag"]),
-        tag: Schema.String,
-        message: Schema.String,
-      }),
+      success: TagRead,
       error: ObjectNotFound,
     }),
   )
   .add(
     HttpApiEndpoint.delete("tagRemove", "/tags/:name", {
       params: { ...RepoParam, name: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       error: Invalid,
     }),
   )
@@ -782,12 +772,7 @@ const repo = HttpApiGroup.make("repo")
     // object.
     HttpApiEndpoint.post("fsck", "/fsck", {
       params: RepoParam,
-      success: Schema.Struct({
-        checked: Schema.Finite,
-        ok: Schema.Boolean,
-        problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
-        dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
-      }),
+      success: FsckReport,
       // `Invalid` when the caller may not ask: a whole-store scan is charged
       // like the other maintenance verbs.
       error: [Invalid],
@@ -796,7 +781,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.delete("branchRemove", "/branches/:name", {
       params: { ...RepoParam, name: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       error: Invalid,
     }),
   )
@@ -809,17 +794,8 @@ const repo = HttpApiGroup.make("repo")
      */
     HttpApiEndpoint.post("reset", "/reset", {
       params: RepoParam,
-      payload: Schema.Struct({
-        ref: Schema.String,
-        to: Schema.String,
-        /** Absent moves whatever it is now; stating it makes this a CAS. */
-        expected: Schema.optional(Schema.NullOr(OidString)),
-      }),
-      success: Schema.Struct({
-        ref: Schema.String,
-        oid: OidString,
-        previous: Schema.NullOr(OidString),
-      }),
+      payload: ResetRequest,
+      success: ResetResult,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -836,18 +812,7 @@ const repo = HttpApiGroup.make("repo")
         into: Schema.optional(Schema.String),
         no_fast_forward: Schema.optional(Schema.Boolean),
       }),
-      success: Schema.Struct({
-        kind: Schema.Literals(["up-to-date", "fast-forward", "merged", "conflicted"]),
-        commit: Schema.NullOr(OidString),
-        tree: Schema.NullOr(OidString),
-        base: Schema.NullOr(OidString),
-        conflicts: Schema.Array(
-          Schema.Struct({
-            path: Schema.String,
-            reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
-          }),
-        ),
-      }),
+      success: MergeResult,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -915,72 +880,22 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("reflog", "/reflog", {
       params: RepoParam,
       query: { ref: Schema.String },
-      success: Schema.Struct({
-        entries: Schema.Array(
-          Schema.Struct({
-            from: Schema.NullOr(OidString),
-            to: Schema.NullOr(OidString),
-            at: Schema.String,
-            message: Schema.String,
-          }),
-        ),
-      }),
+      success: ReflogResponse,
     }),
   )
   .add(
     HttpApiEndpoint.post("grep", "/grep", {
       params: RepoParam,
-      payload: Schema.Struct({
-        pattern: Schema.String,
-        ref: Schema.optional(Schema.String),
-        path: Schema.optional(Schema.String),
-        ignore_case: Schema.optional(Schema.Boolean),
-        fixed: Schema.optional(Schema.Boolean),
-        /** Bounded by default: a grep over a big tree is a lot of lines. */
-        max_matches: Schema.optional(Schema.Finite),
-      }),
-      success: Schema.Struct({
-        matches: Schema.Array(
-          Schema.Struct({
-            path: Schema.String,
-            line: Schema.Finite,
-            text: Schema.String,
-          }),
-        ),
-        truncated: Schema.Boolean,
-        /** Files too large to scan, named so the answer is not silently partial. */
-        skipped: Schema.Array(Schema.String),
-      }),
+      payload: GrepRequest,
+      success: GrepResponse,
       error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.post("gc", "/gc", {
       params: RepoParam,
-      payload: Schema.Struct({
-        dry_run: Schema.optional(Schema.Boolean),
-        /** Also write what survives into one pack and drop the loose copies. */
-        repack: Schema.optional(Schema.Boolean),
-        /**
-         * How long an object only the reflog still names is protected, in
-         * milliseconds; `0` collects those too. Defaults to git's 90 days.
-         */
-        reflog_grace_ms: Schema.optional(Schema.Finite),
-      }),
-      success: Schema.Struct({
-        scanned: Schema.Finite,
-        reachable: Schema.Finite,
-        removed: Schema.Array(OidString),
-        /** Unreachable, but inside a pack: `repack` is what collects these. */
-        retained: Schema.Array(OidString),
-        packed: Schema.NullOr(Schema.Struct({ name: Schema.String, objects: Schema.Finite })),
-        /**
-         * Why a requested repack did not happen, when it did not. Without it a
-         * fork that borrows through alternates gets `packed: null` and no way
-         * to tell a refusal from a repository that had nothing to pack.
-         */
-        repack_skipped: Schema.NullOr(Schema.String),
-      }),
+      payload: GcRequestWire,
+      success: GcReport,
       // `Invalid` when the repository lends its objects to a fork: refusing is
       // an answer the caller acts on, not a fault.
       error: [ObjectNotFound, Invalid],
@@ -999,7 +914,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("webhookList", "/webhooks", {
       params: RepoParam,
-      success: Schema.Struct({ webhooks: Schema.Array(WebhookWire) }),
+      success: WebhookList,
       // `Invalid` when the caller may not ask: where a repository sends its
       // pushes is administrative, not public.
       error: Invalid,
@@ -1008,7 +923,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.delete("webhookRemove", "/webhooks/:id", {
       params: { ...RepoParam, id: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       // Where this repository sends what it holds is administrative, and
       // "you may not" is an answer this has to be able to give.
       error: Invalid,
@@ -1079,7 +994,7 @@ const remotes = HttpApiGroup.make("remotes")
   .add(
     HttpApiEndpoint.get("remoteList", "/remotes", {
       params: RepoParam,
-      success: Schema.Struct({ remotes: Schema.Array(RemoteWire) }),
+      success: RemoteList,
       // As `webhookList`: administrative, not public.
       error: Invalid,
     }),
@@ -1087,7 +1002,7 @@ const remotes = HttpApiGroup.make("remotes")
   .add(
     HttpApiEndpoint.delete("remoteRemove", "/remotes/:name", {
       params: { ...RepoParam, name: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       error: Invalid,
     }),
   )
@@ -1100,12 +1015,7 @@ const remotes = HttpApiGroup.make("remotes")
         refs: Schema.optional(Schema.Array(Schema.String)),
         depth: Schema.optional(Schema.Finite),
       }),
-      success: Schema.Struct({
-        /** The namespace the branches landed in: `refs/remotes/<remote>/…`. */
-        remote: Schema.String,
-        refs: Schema.Array(FetchedRef),
-        objects: Schema.Finite,
-      }),
+      success: FetchResult,
       error: [RefConflict, PackCorrupt, ObjectNotFound, Invalid],
     }),
   )
@@ -1130,15 +1040,7 @@ const remotes = HttpApiGroup.make("remotes")
        * Every requested ref gets a line, and a rejection is a value: a push
        * of five branches where one lost a race is four successes.
        */
-      success: Schema.Struct({
-        refs: Schema.Array(
-          Schema.Struct({
-            ref: Schema.String,
-            ok: Schema.Boolean,
-            reason: Schema.NullOr(Schema.String),
-          }),
-        ),
-      }),
+      success: PushResult,
       error: [PackCorrupt, ObjectNotFound, Invalid],
     }),
   )
@@ -1156,16 +1058,7 @@ const remotes = HttpApiGroup.make("remotes")
        * report: the tracking ref moved, the branch did not, and which of a
        * merge or a rebase was wanted is not something a pull can guess.
        */
-      success: Schema.Struct({
-        kind: Schema.Literals(["up-to-date", "created", "fast-forward", "non-fast-forward"]),
-        branch: Schema.String,
-        tracking: Schema.String,
-        /** Where the branch was; `null` when it did not exist. */
-        from: Schema.NullOr(OidString),
-        /** What the remote had — where the branch is now, unless it diverged. */
-        to: OidString,
-        objects: Schema.Finite,
-      }),
+      success: PullResult,
       error: [RefConflict, PackCorrupt, ObjectNotFound, Invalid],
     }),
   )

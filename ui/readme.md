@@ -7,13 +7,14 @@ The web interface for `@chr33s/git`, implementing the Claude Design prototypes
 
 Five screens, in one shell with a collapsible rail:
 
-| Screen       | Contents                                                                     |
-| ------------ | ---------------------------------------------------------------------------- |
-| **Activity** | A fortnight of work as a calendar timeline; every card opens its Task        |
-| **Code**     | Repository explorer and file view — **wired to the JSON API**                |
-| **Tasks**    | Tasks and Change Requests as one hierarchy                                   |
-| **Detail**   | A Task, or a Change Request with refs, diff, commits, checks and merge state |
-| **Settings** | General, merge policy, danger zone                                           |
+| Screen       | Contents                                                                      |
+| ------------ | ----------------------------------------------------------------------------- |
+| **Activity** | Repository history as a calendar timeline, zoomable and pageable              |
+| **Code**     | Explorer, file view, editor, history and branch management                    |
+| **Tasks**    | Tasks and Change Requests as one hierarchy                                    |
+| **Detail**   | A Task, or a Change Request with refs, diff, commits, checks and merge state  |
+| **Search**   | One query over Task titles and — through `/grep` — file contents              |
+| **Settings** | Identity, branches, tags, remotes, webhooks, maintenance, policy, danger zone |
 
 Both palettes ship. The rail's toggle pins one and remembers it; with no stored
 choice the page follows `prefers-color-scheme`.
@@ -41,15 +42,31 @@ refresh.
 **Code reads and writes the server.** The client in `api.ts` calls the
 endpoints declared in `src/server/Api.ts`:
 
-| Screen | Endpoint              | Use                                       |
-| ------ | --------------------- | ----------------------------------------- |
-| Code   | `GET /:repo/refs`     | Branch list and the tip oid               |
-| Code   | `GET /:repo/files`    | Tree paths for the explorer               |
-| Code   | `GET /:repo/file`     | Blob content for the file view and editor |
-| Code   | `GET /:repo/log/:oid` | The latest-commit bar                     |
-| Code   | `POST /:repo/commit`  | Committing an edit, a new file, a delete  |
-| Detail | `POST /:repo/diff`    | Which files a Change Request touches      |
-| Detail | `GET /:repo/file`     | Both sides of each changed file           |
+| Screen   | Endpoint                                                                                        | Use                                        |
+| -------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Rail     | `GET /:repo/whoami`                                                                             | Identity, resolved once and handed down    |
+| Code     | `GET /:repo/refs`                                                                               | Branch list and the tip oid                |
+| Code     | `GET /:repo/files`                                                                              | Tree paths for the explorer                |
+| Code     | `GET /:repo/file`                                                                               | Blob content for the view, editor, history |
+| Code     | `GET /:repo/object/:oid`                                                                        | Author and date, from the raw commit       |
+| Code     | `GET /:repo/commits/:oid`                                                                       | The commit bar's history panel             |
+| Code     | `GET /:repo/history/:oid`                                                                       | Commits touching the open file             |
+| Code     | `POST /:repo/commit`                                                                            | Committing an edit, a new file, a delete   |
+| Code     | `POST /:repo/branches/create`                                                                   | New branch, at the current tip             |
+| Search   | `POST /:repo/grep`                                                                              | File contents matching the query           |
+| Activity | `GET /:repo/commits/:oid`                                                                       | The timeline, one card per commit          |
+| Detail   | `POST /:repo/diff`                                                                              | Which files a Change Request touches       |
+| Detail   | `POST /:repo/merge`                                                                             | Merging a Change Request whose refs exist  |
+| Settings | `GET /:repo/branches`, `DELETE /:repo/branches/:name`, `POST /:repo/reset`                      | Branch administration                      |
+| Settings | `GET/POST /:repo/tags`, `DELETE /:repo/tags/:name`                                              | Tags                                       |
+| Settings | `GET/POST /:repo/remotes`, `DELETE /:repo/remotes/:name`, `POST /:repo/fetch`, `/push`, `/pull` | Remotes and sync                           |
+| Settings | `GET/POST /:repo/webhooks`, `DELETE /:repo/webhooks/:id`                                        | Webhooks                                   |
+| Settings | `POST /:repo/fsck`, `POST /:repo/gc`, `GET /:repo/reflog`                                       | Maintenance                                |
+
+What the API does **not** answer, the UI does not pretend to: the merge-policy
+toggles say they are local to the browser, and the danger zone's buttons are
+disabled with a title saying why. Offline, every write affordance disables
+rather than failing on click.
 
 Editing is the pencil on the file card and the explorer's "+": both open a
 textarea over the blob, and committing sends the file with `expected` pinned
@@ -126,32 +143,35 @@ Deployed, no proxy is involved: the Worker serves both the page and the API, and
 `verify.ts` runs three suites in Chromium: every screen mounts in both palettes
 with nothing thrown; the behaviours from the design conversation still work
 (nav collapse, tab switching, hierarchy navigation, theme toggle, deep links,
-the kind filter, task creation, commenting, merging, ⌘K search); and Code and
-Diff really do read the API — that last suite serves the shapes
+the kind filter, task creation, commenting, merging, ⌘K search, and the
+disabled states of what has no endpoint); and the live surface really does
+read and write the API — editing, branch creation, history, grep and the whole
+Settings administration surface — that last suite serves the shapes
 from `src/server/Api.ts`, so it fails loudly if this UI and that declaration
 drift apart.
 
 ## Files
 
-| File             | Role                                 |
-| ---------------- | ------------------------------------ |
-| `main.ts`        | Entry point                          |
-| `app.ts`         | Shell, routing                       |
-| `base.ts`        | Light-DOM Lit base, navigation event |
-| `elements.ts`    | base-wc element registration         |
-| `api.ts`         | Typed client for the JSON API        |
-| `model.ts`       | Task / Change Request domain         |
-| `fixtures.ts`    | The design's Task data               |
-| `store.ts`       | The mutable, observable Task store   |
-| `theme.ts`       | Palette choice and persistence       |
-| `icons.ts`       | Inline SVG icon set                  |
-| `highlight.ts`   | Lazy `@pierre/diffs` loader          |
-| `nav.sidebar.ts` | The left rail                        |
-| `screen.*.ts`    | One module per screen                |
-| `tokens.css`     | Both palettes, as custom properties  |
-| `styles/*.css`   | Shell, primitives, and screen styles |
-| `build.ts`       | esbuild bundle                       |
-| `verify.ts`      | Browser checks                       |
+| File               | Role                                 |
+| ------------------ | ------------------------------------ |
+| `main.ts`          | Entry point                          |
+| `app.ts`           | Shell, routing                       |
+| `base.ts`          | Light-DOM Lit base, navigation event |
+| `elements.ts`      | base-wc element registration         |
+| `api.ts`           | Typed client for the JSON API        |
+| `model.ts`         | Task / Change Request domain         |
+| `fixtures.ts`      | The design's Task data               |
+| `store.ts`         | The mutable, observable Task store   |
+| `theme.ts`         | Palette choice and persistence       |
+| `icons.ts`         | Inline SVG icon set                  |
+| `highlight.ts`     | Lazy `@pierre/diffs` loader          |
+| `nav.sidebar.ts`   | The left rail                        |
+| `screen.*.ts`      | One module per screen                |
+| `screen.search.ts` | ⌘K results: tasks and `/grep` hits   |
+| `tokens.css`       | Both palettes, as custom properties  |
+| `styles/*.css`     | Shell, primitives, and screen styles |
+| `build.ts`         | esbuild bundle                       |
+| `verify.ts`        | Browser checks                       |
 
 ## Notes for whoever picks this up
 

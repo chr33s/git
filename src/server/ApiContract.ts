@@ -1,0 +1,339 @@
+/**
+ * The JSON wire contract consumed by the browser UI.
+ *
+ * These schemas are imported by both the HTTP declaration and the browser
+ * client. A response therefore earns its TypeScript type only after runtime
+ * decoding against the same schema the server uses to encode it.
+ */
+import { Schema } from "effect";
+
+import { isOid } from "../git/Oid.ts";
+
+export const OidString = Schema.String.pipe(Schema.refine(isOid));
+
+export const Ref = Schema.Struct({ name: Schema.String, oid: OidString });
+export type Ref = (typeof Ref)["Type"];
+
+export const Page = <A extends Schema.Top>(item: A) =>
+  Schema.Struct({
+    items: Schema.Array(item),
+    next_cursor: Schema.NullOr(Schema.String),
+    has_more: Schema.Boolean,
+  });
+
+export const RefsResponse = Schema.Struct({ refs: Schema.Array(Ref) });
+export const RefPage = Page(Ref);
+
+export const FileEntry = Schema.Struct({
+  path: Schema.String,
+  mode: Schema.String,
+  oid: OidString,
+});
+export type FileEntry = (typeof FileEntry)["Type"];
+
+export const FilesResponse = Schema.Struct({ files: Schema.Array(FileEntry) });
+
+export const FileContent = Schema.Struct({
+  path: Schema.String,
+  mode: Schema.String,
+  oid: OidString,
+  content: Schema.String,
+  encoding: Schema.Literals(["base64"]),
+  size: Schema.Finite,
+});
+export type FileContent = (typeof FileContent)["Type"];
+
+export const Encoding = Schema.Literals(["utf8", "base64"]);
+
+/** A path to write, or — with `content: null` — to remove. */
+export const FileWrite = Schema.Struct({
+  path: Schema.String,
+  content: Schema.NullOr(Schema.String),
+  encoding: Schema.optional(Encoding),
+  mode: Schema.optional(Schema.String),
+});
+export type FileWrite = (typeof FileWrite)["Type"];
+
+/** What `POST /:repo/commit` answers: the commit written, and its tree. */
+export const CommitCreated = Schema.Struct({ oid: OidString, tree: OidString });
+export type CommitCreated = (typeof CommitCreated)["Type"];
+
+export const DiffRequest = Schema.Struct({
+  from: Schema.String,
+  to: Schema.String,
+  path: Schema.optional(Schema.String),
+  context: Schema.optional(Schema.Finite),
+});
+export type DiffRequest = (typeof DiffRequest)["Type"];
+
+export const DiffFile = Schema.Struct({
+  path: Schema.String,
+  status: Schema.Literals(["added", "removed", "modified"]),
+  binary: Schema.Boolean,
+  patch: Schema.String,
+});
+export type DiffFile = (typeof DiffFile)["Type"];
+
+export const DiffResponse = Schema.Struct({ files: Schema.Array(DiffFile) });
+
+export const CommitSummary = Schema.Struct({
+  oid: OidString,
+  message: Schema.String,
+});
+export type CommitSummary = (typeof CommitSummary)["Type"];
+
+export const LogResponse = Schema.Struct({ commits: Schema.Array(CommitSummary) });
+export const CommitPage = Page(CommitSummary);
+
+export const Commit = Schema.Struct({
+  message: Schema.String,
+  parents: Schema.Array(OidString),
+  tree: OidString,
+});
+export type Commit = (typeof Commit)["Type"];
+
+export const HistoryEntry = Schema.Struct({
+  oid: OidString,
+  message: Schema.String,
+  blob: Schema.NullOr(OidString),
+});
+export const HistoryPage = Page(HistoryEntry);
+
+export const RawObject = Schema.Struct({
+  oid: OidString,
+  type: Schema.Literals(["blob", "tree", "commit", "tag"]),
+  size: Schema.Finite,
+  content: Schema.String,
+  encoding: Schema.Literals(["base64"]),
+});
+export type RawObject = (typeof RawObject)["Type"];
+
+/** `{ deleted }` — what every DELETE endpoint answers. */
+export const Deleted = Schema.Struct({ deleted: Schema.Boolean });
+
+export const BranchCreateRequest = Schema.Struct({ name: Schema.String, base: Schema.String });
+export type BranchCreateRequest = (typeof BranchCreateRequest)["Type"];
+
+export const ResetRequest = Schema.Struct({
+  ref: Schema.String,
+  to: Schema.String,
+  /** Absent moves whatever it is now; stating it makes this a CAS. */
+  expected: Schema.optional(Schema.NullOr(OidString)),
+});
+export type ResetRequest = (typeof ResetRequest)["Type"];
+
+export const ResetResult = Schema.Struct({
+  ref: Schema.String,
+  oid: OidString,
+  previous: Schema.NullOr(OidString),
+});
+export type ResetResult = (typeof ResetResult)["Type"];
+
+export const TagCreateRequest = Schema.Struct({
+  name: Schema.String,
+  /** A ref or an oid. */
+  target: Schema.String,
+  /** Present makes it annotated; absent makes it lightweight. */
+  message: Schema.optional(Schema.String),
+  force: Schema.optional(Schema.Boolean),
+});
+export type TagCreateRequest = (typeof TagCreateRequest)["Type"];
+
+export const TagCreated = Schema.Struct({
+  ref: Schema.String,
+  oid: OidString,
+  target: OidString,
+});
+export type TagCreated = (typeof TagCreated)["Type"];
+
+export const TagRead = Schema.Struct({
+  object: OidString,
+  type: Schema.Literals(["blob", "tree", "commit", "tag"]),
+  tag: Schema.String,
+  message: Schema.String,
+});
+export type TagRead = (typeof TagRead)["Type"];
+
+export const MergeRequest = Schema.Struct({
+  ours: Schema.String,
+  theirs: Schema.String,
+  message: Schema.optional(Schema.String),
+  strategy: Schema.optional(Schema.Literals(["recursive", "ours", "theirs"])),
+  /** The ref to move on success; absent computes and stops. */
+  into: Schema.optional(Schema.String),
+  no_fast_forward: Schema.optional(Schema.Boolean),
+});
+export type MergeRequest = (typeof MergeRequest)["Type"];
+
+export const MergeResult = Schema.Struct({
+  kind: Schema.Literals(["up-to-date", "fast-forward", "merged", "conflicted"]),
+  commit: Schema.NullOr(OidString),
+  tree: Schema.NullOr(OidString),
+  base: Schema.NullOr(OidString),
+  conflicts: Schema.Array(
+    Schema.Struct({
+      path: Schema.String,
+      reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
+    }),
+  ),
+});
+export type MergeResult = (typeof MergeResult)["Type"];
+
+export const GrepRequest = Schema.Struct({
+  pattern: Schema.String,
+  ref: Schema.optional(Schema.String),
+  path: Schema.optional(Schema.String),
+  ignore_case: Schema.optional(Schema.Boolean),
+  fixed: Schema.optional(Schema.Boolean),
+  /** Bounded by default: a grep over a big tree is a lot of lines. */
+  max_matches: Schema.optional(Schema.Finite),
+});
+export type GrepRequest = (typeof GrepRequest)["Type"];
+
+export const GrepMatch = Schema.Struct({
+  path: Schema.String,
+  line: Schema.Finite,
+  text: Schema.String,
+});
+export type GrepMatch = (typeof GrepMatch)["Type"];
+
+export const GrepResponse = Schema.Struct({
+  matches: Schema.Array(GrepMatch),
+  truncated: Schema.Boolean,
+  /** Files too large to scan, named so the answer is not silently partial. */
+  skipped: Schema.Array(Schema.String),
+});
+export type GrepResponse = (typeof GrepResponse)["Type"];
+
+export const ReflogResponse = Schema.Struct({
+  entries: Schema.Array(
+    Schema.Struct({
+      from: Schema.NullOr(OidString),
+      to: Schema.NullOr(OidString),
+      at: Schema.String,
+      message: Schema.String,
+    }),
+  ),
+});
+export type ReflogResponse = (typeof ReflogResponse)["Type"];
+
+export const FsckReport = Schema.Struct({
+  checked: Schema.Finite,
+  ok: Schema.Boolean,
+  problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
+  dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
+});
+export type FsckReport = (typeof FsckReport)["Type"];
+
+export const GcRequest = Schema.Struct({
+  dry_run: Schema.optional(Schema.Boolean),
+  /** Also write what survives into one pack and drop the loose copies. */
+  repack: Schema.optional(Schema.Boolean),
+  reflog_grace_ms: Schema.optional(Schema.Finite),
+});
+export type GcRequest = (typeof GcRequest)["Type"];
+
+export const GcReport = Schema.Struct({
+  scanned: Schema.Finite,
+  reachable: Schema.Finite,
+  removed: Schema.Array(OidString),
+  /** Unreachable, but inside a pack: `repack` is what collects these. */
+  retained: Schema.Array(OidString),
+  packed: Schema.NullOr(Schema.Struct({ name: Schema.String, objects: Schema.Finite })),
+  repack_skipped: Schema.NullOr(Schema.String),
+});
+export type GcReport = (typeof GcReport)["Type"];
+
+/** A registered webhook as a client may see it: no secret, ever. */
+export const WebhookWire = Schema.Struct({
+  id: Schema.String,
+  url: Schema.String,
+  created_at: Schema.String,
+});
+export type WebhookWire = (typeof WebhookWire)["Type"];
+
+export const WebhookList = Schema.Struct({ webhooks: Schema.Array(WebhookWire) });
+
+/** A registered remote as a client may see it: no credential, ever. */
+export const RemoteWire = Schema.Struct({
+  name: Schema.String,
+  url: Schema.String,
+  has_credential: Schema.Boolean,
+  has_key: Schema.Boolean,
+  /** The standing instruction, or `null` for a remote nothing happens to. */
+  sync: Schema.NullOr(Schema.Struct({ mode: Schema.String, refs: Schema.Array(Schema.String) })),
+  created_at: Schema.String,
+});
+export type RemoteWire = (typeof RemoteWire)["Type"];
+
+export const RemoteList = Schema.Struct({ remotes: Schema.Array(RemoteWire) });
+
+/** A ref after a fetch moved it, and where it was before. */
+export const FetchedRef = Schema.Struct({
+  name: Schema.String,
+  oid: OidString,
+  from: Schema.NullOr(OidString),
+});
+
+export const FetchResult = Schema.Struct({
+  /** The namespace the branches landed in: `refs/remotes/<remote>/…`. */
+  remote: Schema.String,
+  refs: Schema.Array(FetchedRef),
+  objects: Schema.Finite,
+});
+export type FetchResult = (typeof FetchResult)["Type"];
+
+export const PushResult = Schema.Struct({
+  refs: Schema.Array(
+    Schema.Struct({
+      ref: Schema.String,
+      ok: Schema.Boolean,
+      reason: Schema.NullOr(Schema.String),
+    }),
+  ),
+});
+export type PushResult = (typeof PushResult)["Type"];
+
+export const PullResult = Schema.Struct({
+  kind: Schema.Literals(["up-to-date", "created", "fast-forward", "non-fast-forward"]),
+  branch: Schema.String,
+  tracking: Schema.String,
+  /** Where the branch was; `null` when it did not exist. */
+  from: Schema.NullOr(OidString),
+  /** What the remote had — where the branch is now, unless it diverged. */
+  to: OidString,
+  objects: Schema.Finite,
+});
+export type PullResult = (typeof PullResult)["Type"];
+
+export const WhoamiVerdict = Schema.Struct({
+  push: Schema.Literals(["allowed", "refused"]),
+  why: Schema.Array(Schema.String),
+});
+
+export const WhoamiAnswer = Schema.Struct({
+  repo: Schema.NullOr(Schema.String),
+  subject: Schema.NullOr(Schema.String),
+  member: Schema.Boolean,
+  why: Schema.NullOr(Schema.String),
+  capabilities: Schema.Array(Schema.String),
+  expiresAt: Schema.NullOr(Schema.String),
+  trust: Schema.NullOr(
+    Schema.Struct({
+      maxTrustAgeSeconds: Schema.Int,
+      fresh: Schema.Boolean,
+      reason: Schema.NullOr(Schema.String),
+    }),
+  ),
+  /** Only where the repository bounds what it accepts being told it cost. */
+  budget: Schema.NullOr(
+    Schema.Struct({
+      maxUsageTokens: Schema.Int,
+      windowSeconds: Schema.Int,
+      usedTokens: Schema.Int,
+      remainingTokens: Schema.Int,
+    }),
+  ),
+  branches: Schema.Record(Schema.String, WhoamiVerdict),
+});
+export type WhoamiAnswer = (typeof WhoamiAnswer)["Type"];

@@ -30,12 +30,15 @@ export class GitPlusElement extends LitElement {
  * parallel entity types — so one screen renders both and shows the extra
  * sections only when a diff exists.
  */
-export type Screen = "activity" | "code" | "tasks" | "detail" | "settings";
+export type Screen = "activity" | "code" | "tasks" | "detail" | "settings" | "search";
 
 /** The event a child fires to ask the shell to navigate. */
 export interface NavigateDetail {
   readonly screen: Screen;
-  /** Set when `screen` is `detail`: which Task or Change Request to open. */
+  /**
+   * What to open there: a Task or Change Request id for `detail`, a file
+   * path for `code`. Paths carry slashes, which the hash keeps verbatim.
+   */
   readonly id?: string;
 }
 

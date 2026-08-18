@@ -125,6 +125,12 @@
   display: none;
 }
 
+/* WebKit draws its own clear affordance on `input[type=search]`; base-wc
+   generates one it actually controls, so the native one is a duplicate. */
+.gp-search input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
 /* base-wc generates the ✕; keep it quiet and only when there is a query. */
 .gp-search [data-search-clear] {
   margin-left: auto;

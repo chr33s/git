@@ -4,7 +4,7 @@
  * The endpoints and paths mirror `src/server/Api.ts`; their shared response
  * shapes come from the contract that module uses.
  *
- * The browser-safe response schemas live in `src/server/UiApiContract.ts` and
+ * The browser-safe response schemas live in `src/server/ApiContract.ts` and
  * are also used by the HTTP declaration. Everything is decoded against those
  * schemas at this boundary and handed on as a domain value, so a server/client
  * drift is an explicit `InvalidResponse` rather than an unsafe assertion.
@@ -12,7 +12,7 @@
 
 import { Option, Schema } from "effect";
 
-import * as Contract from "../src/server/UiApiContract.ts";
+import * as Contract from "../src/server/ApiContract.ts";
 
 /** Thrown for any non-2xx answer, carrying the server's tagged error name. */
 export class ApiError extends Error {
@@ -59,6 +59,20 @@ export type Ref = Contract.Ref;
 export type FileEntry = Contract.FileEntry;
 export type FileWrite = Contract.FileWrite;
 export type CommitCreated = Contract.CommitCreated;
+export type GrepMatch = Contract.GrepMatch;
+export type GrepResponse = Contract.GrepResponse;
+export type MergeResult = Contract.MergeResult;
+export type ResetResult = Contract.ResetResult;
+export type TagCreated = Contract.TagCreated;
+export type TagRead = Contract.TagRead;
+export type FsckReport = Contract.FsckReport;
+export type GcReport = Contract.GcReport;
+export type ReflogEntry = Contract.ReflogResponse["entries"][number];
+export type WebhookWire = Contract.WebhookWire;
+export type RemoteWire = Contract.RemoteWire;
+export type FetchResult = Contract.FetchResult;
+export type PushResult = Contract.PushResult;
+export type PullResult = Contract.PullResult;
 
 /**
  * What `POST /:repo/commit` is asked for, in the fields this client uses.
@@ -71,6 +85,25 @@ export interface CommitFilesRequest {
   message: string;
   files: readonly FileWrite[];
   expected?: string;
+}
+
+/**
+ * Client-side request slices, in plain strings.
+ *
+ * The contract's request types brand oids, which a browser holding oids as
+ * strings cannot produce without asserting; the server decodes and re-brands
+ * at its boundary either way, so these carry the same wire shape unbranded.
+ */
+interface ResetOptions {
+  ref: string;
+  to: string;
+  expected?: string;
+}
+
+interface RemoteAddRequest {
+  name: string;
+  url: string;
+  credential?: string;
 }
 export type FileContent = Contract.FileContent;
 export type DiffFile = Contract.DiffFile;
@@ -204,6 +237,17 @@ export class GitApi {
     this.#base = (options.base ?? "").replace(/\/$/, "");
   }
 
+  /**
+   * What `git clone` should be handed.
+   *
+   * The same base the JSON calls use: the smart-HTTP endpoints live beside
+   * them, so an empty base means this very origin serves the repository.
+   */
+  get cloneUrl(): string {
+    const base = this.#base === "" ? globalThis.location.origin : this.#base;
+    return `${base}/${encodeURIComponent(this.repo)}`;
+  }
+
   #url(path: string, query?: URLSearchParams): string {
     const search = query === undefined || query.size === 0 ? "" : `?${query.toString()}`;
     return `${this.#base}/${encodeURIComponent(this.repo)}${path}${search}`;
@@ -324,6 +368,155 @@ export class GitApi {
   /** Who the server thinks is asking. */
   async whoami(): Promise<Whoami> {
     return await this.#json(this.#url("/whoami"), Contract.WhoamiAnswer);
+  }
+
+  /** One POST body, one decoded answer — every write endpoint's shape. */
+  async #post<S extends Schema.ConstraintDecoder<unknown>, P extends object>(
+    path: string,
+    payload: P,
+    schema: S,
+  ): Promise<S["Type"]> {
+    return await this.#json(this.#url(path), schema, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /** `DELETE`, answered `{ deleted }`. */
+  async #delete(path: string): Promise<boolean> {
+    const body = await this.#json(this.#url(path), Contract.Deleted, { method: "DELETE" });
+    return body.deleted;
+  }
+
+  /**
+   * Search blob contents at a ref.
+   *
+   * Literal and case-insensitive, because this backs the UI's search box —
+   * a reader types text, not a regular expression.
+   */
+  async grep(pattern: string, ref: string, maxMatches = 50): Promise<GrepResponse> {
+    const payload: Contract.GrepRequest = {
+      pattern,
+      ref: qualify(ref),
+      fixed: true,
+      ignore_case: true,
+      max_matches: maxMatches,
+    };
+    return await this.#post("/grep", payload, Contract.GrepResponse);
+  }
+
+  /** Create a branch at `base` (a ref or an oid). */
+  async branchCreate(name: string, base: string): Promise<Ref> {
+    const payload: Contract.BranchCreateRequest = { name, base: qualify(base) };
+    return await this.#post("/branches/create", payload, Contract.Ref);
+  }
+
+  async branchDelete(name: string): Promise<boolean> {
+    return await this.#delete(`/branches/${encodeURIComponent(name)}`);
+  }
+
+  /** Move a ref to a commit — `reset --hard`, with an optional CAS. */
+  async reset(ref: string, to: string, expected?: string): Promise<ResetResult> {
+    const payload: ResetOptions = { ref: qualify(ref), to };
+    if (expected !== undefined) payload.expected = expected;
+    return await this.#post("/reset", payload, Contract.ResetResult);
+  }
+
+  /** Tags, paged; one page is enough for a tag list. */
+  async tags(limit = "100"): Promise<readonly Ref[]> {
+    const body = await this.#json(
+      this.#url("/tags", new URLSearchParams({ limit })),
+      Contract.RefPage,
+    );
+    return body.items;
+  }
+
+  /** Create a tag; a `message` makes it annotated. */
+  async tagCreate(options: Contract.TagCreateRequest): Promise<TagCreated> {
+    return await this.#post("/tags", options, Contract.TagCreated);
+  }
+
+  async tagDelete(name: string): Promise<boolean> {
+    return await this.#delete(`/tags/${encodeURIComponent(name)}`);
+  }
+
+  /** An annotated tag object's target, name and message. */
+  async tagRead(oid: string): Promise<TagRead> {
+    return await this.#json(this.#url(`/tag/${oid}`), Contract.TagRead);
+  }
+
+  /** Merge `theirs` into `ours`, moving `into` on success when named. */
+  async merge(options: Contract.MergeRequest): Promise<MergeResult> {
+    return await this.#post("/merge", options, Contract.MergeResult);
+  }
+
+  /** Where a ref has been: every move, newest first. */
+  async reflog(ref: string): Promise<readonly ReflogEntry[]> {
+    const body = await this.#json(
+      this.#url("/reflog", new URLSearchParams({ ref: qualify(ref) })),
+      Contract.ReflogResponse,
+    );
+    return body.entries;
+  }
+
+  /** Prove every object decodes and every ref resolves. */
+  async fsck(): Promise<FsckReport> {
+    return await this.#post("/fsck", {}, Contract.FsckReport);
+  }
+
+  /** Collect what nothing reaches. */
+  async gc(options: Contract.GcRequest = {}): Promise<GcReport> {
+    return await this.#post("/gc", options, Contract.GcReport);
+  }
+
+  async webhooks(): Promise<readonly WebhookWire[]> {
+    const body = await this.#json(this.#url("/webhooks"), Contract.WebhookList);
+    return body.webhooks;
+  }
+
+  /** Register a webhook. The secret goes in and never comes back out. */
+  async webhookAdd(url: string, secret: string): Promise<WebhookWire> {
+    return await this.#post("/webhooks", { url, secret }, Contract.WebhookWire);
+  }
+
+  async webhookDelete(id: string): Promise<boolean> {
+    return await this.#delete(`/webhooks/${encodeURIComponent(id)}`);
+  }
+
+  async remotes(): Promise<readonly RemoteWire[]> {
+    const body = await this.#json(this.#url("/remotes"), Contract.RemoteList);
+    return body.remotes;
+  }
+
+  /** Register a remote. The credential goes in and never comes back out. */
+  async remoteAdd(name: string, url: string, credential?: string): Promise<RemoteWire> {
+    const payload: RemoteAddRequest = { name, url };
+    if (credential !== undefined && credential !== "") payload.credential = credential;
+    return await this.#post("/remotes", payload, Contract.RemoteWire);
+  }
+
+  async remoteDelete(name: string): Promise<boolean> {
+    return await this.#delete(`/remotes/${encodeURIComponent(name)}`);
+  }
+
+  /** Fetch everything a stored remote has into `refs/remotes/<name>/…`. */
+  async fetchRemote(name: string): Promise<FetchResult> {
+    return await this.#post("/fetch", { name }, Contract.FetchResult);
+  }
+
+  /** Push one local branch to a stored remote, same name on the far side. */
+  async pushRemote(name: string, branch: string): Promise<PushResult> {
+    return await this.#post(
+      "/push",
+      { name, refs: [{ local: qualify(branch) }] },
+      Contract.PushResult,
+    );
+  }
+
+  /** Fast-forward one branch from a stored remote. */
+  async pullRemote(name: string, branch: string): Promise<PullResult> {
+    return await this.#post("/pull", { name, branch }, Contract.PullResult);
   }
 
   /** One raw object, decoded to text. */

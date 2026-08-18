@@ -88,6 +88,15 @@ export const ellipsis = (size = 15): TemplateResult =>
     ${svg`<circle cx="3" cy="8" r="1.3"></circle><circle cx="8" cy="8" r="1.3"></circle><circle cx="13" cy="8" r="1.3"></circle>`}
   </svg>`;
 
+export const clock = (size = 13): TemplateResult =>
+  icon(size, svg`<circle cx="8" cy="8" r="6"></circle><path d="M8 4.5V8l2.5 1.5"></path>`);
+
+export const copy = (size = 13): TemplateResult =>
+  icon(
+    size,
+    svg`<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"></rect><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"></path>`,
+  );
+
 export const pencil = (size = 13): TemplateResult =>
   icon(size, svg`<path d="m10.5 2.5 3 3L6 13l-3.5.5L3 10Z"></path><path d="m9 4 3 3"></path>`);
 
