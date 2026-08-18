@@ -170,8 +170,26 @@ right for a write that names a whole namespace, wrong here, where it would
 report every unprotected branch as protected the moment one branch under it
 was.
 
-_Answering the same question over the wire — for a credential presented to
-a remote — is the natural next step, and is not built yet._
+The same question is answered over the wire, which is the form an agent in
+a sandbox actually needs — it holds a clone and a credential, not the bare
+repository:
+
+```sh
+curl -s "http://<credential>@127.0.0.1:8080/project/whoami"
+```
+
+`GET /:repo/whoami` needs no capability of its own: a request may always be
+told what it may do, and an anonymous one is told it may do nothing rather
+than being refused the question. It answers for the **credential**, not for
+the key behind it — a delegated credential narrows what its holder may do,
+so the capabilities reported are the intersection. An agent told the
+member's full grant would plan a push its own credential cannot make.
+
+Both forms name the _nearest_ obstacle rather than every obstacle. A
+credential without `source.push` is told exactly that for a protected
+branch, not what that branch would additionally have required — advice
+about a push it could never make is noise. Widen the credential and the
+branch's own requirements are what is left to answer.
 
 Call it from the session-start hook and drop the output into the agent's
 context. An agent that knows before working that `main` takes a pull

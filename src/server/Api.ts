@@ -34,6 +34,7 @@ import * as Redaction from "../hub/Redaction.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import * as Policy from "./Policy.ts";
 import * as Auth from "./Auth.ts";
+import * as Whoami from "./Whoami.ts";
 import { permits } from "../trust/Certificate.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
@@ -625,6 +626,16 @@ const FetchedRef = Schema.Struct({
 });
 
 const repo = HttpApiGroup.make("repo")
+  .add(
+    // Answered for whoever is asking, so it needs no capability of its own:
+    // a request may always be told what it may do, and an anonymous one is
+    // told that it may do nothing rather than being refused the question.
+    HttpApiEndpoint.get("whoami", "/whoami", {
+      params: RepoParam,
+      success: Whoami.Answer,
+      error: [Invalid],
+    }),
+  )
   .add(
     HttpApiEndpoint.post("create", "/commit", {
       params: RepoParam,
@@ -1389,6 +1400,62 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const repository = yield* Repository;
         const refs = yield* repository.refs.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { refs: refs.map(([name, oid]) => ({ name, oid })) };
+      }),
+    )
+    .handle("whoami", () =>
+      Effect.gen(function* () {
+        const stored = yield* readGenesis().pipe(
+          Effect.mapError(
+            () =>
+              new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+          ),
+        );
+
+        // The projection the guard already folded, not a fresh one: it is the
+        // state this request was authenticated against, so answering from
+        // anything else would describe a different request than the one asked
+        // about.
+        const requester = yield* Effect.serviceOption(Auth.Requester);
+        const who = Option.getOrUndefined(requester);
+
+        const held =
+          stored === null
+            ? Whoami.withoutMembership(
+                "this repository has no genesis, so it has no membership: writes are refused unless the host serves --open",
+              )
+            : who === undefined || who.signer === null
+              ? Whoami.withoutMembership(
+                  "this request proved possession of no key; present a credential to be told more",
+                )
+              : // The credential's own scope, not the member's full grant: a
+                // delegated credential narrows what this *request* may do, and
+                // that narrowing is the answer its holder is asking for.
+                Whoami.standingOf(who.projection, who.signer, new Date(), who.capabilities);
+
+        // Fails closed on unreadable rules, for the reason `Policy.rulesOf`
+        // gives: rules that will not parse leave the repository's stated
+        // protection in force. Answered as "no rules" instead, this would tell
+        // a caller a protected branch was open at the moment storage was least
+        // trustworthy — and unlike a refusal, an answer gets acted on.
+        return yield* Whoami.answer({
+          subject: who?.signer ?? null,
+          repoId: stored === null ? null : stored.genesis.repoId,
+          projection: who?.projection ?? null,
+          held,
+        }).pipe(
+          Effect.catchTags({
+            ObjectNotFound: () =>
+              new Invalid({
+                field: "policy",
+                reason: "the repository's branch rules could not be read",
+              }),
+            StorageFailure: () =>
+              new Invalid({
+                field: "policy",
+                reason: "the repository's branch rules could not be read",
+              }),
+          }),
+        );
       }),
     )
     .handle("branches", ({ query }) =>
