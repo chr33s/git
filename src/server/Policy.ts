@@ -759,6 +759,15 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // first pass and with them the trust floor, and have a tombstone signed
     // against a stale head accepted — sending somebody else's payload to `gc`.
     // The boundary is where "now" is knowable, so it is where that is refused.
+    //
+    // The cost is deliberate and worth stating: a pull request whose history
+    // already carries a once-valid tombstone stops being *pushable* to a host
+    // that does not hold it, once its signer's `hub.redact` is narrowed away.
+    // Replication is not gated here, so such a history still reaches a replica
+    // by fetch; what it cannot do is arrive by push. The alternative is to
+    // judge the tombstone by what its signer held at the head it declares,
+    // which is the fold's question — and the fold's question is exactly what
+    // the decoy attack above is built to answer wrongly.
     if (payload?.type !== "event.redacted") continue;
     // Expiry as well as the capability. A permanent verdict does not consult
     // expiry — it cannot, or the answer would move on a wall clock and the
