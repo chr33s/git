@@ -142,6 +142,62 @@ describe("Remotes", () => {
     }).pipe(Effect.provide(Remotes.memory)),
   );
 
+  it("reads a hand-edited standing instruction it cannot make sense of as none", async () => {
+    // The file is a repository's, and repositories get edited and get carried
+    // between versions. Trusted as written, a `refs` that is not a list is a
+    // shape the forwarder walks straight into — on `post-receive`, where
+    // nothing is watching. The SQL registry already decoded it with a schema;
+    // the file registry now decodes it with the same one.
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "remotes-file-"));
+    try {
+      const location = path.join(directory, "remotes.json");
+      await fs.writeFile(
+        location,
+        JSON.stringify([
+          {
+            name: "bent",
+            url: "https://example.com/repo.git",
+            credential: null,
+            sync: { mode: "push", refs: "refs/heads/main" },
+            createdAt: new Date(0).toISOString(),
+          },
+        ]),
+      );
+
+      const held = await Effect.runPromise(
+        Effect.flatMap(Remotes.Remotes, (registry) => registry.list).pipe(
+          Effect.provide(remotesFile(location)),
+        ),
+      );
+
+      assert.equal(
+        held[0]?.sync,
+        null,
+        "unreadable reads as manual, not as a shape nothing checked",
+      );
+      assert.equal(Remotes.sends(held[0]!), false);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.effect("reads a remote with no standing instruction as having none", () =>
+    Effect.gen(function* () {
+      // `undefined` is a legal way to write "no opinion", and a spread carries
+      // it straight over a default — so `sync` arrived as `undefined` where
+      // every reader had been promised `Sync | null`, and the one that decides
+      // whether to forward reads `.mode` off it.
+      const registry = yield* Remotes.Remotes;
+      const [held] = yield* registry.list;
+      assert.equal(held?.sync, null);
+      assert.equal(Remotes.sends(held!), false);
+    }).pipe(
+      Effect.provide(
+        Remotes.of([{ name: "quiet", url: "https://example.com/repo.git", sync: undefined }]),
+      ),
+    ),
+  );
+
   it.effect("refuses a standing instruction nothing here can carry out", () =>
     Effect.gen(function* () {
       // Nothing drives a scheduled fetch, so storing one would leave a remote

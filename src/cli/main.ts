@@ -232,6 +232,14 @@ const readStdin = Effect.promise(
       process.stdin.on("end", () => {
         resolve(text);
       });
+      // A stream that errors — or one already closed by the caller — never
+      // ends, and a promise nothing settles is a helper that never exits and a
+      // `git push` that hangs behind it. Resolved with what did arrive, so the
+      // caller refuses on what it can see rather than on a timeout.
+      process.stdin.on("error", () => {
+        resolve(text);
+      });
+      if (process.stdin.destroyed) resolve(text);
     }),
 );
 

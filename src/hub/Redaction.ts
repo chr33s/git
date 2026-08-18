@@ -211,7 +211,21 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
 
   const found = new Set<Oid>();
   for (const pr of yield* tombstoned(refs)) {
-    const { events } = yield* Event.entries(pr);
+    // A pull request this replica will not walk is one candidate missing, the
+    // same reading every other caller gives it.
+    //
+    // Unreachable today and kept anyway: `tombstoned` walks the same pull
+    // request under the same ceiling and drops what it cannot read, so nothing
+    // that fails here ever gets here. That is a property of the *caller*, not
+    // of this loop, and the cost of it changing is this set escaping into the
+    // fetch planner — every deepening fetch and every hub-ref push on the
+    // replica failing over one over-sized pull request that arrived by
+    // replication without passing the boundary that would have refused it.
+    const walked = yield* Event.entries(pr).pipe(
+      Effect.catchTag("Invalid", () => Effect.succeed(null)),
+    );
+    if (walked === null) continue;
+    const { events } = walked;
     for (const entry of events) {
       if (entry.payload?.type !== "event.redacted" || entry.payload.pr !== pr) continue;
       const target = Event.unqualify(entry.payload.targetCommit);

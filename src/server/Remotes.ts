@@ -213,11 +213,15 @@ export const of = (
     }
   >,
 ) => {
+  // Spread first, defaults after: an explicit `undefined` is a legal way to
+  // write "no opinion" and a spread carries it straight over a default, so
+  // `sync` arrived as `undefined` where every reader had been promised
+  // `Sync | null` — and `sends` reads `.mode` off it.
   const rows = remotes.map((remote) => ({
-    createdAt: new Date(0),
-    credential: null,
-    sync: null,
     ...remote,
+    createdAt: remote.createdAt ?? new Date(0),
+    credential: remote.credential ?? null,
+    sync: remote.sync ?? null,
   }));
   return Layer.succeed(Remotes, {
     list: Effect.succeed(rows),
@@ -284,7 +288,7 @@ const StoredSync = Schema.Struct({
   refs: Schema.Array(Schema.String),
 });
 
-const decodeSync = Schema.decodeUnknownOption(StoredSync);
+export const decodeSync = Schema.decodeUnknownOption(StoredSync);
 
 const syncOf = (stored: string | null): Sync | null => {
   if (stored === null) return null;

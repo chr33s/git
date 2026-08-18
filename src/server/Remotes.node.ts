@@ -12,17 +12,18 @@
  * plain text, so the file is only as private as the repository directory it
  * lives in — which is also true of the objects it protects.
  */
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Option } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import { readRows, writeRows } from "./JsonRows.node.ts";
-import { duplicate, type Remote, Remotes, type Sync, validate } from "./Remotes.ts";
+import { decodeSync, duplicate, type Remote, Remotes, type Sync, validate } from "./Remotes.ts";
 
 interface Stored {
   readonly name: string;
   readonly url: string;
   readonly credential: string | null;
-  readonly sync?: Sync | null;
+  /** Whatever the file says; `read` decides whether it is a `Sync`. */
+  readonly sync?: unknown;
   readonly createdAt: string;
 }
 
@@ -31,9 +32,12 @@ const read = (file: string): ReadonlyArray<Remote> =>
     name: row.name,
     url: row.url,
     credential: row.credential ?? null,
-    // Absent in a file written before remotes had a standing instruction,
-    // which reads as `manual` — the behaviour that file was written under.
-    sync: row.sync ?? null,
+    // Decoded with the same schema the SQL registry uses, not trusted as
+    // written. Absent — a file from before remotes had a standing instruction
+    // — reads as `manual`, which is the behaviour that file was written
+    // under; so does a hand-edit the schema cannot make sense of, because the
+    // alternative is a shape `Sending` walks straight into.
+    sync: Option.getOrElse(decodeSync(row.sync), (): Sync | null => null),
     createdAt: new Date(row.createdAt),
   }));
 
