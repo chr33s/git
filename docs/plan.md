@@ -105,30 +105,33 @@ causally latest producer.
 ## Phase 3 — wake — **the dispatcher has landed**
 
 ```text
-done   src/cli/wake.ts   `chr33s-git wake <repo>`: walks each hub
-                         ref from its bookmark to the tip, decodes
-                         the typed signed events, matches local
-                         rules from wake.json, spawns them with the
-                         event in the environment, and advances.
-                         --dry-run says what would run
-next   src/host/Node.ts  call it from a real Hooks layer, so a push
-                         wakes without waiting for a timer
+src/server/Wake.node.ts   the pass itself: walk each hub ref from
+                          its bookmark to the tip, decode the typed
+                          signed events, match rules from wake.json,
+                          spawn with the event in the environment,
+                          advance. Plus the hooks decorator, and the
+                          per-repository serialization that keeps two
+                          pushes from waking one event twice
+src/cli/wake.ts           the same pass from a terminal, and
+                          --dry-run
+src/host/Node.ts          `serve --wake` runs it on post-receive,
+                          forked so a push never waits on a rule
 later  src/cli/session.ts  `enable` — writes the harness hooks;
-                         waits on Phase 1's session verbs
+                          waits on Phase 1's session verbs
 ```
 
-Pull rather than push, which is what makes the hook optional: the same
-run serves a hook, a timer and a person, so a missed hook is a late wake
-rather than a lost one. Five end-to-end tests cover waking once and not
-twice, waking for what arrived since, replaying a failed batch, the dry
-run, and refusing unreadable rules.
+Pull rather than push, which is what makes the hook optional rather than
+load-bearing: the same pass serves a hook, a timer and a person, so a
+missed hook is a late wake rather than a lost one. Six end-to-end tests
+cover waking once and not twice, waking for what arrived since, replaying
+a failed batch, the dry run, refusing unreadable rules, and — through a
+real server and a real push — that the host wakes at all.
 
 The Workers host needs nothing new: `Webhooks.ts` already delivers signed
-push events with retries — a wake consumer there is a webhook receiver,
-documented rather than built.
+push events with retries, which is a wake anyone can consume.
 
-**Exit:** an agent is woken by a review on its pull request. Closing the
-loop back into a _session_ waits on Phase 1.
+**Exit — met:** an agent is woken by a review on its pull request. Closing
+the loop back into a _session_ waits on Phase 1.
 
 ## Phase 4 — deferred layers (explicitly not v0)
 
