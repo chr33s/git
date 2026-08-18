@@ -123,79 +123,80 @@ push events with retries, which is a wake anyone can consume.
 `session enable` closes the loop back into a session — one harness, as the
 v0 cut says.
 
-## Phase 4 — deferred layers (explicitly not v0)
+## Phase 4 — the deferred layers — **landed**
 
-Each slots into a file that exists by Phase 3, in rough value order:
-
-**Tasks and claims have landed** — `src/hub/Task.ts` beside `Session.ts`,
-the `hub.task` capability, a third shape at the namespace boundary counted
-as its own class, and `src/cli/task.ts`. A claim is a lease judged against
-the caller's clock, because the events carry no trustworthy one of their
-own. What remains:
-
-**`requireProvenance` has landed** — the trailer → `session.produced`
-check at the boundary, with the batch's own session commands counted
-before its source commands, so a branch and the record of what produced it
-travel in one receive-pack. What remains:
-
-**Memory, decisions and budgets have landed** — memory as a note on the
-genesis commit, rebuilt from the sessions it cites and capped so eviction
-is forced; — `decision.requested` /
-`decision.resolved` in the session DAG with `session ask|answer`, and
-`maxUsageTokens` over what sessions report, surfaced by `whoami` rather
-than enforced at the boundary because what it counts is self-reported.
-What remains:
+Everything the v0 cut set aside is now built, each on the machinery the
+phases before it left in place and none of it changing a Phase 1 wire or
+event format — which is the invariant that made the ordering safe.
 
 ```text
-secret scanning         a Policy.ts payload filter, layers 1–6
-provenance remote       Remotes.ts sync config: per-remote
-                        refspecs excluding sessions by default
+tasks and claims     src/hub/Task.ts, hub.task, src/cli/task.ts.
+                     A claim is a lease judged against the caller's
+                     clock, because the events carry no trustworthy
+                     one of their own, and advisory because two
+                     agents reading at once can both pass any check
+                     a boundary could make
+requireProvenance    the trailer → session.produced check, with the
+                     batch's own session commands counted before its
+                     source commands, so a branch and the record of
+                     what produced it travel in one receive-pack
+decisions            decision.requested / decision.resolved in the
+                     session DAG, with session ask|answer. The
+                     answer is the one projected record a harness
+                     may treat as instruction, and the carve-out is
+                     narrow: a question this session asked, from a
+                     key the trust graph can name
+memory               a note on the genesis commit, rebuilt from the
+                     sessions it cites rather than merged into, and
+                     capped so eviction is forced
+budgets              maxUsageTokens over what sessions report,
+                     surfaced by whoami rather than enforced,
+                     because what it counts is self-reported
+secret scanning      src/hub/Secrets.ts over what somebody typed —
+                     not over the record, whose own identifiers are
+                     high-entropy by construction
+provenance remote    a mirror-everything default never carries a
+                     session ref; naming it is what configuring a
+                     provenance remote is
 ```
-
-None of these changes a Phase 1 wire or event format — that invariant
-(agents.md §15) is what makes this ordering safe.
 
 ---
 
 ## Running alongside foundation work
 
-While the foundation is still being fixed on its own branch, the phases
-above split cleanly into lanes by how much existing code they touch.
+This branch was built beside a foundation still being fixed, and the split
+that made that work is worth keeping for the next time.
 
 ```text
 safe in parallel — new files, or additive edges:
-  Phase 0    a new CLI verb and (next) a new Api verb; every fix to
-             the projection it reads makes its answers more correct
-  Phase 3    wake.ts and session enable are new files against the
-             Hooks.postReceive seam, which the foundation work has
-             not touched
-  trailers   convention only, no code
+  a new CLI verb, a new Api verb, a new module beside an
+  existing one, a hook on a seam that already exists
 
-hold, or land inside the foundation branch instead:
-  the Event.ts ref generalization and the Policy.ts session gate —
-  both modify files the foundation work is actively reworking, so a
-  fork of them is a standing rebase conflict. Both are small
-  (a caller-supplied ref class; one capability in the list), which
-  makes them cheaper to propose there than to carry here.
+worth landing in the foundation branch instead:
+  edits to a file it is actively reworking — a fork of one
+  is a standing rebase conflict
 ```
 
-Two working rules follow. Branch implementation off the foundation
-branch's head rather than the default branch, and rebase onto it often —
-its commits are semantic fixes rather than structural moves, so additive
-work rebases cheaply. And keep each phase's tests runnable in isolation,
-so a rebase that breaks something says which phase it broke.
+Both rules held. The one change that had to touch shared code —
+generalizing the event append path from a pull request id to a
+caller-supplied ref — was mechanical and left pull-request behaviour
+identical, which is what made it safe to carry here. The rebase that
+followed cost two conflicts, both in files this branch had extended
+rather than rewritten.
 
-## Sizing and sequence
+## What it came to
 
 ```text
-Phase 0   ~2–3 days    independent; ship first
-Phase 1   ~1–2 weeks   the only phase with a schema decision
-Phase 2   ~2–3 days    pure reads
-Phase 3   ~1 week      dispatcher + one harness integration
+Phase 0   whoami, locally and over the wire
+Phase 1   session capture
+Phase 2   projection and resume
+Phase 3   wake, the host hook, session enable
+Phase 4   tasks, requireProvenance, decisions, memory,
+          budgets, scanning, the provenance remote
 ```
 
-One month of focused work to the closed loop, with a shippable increment
-at every phase boundary. The risk concentrates in Phase 1's one refactor
-(generalizing Event.ts ref naming) — do it first inside the phase, keep
-the PR-event tests green throughout, and everything after is addition,
-not modification.
+Every phase landed green through `npm run check` and `npm test`, and every
+fix carries a test that fails without it. What is _not_ built is named in
+agents.md where it is proposed: session authorship and resume semantics
+(§7–§8's finer rules), signer-scoped `requireProvenance`, transcript side
+objects, and harnesses beyond Claude Code.
