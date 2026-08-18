@@ -262,6 +262,8 @@ WARNING: REPOSITORY IDENTITY HAS CHANGED
 
 Hub operations MUST fail unless the user explicitly resolves the mismatch. Do not silently overwrite the trusted repository identity.
 
+Editing that file MUST leave every line it does not recognise exactly as it was. It is a user's file: it has comments in it, and the occasional typo. Rewritten by reformatting what parsed, an edit to one pin silently deletes the rest — and a deleted pin is not a cosmetic loss, because the next connection to that repository reads as _first use_, so the identity-changed warning the pin existed to raise never comes.
+
 ### Repository moves
 
 Because entries are keyed by URL, a repository reached at a new URL prompts a fresh TOFU decision. When the presented RepoID matches an existing entry under a different URL, the client SHOULD say so:
@@ -930,7 +932,7 @@ chr33s-git hub disable
 chr33s-git hub status
 ```
 
-`hub disable` removes only the refspecs managed by `chr33s-git`. A client that keeps no per-remote configuration — where every fetch names its own refspecs — has no refspecs to remove, and there the same rule reads as the refs: it MUST remove exactly what `hub enable` fetches — the hub refspecs themselves, the rules file among them — plus the scratch ref a presented genesis lands in while it is still only a claim, and nothing else, never a branch or a tag. Naming the namespaces by hand instead of deriving them from the refspecs leaves the origin's branch rules behind, outliving the identity that could have changed them. Deleting those refs is the one place this client does what the policy boundary refuses a push, so it MUST be guarded by the pin: a repository this client enabled against a URL got that state from somewhere else, and one that `hub init` created has no pin naming itself. The pin survives — dropping trust is `hub forget`, and a repository whose hub state you have stopped fetching is not one whose identity you have stopped believing.
+`hub disable` removes only the refspecs managed by `chr33s-git`. A client that keeps no per-remote configuration — where every fetch names its own refspecs — has no refspecs to remove, and there the same rule reads as the refs: it MUST remove exactly what `hub enable` fetches — the hub refspecs themselves, the rules file among them — plus the scratch ref a presented genesis lands in while it is still only a claim, and nothing else, never a branch or a tag. Naming the namespaces by hand instead of deriving them from the refspecs leaves the origin's branch rules behind, outliving the identity that could have changed them. Deleting those refs is the one place this client does what the policy boundary refuses a push, so it MUST be guarded by the pin: a repository this client enabled against a URL got that state from somewhere else, and one that `hub init` created has no pin naming itself. The pin is about the _URL_, and what gets deleted is a _directory_, so the two MUST also be checked against each other: the identity the directory holds has to be the one the URL was pinned as. Without that, a mistyped local name points the one command that removes an identity at somebody else's repository, and there is no undo — the genesis and the trust log are gone, and a served repository that has lost its genesis answers every read anonymously. The pin survives — dropping trust is `hub forget`, and a repository whose hub state you have stopped fetching is not one whose identity you have stopped believing.
 
 ### Trust establishment
 

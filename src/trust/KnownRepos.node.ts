@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { Effect, Layer } from "effect";
 
 import { StorageFailure } from "../git/Error.ts";
-import { formatFile, type KnownRepo, KnownRepos, parseFile } from "./KnownRepos.ts";
+import { type KnownRepo, KnownRepos, parseFile, withEntry, withoutUrl } from "./KnownRepos.ts";
 
 /**
  * `$XDG_CONFIG_HOME/chr33s-git/known_repos`, falling back to `~/.config`.
@@ -49,23 +49,26 @@ export const defaultPath = (): string | undefined => {
     : path.join(base, "chr33s-git", "known_repos");
 };
 
-const read = (location: string): ReadonlyArray<KnownRepo> => {
+/** The file's own text, or `""` where there is no file yet. */
+const contentsOf = (location: string): string => {
   try {
-    return parseFile(fs.readFileSync(location, "utf8"));
+    return fs.readFileSync(location, "utf8");
   } catch (cause: unknown) {
     // A store nobody has written to yet is empty, not broken: the first
     // `hub enable` on a machine is the ordinary case.
-    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return [];
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return "";
     throw cause;
   }
 };
 
-const write = (location: string, entries: ReadonlyArray<KnownRepo>): void => {
+const read = (location: string): ReadonlyArray<KnownRepo> => parseFile(contentsOf(location));
+
+const write = (location: string, contents: string): void => {
   fs.mkdirSync(path.dirname(location), { recursive: true, mode: 0o700 });
   const temporary = `${location}.${process.pid}.tmp`;
   // `0600`: this file decides which repositories a user's tooling trusts, so
   // it is written with the permissions ssh gives its own trust stores.
-  fs.writeFileSync(temporary, formatFile(entries), { mode: 0o600 });
+  fs.writeFileSync(temporary, contents, { mode: 0o600 });
   fs.renameSync(temporary, location);
 };
 
@@ -87,10 +90,10 @@ export const file = (location: string): Layer.Layer<KnownRepos> =>
       remember: (entry) =>
         Effect.try({
           // Read and write inside one `try`: the CLI is the only writer and it
-          // is one process, so this is as atomic as the file needs to be.
+          // is one process, so this is as atomic as the file needs to be. The
+          // edit is by line rather than by reformatting; see `withEntry`.
           try: () => {
-            const kept = read(location).filter((row) => row.url !== entry.url);
-            write(location, [...kept, entry]);
+            write(location, withEntry(contentsOf(location), entry));
           },
           catch: failed("knownRepos.remember"),
         }),
@@ -98,10 +101,9 @@ export const file = (location: string): Layer.Layer<KnownRepos> =>
       forget: (url) =>
         Effect.try({
           try: () => {
-            const rows = read(location);
-            const kept = rows.filter((row) => row.url !== url);
-            if (kept.length === rows.length) return false;
-            write(location, kept);
+            const next = withoutUrl(contentsOf(location), url);
+            if (!next.removed) return false;
+            write(location, next.contents);
             return true;
           },
           catch: failed("knownRepos.forget"),

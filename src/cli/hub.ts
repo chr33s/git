@@ -557,7 +557,8 @@ const disable = Command.make(
     Effect.gen(function* () {
       const key = yield* canonicalUrl(url);
       const store = yield* KnownRepos;
-      if ((yield* store.lookup(key)) === null) {
+      const pinned = yield* store.lookup(key);
+      if (pinned === null) {
         return yield* new Invalid({
           field: "url",
           reason: `${key} is not enabled; nothing to disable`,
@@ -565,6 +566,25 @@ const disable = Command.make(
       }
 
       const removed = yield* Effect.gen(function* () {
+        // The pin says the *URL* is one this client enabled against. It says
+        // nothing about the directory, and the directory is what gets deleted
+        // — so a mistyped `--as` or `--root` pointed the one command that
+        // removes an identity at somebody else's repository, and there is no
+        // undo: the genesis and the trust log are gone, and a served
+        // repository that has lost its genesis answers every read
+        // anonymously. So the two are checked against each other: what this
+        // directory says it is has to be what the URL was pinned as.
+        const stored = yield* readGenesis();
+        if (stored === null || stored.genesis.repoId !== pinned) {
+          return yield* new Invalid({
+            field: "as",
+            reason:
+              stored === null
+                ? `${root}/${name} has no identity, so it is not the clone enabled against ${key}`
+                : `${root}/${name} is ${stored.genesis.repoId}, not the ${pinned} pinned for ${key}`,
+          });
+        }
+
         const refs = yield* RefStore;
         const held = yield* refs.list("refs/");
         const managed = held

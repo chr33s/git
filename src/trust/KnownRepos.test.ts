@@ -65,6 +65,43 @@ describe("KnownRepos", () => {
       assert.equal(readFileSync(location, "utf8"), `https://git.example.com/acme ${alpha}\n`);
     });
 
+    it("leaves alone every line it does not recognise", async () => {
+      // The file is a user's, and a user's file has comments in it and the
+      // occasional typo. Rewritten by reformatting what parsed, an edit to one
+      // pin quietly deleted the rest — and a deleted pin is not a cosmetic
+      // loss: the next connection to that repository reads as *first use*, so
+      // the identity-changed warning the pin existed to raise never comes.
+      writeFileSync(
+        location,
+        [
+          "# repositories I trust",
+          "",
+          `https://git.example.com/acme ${alpha}`,
+          "https://git.example.com/typo NOTANIDENTITY",
+          `https://git.example.com/other ${beta}`,
+          "",
+        ].join("\n"),
+      );
+
+      await run(
+        Effect.gen(function* () {
+          const store = yield* KnownRepos;
+          yield* store.remember({ url: "https://git.example.com/acme", repoId: beta });
+          yield* store.remember({ url: "https://git.example.com/fresh", repoId: alpha });
+          return yield* store.forget("https://git.example.com/other");
+        }),
+      );
+
+      assert.deepEqual(readFileSync(location, "utf8").split("\n"), [
+        "# repositories I trust",
+        "",
+        `https://git.example.com/acme ${beta}`,
+        "https://git.example.com/typo NOTANIDENTITY",
+        `https://git.example.com/fresh ${alpha}`,
+        "",
+      ]);
+    });
+
     it("replaces the entry for a url rather than appending a second", async () => {
       const entries = await run(
         Effect.gen(function* () {

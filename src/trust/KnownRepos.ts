@@ -166,6 +166,41 @@ export const formatFile = (entries: ReadonlyArray<KnownRepo>): string =>
   entries.length === 0 ? "" : `${entries.map(formatLine).join("\n")}\n`;
 
 /**
+ * The file with one entry set, and every other line left exactly as it was.
+ *
+ * Edits go line by line rather than through parse-then-format. Reformatting
+ * the whole file drops what `parseLine` does not recognise — a comment, a
+ * blank line, a pin somebody typed a character wrong in — and dropping a pin
+ * is not cosmetic: the next connection to that repository reads as *first
+ * use*, so the identity-changed warning the pin existed to raise never comes.
+ * The one failure the atomic rename was written to prevent, arrived at through
+ * the formatter instead.
+ */
+export const withEntry = (contents: string, entry: KnownRepo): string => {
+  const lines = contents === "" ? [] : contents.replace(/\n$/, "").split("\n");
+  const line = formatLine(entry);
+  const at = lines.findIndex((held) => parseLine(held)?.url === entry.url);
+  const next = at === -1 ? [...lines, line] : lines.with(at, line);
+  return `${next.join("\n")}\n`;
+};
+
+/** What dropping a URL from the file left behind. */
+export interface Dropped {
+  readonly contents: string;
+  readonly removed: boolean;
+}
+
+/** The same as `withEntry`, dropping every entry for a URL. */
+export const withoutUrl = (contents: string, url: string): Dropped => {
+  const lines = contents === "" ? [] : contents.replace(/\n$/, "").split("\n");
+  const kept = lines.filter((held) => parseLine(held)?.url !== url);
+  return {
+    contents: kept.length === 0 ? "" : `${kept.join("\n")}\n`,
+    removed: kept.length !== lines.length,
+  };
+};
+
+/**
  * A URL reduced to what identity is keyed by.
  *
  * `https://host/repo`, `https://host/repo/` and `https://host/repo.git` are

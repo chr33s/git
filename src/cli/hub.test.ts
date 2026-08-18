@@ -624,6 +624,50 @@ describe("cli hub", () => {
     }
   });
 
+  it("refuses to disable a directory that is not the clone the url was pinned as", async () => {
+    // The pin says the *URL* is one this client enabled against. It says
+    // nothing about the directory, and the directory is what gets deleted — so
+    // a mistyped `--as` pointed the one command that removes an identity at
+    // somebody else's repository, with no undo: the genesis and the trust log
+    // gone, and a served repository that has lost its genesis answering every
+    // read anonymously.
+    const server = await serve({ root: path.join(root, "served2"), allowAnonymousWrites: true });
+    try {
+      const member = await enableHubUnder(path.join(root, "served2"), "theirs", ["repo.read"]);
+      const url = `${server.url}/theirs`;
+      await cli([
+        "hub",
+        "enable",
+        "--root",
+        root,
+        "--as",
+        "theirs-clone",
+        "--yes",
+        "--token",
+        member.credential,
+        url,
+      ]);
+
+      // A different repository entirely, in the same root: somebody's origin.
+      await enableHubUnder(root, "mine", ["repo.read"]);
+
+      const failed = await cli(["hub", "disable", "--root", root, "--as", "mine", url]).then(
+        () => null,
+        (error: { stderr?: string; stdout?: string }) =>
+          `${error.stdout ?? ""}${error.stderr ?? ""}`,
+      );
+
+      assert.notEqual(failed, null, "the wrong directory must not be emptied");
+      assert.match(failed ?? "", /not the/);
+
+      // And it still has its identity.
+      const left = await cli(["refs", "--root", root, "mine"]);
+      assert.match(left, /refs\/meta\/trust\/genesis/);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("refuses to disable a repository it was never enabled against", async () => {
     // The refs this deletes are undeletable on a server for good reasons — a
     // pull request nothing can remove, an identity nothing can rewrite — so it
