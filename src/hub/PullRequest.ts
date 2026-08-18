@@ -358,10 +358,18 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   // nothing could make every future collection pay for a tombstone that was
   // never going to work. What they can still do is push the event directly;
   // what they cannot do is have this command do it for them.
+  // Expiry among them, and that is not belt-and-braces: the fold judges a
+  // tombstone `permanent`, which deliberately does not consult the clock, so
+  // an expired holder's tombstone counts for ever once it exists. The boundary
+  // refuses that very event over the wire — "a redaction needs an unexpired
+  // hub.redact" — so without this the local command was the one door that let
+  // an expired member drive an irreversible deletion.
   const signer = yield* fingerprint(input.key.publicKey);
   const member = trust.members.get(signer);
+  const expired = member?.expiresAt !== null && (member?.expiresAt?.getTime() ?? 0) <= Date.now();
   if (
     member === undefined ||
+    expired ||
     openWindow(trust.revoked.get(signer)) !== null ||
     !permits(member.capabilities, "hub.redact")
   ) {

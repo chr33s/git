@@ -271,6 +271,21 @@ export const grant = Effect.fn("Certificate.grant")(function* (input: {
     return yield* new Invalid({ field: "publicKey", reason: key.failure.reason });
   }
 
+  // Here as well as in `validate`, and the difference is where the answer
+  // lands. `validate` runs during the fold, which is *after* the record has
+  // been written — and the trust log is append-only, so a capability somebody
+  // typed wrong was pinned on a ref nothing can rewind, rejected for ever and
+  // re-read on every membership check. A payload that can never be valid is
+  // one this refuses to build.
+  for (const capability of input.capabilities) {
+    if (!isCapability(capability)) {
+      return yield* new Invalid({
+        field: "capabilities",
+        reason: `unknown capability '${capability}'`,
+      });
+    }
+  }
+
   return {
     type: "trust.grant",
     version: 1,

@@ -273,15 +273,31 @@ const requireRead = Effect.fn("Api.requireRead")(function* () {
  * absent context is a host that did not say who is asking.
  */
 const requireCapability = Effect.fn("Api.requireCapability")(function* (capability: string) {
-  // A repository with no genesis has no membership to charge anything against,
-  // and the guard has already refused the request unless the host opened it —
-  // so it is left exactly as a plain git repository has always been.
+  // A repository with no genesis has no membership to charge anything against.
+  // The guard is no help here either: it lets every *read* through on such a
+  // repository, exactly as a plain git repository has always done — and these
+  // verbs are not reads whatever their method says. Left at "no genesis, no
+  // charge", a plain repository served read-only handed its webhook delivery
+  // URLs and every remote it pushes to, to anybody who could reach it.
+  //
+  // So the host's own decision stands in for the membership there is none of:
+  // a repository opened to anonymous writes is one whose operator has said
+  // anybody may administer it, and one that was not is closed. That keeps
+  // `serve --open` working and stops a repository nobody opened from being
+  // administered — or read — by strangers.
   const stored = yield* readGenesis().pipe(
     Effect.mapError(
       () => new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
     ),
   );
-  if (stored === null) return;
+  if (stored === null) {
+    const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
+    if (Option.getOrElse(open, () => false)) return;
+    return yield* new Invalid({
+      field: "capability",
+      reason: `this repository has no membership to authorize ${capability}; run \`hub init\``,
+    });
+  }
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
   if (Option.isSome(requester) && permits(requester.value.capabilities, capability)) return;

@@ -701,6 +701,47 @@ describe("hub redaction", () => {
     assert.equal(outcome.headless, 1, "and the one that records none adds nothing");
   });
 
+  it("will not let an expired holder start an irreversible deletion", async () => {
+    // A tombstone is judged `permanent`, which deliberately does not consult
+    // the clock — so once it exists it counts for ever, expired signer or not.
+    // The boundary refuses that very event over the wire; the local command
+    // was the one door left that let an expired `hub.redact` holder drive a
+    // deletion nothing takes back.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const where = yield* world();
+        const { pr, target } = yield* withASecret(where);
+
+        // Somebody else, holding `hub.redact` on a grant that has lapsed. The
+        // author keeps theirs, so the events being redacted still count.
+        const lapsed = yield* generate("lapsed@example.com");
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: where.genesis.repoId,
+            publicKey: formatPublicKey(lapsed.publicKey),
+            capabilities: ["hub.redact"],
+            expiresAt: new Date(Date.now() - 1_000),
+            id: Log.newId(),
+          }),
+          [where.root],
+        );
+
+        return yield* PullRequest.redact({
+          repo: where.genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: lapsed,
+        }).pipe(
+          Effect.as(null),
+          Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+        );
+      }),
+    );
+
+    assert.match(outcome ?? "", /hub\.redact/);
+  });
+
   it("keeps collecting when one pull request will not fold", async () => {
     // The walk that finds tombstones already tolerates a pull request it
     // cannot read; the fold on the next line did not. One failing pull request

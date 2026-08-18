@@ -1732,12 +1732,46 @@ describe("trust projection", () => {
       assert.ok(Certificate.permits(["hub.check:*"], Certificate.checkCapability("deploy")));
     });
 
+    it("will not even build a grant naming one", async () => {
+      // The fold refuses it, and the fold runs *after* the record is written —
+      // on a log that only grows. So a capability somebody typed wrong was
+      // pinned on a ref nothing can rewind, rejected for ever and re-read on
+      // every membership check. Refused where it is written instead.
+      const refused = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world();
+          const bob = yield* generate("bob@example.com");
+          return yield* Certificate.grant({
+            repo: where.genesis.repoId,
+            publicKey: formatPublicKey(bob.publicKey),
+            capabilities: ["source.pussh"],
+            id: Log.newId(),
+          }).pipe(
+            Effect.as(null),
+            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          );
+        }),
+      );
+      assert.match(refused ?? "", /unknown capability/);
+    });
+
     it("refuses a grant naming a capability that does not exist", async () => {
+      // Built by hand rather than through `Certificate.grant`, which refuses
+      // one outright so a typo cannot be pinned on an append-only ref. The
+      // fold has to refuse it too: a record can arrive from another
+      // implementation, or straight off a push, having gone through no
+      // constructor of ours at all.
       const state = await scenario(
         Effect.gen(function* () {
           const where = yield* world();
           const bob = yield* generate("bob@example.com");
-          yield* grantTo(where, bob, ["source.pussh"], where.roots.slice(0, 2));
+          const payload = yield* Certificate.grant({
+            repo: where.genesis.repoId,
+            publicKey: formatPublicKey(bob.publicKey),
+            capabilities: ["source.push"],
+            id: Log.newId(),
+          });
+          yield* Log.issue({ ...payload, capabilities: ["source.pussh"] }, where.roots.slice(0, 2));
           return yield* projectionOf(where);
         }),
       );

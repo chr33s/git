@@ -184,6 +184,32 @@ describe("a mirror beside its origin", () => {
  * every delivery URL and every remote it pushes to.
  */
 describe("the administrative registries", () => {
+  it("does not administer a repository nobody opened, identity or not", async () => {
+    // A repository with no genesis has no membership to charge anything
+    // against, and the guard lets every read through on one — exactly as a
+    // plain git repository has always done. These verbs are not reads whatever
+    // their method says, so "no genesis, no charge" handed a plain repository's
+    // webhook delivery URLs to anybody who could reach it. The host's own
+    // decision stands in for the membership there is none of.
+    const plain = `${server.url}/plain-registries`;
+    const seeded = await post(`${plain}/blob`, { content: "hello\n" });
+    assert.equal(seeded.status, 200, "the repository exists and has no identity");
+
+    // This server was started with `allowAnonymousWrites`, which is the
+    // operator saying anybody may administer it.
+    assert.equal((await fetch(`${plain}/webhooks`)).status, 200);
+
+    const closed = await serve({ root: await fs.mkdtemp(path.join(os.tmpdir(), "closed-")) });
+    try {
+      const url = `${closed.url}/plain-registries`;
+      await post(`${url}/blob`, { content: "hello\n" }).catch(() => null);
+      const refused = await fetch(`${url}/webhooks`);
+      assert.notEqual(refused.status, 200, "and a host that opened nothing administers nothing");
+    } finally {
+      await closed.close();
+    }
+  });
+
   it("does not show a reader where this repository sends things", async () => {
     const repo = "private-registries";
     const admin = await enableHubUnder(root, repo, ["repo.read", "repo.admin"]);
