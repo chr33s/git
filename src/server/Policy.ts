@@ -40,6 +40,7 @@ import {
   type Projection as TrustProjection,
 } from "../trust/Projection.ts";
 import * as Event from "../hub/Event.ts";
+import * as Session from "../hub/Session.ts";
 import {
   approvals,
   checksPassed,
@@ -650,14 +651,18 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     return refused(update.name, `${update.name} is append-only and may not be deleted`);
   }
 
-  // A ref in this namespace is a pull request, and nothing else. `refs/hub/`
-  // as a whole is undeletable, so a name outside that shape is a permanent
-  // entry nothing counts, nothing folds and nothing can ever remove — one
-  // more object graph pinned into every ref listing, every advertisement,
-  // every collection root and every memo key for the life of the repository.
-
-  if (update.name.startsWith("refs/hub/") && Event.prOf(update.name) === null) {
-    return refused(update.name, `${update.name} does not name a pull request`);
+  // A ref in this namespace is a pull request or a session, and nothing else.
+  // `refs/hub/` as a whole is undeletable, so a name outside those shapes is a
+  // permanent entry nothing counts, nothing folds and nothing can ever remove
+  // — one more object graph pinned into every ref listing, every
+  // advertisement, every collection root and every memo key for the life of
+  // the repository.
+  if (
+    update.name.startsWith("refs/hub/") &&
+    Event.prOf(update.name) === null &&
+    Session.sessionOf(update.name) === null
+  ) {
+    return refused(update.name, `${update.name} does not name a pull request or a session`);
   }
 
   // And its value is a commit of this namespace's own kind. Nothing else here
@@ -689,9 +694,23 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // could open as many pull requests as it liked. `refs/hub/*` is
     // undeletable, so what that costs every later protected-branch push,
     // collection and deepening fetch is permanent.
-    const count = (yield* Event.pullRequests()).length + opening.size;
+    //
+    // Counted per class. Sessions are opened far faster than pull requests —
+    // one per agent run rather than one per proposal — so a shared bound would
+    // let a fleet's ordinary week exhaust what a repository's pull requests
+    // are allowed, and a session ref is exactly as undeletable as a pull
+    // request's.
+    const session = Session.sessionOf(update.name) !== null;
+    const held = session ? yield* Session.sessions() : yield* Event.pullRequests();
+    const opened = [...opening].filter(
+      (name) => (Session.sessionOf(name) !== null) === session,
+    ).length;
+    const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
-      return refused(update.name, `this repository already holds ${count} pull requests`);
+      return refused(
+        update.name,
+        `this repository already holds ${count} ${session ? "sessions" : "pull requests"}`,
+      );
     }
   }
 
