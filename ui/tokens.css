@@ -1,0 +1,227 @@
+/**
+ * git+ design tokens.
+ *
+ * Extracted verbatim from the Claude Design prototypes:
+ *   - `git-plus.dc.html`       (dark, the original)
+ *   - `git-plus light.dc.html` (light, derived + softened)
+ *
+ * The prototypes carried every colour as an inline literal. Each literal that
+ * differed between the two files became one token here, so a single `data-theme`
+ * flip swaps the whole palette. Values are unchanged — this is a re-encoding,
+ * not a re-design.
+ *
+ * `-rgb` variants exist for the colours the design uses at partial alpha
+ * (status pills at 10%/25%, kind badges at 12%, diff line backgrounds at 7%).
+ */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* surfaces */
+  --gp-bg: #ffffff;
+  --gp-surface: #ffffff;
+  --gp-surface-raised: #fbfbfc;
+  --gp-surface-input: #f7f7f8;
+  --gp-surface-hover: #f2f2f4;
+  --gp-surface-active: #eaeaed;
+  --gp-surface-selected: #efeff1;
+  --gp-row-bg: #ffffff;
+  --gp-row-hover: #f4f4f6;
+
+  /* borders */
+  --gp-border: #ebebee;
+  --gp-border-strong: #e3e3e8;
+  --gp-border-card: #eaeaed;
+  --gp-border-hover: #d6d6dc;
+  --gp-divider: #f4f4f6;
+
+  /* text */
+  --gp-fg: #2e2e33;
+  --gp-fg-secondary: #52525a;
+  --gp-fg-muted: #74747e;
+  --gp-fg-faint: #9a9aa2;
+  --gp-fg-fainter: #c8c8ce;
+  --gp-fg-dim: #b8b8bf;
+
+  /* accent */
+  --gp-accent: #0e9f78;
+  --gp-accent-rgb: 14 159 120;
+  --gp-accent-hover: #0b8a68;
+  --gp-accent-fg: #ffffff;
+  --gp-accent-strong: #0b8a68;
+
+  /* status hues */
+  --gp-blue: #3b6fd6;
+  --gp-blue-rgb: 59 111 214;
+  --gp-purple: #8b5cd6;
+  --gp-purple-rgb: 139 92 214;
+  --gp-red: #d64545;
+  --gp-red-rgb: 214 69 69;
+  --gp-todo: #74747e;
+  --gp-todo-rgb: 95 95 104;
+  --gp-todo-ring: #9a9aa2;
+
+  /* label hues */
+  --gp-amber: #b0862a;
+  --gp-orange: #c26b1f;
+  --gp-cyan: #0e8fa3;
+  --gp-ts: #3b6fd6;
+
+  /* diff */
+  --gp-diff-add-fg: #0b8a68;
+  --gp-diff-del-fg: #b03535;
+
+  /* danger zone */
+  --gp-danger-border: #efdbdc;
+  --gp-danger-hover-bg: #fbecec;
+
+  /* avatars */
+  --gp-avatar-bg: #eaeaed;
+  --gp-avatar-fg: #52525a;
+  --gp-avatar-alt-bg: #e3e3e8;
+  --gp-avatar-ring: #ffffff;
+
+  /* chrome */
+  --gp-scroll-thumb: #e3e3e8;
+  --gp-scroll-track: #f7f7f8;
+  --gp-timeline-grid: #f2f2f4;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --gp-bg: #0c0c0d;
+  --gp-surface: #111113;
+  --gp-surface-raised: #141416;
+  --gp-surface-input: #161618;
+  --gp-surface-hover: #1c1c1f;
+  --gp-surface-active: #26262b;
+  --gp-surface-selected: #1f1f23;
+  --gp-row-bg: #101012;
+  --gp-row-hover: #18181b;
+
+  --gp-border: #1e1e22;
+  --gp-border-strong: #2a2a2e;
+  --gp-border-card: #26262b;
+  --gp-border-hover: #3a3a40;
+  --gp-divider: #18181b;
+
+  --gp-fg: #ececef;
+  --gp-fg-secondary: #b9b9c0;
+  --gp-fg-muted: #8a8a93;
+  --gp-fg-faint: #6b6b74;
+  --gp-fg-fainter: #4a4a52;
+  --gp-fg-dim: #55555c;
+
+  --gp-accent: #7ee2c0;
+  --gp-accent-rgb: 126 226 192;
+  --gp-accent-hover: #a4f0d6;
+  --gp-accent-fg: #0c0c0d;
+  --gp-accent-strong: #a4f0d6;
+
+  --gp-blue: #8ab8f2;
+  --gp-blue-rgb: 138 184 242;
+  --gp-purple: #c9a6f2;
+  --gp-purple-rgb: 201 166 242;
+  --gp-red: #f28b8b;
+  --gp-red-rgb: 242 139 139;
+  --gp-todo: #8a8a93;
+  --gp-todo-rgb: 138 138 147;
+  --gp-todo-ring: #6b6b74;
+
+  --gp-amber: #e2c37e;
+  --gp-orange: #f2a76b;
+  --gp-cyan: #67d3e0;
+  --gp-ts: #6b9ff2;
+
+  --gp-diff-add-fg: #a4f0d6;
+  --gp-diff-del-fg: #f2a3a3;
+
+  --gp-danger-border: #4a2325;
+  --gp-danger-hover-bg: #2a1516;
+
+  --gp-avatar-bg: #26262b;
+  --gp-avatar-fg: #b9b9c0;
+  --gp-avatar-alt-bg: #2a2a2e;
+  --gp-avatar-ring: #0f1512;
+
+  --gp-scroll-thumb: #2a2a2e;
+  --gp-scroll-track: #0c0c0d;
+  --gp-timeline-grid: #17171a;
+}
+
+/* Follow the OS when the user has expressed no preference. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --gp-bg: #0c0c0d;
+    --gp-surface: #111113;
+    --gp-surface-raised: #141416;
+    --gp-surface-input: #161618;
+    --gp-surface-hover: #1c1c1f;
+    --gp-surface-active: #26262b;
+    --gp-surface-selected: #1f1f23;
+    --gp-row-bg: #101012;
+    --gp-row-hover: #18181b;
+
+    --gp-border: #1e1e22;
+    --gp-border-strong: #2a2a2e;
+    --gp-border-card: #26262b;
+    --gp-border-hover: #3a3a40;
+    --gp-divider: #18181b;
+
+    --gp-fg: #ececef;
+    --gp-fg-secondary: #b9b9c0;
+    --gp-fg-muted: #8a8a93;
+    --gp-fg-faint: #6b6b74;
+    --gp-fg-fainter: #4a4a52;
+    --gp-fg-dim: #55555c;
+
+    --gp-accent: #7ee2c0;
+    --gp-accent-rgb: 126 226 192;
+    --gp-accent-hover: #a4f0d6;
+    --gp-accent-fg: #0c0c0d;
+    --gp-accent-strong: #a4f0d6;
+
+    --gp-blue: #8ab8f2;
+    --gp-blue-rgb: 138 184 242;
+    --gp-purple: #c9a6f2;
+    --gp-purple-rgb: 201 166 242;
+    --gp-red: #f28b8b;
+    --gp-red-rgb: 242 139 139;
+    --gp-todo: #8a8a93;
+    --gp-todo-rgb: 138 138 147;
+    --gp-todo-ring: #6b6b74;
+
+    --gp-amber: #e2c37e;
+    --gp-orange: #f2a76b;
+    --gp-cyan: #67d3e0;
+    --gp-ts: #6b9ff2;
+
+    --gp-diff-add-fg: #a4f0d6;
+    --gp-diff-del-fg: #f2a3a3;
+
+    --gp-danger-border: #4a2325;
+    --gp-danger-hover-bg: #2a1516;
+
+    --gp-avatar-bg: #26262b;
+    --gp-avatar-fg: #b9b9c0;
+    --gp-avatar-alt-bg: #2a2a2e;
+    --gp-avatar-ring: #0f1512;
+
+    --gp-scroll-thumb: #2a2a2e;
+    --gp-scroll-track: #0c0c0d;
+    --gp-timeline-grid: #17171a;
+  }
+}
+
+:root {
+  --gp-font: "Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --gp-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --gp-radius-sm: 6px;
+  --gp-radius: 9px;
+  --gp-radius-lg: 12px;
+  --gp-radius-pill: 99px;
+}
