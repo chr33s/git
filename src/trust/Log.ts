@@ -230,9 +230,20 @@ export const isTrustCommit = Effect.fn("trust.Log.isTrustCommit")(function* (com
     .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   if (found !== null) return true;
   // A join carries an empty tree; anything else is not part of this history.
-  return (
-    (yield* repository.readTree(info.tree).pipe(Effect.orElseSucceed(() => null)))?.length === 0
-  );
+  // A missing tree is one commit the walk steps over; a store that *failed* to
+  // answer is not. `orElseSucceed` swallowed both, so a transient read error
+  // read as "not part of this history" — and this walk is the boundary of the
+  // history, so the whole ref went empty. Narrowed to the same absence the two
+  // reads above tolerate, a failure propagates and every caller turns it into
+  // its own conservative answer instead of a silently empty one.
+  //
+  // Swallowed, one blip on a join's tree emptied the trust log: no members and
+  // no revocations, cached under an unchanged head, so every revoked key was
+  // authorized again and a private repository reported itself as public.
+  const tree = yield* repository
+    .readTree(info.tree)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  return tree?.length === 0;
 });
 
 /**

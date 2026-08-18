@@ -739,6 +739,9 @@ const repo = HttpApiGroup.make("repo")
         problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
         dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
       }),
+      // `Invalid` when the caller may not ask: a whole-store scan is charged
+      // like the other maintenance verbs.
+      error: [Invalid],
     }),
   )
   .add(
@@ -1437,6 +1440,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("fsck", () =>
       Effect.gen(function* () {
+        // Charged like `gc`, for the same reason and not for `gc`'s reason:
+        // this changes nothing, and it reads every object in the store. That
+        // is the whole cost, and it has no ref for a gate to hang off, so
+        // anybody who could push could drive a full-store scan in a loop. The
+        // guard already keeps it off the anonymous path; this keeps it off the
+        // contributor's.
+        yield* requireCapability("repo.admin");
         const repository = yield* Repository;
         const report = yield* repository.fsck.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Exit, Layer } from "effect";
 
 import {
   type Fingerprint,
@@ -12,12 +12,12 @@ import {
   type PrivateKey,
   sign,
 } from "../crypto/SshSignature.ts";
-import type { Invalid, StorageFailure } from "../git/Error.ts";
+import { type Invalid, StorageFailure } from "../git/Error.ts";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { ObjectStore, type Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
 import { create, type Genesis, signGenesis, writeGenesis } from "./Genesis.ts";
 import * as Log from "./Log.ts";
@@ -36,6 +36,49 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
       ),
     ),
   );
+
+/**
+ * The same, with reads of whatever `flaky.oid` names failing after the first.
+ *
+ * A store that is absent and a store that is broken are different answers, and
+ * the only way to tell whether a walk keeps them apart is to break one. Failing
+ * only after the first read is what makes the two reads of one tree — the path
+ * lookup, and the emptiness check behind it — disagree, which is the window a
+ * transient failure actually arrives in. Named through a holder rather than up
+ * front, because what to break is an oid the run itself writes.
+ */
+const flaking = (flaky: { oid: Oid | null }) => {
+  let seen = 0;
+  return Layer.effect(
+    ObjectStore,
+    Effect.gen(function* () {
+      const inner = yield* ObjectStore;
+      return ObjectStore.of({
+        ...inner,
+        read: (oid) =>
+          oid === flaky.oid && seen++ > 0
+            ? Effect.fail(new StorageFailure({ operation: "read", path: oid }))
+            : inner.read(oid),
+      });
+    }),
+  ).pipe(Layer.provideMerge(stores));
+};
+
+const flakily = <A, E>(build: (flaky: { oid: Oid | null }) => Effect.Effect<A, E, Repository>) => {
+  // SAFETY: the holder starts empty and the run fills it with an oid it
+  // wrote; nothing else reads it, and `null` matches nothing.
+  const flaky = { oid: null as Oid | null };
+  return Effect.runPromiseExit(
+    build(flaky).pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(flaking(flaky)),
+        ),
+      ),
+    ),
+  );
+};
 
 interface World {
   readonly genesis: Genesis;
@@ -170,6 +213,40 @@ describe("what an event's declared trust head can cost", () => {
     // naming such a head would count rather than being turned away. The
     // callers turn this failure into a denial of that one event.
     assert.match(outcome.bounded ?? "", /more than 3 commits/);
+  });
+
+  it("does not read a broken store as 'not part of this history'", async () => {
+    // Absent and broken are different answers. The walk that decides whether a
+    // commit belongs to the trust log tolerates absence deliberately — refs are
+    // applied without a connectivity check, so a replica can hold a commit
+    // whose tree never arrived — and it was tolerating failure along with it.
+    // That walk *is* the boundary of the history, so a failure read as "not
+    // part of it" does not skip one commit: it empties the log. No members and
+    // no revocations, cached under an unchanged head — every revoked key
+    // authorized again, and a private repository reporting itself as public,
+    // with nothing raised anywhere.
+    const asked = await flakily((flaky) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        // A tree with something in it and no record: the shape whose emptiness
+        // has to be read from the store rather than from the oid.
+        const tree = yield* repository.writeTree([
+          { mode: "100644", name: "file.txt", oid: yield* repository.writeBlob(new Uint8Array(1)) },
+        ]);
+        const commit = yield* repository.commitTree({
+          tree,
+          parents: [],
+          message: "not a record\n",
+          author: Record.identityAt(new Date(1_700_000_000_000)),
+        });
+        // From here the path lookup answers and the emptiness check behind it
+        // does not, which is what a transient failure looks like.
+        flaky.oid = tree;
+        return yield* Log.isTrustCommit(commit);
+      }),
+    );
+
+    assert.ok(Exit.isFailure(asked), "a store that failed is not a store that said no");
   });
 
   it("refuses an event whose declared head it cannot walk, rather than counting it", async () => {
