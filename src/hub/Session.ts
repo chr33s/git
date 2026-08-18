@@ -409,3 +409,58 @@ export const latestFor = Effect.fn("hub.Session.latestFor")(function* (ref: stri
   }
   return latest;
 });
+
+/**
+ * Every commit a session says it produced, walked from a given head.
+ *
+ * Takes the head rather than reading the ref, because the caller that needs
+ * this most is the policy boundary judging a push that is *moving* that ref:
+ * read from the ref, the check would ask about the session as it was before
+ * the push, and a branch and its provenance arriving together — which is the
+ * whole point of one receive-pack carrying both — would never pass.
+ */
+export const producedBy = Effect.fn("hub.Session.producedBy")(function* (head: Oid) {
+  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* Event.ceilingOf());
+  const commits = new Set<string>();
+
+  for (const commit of Dag.topological(parents)) {
+    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
+    const record = yield* Record.read(commit, Event.RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    if (record === null) continue;
+    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    if (payload === null || payload.type !== "session.produced") continue;
+    for (const named of payload.commits) commits.add(named);
+  }
+
+  return commits;
+});
+
+/** The trailer a commit carries to name the session that made it. */
+export const TRAILER = "Session";
+
+/**
+ * The session a commit message names, or why it names none.
+ *
+ * Exactly one, because two are two claims about the same commit and a rule
+ * that took the last would let a second trailer overwrite the first — the
+ * check exists to be answerable, not to be argued with.
+ */
+export const trailerOf = (
+  message: string,
+): { readonly session: string } | { readonly reason: string } => {
+  const found = message
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${TRAILER}:`))
+    .map((line) => line.slice(TRAILER.length + 1).trim());
+
+  if (found.length === 0) return { reason: `no ${TRAILER}: trailer` };
+  if (found.length > 1) return { reason: `${found.length} ${TRAILER}: trailers` };
+  const session = found[0]!;
+  return isSessionId(session) ? { session } : { reason: `'${session}' cannot name a session` };
+};

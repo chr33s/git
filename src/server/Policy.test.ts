@@ -123,6 +123,20 @@ const history = Effect.fn("test.history")(function* (branch: string) {
   return { first, second };
 });
 
+/** The rules a repository has published, written the way it publishes them. */
+const publish = Effect.fn("test.publish")(function* (rules: Rules) {
+  const repository = yield* Repository;
+  const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
+  const tree = yield* repository.writeTree([{ mode: "100644", name: "policy.json", oid: blob }]);
+  const commit = yield* repository.commitTree({
+    tree,
+    parents: [],
+    message: "policy\n",
+    author,
+  });
+  yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
+});
+
 /**
  * The receive-pack path, as a request from one principal.
  *
@@ -1102,6 +1116,72 @@ describe("Policy", () => {
       assert.match(outcome.nested.ok === false ? outcome.nested.reason : "", /pull request/);
       assert.equal(outcome.beside.ok, false);
       assert.equal(outcome.proper.ok, true, "a pull request still moves");
+    });
+
+    it("requires a commit to name the session that produced it, in the same push", async () => {
+      // The flow the rule is for: a branch and the record of what produced it
+      // travel in one receive-pack. Judged against the session as it stands on
+      // disk, the push that did everything right would be the one refused —
+      // its session ref has not been applied yet either.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+
+          const opened = yield* Session.open({
+            repo: where.genesis.repoId,
+            agent: { kind: "claude-code", model: "m", harness: "h" },
+            prompt: "do the thing",
+            key: where.dev,
+          });
+          const before = yield* repository.resolve(Session.refOf(opened.session));
+
+          const provenanced = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: `did the thing\n\nSession: ${opened.session}\n`,
+            author,
+          });
+          const bare = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "did the thing quietly\n",
+            author,
+          });
+
+          yield* Session.produced({
+            repo: where.genesis.repoId,
+            session: opened.session,
+            key: where.dev,
+            commits: [provenanced],
+          });
+          const head = yield* repository.resolve(Session.refOf(opened.session));
+
+          // Rewound, so the repository holds what it held before the push and
+          // the batch carries the rest — which is what a receive-pack is.
+          yield* repository.setRef({ name: Session.refOf(opened.session), to: before! });
+
+          yield* publish({ ...OPEN, requireProvenance: true });
+
+          return {
+            together: yield* gateAs(where, [
+              { name: Session.refOf(opened.session), value: head },
+              { name: "refs/heads/main", value: provenanced },
+            ]),
+            alone: yield* gateAs(where, [{ name: "refs/heads/topic", value: provenanced }]),
+            bare: yield* gateAs(where, [{ name: "refs/heads/other", value: bare }]),
+          };
+        }),
+      );
+
+      assert.deepEqual(
+        outcome.together.refused,
+        [],
+        "a branch and its provenance in one push are the case this is for",
+      );
+      assert.equal(outcome.alone.refused.length, 1, "and the record has to be there at all");
+      assert.equal(outcome.bare.refused.length, 1);
+      assert.match(outcome.bare.refused[0]?.reason ?? "", /Session: trailer/);
     });
 
     it("admits a session ref, which is the other shape this namespace holds", async () => {

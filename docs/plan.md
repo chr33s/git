@@ -133,10 +133,12 @@ as its own class, and `src/cli/task.ts`. A claim is a lease judged against
 the caller's clock, because the events carry no trustworthy one of their
 own. What remains:
 
+**`requireProvenance` has landed** — the trailer → `session.produced`
+check at the boundary, with the batch's own session commands counted
+before its source commands, so a branch and the record of what produced it
+travel in one receive-pack. What remains:
+
 ```text
-requireProvenance       Policy.ts: trailer → produced check,
-                        session commands judged before source
-                        commands in one receive-pack
 decisions               two more payload schemas + the authorship
                         exemption
 memory                  a distiller job (agent-side) + notes
