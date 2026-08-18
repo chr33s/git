@@ -734,6 +734,58 @@ describe("hub projection", () => {
       assert.ok(Exit.isFailure(asked), "a store that failed is not a store that said no");
     });
 
+    it("gives back the id of a merge it refuses", async () => {
+      // Every other event type holds the invariant that a rejected event does
+      // not keep its author's slot for that id. A merge is settled after the
+      // loop that hands the slot out, so a refused one kept it — leaving
+      // `claims` resolving the id to an event nothing accepted, and the author
+      // unable to ever use the id again on this pull request.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          const id = Event.newId();
+          const write = (head: string, message: string) =>
+            Effect.gen(function* () {
+              const bytes = Event.encode({
+                version: 1,
+                type: "pr.merged",
+                repo: where.genesis.repoId,
+                pr,
+                id,
+                issuedAt: new Date(1_700_000_001_000).toISOString(),
+                trustHead: yield* repository.resolve(Log.LOG_REF),
+                head,
+                mergeCommit: head,
+              });
+              const ref = Event.refOf(pr);
+              const at = yield* repository.resolve(ref);
+              yield* repository.setRef({
+                name: ref,
+                to: yield* Record.write({
+                  name: Event.RECORD,
+                  payload: bytes,
+                  signatures: [yield* sign(where.reviewer, bytes, NAMESPACE)],
+                  parents: [at!],
+                  message,
+                }),
+                expected: at,
+              });
+            });
+
+          // Refused: this pull request proposed `REVISION`, not `NEXT`.
+          yield* write(Event.qualify(NEXT), "pr.merged of something else\n");
+          const state = yield* projectionOf(where, pr);
+          return { state: state.state, claimed: state.claims.has(id) };
+        }),
+      );
+
+      assert.equal(outcome.state, "open");
+      assert.equal(outcome.claimed, false, "the refused merge holds no id");
+    });
+
     it("refuses a merge of a revision the pull request never proposed", async () => {
       // "Merged" is the one state with no way back — `pr.closed` and
       // `pr.reopened` both stop at it, deliberately, since the merge has

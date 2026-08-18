@@ -694,6 +694,9 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     readonly commit: Oid;
     readonly head: Oid | null;
     readonly landed: Oid | null;
+    /** What it claimed, so a refusal below can give the id back; see `already`. */
+    readonly mine: string;
+    readonly id: string;
   }> = [];
   const reviews = new Map<string, Review>();
   const dismissed = new Set<string>();
@@ -1063,6 +1066,8 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
           commit: entry.commit,
           head: Event.unqualify(payload.head),
           landed: Event.unqualify(payload.mergeCommit),
+          mine,
+          id: payload.id,
         });
         break;
 
@@ -1255,6 +1260,16 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         commit: merge.commit,
         reason: `pr.merged names ${merge.head ?? "no revision"}, which this pull request never proposed`,
       });
+      // And the id goes back. The loop hands a slot to every event it did not
+      // reject, and this one is rejected — a slot later than the loop, but the
+      // same slot. Kept, it would leave `claims` resolving that id to an event
+      // nothing accepted, and its author unable to ever use the id again.
+      if (claimed.get(merge.mine) === merge.commit) claimed.delete(merge.mine);
+      const under = byId.get(merge.id)?.filter((oid) => oid !== merge.commit);
+      if (under !== undefined) {
+        if (under.length === 0) byId.delete(merge.id);
+        else byId.set(merge.id, under);
+      }
       continue;
     }
     state = "merged";
