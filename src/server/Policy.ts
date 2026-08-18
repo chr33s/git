@@ -457,6 +457,23 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     return refused(update.name, "the genesis is written once and never moves");
   }
 
+  // And the namespace holds only the two things it is for. The rules below
+  // know `refs/meta/trust/log` and the genesis; every other name under
+  // `refs/meta/trust/` is not append-only, so nothing here bounds it — and the
+  // API refuses the whole namespace, so this door was the only one open. Such
+  // a ref is hidden from the advertisement, copied to every mirror by the hub
+  // refspec, which only adds refs, and roots collection: a permanent,
+  // invisible pin on the object graph of every replica, created by anybody
+  // holding `source.push`. Refused whether or not the repository has an
+  // identity: the namespace means what it means either way.
+  if (
+    update.name.startsWith("refs/meta/trust/") &&
+    update.name !== Refspec.TRUST_GENESIS &&
+    !Refspec.isAppendOnly(update.name)
+  ) {
+    return refused(update.name, `${update.name} is not part of the trust namespace`);
+  }
+
   // Not hub-enabled: no genesis, so no members, so nobody holds `source.push`
   // — and §14 is unconditional that anonymous does not get it. A repository
   // with no identity is readable by anyone who can reach it, exactly as a

@@ -164,6 +164,25 @@ const FileWire = Schema.Struct({
 const refNameOf = (value: string): string =>
   value === "HEAD" || value.startsWith("refs/") ? value : `refs/heads/${value}`;
 
+/**
+ * The same, for a destination a caller may only name as a branch.
+ *
+ * An object id is not a destination: nothing moves it, and qualifying one made
+ * `into: "<40 hex>"` create a branch *named after the object id* — silently,
+ * and reported as success. Refused instead, which is the answer the caller can
+ * act on. `Repository.merge` still resolves an oid `into` for its own callers;
+ * what is closed here is the door that let a request spell one.
+ */
+const branchRefOf = Effect.fn("Api.branchRefOf")(function* (value: string) {
+  if (isOid(value)) {
+    return yield* new Invalid({
+      field: "into",
+      reason: "a destination is a branch, not an object id",
+    });
+  }
+  return refNameOf(value);
+});
+
 const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = false) {
   // Fail closed: a policy that cannot be evaluated refuses the write rather
   // than allowing it. The alternative is a repository whose protection turns
@@ -1557,7 +1576,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // `refs/heads/main` and written to a top-level ref called `main`: the
         // branch never moved and the response said it had.
         if (payload.into !== undefined) {
-          const into = refNameOf(payload.into);
+          const into = yield* branchRefOf(payload.into);
           request.into = into;
           // Compared as *revisions*, not as names. `ours` and `theirs` take
           // anything `merge` can resolve — an oid, a tag, a tracking ref — so
@@ -1594,7 +1613,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // charging `source.force-push` for it refused the readme's own
         // contributor set a branch they were creating.
         if (payload.into !== undefined) {
-          request.into = refNameOf(payload.into);
+          request.into = yield* branchRefOf(payload.into);
           const judged = yield* discards(request.into, [payload.onto]);
           yield* gateWrite(request.into, judged.rewrites);
           request.expected = judged.swap;
@@ -1609,7 +1628,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
         // As `cherry-pick` above.
         if (payload.into !== undefined) {
-          request.into = refNameOf(payload.into);
+          request.into = yield* branchRefOf(payload.into);
           const judged = yield* discards(request.into, [payload.onto]);
           yield* gateWrite(request.into, judged.rewrites);
           request.expected = judged.swap;

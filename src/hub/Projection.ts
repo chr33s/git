@@ -687,6 +687,14 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
   let mergeCommit: Oid | null = null;
   let at = new Date(0);
   let headSetter: { readonly commit: Oid; readonly id: string; readonly head: Oid } | null = null;
+  /** Every revision an accepted event proposed, which is what a merge may name. */
+  const proposed = new Set<Oid>();
+  /** Merges, settled after the loop; see the `pr.merged` case. */
+  const merges: Array<{
+    readonly commit: Oid;
+    readonly head: Oid | null;
+    readonly landed: Oid | null;
+  }> = [];
   const reviews = new Map<string, Review>();
   const dismissed = new Set<string>();
   const threads = new Map<string, Thread>();
@@ -956,6 +964,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // opening still confers none at all.
         if (opens && !opening.contested) author ??= signer;
         const head = Event.unqualify(payload.head);
+        if (head !== null) proposed.add(head);
         if (
           head !== null &&
           supersedes({ commit: entry.commit, id: payload.id }, headSetter, ancestors)
@@ -992,6 +1001,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // holding `hub.merge` could push a revision onto somebody else's pull
         // request and then approve it — self-approval wearing another event's
         // name.
+        if (head !== null) proposed.add(head);
         if (
           head !== null &&
           supersedes({ commit: entry.commit, id: payload.id }, headSetter, ancestors)
@@ -1022,15 +1032,38 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
           break;
         }
         // A merge is final; closing or reopening after it would be a later
-        // event undoing a state that has already landed in the branch.
-        if (state === "merged") break;
+        // event undoing a state that has already landed in the branch. Not
+        // guarded here any more because it cannot be: merges are settled after
+        // this loop, and settling them last is what makes them final — in fold
+        // order as well as in history, which the guard could only manage in
+        // one of the two.
         state = payload.type === "pr.closed" ? "closed" : "open";
         break;
       }
 
       case "pr.merged":
-        state = "merged";
-        mergeCommit = Event.unqualify(payload.mergeCommit);
+        // Collected, not applied. "Merged" is the one pull-request state with
+        // no way back — `pr.closed` and `pr.reopened` both stop at it, and
+        // deliberately, since the merge has already landed in the branch — so
+        // the event that reaches it has to be about the revision this pull
+        // request actually proposed. Applied unconditionally, one stray
+        // `pr.merged` naming any revision at all took an approved pull request
+        // out as the route to its protected branch, permanently, on a ref that
+        // cannot be rewound: the same denial `pr.closed` is guarded against,
+        // through the one door where closing it again does not help.
+        //
+        // Settled after the loop because "did this pull request propose that
+        // revision?" is a question about the whole history. Fold order
+        // interleaves concurrent branches, so a merge can be reached before
+        // the `pr.updated` that proposed what it names, and judging it in
+        // place would turn an honest merge into a rejection on ordering alone.
+        // Which merge wins does not change: any accepted one makes the pull
+        // request merged, whatever order it was folded in, exactly as before.
+        merges.push({
+          commit: entry.commit,
+          head: Event.unqualify(payload.head),
+          landed: Event.unqualify(payload.mergeCommit),
+        });
         break;
 
       case "review.submitted": {
@@ -1214,6 +1247,18 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
       claimed.set(mine, entry.commit);
       byId.set(payload.id, [...(byId.get(payload.id) ?? []), entry.commit]);
     }
+  }
+
+  for (const merge of merges) {
+    if (merge.head === null || !proposed.has(merge.head)) {
+      rejected.push({
+        commit: merge.commit,
+        reason: `pr.merged names ${merge.head ?? "no revision"}, which this pull request never proposed`,
+      });
+      continue;
+    }
+    state = "merged";
+    mergeCommit = merge.landed;
   }
 
   const head = headSetter?.head ?? null;

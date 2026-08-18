@@ -643,6 +643,28 @@ describe("Api", () => {
           `no branch called HEAD: ${afterHead.map((ref) => ref.name).join(", ")}`,
         );
 
+        // An object id is not a destination: nothing moves it. Qualified along
+        // with every other short name, `into: "<40 hex>"` created a branch
+        // *named after the object id* — silently, and reported as success.
+        const atOid = yield* client.repo
+          .merge({
+            params: { repo: "r" },
+            payload: {
+              ours: "refs/heads/main",
+              theirs: "refs/heads/side",
+              author: alice,
+              into: EMPTY_TREE_OID,
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(atOid._tag, "Invalid");
+        const { refs: afterOid } = yield* client.repo.refs({ params: { repo: "r" } });
+        assert.equal(
+          afterOid.find((ref) => ref.name === `refs/heads/${EMPTY_TREE_OID}`),
+          undefined,
+          `no branch named after an oid: ${afterOid.map((ref) => ref.name).join(", ")}`,
+        );
+
         const merged = yield* client.repo.merge({
           params: { repo: "r" },
           payload: {

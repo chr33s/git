@@ -1238,6 +1238,35 @@ describe("Policy", () => {
       assert.match(outcome.ok === false ? outcome.reason : "", /is not part of this history/);
     });
 
+    it("refuses a name under refs/meta/trust that is not the log or the genesis", async () => {
+      // The namespace holds two things, and the rules know both. Anything else
+      // under it is not append-only, so nothing bounds it — and the JSON verbs
+      // refuse the whole namespace, so receive-pack was the only door left
+      // open. Such a ref is hidden from the advertisement, copied to every
+      // mirror by the hub refspec, which only adds refs, and roots collection:
+      // a permanent, invisible pin on the object graph of every replica, put
+      // there by anybody holding `source.push`.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const log = yield* repository.resolve(Log.LOG_REF);
+          return {
+            stray: yield* judge(where, { name: "refs/meta/trust/notes", value: log! }),
+            // The two the namespace is actually for still work.
+            log: yield* judge(where, { name: Log.LOG_REF, value: log! }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.stray.ok, false);
+      assert.match(
+        outcome.stray.ok === false ? outcome.stray.reason : "",
+        /not part of the trust namespace/,
+      );
+      assert.equal(outcome.log.ok, true, "the log itself is still appendable");
+    });
+
     it("refuses to open more pull requests than a push will walk", async () => {
       // The per-pull-request ceiling bounds one fold; nothing bounded how many
       // folds a protected-branch push, a collection and a deepening fetch each

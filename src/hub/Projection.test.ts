@@ -734,6 +734,54 @@ describe("hub projection", () => {
       assert.ok(Exit.isFailure(asked), "a store that failed is not a store that said no");
     });
 
+    it("refuses a merge of a revision the pull request never proposed", async () => {
+      // "Merged" is the one state with no way back — `pr.closed` and
+      // `pr.reopened` both stop at it, deliberately, since the merge has
+      // already landed in the branch. Applied to whatever revision the event
+      // happened to name, one stray `pr.merged` took an approved pull request
+      // out as the route to its protected branch, permanently, on a ref that
+      // cannot be rewound: the denial `pr.closed` is guarded against, reached
+      // through the one door where closing it again does not help.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          const bytes = Event.encode({
+            version: 1,
+            type: "pr.merged",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_001_000).toISOString(),
+            trustHead: yield* repository.resolve(Log.LOG_REF),
+            // Not `REVISION`, which is what this pull request proposed.
+            head: Event.qualify(NEXT),
+            mergeCommit: Event.qualify(NEXT),
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.reviewer, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "pr.merged of something else\n",
+            }),
+            expected: head,
+          });
+
+          return yield* projectionOf(where, pr);
+        }),
+      );
+
+      assert.equal(outcome.state, "open", "the pull request is still the route to its branch");
+      assert.match(outcome.rejected.at(-1)?.reason ?? "", /never proposed/);
+    });
+
     it("walks a head it refuses exactly once, not once per ask", async () => {
       // The memo in front of the log walk recorded successes only, so the one
       // head worth remembering — the one whose ancestry this host will not
