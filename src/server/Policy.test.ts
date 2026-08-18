@@ -15,6 +15,7 @@ import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid, type RefUpdate, storageOf } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
+import * as Session from "../hub/Session.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, GENESIS_REF, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
@@ -1101,6 +1102,35 @@ describe("Policy", () => {
       assert.match(outcome.nested.ok === false ? outcome.nested.reason : "", /pull request/);
       assert.equal(outcome.beside.ok, false);
       assert.equal(outcome.proper.ok, true, "a pull request still moves");
+    });
+
+    it("admits a session ref, which is the other shape this namespace holds", async () => {
+      // Sessions live under `refs/hub/session/<id>` on the same machinery a
+      // pull request uses, so the namespace rules have to know about both:
+      // read as pull requests only, every session push was refused as a name
+      // that does not belong here.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const opened = yield* Session.open({
+            repo: where.genesis.repoId,
+            agent: { kind: "claude-code", model: "m", harness: "h" },
+            prompt: "do the thing",
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(Session.refOf(opened.session));
+          return {
+            proper: yield* judge(where, { name: Session.refOf(opened.session), value: head }),
+            nested: yield* judge(where, {
+              name: `refs/hub/session/${opened.session}/extra`,
+              value: head,
+            }),
+          };
+        }),
+      );
+      assert.equal(outcome.proper.ok, true, "a session ref moves");
+      assert.equal(outcome.nested.ok, false, "a name outside either shape does not");
     });
 
     it("refuses a hub update that grafts a second beginning onto the history", async () => {

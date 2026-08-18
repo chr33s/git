@@ -57,6 +57,7 @@ import {
   rootFlag,
   withRepo,
 } from "./shared.ts";
+import { sessionCommand } from "./session.ts";
 import { wakeCommand } from "./wake.ts";
 import * as work from "./work.ts";
 
@@ -922,6 +923,9 @@ const git = Command.make("chr33s-git").pipe(
     ),
     work.switchCommand.pipe(
       Command.withDescription("Check out a branch, replacing index and work tree"),
+    ),
+    sessionCommand.pipe(
+      Command.withDescription("Record what an agent was told, and what came of it"),
     ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
     wakeCommand,
