@@ -1977,6 +1977,41 @@ describe("Policy", () => {
       assert.match(decision.ok === false ? decision.reason : "", /policy\.write/);
     });
 
+    it("leaves a repository with no identity a way back too", async () => {
+      // `serve --open` has no members, so nobody holds `policy.write` — and a
+      // door that asks for it leaves exactly that repository with no repair
+      // route: the same anonymous client that may publish the rules can
+      // publish an unparseable one and lock every write on the repository, its
+      // own next attempt included. Whoever may publish them may repair them.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { first, second } = yield* history("refs/heads/main");
+          const broken = yield* repository.writeBlob(new TextEncoder().encode("{ not json"));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: broken },
+          ]);
+          yield* repository.setRef({
+            name: Policy.RULES_REF,
+            to: yield* repository.commitTree({ tree, parents: [], message: "policy\n", author }),
+          });
+
+          const open = Policy.anonymousWrites(true);
+          return {
+            repair: yield* gateAs(null, [{ name: Policy.RULES_REF, value: first }], false).pipe(
+              Effect.provide(open),
+            ),
+            other: yield* gateAs(null, [{ name: "refs/heads/topic", value: second }], false).pipe(
+              Effect.provide(open),
+            ),
+          };
+        }),
+      );
+
+      assert.equal(outcome.repair.updates.length, 1, "the rules can be republished");
+      assert.equal(outcome.other.updates.length, 0, "and nothing else moves until they are");
+    });
+
     it("still takes the push that repairs a rules file nothing can parse", async () => {
       // A policy file that exists and will not parse fails rather than reading
       // as `OPEN` — otherwise anybody could turn branch protection off by
@@ -2000,14 +2035,28 @@ describe("Policy", () => {
             to: yield* repository.commitTree({ tree, parents: [], message: "policy\n", author }),
           });
 
-          return {
-            repair: yield* gateAs(where, [{ name: Policy.RULES_REF, value: first }], false),
-            other: yield* gateAs(where, [{ name: "refs/heads/topic", value: second }], false),
-          };
+          const repair = yield* gateAs(where, [{ name: Policy.RULES_REF, value: first }], false);
+          const other = yield* gateAs(where, [{ name: "refs/heads/topic", value: second }], false);
+          // Applied, not merely allowed. The compare-and-swap the decision
+          // carries is what the store checks, and `null` reads as *must not
+          // exist* — which the ref being repaired always does, so an allowed
+          // repair that carried `null` was reported as allowed and never
+          // landed.
+          const applied = yield* Effect.forEach(repair.updates, (update) =>
+            repository
+              .setRef({ name: update.name, to: update.value ?? first, expected: update.expected })
+              .pipe(
+                Effect.as(true),
+                Effect.catchTag("RefConflict", () => Effect.succeed(false)),
+              ),
+          );
+          return { repair, other, applied, at: yield* repository.resolve(Policy.RULES_REF) };
         }),
       );
 
-      assert.equal(outcome.repair.updates.length, 1, "the push that fixes it still lands");
+      assert.equal(outcome.repair.updates.length, 1, "the push that fixes it is allowed");
+      assert.deepEqual(outcome.applied, [true], "and actually lands");
+      assert.equal(outcome.at, outcome.repair.updates[0]?.value, "on the ref it was aimed at");
       assert.equal(outcome.other.updates.length, 0, "and everything the rules govern is refused");
       assert.match(outcome.other.refused.at(0)?.reason ?? "", /policy could not be evaluated/);
     });

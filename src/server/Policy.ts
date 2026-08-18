@@ -1227,9 +1227,17 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
  * The door locked from the inside, and the key was filesystem access to the
  * host. The rules have nothing to say about their own file in any case: the
  * staleness bound already exempts it for the same reason.
+ *
+ * `open` is the repository that has no identity on a host that allows
+ * anonymous writes — `serve --open`. It has no members, so there is nobody to
+ * hold `policy.write`, and requiring the capability left exactly that
+ * repository with no way back: the same anonymous client that may write the
+ * rules could write an unparseable one and lock every write on the repository,
+ * its own next attempt included. Whoever may publish the rules may repair
+ * them, which is the same door either way.
  */
-const repairable = (ref: string, principal: Principal): boolean =>
-  ref === RULES_REF && may(principal, "policy.write");
+const repairable = (ref: string, principal: Principal, open: boolean): boolean =>
+  ref === RULES_REF && (open || may(principal, "policy.write"));
 
 const boundApplies = (ref: string): boolean =>
   ref !== RULES_REF && ref !== Refspec.TRUST_LOG && !ref.startsWith("refs/meta/trust/log/");
@@ -1274,7 +1282,16 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     // `pull` and commit-pack ignored it. These verbs name a branch rather
     // than a revision, so what a protected branch has to say to them is that
     // it does not move this way at all.
-    return isProtected(yield* rulesOf(), ref)
+    // And unreadable rules must not lock this repository either; see
+    // `repairable`. It has no members, so there is nobody to hold
+    // `policy.write` — whoever may publish the rules here may repair them.
+    const published = yield* rulesOf().pipe(
+      Effect.orElseSucceed(() =>
+        repairable(ref, { member: null, capabilities: [] }, true) ? OPEN : null,
+      ),
+    );
+    if (published === null) return "the repository's policy could not be evaluated";
+    return isProtected(published, ref)
       ? `${ref} is protected and does not move by this route`
       : null;
   }
@@ -1296,7 +1313,7 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   // see `repairable`. Everything below this point is a question the rules
   // answer, and the rules answer nothing about their own file.
   const rules = yield* rulesOf().pipe(
-    Effect.orElseSucceed(() => (repairable(ref, principal) ? OPEN : null)),
+    Effect.orElseSucceed(() => (repairable(ref, principal, false) ? OPEN : null)),
   );
   if (rules === null) return "the repository's policy could not be evaluated";
 
@@ -1411,15 +1428,31 @@ export const gate = Effect.fn("Policy.gate")(function* (
   const principal = { member: who.principal, capabilities: who.capabilities };
   const published = yield* rulesOf().pipe(Effect.orElseSucceed(() => null));
   if (published === null) {
-    const decisions = updates.map((update) =>
-      repairable(update.name, principal)
-        ? ({ ok: true, allowed: { update, expected: null } } as const)
-        : ({
-            ok: false,
-            ref: update.name,
-            reason: "the repository's policy could not be evaluated",
-          } as const),
-    );
+    const anonymous = yield* Effect.serviceOption(Auth.AnonymousWrites);
+    const open = stored === null && Option.getOrElse(anonymous, () => false);
+    const repository = yield* Repository;
+    const decisions: Decision[] = [];
+    for (const update of updates) {
+      if (!repairable(update.name, principal, open)) {
+        decisions.push({
+          ok: false,
+          ref: update.name,
+          reason: "the repository's policy could not be evaluated",
+        });
+        continue;
+      }
+      // The value the ref actually holds, exactly as `evaluate` computes it.
+      // `null` here is not "no opinion" — the store reads it as *must not
+      // exist*, and the ref being repaired exists by definition, so the swap
+      // could never match: the push was allowed, reported as allowed, and
+      // never applied. The door stayed shut while the boundary said it was
+      // open. The client's own old-oid still wins where it declared one.
+      const stale = yield* repository.readRef(update.name);
+      decisions.push({
+        ok: true,
+        allowed: { update, expected: update.expected === undefined ? stale : update.expected },
+      });
+    }
     const refused = decisions.flatMap((decision) => (decision.ok ? [] : [decision]));
     return {
       updates:
