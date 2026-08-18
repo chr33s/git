@@ -272,9 +272,13 @@ const byEventId = <A extends { readonly id: string; readonly commit: Oid }>(
 /**
  * The trust head an event recorded, as an oid.
  *
- * SAFETY: a trust head is a commit oid, and a value that is not one simply
- * fails to resolve — an ancestry walk treats an unknown commit as unreachable
- * rather than as an error, so a malformed one denies rather than throws.
+ * SAFETY: `Event.validate` refuses a `trustHead` that is not forty lowercase
+ * hex characters, and both callers below run it first and skip the event when
+ * it fails. The claim this replaces — that a value which is not an oid "simply
+ * fails to resolve" — was false and load-bearing: the walk *names an object*
+ * with it, and a name is joined into a path, so a signer-chosen `../HEAD` left
+ * the objects directory. The store refuses that too now; this is the half that
+ * keeps the event from being read as authorized against anything at all.
  */
 const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
 

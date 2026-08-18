@@ -696,6 +696,61 @@ describe("hub projection", () => {
       assert.equal(outcome, null, "the pull request still folds");
     });
 
+    it("refuses a trust head that is not an object id", async () => {
+      // The trust head is written by the event's own signer and *used as a
+      // name*: the fold walks the log from it, which means reading an object
+      // by that name. Never checked, `../HEAD` went straight into a path and
+      // left the objects directory — a read oracle, and a decompression
+      // failure that then took the whole fold down, permanently, on a ref that
+      // cannot be rewound. Every protected-branch push, every collection and
+      // every deepening fetch touching that pull request went with it, at the
+      // cost of one comment from anybody holding `hub.comment`.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world();
+          const { pr } = yield* opened(where);
+
+          const bytes = Event.encode({
+            version: 1,
+            type: "comment.created",
+            repo: where.genesis.repoId,
+            pr,
+            id: Event.newId(),
+            issuedAt: new Date(1_700_000_001_000).toISOString(),
+            trustHead: "../HEAD",
+            body: "naming a file instead of a commit",
+            head: null,
+            path: null,
+            side: null,
+            line: null,
+            contextHash: null,
+          });
+          const ref = Event.refOf(pr);
+          const head = yield* repository.resolve(ref);
+          yield* repository.setRef({
+            name: ref,
+            to: yield* Record.write({
+              name: Event.RECORD,
+              payload: bytes,
+              signatures: [yield* sign(where.author, bytes, NAMESPACE)],
+              parents: [head!],
+              message: "comment.created escaping\n",
+            }),
+            expected: head,
+          });
+
+          // The fold still happens, which is the point: one bad event is one
+          // rejection, not a pull request nothing can read.
+          const state = yield* projectionOf(where, pr);
+          return { threads: state.threads.length, reason: state.rejected.at(-1)?.reason ?? "" };
+        }),
+      );
+
+      assert.equal(outcome.threads, 0, "the event counts for nothing");
+      assert.match(outcome.reason, /is not an object id/);
+    });
+
     it("does not read a broken store as 'not part of this history'", async () => {
       // Absent and broken are different answers. The walk that decides whether
       // a commit belongs to a pull request tolerates absence deliberately —

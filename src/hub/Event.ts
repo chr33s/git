@@ -32,7 +32,7 @@ import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
-import { checkRefName, type Oid } from "../git/Store.ts";
+import { checkRefName, isOid, type Oid } from "../git/Store.ts";
 import { checkCapability } from "../trust/Certificate.ts";
 import type { RepoId } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
@@ -427,6 +427,23 @@ export const validate = Effect.fn("hub.Event.validate")(function* (
   }
   if (Number.isNaN(Date.parse(payload.issuedAt))) {
     return yield* new Invalid({ field: "issuedAt", reason: `not a date: '${payload.issuedAt}'` });
+  }
+
+  // The trust head is an object id, and nothing else had ever checked that it
+  // was one. It is written by the event's own signer, and it is *used* as a
+  // name: the fold walks the log from it, which means reading an object by
+  // that name. `../HEAD` is not an object id and joins into a path outside the
+  // objects directory — a read oracle, and a failure that then took down every
+  // fold, every protected-branch push and every collection touching the pull
+  // request carrying it, on a ref that cannot be rewound. Unqualified rather
+  // than hash-qualified, unlike the revisions below, because it names a commit
+  // in this repository's own trust log rather than a revision an event is
+  // about.
+  if (payload.trustHead !== null && !isOid(payload.trustHead)) {
+    return yield* new Invalid({
+      field: "trustHead",
+      reason: `'${payload.trustHead}' is not an object id`,
+    });
   }
 
   // Every revision an event names has to be one this version can resolve;
