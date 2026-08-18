@@ -1165,7 +1165,9 @@ task.closed     outcome: completed | abandoned |
 
 All task events are signed and carry the `RepoID`; one new capability,
 `hub.task`, gates appends, granted like any other (Part I). `repo.admin`
-implies it.
+implies it. This is **built**: `task open | claim | release | close |
+list | show`, where `list` is what an agent woken by a task ref reads —
+the tasks nobody currently holds.
 
 **Claims are leases, and advisory.** A claim is live until its `expiresAt`
 or a `task.released`, so a sandbox that dies claiming work frees it by
