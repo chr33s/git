@@ -35,6 +35,7 @@ import {
   tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
+  Storage,
 } from "./Store.ts";
 
 const failure = (operation: string, target: string) => (cause: unknown) =>
@@ -441,4 +442,8 @@ export const stores = (options: {
   Layer.mergeAll(
     objectStore(options.bucket, options.repo),
     refStore(options.storage, options.repo),
+    // The bucket prefix, which is what actually separates two repositories
+    // here — an origin and its mirror share everything else, the genesis bytes
+    // included; see `Storage`.
+    Layer.succeed(Storage)(options.repo),
   ).pipe(Layer.provideMerge(packStore(options.bucket, options.repo)));

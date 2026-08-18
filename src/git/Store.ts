@@ -6,7 +6,7 @@
  * backend has to answer for it and callers never branch on whether a method
  * exists.
  */
-import { Context, Effect, type Layer, Stream } from "effect";
+import { Context, Effect, type Layer, Option, Stream } from "effect";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "./Error.ts";
 
 /** A 40-char lowercase hex object id. Branded so a ref name cannot pass as one. */
@@ -19,6 +19,35 @@ export interface RawObject {
   readonly type: ObjectType;
   readonly data: Uint8Array;
 }
+
+/**
+ * Which repository this store *is*, as far as the host is concerned.
+ *
+ * Not its identity in the trust sense — that is the genesis, and a mirror
+ * shares it. This is the thing that differs between an origin and its mirror
+ * sitting side by side under one `serve --root`: the directory, the Durable
+ * Object, the map. Anything memoised across requests on a host that serves
+ * both has to key on it, because everything else about them can agree — the
+ * genesis bytes, the RepoID, the ref names, and right after a replication the
+ * ref values too — while what they can actually *read* does not, since refs
+ * are applied without a connectivity check. Cached under a shared key, the
+ * answer computed for the replica that is missing objects was served for the
+ * origin: a revocation folded away, an exclusion set computed for the wrong
+ * repository, an approved pull request filtered out of a protected-branch push.
+ */
+export class Storage extends Context.Service<Storage, string>()("git/Storage") {}
+
+/**
+ * The storage identity in force, or `null` where none was provided.
+ *
+ * `null` is what every store layer here supplies one to avoid, and it keeps a
+ * caller that builds a `Repository` by hand working exactly as it did — one
+ * unnamed repository per process, which is the assumption that was already
+ * being made.
+ */
+export const storageOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(Storage), () => null);
+});
 
 /** Content-addressed object storage. Immutable, so no compare-and-swap needed. */
 export class ObjectStore extends Context.Service<

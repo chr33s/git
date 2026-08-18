@@ -47,6 +47,7 @@ import {
   tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
+  Storage,
 } from "./Store.ts";
 
 const failure = (operation: string, target: string) => (cause: unknown) =>
@@ -1552,4 +1553,6 @@ export const refStore = (root: string) =>
 
 /** Both stores over one directory. */
 export const stores = (root: string) =>
-  Layer.mergeAll(objectStore(root), refStore(root)).pipe(Layer.provideMerge(packStore(root)));
+  Layer.mergeAll(objectStore(root), refStore(root), Layer.succeed(Storage)(root)).pipe(
+    Layer.provideMerge(packStore(root)),
+  );

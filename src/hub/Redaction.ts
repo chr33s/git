@@ -25,7 +25,7 @@ import { Effect } from "effect";
 
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { type Oid, storageOf } from "../git/Store.ts";
 import { GENESIS_REF, type Genesis, readGenesis } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import {
@@ -104,7 +104,11 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   // ref store already has, and the answer is a pure function of them, so a
   // moved ref changes the key and a stale answer is not possible.
   const refs = yield* Event.pullRequests();
-  const identity = yield* repository.resolve(GENESIS_REF);
+  // The storage as well as the genesis: an origin and its mirror under one
+  // host share the genesis oid, and right after a replication the hub ref oids
+  // too — while what they can read need not agree, since refs are applied
+  // without a connectivity check. See `Storage`.
+  const identity = `${yield* storageOf()}\u0000${yield* repository.resolve(GENESIS_REF)}`;
   // Names as well as oids. A repository with no genesis keys under `null`
   // along with every other one, so the state is all that separates them — and
   // oids alone made a fork and its parent, whose pull requests point at the
@@ -185,7 +189,11 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
   // set asks only what a tombstone *names*, so no trust state and no clock
   // enters it, and a moved ref changes the key.
   const refs = yield* Event.pullRequests();
-  const identity = yield* repository.resolve(GENESIS_REF);
+  // The storage as well as the genesis: an origin and its mirror under one
+  // host share the genesis oid, and right after a replication the hub ref oids
+  // too — while what they can read need not agree, since refs are applied
+  // without a connectivity check. See `Storage`.
+  const identity = `${yield* storageOf()}\u0000${yield* repository.resolve(GENESIS_REF)}`;
   const state = [
     // As above: the ceiling decides which pull requests were walked at all.
     `ceiling ${yield* Event.ceilingOf()}`,
@@ -290,7 +298,7 @@ const tombstoned = Effect.fn("hub.Redaction.tombstoned")(function* (refs: Readon
  * happens to be oldest rather than whichever is idle.
  */
 const MEMO = 256;
-type Memo = Map<Oid | null, { readonly state: string; readonly found: ReadonlySet<Oid> }>;
+type Memo = Map<string, { readonly state: string; readonly found: ReadonlySet<Oid> }>;
 const memo: Memo = new Map();
 
 /**

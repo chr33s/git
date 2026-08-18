@@ -43,7 +43,7 @@ import {
 } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { type Oid, storageOf } from "../git/Store.ts";
 import { type Genesis, readGenesis, type RepoId } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import { type Member, project, type Projection } from "../trust/Projection.ts";
@@ -845,25 +845,34 @@ export class Requester extends Context.Service<Requester, Authenticated>()("serv
  * Least-recently-used, not first-in: a host with more repositories than the
  * bound serves them in some order, and evicting by insertion evicts whichever
  * happens to be oldest rather than whichever is idle.
+ *
+ * The key is the *storage*, not the RepoID. An origin and its mirror under one
+ * host have the same genesis bytes and therefore the same RepoID, and right
+ * after a replication the same log head as well — while what they can actually
+ * read need not agree, since refs are applied without a connectivity check. So
+ * whichever folded first answered for both, and a revocation present on the
+ * origin could be served away by the mirror's projection. See `Storage`.
  */
 const FOLDS = 256;
-const folds = new Map<RepoId, { readonly head: Oid | null; readonly projection: Projection }>();
+const folds = new Map<string, { readonly head: Oid | null; readonly projection: Projection }>();
 
 const folded = Effect.fn("Auth.folded")(function* (genesis: Genesis) {
   const repository = yield* Repository;
   const head = yield* repository.resolve(LOG_REF);
+  const where = yield* storageOf();
+  const key = `${where}\u0000${genesis.repoId}`;
 
-  const known = folds.get(genesis.repoId);
+  const known = folds.get(key);
   if (known !== undefined && known.head === head) {
     // Re-inserted so iteration order is least-recently-used first.
-    folds.delete(genesis.repoId);
-    folds.set(genesis.repoId, known);
+    folds.delete(key);
+    folds.set(key, known);
     return known.projection;
   }
 
   const projection = yield* project(genesis);
-  folds.delete(genesis.repoId);
-  folds.set(genesis.repoId, { head, projection });
+  folds.delete(key);
+  folds.set(key, { head, projection });
   while (folds.size > FOLDS) {
     const oldest = folds.keys().next();
     if (oldest.done === true) break;

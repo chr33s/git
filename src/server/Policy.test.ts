@@ -12,7 +12,7 @@ import { stores } from "../git/Memory.ts";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import { ObjectStore, type Oid, type RefUpdate } from "../git/Store.ts";
+import { ObjectStore, type Oid, type RefUpdate, storageOf } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Certificate from "../trust/Certificate.ts";
@@ -1521,7 +1521,8 @@ describe("Policy", () => {
           });
 
           const identity = yield* repository.resolve(GENESIS_REF);
-          const before = Policy.mentionsHeld(identity);
+          const storage = yield* storageOf();
+          const before = Policy.mentionsHeld(storage, identity);
           // Each round moves the pull request's head and then asks the
           // boundary about the protected branch, which is what walks it.
           for (const head of [second, first, second, first, second]) {
@@ -1530,7 +1531,7 @@ describe("Policy", () => {
           }
           // Sanity: the rounds really did move the ref each time.
           const at = yield* repository.resolve(Event.refOf(pr));
-          return { grew: Policy.mentionsHeld(identity) - before, at, opened: first };
+          return { grew: Policy.mentionsHeld(storage, identity) - before, at, opened: first };
         }),
       );
 
@@ -1565,16 +1566,58 @@ describe("Policy", () => {
 
           const repository = yield* Repository;
           const identity = yield* repository.resolve(GENESIS_REF);
+          const storage = yield* storageOf();
           // One push, which walks every pull request the repository has — with
           // room in the memo for one repository, not for one pull request.
           yield* judge(where, { name: "refs/heads/main", value: second }, guarded).pipe(
             Effect.provide(Policy.memo(1)),
           );
-          return Policy.mentionsHeld(identity);
+          return Policy.mentionsHeld(storage, identity);
         }),
       );
 
       assert.equal(held, 3, "every pull request the sweep walked is still remembered");
+    });
+
+    it("keeps a mirror's answers apart from its origin's", async () => {
+      // A memo keyed by what the repository *says it is* aliases an origin and
+      // its mirror: the mirror is made by copying `refs/meta/trust/*`, so the
+      // genesis bytes and the RepoID are the same, and right after a
+      // replication the hub ref oids are too. What they can actually read need
+      // not agree — refs are applied without a connectivity check — so
+      // whichever folded first answered for both, and an answer computed on
+      // the replica that is missing objects was served for the origin: an
+      // approved pull request filtered out of a protected-branch push.
+      const swept = Effect.fn("test.swept")(function* () {
+        const repository = yield* Repository;
+        const where = yield* world(["source.push", "hub.create-pr"]);
+        const { second } = yield* history("refs/heads/main");
+        yield* PullRequest.open({
+          repo: where.genesis.repoId,
+          title: "one",
+          base: "refs/heads/main",
+          head: second,
+          key: where.dev,
+        });
+        const identity = yield* repository.resolve(GENESIS_REF);
+        const storage = yield* storageOf();
+        yield* judge(where, { name: "refs/heads/main", value: second }, guarded);
+        return { storage, identity, held: Policy.mentionsHeld(storage, identity) };
+      });
+
+      // Two builds of the memory store: different repositories on one host,
+      // which is what a mirror beside its origin is.
+      const origin = await scenario(swept());
+      const mirror = await scenario(swept());
+
+      assert.notEqual(origin.storage, mirror.storage, "two repositories, not one twice");
+      assert.equal(origin.held, 1);
+      assert.equal(mirror.held, 1);
+      assert.equal(
+        Policy.mentionsHeld(origin.storage, origin.identity),
+        1,
+        "the origin's answers are still its own after the mirror has folded",
+      );
     });
 
     it("caps what the mention memo retains in total, evicting whole repositories", async () => {
@@ -1603,10 +1646,11 @@ describe("Policy", () => {
           });
         }
         const identity = yield* repository.resolve(GENESIS_REF);
+        const storage = yield* storageOf();
         yield* judge(where, { name: "refs/heads/main", value: second }, guarded).pipe(
           Effect.provide(bounded),
         );
-        return { identity, held: Policy.mentionsHeld(identity) };
+        return { storage, identity, held: Policy.mentionsHeld(storage, identity) };
       });
 
       // Two repositories, one after the other: separate stores, one memo.
@@ -1617,7 +1661,7 @@ describe("Policy", () => {
       assert.equal(first.held, 3, "the sweep that is running is kept whole");
       assert.equal(second.held, 1);
       assert.equal(
-        Policy.mentionsHeld(first.identity),
+        Policy.mentionsHeld(first.storage, first.identity),
         0,
         "and the one that went idle is evicted whole, not entry by entry",
       );
@@ -1931,6 +1975,41 @@ describe("Policy", () => {
       );
       assert.equal(decision.ok, false);
       assert.match(decision.ok === false ? decision.reason : "", /policy\.write/);
+    });
+
+    it("still takes the push that repairs a rules file nothing can parse", async () => {
+      // A policy file that exists and will not parse fails rather than reading
+      // as `OPEN` — otherwise anybody could turn branch protection off by
+      // corrupting it. But the rules are read before any per-ref decision, so
+      // failing closed refused *every* write on the repository including the
+      // corrective one: one bad push and the only way back was filesystem
+      // access to the host. The rules have nothing to say about their own file
+      // in any case; the staleness bound already exempts it for that reason.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world(["source.push", "policy.write"]);
+          const { first, second } = yield* history("refs/heads/main");
+
+          const broken = yield* repository.writeBlob(new TextEncoder().encode("{ not json"));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "policy.json", oid: broken },
+          ]);
+          yield* repository.setRef({
+            name: Policy.RULES_REF,
+            to: yield* repository.commitTree({ tree, parents: [], message: "policy\n", author }),
+          });
+
+          return {
+            repair: yield* gateAs(where, [{ name: Policy.RULES_REF, value: first }], false),
+            other: yield* gateAs(where, [{ name: "refs/heads/topic", value: second }], false),
+          };
+        }),
+      );
+
+      assert.equal(outcome.repair.updates.length, 1, "the push that fixes it still lands");
+      assert.equal(outcome.other.updates.length, 0, "and everything the rules govern is refused");
+      assert.match(outcome.other.refused.at(0)?.reason ?? "", /policy could not be evaluated/);
     });
 
     it("allows the holder of policy.write", async () => {

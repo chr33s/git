@@ -31,7 +31,7 @@ import * as Dag from "../git/Dag.ts";
 import { Invalid, type StorageFailure } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid, RefUpdate } from "../git/Store.ts";
+import { type Oid, type RefUpdate, storageOf } from "../git/Store.ts";
 import { GENESIS_REF, type Genesis, readGenesis } from "../trust/Genesis.ts";
 import {
   type Member,
@@ -148,7 +148,8 @@ export const encodeRules = (rules: Rules): Uint8Array =>
  * A policy file that *exists* and will not parse is a failure, not `OPEN`.
  * Reading a broken rules file as "no rules" would let anybody turn branch
  * protection off by corrupting it, which is the opposite of what a rules file
- * is for. Callers fail closed on that failure.
+ * is for. Callers fail closed on that failure — with one exception, and it is
+ * what keeps failing closed from being a one-way door: see `repairable`.
  */
 export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
   const repository = yield* Repository;
@@ -248,7 +249,7 @@ export type Openings = Set<string>;
 export const ENTRIES = Event.MAX_PULL_REQUESTS;
 export const REPOSITORIES = 256;
 type Mentions = Map<string, { readonly state: string; readonly heads: ReadonlySet<string> }>;
-const mentions = new Map<Oid | null, Mentions>();
+const mentions = new Map<string, Mentions>();
 
 /** What the mention memo may keep; see `ENTRIES` and `REPOSITORIES`. */
 export class MemoSize extends Context.Service<
@@ -273,7 +274,8 @@ const memoOf = Effect.fnUntraced(function* () {
  * pull requests rather than the revisions they propose, and that it counts
  * repositories rather than pull requests. Nothing reads it in production.
  */
-export const mentionsHeld = (identity: Oid | null): number => mentions.get(identity)?.size ?? 0;
+export const mentionsHeld = (storage: string | null, genesis: Oid | null): number =>
+  mentions.get(`${storage}\u0000${genesis}`)?.size ?? 0;
 
 /** Whether a pull request's events ever named this revision as a head. */
 const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, cache: MentionCache) {
@@ -297,7 +299,14 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
   // from one, so `pr` alone is not a name — and a fork and its parent point at
   // the same commits under different refs, which the oid does not separate
   // either.
-  const identity = yield* repository.resolve(GENESIS_REF);
+  //
+  // The storage as well as the genesis, for the same reason: an origin and its
+  // mirror under one host share the genesis oid, and right after a replication
+  // the hub ref oids too — while what they can read need not agree, since refs
+  // are applied without a connectivity check. Aliased, a cached empty answer
+  // from the replica that cannot walk a pull request filtered the approved one
+  // out of the origin's protected-branch push. See `Storage`.
+  const identity = `${yield* storageOf()}\u0000${yield* repository.resolve(GENESIS_REF)}`;
   const state = `${at}\u0000${yield* Event.ceilingOf()}`;
   const kept = mentions.get(identity);
   const remembered = kept?.get(pr);
@@ -1207,6 +1216,21 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
  * capability, and `refs/meta/policy` needs `policy.write` — so exempting them
  * from *this* check opens nothing.
  */
+/**
+ * Whether this write is the one that can fix an unreadable rules file.
+ *
+ * Failing closed on a policy nobody can parse is right for every ref the
+ * policy governs, and wrong for the policy itself: the rules are read before
+ * any per-ref decision, so a single `policy.write` holder pushing a truncated
+ * file made every receive-pack fail and every JSON verb answer "the
+ * repository's policy could not be evaluated" — the corrective push included.
+ * The door locked from the inside, and the key was filesystem access to the
+ * host. The rules have nothing to say about their own file in any case: the
+ * staleness bound already exempts it for the same reason.
+ */
+const repairable = (ref: string, principal: Principal): boolean =>
+  ref === RULES_REF && may(principal, "policy.write");
+
 const boundApplies = (ref: string): boolean =>
   ref !== RULES_REF && ref !== Refspec.TRUST_LOG && !ref.startsWith("refs/meta/trust/log/");
 
@@ -1268,7 +1292,13 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     return `writing ${RULES_REF} needs policy.write`;
   }
 
-  const rules = yield* rulesOf();
+  // Read after the capability checks and *before* it can lock the repair out;
+  // see `repairable`. Everything below this point is a question the rules
+  // answer, and the rules answer nothing about their own file.
+  const rules = yield* rulesOf().pipe(
+    Effect.orElseSucceed(() => (repairable(ref, principal) ? OPEN : null)),
+  );
+  if (rules === null) return "the repository's policy could not be evaluated";
 
   // The same staleness bound `gate` applies. Left only on receive-pack, a
   // repository that had asked for one still accepted `commit`, `branch`,
@@ -1374,7 +1404,36 @@ export const gate = Effect.fn("Policy.gate")(function* (
         ? who.projection
         : yield* project(stored.genesis);
 
-  const rules = yield* rulesOf();
+  // Unreadable is refused per ref, not for the batch, so the one push that can
+  // fix it still lands; see `repairable`. A rules file that will not parse
+  // otherwise refused every write on the repository including its own repair,
+  // and the only way back was filesystem access to the host.
+  const principal = { member: who.principal, capabilities: who.capabilities };
+  const published = yield* rulesOf().pipe(Effect.orElseSucceed(() => null));
+  if (published === null) {
+    const decisions = updates.map((update) =>
+      repairable(update.name, principal)
+        ? ({ ok: true, allowed: { update, expected: null } } as const)
+        : ({
+            ok: false,
+            ref: update.name,
+            reason: "the repository's policy could not be evaluated",
+          } as const),
+    );
+    const refused = decisions.flatMap((decision) => (decision.ok ? [] : [decision]));
+    return {
+      updates:
+        atomic && refused.length > 0
+          ? []
+          : decisions.flatMap((decision) =>
+              decision.ok
+                ? [{ ...decision.allowed.update, expected: decision.allowed.expected }]
+                : [],
+            ),
+      refused,
+    };
+  }
+  const rules = published;
 
   // How stale a view may be, checked once for the batch rather than per ref.
   // This is the bound on the one failure a hash-linked log cannot rule out by
@@ -1424,7 +1483,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
     }
     const decision = yield* evaluate({
       update,
-      principal: { member: who.principal, capabilities: who.capabilities },
+      principal,
       genesis: stored?.genesis ?? null,
       trust,
       rules,
