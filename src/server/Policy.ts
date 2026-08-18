@@ -32,7 +32,7 @@ import { Invalid, type StorageFailure } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid, RefUpdate } from "../git/Store.ts";
-import { type Genesis, readGenesis } from "../trust/Genesis.ts";
+import { GENESIS_REF, type Genesis, readGenesis } from "../trust/Genesis.ts";
 import {
   type Member,
   openWindow,
@@ -209,9 +209,10 @@ export type MentionCache = Map<string, ReadonlySet<string>>;
  * `MentionCache` is per batch, which is the right lifetime for a decision and
  * the wrong one for a walk: this reads a pull request's whole event DAG, and
  * it is asked about *every* pull request the repository has on *every*
- * protected-branch push. Keyed by the ref's value, so a moved ref is a
- * different answer and a stale one is not possible — the same shape as the
- * redaction memos. Bounded by pull requests, least-recently-used — and bounded
+ * protected-branch push. Keyed by repository and pull request, holding the
+ * ref's value as state to compare, so a moved ref is a miss and a stale answer
+ * is not possible — the same shape as the redaction memos. Bounded by pull
+ * requests, least-recently-used — and bounded
  * well above what a busy repository holds at once, because the miss *is* the
  * walk this exists to avoid: sized below the population a repository may
  * reach, the pre-filter stops helping exactly where it is needed and a
@@ -220,7 +221,15 @@ export type MentionCache = Map<string, ReadonlySet<string>>;
  * costs megabytes rather than the tens the population bound would.
  */
 const MENTIONS = 16_384;
-const mentions = new Map<string, ReadonlySet<string>>();
+const mentions = new Map<string, { readonly state: string; readonly heads: ReadonlySet<string> }>();
+
+/**
+ * How many pull requests the mention memo is holding.
+ *
+ * Exported for the suite that guards the memo's ceiling against counting
+ * revisions instead of pull requests. Nothing reads it in production.
+ */
+export const mentionsHeld = (): number => mentions.size;
 
 /** Whether a pull request's events ever named this revision as a head. */
 const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, cache: MentionCache) {
@@ -236,13 +245,27 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
   // approved protected-branch push. The repository does not: this answer is a
   // pure function of the event DAG the oid names, so two repositories holding
   // the same one hold the same answer.
-  const key = `${pr}\u0000${at}\u0000${yield* Event.ceilingOf()}`;
+  // One entry per pull request, and the head oid is *compared* rather than
+  // keyed on — the shape the redaction memos already use. Keyed on the oid,
+  // every append left the answer for the head before it behind, so the ceiling
+  // counted revisions rather than pull requests: a repository well inside the
+  // population bound turned the memo over on ordinary activity, and the walk
+  // this exists to avoid came back on the synchronous receive-pack path.
+  // Compared, an append overwrites.
+  //
+  // The repository keys it too. This map outlives one request and one
+  // repository, and a host serves many: two of them number their pull requests
+  // from one, so `pr` alone is not a name — and a fork and its parent point at
+  // the same commits under different refs, which the oid does not separate
+  // either.
+  const key = `${yield* repository.resolve(GENESIS_REF)}\u0000${pr}`;
+  const state = `${at}\u0000${yield* Event.ceilingOf()}`;
   const remembered = mentions.get(key);
-  if (remembered !== undefined) {
+  if (remembered !== undefined && remembered.state === state) {
     mentions.delete(key);
     mentions.set(key, remembered);
-    cache.set(pr, remembered);
-    return remembered.has(to);
+    cache.set(pr, remembered.heads);
+    return remembered.heads.has(to);
   }
 
   // A pull request this replica cannot walk proposes nothing it can act on.
@@ -269,7 +292,7 @@ const proposes = Effect.fn("Policy.proposes")(function* (pr: string, to: Oid, ca
   }
   cache.set(pr, heads);
   mentions.delete(key);
-  mentions.set(key, heads);
+  mentions.set(key, { state, heads });
   while (mentions.size > MENTIONS) {
     const oldest = mentions.keys().next();
     if (oldest.done === true) break;
@@ -448,7 +471,13 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // this boundary has not got. The point here is that the door belongs to
   // members of the hub rather than to everyone who may push.
   if (update.value !== null && Refspec.isAppendOnly(update.name)) {
-    const kind = update.name.startsWith("refs/hub/") ? "hub." : "trust.";
+    // The trust log's kind is `member.*`: what a trust record says is who may
+    // do what, and the two capabilities that say it are `member.invite` and
+    // `member.revoke`. Naming a `trust.*` prefix here charged a capability
+    // that does not exist, which reads as tighter and is in fact a lockout —
+    // `repo.admin` and nobody else could grow the log, so a `member.revoke`
+    // holder could sign a revocation and never publish it.
+    const kind = update.name.startsWith("refs/hub/") ? "hub." : "member.";
     if (
       !input.principal.capabilities.some((held) => held.startsWith(kind) || held === "repo.admin")
     ) {

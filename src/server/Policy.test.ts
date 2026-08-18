@@ -1043,9 +1043,33 @@ describe("Policy", () => {
       );
 
       assert.equal(outcome.trust.ok, false);
-      assert.match(outcome.trust.ok === false ? outcome.trust.reason : "", /trust\.\* capability/);
+      assert.match(outcome.trust.ok === false ? outcome.trust.reason : "", /member\.\* capability/);
       assert.equal(outcome.hub.ok, false);
       assert.match(outcome.hub.ok === false ? outcome.hub.reason : "", /hub\.\* capability/);
+    });
+
+    it("lets the holder of a real membership capability grow the trust log", async () => {
+      // The charge above has to name a capability that exists. Spelled
+      // `trust.*` — a prefix nothing in `CAPABILITIES` starts with — it read
+      // as a tighter rule and was in fact a lockout: `repo.admin` and nobody
+      // else could append to the log, so the `member.revoke` holder the trust
+      // model exists to empower could sign a revocation and never publish it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "member.revoke"]);
+          const repository = yield* Repository;
+          const log = yield* repository.resolve(Log.LOG_REF);
+          const grown = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [log!],
+            message: "join\n",
+            author,
+          });
+          return yield* judge(where, { name: Log.LOG_REF, value: grown });
+        }),
+      );
+
+      assert.equal(outcome.ok, true, outcome.ok === false ? outcome.reason : "");
     });
 
     it("refuses a hub ref that does not name a pull request", async () => {
@@ -1356,6 +1380,46 @@ describe("Policy", () => {
       );
       assert.equal(decision.ok, false);
       assert.match(decision.ok === false ? decision.reason : "", /0 approvals/);
+    });
+
+    it("counts pull requests in the mention memo, not the revisions they propose", async () => {
+      // The memo exists so a protected-branch push does not re-read every pull
+      // request's event DAG, and its ceiling is written as a number of pull
+      // requests — sized well above what a busy repository holds, because a
+      // miss *is* the walk. Keyed on the ref's oid, every push to a pull
+      // request left the answer for the head before it behind, so the ceiling
+      // counted revisions: a repository far inside the population bound turned
+      // the memo over on ordinary activity and paid for the walk again, on the
+      // synchronous receive-pack path. Compared instead of keyed, an append
+      // overwrites.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push", "hub.create-pr"]);
+          const repository = yield* Repository;
+          const { first, second } = yield* history("refs/heads/main");
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "please",
+            base: "refs/heads/main",
+            head: first,
+            key: where.dev,
+          });
+
+          const before = Policy.mentionsHeld();
+          // Each round moves the pull request's head and then asks the
+          // boundary about the protected branch, which is what walks it.
+          for (const head of [second, first, second, first, second]) {
+            yield* PullRequest.update({ repo: where.genesis.repoId, pr, head, key: where.dev });
+            yield* judge(where, { name: "refs/heads/main", value: head }, guarded);
+          }
+          // Sanity: the rounds really did move the ref each time.
+          const at = yield* repository.resolve(Event.refOf(pr));
+          return { grew: Policy.mentionsHeld() - before, at, opened: first };
+        }),
+      );
+
+      assert.notEqual(outcome.at, null);
+      assert.equal(outcome.grew, 1, "five revisions of one pull request are one entry");
     });
 
     it("passes over a pull request this replica cannot fold", async () => {

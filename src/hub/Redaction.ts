@@ -192,7 +192,7 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
     ...(yield* Effect.forEach(refs, (pr) =>
       repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
     )),
-  ].join(" ");
+  ].join("\u0000");
 
   const known = names.get(identity);
   if (known !== undefined && known.state === state) {
