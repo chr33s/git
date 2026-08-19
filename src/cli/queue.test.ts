@@ -672,18 +672,8 @@ describe("cli queue", () => {
     await publish(protectedRules({ requireProvenance: true }));
     await enter(await propose("one"));
 
-    const refused = await failing([
-      "queue",
-      "run",
-      "--root",
-      root,
-      "--key",
-      key,
-      "--queue",
-      queue,
-      "project",
-    ]);
-    assert.match(refused, /requires provenance/);
+    const pass = await run();
+    assert.match(pass.skipped, /requires provenance/);
 
     const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
     assert.equal(state.entries[0].candidate, null, "and nothing was built or recorded");
@@ -1021,18 +1011,8 @@ describe("cli queue", () => {
     await publish(protectedRules({ queueCandidates: false }));
     await enter(await propose("one"));
 
-    const refused = await failing([
-      "queue",
-      "run",
-      "--root",
-      root,
-      "--key",
-      key,
-      "--queue",
-      queue,
-      "project",
-    ]);
-    assert.match(refused, /does not admit queue candidates/);
+    const pass = await run();
+    assert.match(pass.skipped, /does not admit queue candidates/);
 
     const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
     assert.equal(state.entries[0].candidate, null, "and nothing was built or recorded");
@@ -1328,6 +1308,23 @@ describe("cli queue", () => {
     ]);
     assert.match(byTarget, /was closed/, "and the ended one runs nothing");
 
+    // Named by branch instead — the form a wake uses — it reports rather than
+    // fails, so the bookmark advances and the loop does not replay for ever.
+    const rotating = JSON.parse(
+      await cli([
+        "queue",
+        "run",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--target",
+        "refs/heads/other",
+        "project",
+      ]),
+    );
+    assert.match(rotating.skipped, /no open queue/);
+
     // Nor does anything else append to it: a record on a queue nothing reads
     // is a permanent entry the projection ignores, reported as success.
     const entering = await failing([
@@ -1413,18 +1410,8 @@ describe("cli queue", () => {
     await publish(protectedRules({ maxTrustAgeSeconds: 1 }));
     await enter(await propose("one"));
 
-    const refused = await failing([
-      "queue",
-      "run",
-      "--root",
-      root,
-      "--key",
-      key,
-      "--queue",
-      queue,
-      "project",
-    ]);
-    assert.match(refused, /checkpoint/i);
+    const pass = await run();
+    assert.match(pass.skipped, /checkpoint/i);
     assert.equal(await mainAt(), base, "and the branch is where it was");
   });
 

@@ -362,6 +362,15 @@ Waking twice is a wasted start and never a double landing — the swap is
 the mutex, exactly as the claim is for tasks. The refs are the truth;
 the notification is a hint.
 
+A pass with nothing to do **succeeds**, and reports why. That matters
+because a wake holds its bookmark when what it started failed: a run that
+exited non-zero on an ordinary state — a branch between queues while one
+is rotated, a rule nobody has turned on, a membership view briefly stale
+— would make every later wake replay the whole ref from the stale
+bookmark and re-run every other rule on it, indefinitely. Those states
+are reports. A caller _naming_ a queue that does not exist is still a
+mistake, which is why a hook should name the branch and not the id.
+
 ## 7. Failure modes, honestly
 
 **The queue agent dies mid-batch.** Candidate branches linger (bounded

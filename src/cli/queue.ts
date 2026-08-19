@@ -489,10 +489,27 @@ const pass = Effect.fn("queue.pass")(function* (input: {
 }) {
   const repository = yield* Repository;
   const genesis = yield* identityOf(input.repo);
-  const state = yield* resolve({ queue: input.queue, target: input.target });
-  if (state.target === null) {
-    return yield* new Invalid({ field: "queue", reason: `${state.queue} names no target branch` });
+
+  // A run with nothing to do *succeeds*. This is the verb a wake fires on a
+  // schedule, and a wake holds its bookmark when what it started failed — so a
+  // pass that exited non-zero on an ordinary state (a branch between queues, a
+  // rule not turned on) made every later wake replay the whole ref from the
+  // stale bookmark and re-run every other rule on it, for ever. The states
+  // below are all "this branch is not queueing right now", which is a report
+  // and not a failure; a caller naming a queue that does not exist is a mistake
+  // and still one, which is why `--queue` goes through `resolve` and `--target`
+  // does not.
+  const skip = (why: string) => ({ skipped: why, queue: input.queue, dryRun: input.dryRun });
+
+  const found =
+    input.queue === ""
+      ? (yield* Queue.forTarget(targetRef(input.target))).found
+      : yield* resolve({ queue: input.queue, target: input.target });
+  if (found === null) {
+    return skip(`this repository holds no open queue for ${targetRef(input.target)}`);
   }
+  const state = found;
+  if (state.target === null) return skip(`${state.queue} names no target branch`);
   const target = state.target;
   const rules = yield* Policy.rulesOf();
 
@@ -523,13 +540,11 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // `queue.candidate` every wake, for ever, on a ref that only grows. Said once
   // is better than churned indefinitely.
   if (rules.requireProvenance) {
-    return yield* new Invalid({
-      field: "queue",
-      reason:
-        `${target} requires provenance, and a queue candidate carries none: ` +
+    return skip(
+      `${target} requires provenance, and a queue candidate carries none: ` +
         "the two cannot be used together yet (docs/queue.md). Turn off " +
         "requireProvenance for this repository, or land pull requests directly.",
-    });
+    );
   }
 
   // And a protected branch that does not admit candidates will refuse every one
@@ -541,12 +556,10 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // default, which makes this the shape a queue is most likely to be run in
   // before somebody turns the rule on.
   if (Policy.isProtected(rules, target) && Policy.needsReview(rules) && !rules.queueCandidates) {
-    return yield* new Invalid({
-      field: "queue",
-      reason:
-        `${target} is protected and does not admit queue candidates; ` +
+    return skip(
+      `${target} is protected and does not admit queue candidates; ` +
         "set queueCandidates in the branch rules to let it take them",
-    });
+    );
   }
 
   const from = yield* repository.resolve(target);
@@ -575,9 +588,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // whose every `git push` was being refused for exactly that reason.
   if (rules.maxTrustAgeSeconds > 0) {
     const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
-    if (!stale.ok) {
-      return yield* new Invalid({ field: "trust", reason: stale.reason });
-    }
+    if (!stale.ok) return skip(stale.reason);
   }
 
   const dropped: Array<{ readonly pr: string; readonly reason: string }> = [];
