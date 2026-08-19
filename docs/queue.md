@@ -29,8 +29,8 @@ base can be wrong **together** — a rename on one side, a new caller on the
 other — and textual mergeability says nothing about it. The only evidence
 that composed changes work is a test run on the composed result.
 
-What is missing is not safety but throughput: a way to test *this exact
-combination* of approved revisions once, and land the whole combination
+What is missing is not safety but throughput: a way to test _this exact
+combination_ of approved revisions once, and land the whole combination
 in one swap — without trusting whoever built it.
 
 ## 2. Design principle: a member, not a service
@@ -63,9 +63,9 @@ candidate rather than the builder.
 ## 3. The verified candidate
 
 The mechanism is one new judgement at the boundary. Hub.md §11 refuses
-merge commits on protected branches because *"a merge's tree is
+merge commits on protected branches because _"a merge's tree is
 unconstrained — a merge commit that merely names an approved head as a
-parent proves nothing about content."* The answer is not to trust the
+parent proves nothing about content."_ The answer is not to trust the
 merge; it is to **constrain the tree**.
 
 `mergeTrees` (`src/git/Merge.ts`) is deterministic and pure — the same
@@ -90,9 +90,9 @@ parents from `C_k` back to a commit the branch already holds — call it
    whose base is this branch (the same fold that judges a
    direct push — hub.md §26)
 
-3. tree(C_i) equals mergeTrees(base_i, C_{i-1}, H_i) where
-   base_i is the unique merge base of C_{i-1} and H_i, and
-   the merge is conflict-free
+3. tree(C_i) is exactly the tree Repository.mergeTree
+   produces for (C_{i-1}, H_i), and that merge is
+   conflict-free
 
 4. PR_i satisfies every rule the branch requires —
    requiredApprovals of H_i for this base, resolved
@@ -114,12 +114,18 @@ keeps the review meaning what hub.md §18 says it means: an approval of
 `H_i` for this base, staled by retargeting and by head movement, with
 self-approval excluded as always.
 
-A step with **several merge bases is refused as a candidate** rather
-than resolved: recursive-merge virtual ancestors would put an iterated
-computation on the boundary's synchronous path, and a wrong guess here
-lands unreviewed content on a protected branch. The pull request falls
-back to today's path — rebase and re-review. Conservative, deterministic,
-and cheap to state.
+Rule 3 names one function rather than a definition of merging, and that
+is the point: the builder and the verifier both call
+`Repository.mergeTree`, so they agree about the base and about the merge
+by construction rather than by two implementations happening to match.
+An earlier draft of this proposal refused a step with several merge bases,
+reasoning that recursive-merge virtual ancestors would put an iterated
+computation on the synchronous push path. That guard turned out to guard
+nothing here: this codebase's `mergeBase` builds no virtual ancestor — it
+picks one best common ancestor by a deterministic walk — so a step with
+several bases costs exactly what any other step costs, and both sides pick
+the same one. Where a replica cannot read the objects the walk needs, it
+computes a different tree or none, and both readings are a refusal.
 
 The chain lands with one `RefStore.apply`, `expected = C_0` — the same
 compare-and-swap discipline as everything else (hub.md §26). If the
@@ -131,7 +137,7 @@ rebuilds; nothing stale can land, no matter how fast the queue moves.
 After the swap, the queue agent appends `pr.merged` to each `PR_i`,
 naming `H_i` — a revision the pull request actually proposed, which is
 what hub.md §10 requires of a merged event; the branch holds `C_i`, whose
-second parent *is* `H_i`, so ancestry tells the truth without any new
+second parent _is_ `H_i`, so ancestry tells the truth without any new
 event shape.
 
 Candidates are merge commits, not rebases, and that is a decision rather
@@ -162,7 +168,7 @@ protection nobody configured must not arrive with an upgrade):
 // refs/meta/policy · policy.json
 {
   "queueCandidates": true, // default false: today's rule only
-  "queueDepth": 8 // default 8; 0 reads as "no chains"
+  "queueDepth": 8, // default 8; 0 reads as "no chains"
 }
 ```
 
@@ -232,7 +238,7 @@ refs/heads/queue/<target>/<n>
 named in `queue.candidate` events, deletable and force-pushable by
 ordinary branch rules, collected by `gc` once deleted. Operators simply
 do not list `queue/**` in `protected`. Hub refs never point at them —
-hub payloads *name* candidate OIDs as strings, and hub.md §23 already
+hub payloads _name_ candidate OIDs as strings, and hub.md §23 already
 forbids hub commits reaching source commits as parents — so a deleted
 candidate's objects genuinely go away. No new ref class, no new
 advertisement rule, no new GC root.
@@ -334,8 +340,8 @@ ordinary branches to delete. Harmless by construction, so not refused.
 ## 8. Alternatives considered
 
 **A privileged queue service** (the GitHub shape): a principal whose
-pushes bypass the rules. Refused on the design's own axiom — *signed is
-not safe* (hub.md §33); authority would replace verification, the host
+pushes bypass the rules. Refused on the design's own axiom — _signed is
+not safe_ (hub.md §33); authority would replace verification, the host
 would stop being passive, and the property "any replica can check any
 landing offline" would be gone. The entire point of rule 3 is that no
 principal needs to be trusted with the branch.

@@ -614,6 +614,8 @@ export const PolicyRules = Schema.Struct({
   requireProvenance: Schema.Boolean,
   maxUsageTokens: Schema.Int,
   usageWindowSeconds: Schema.Int,
+  queueCandidates: Schema.Boolean,
+  queueDepth: Schema.Int,
 });
 export type PolicyRules = (typeof PolicyRules)["Type"];
 

@@ -333,6 +333,8 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
               requireProvenance: false,
               maxUsageTokens: 0,
               usageWindowSeconds: 0,
+              queueCandidates: false,
+              queueDepth: 8,
             },
             ref: null,
           });

@@ -2974,4 +2974,452 @@ describe("Policy", () => {
       assert.equal(outcome.landed !== null, true, "a plain git repository stays servable");
     });
   });
+
+  describe("queue candidates", () => {
+    /** Narrowed rather than asserted: every merge in these checks produces one. */
+    const present = <A>(value: A | null, what: string): A => {
+      if (value === null) throw new Error(`${what} was null`);
+      return value;
+    };
+
+    /**
+     * A repository with a protected `main`, two approved pull requests, and the
+     * two-step candidate chain that lands both.
+     *
+     * The two heads touch different files over a shared base, so merging them
+     * is a real three-way decision rather than a fast-forward — which is what
+     * makes "the tree must *be* the merge" a claim with content.
+     */
+    const queued = Effect.fn("test.queued")(function* (rules: Partial<Rules> = {}) {
+      const repository = yield* Repository;
+      const where = yield* world(["repo.admin"]);
+
+      const write = (
+        files: ReadonlyArray<readonly [string, string]>,
+        parents: ReadonlyArray<Oid>,
+      ) =>
+        Effect.gen(function* () {
+          const tree = yield* repository.writeFiles({
+            changes: files.map(([path, content]) => ({
+              path,
+              content: new TextEncoder().encode(content),
+              mode: "100644",
+            })),
+          });
+          return yield* repository.commitTree({ tree, parents, message: "c\n", author });
+        });
+
+      // One shared base, then a branch each.
+      const base = yield* write([["readme", "base"]], []);
+      yield* repository.setRef({ name: "refs/heads/main", to: base });
+      const first = yield* write(
+        [
+          ["readme", "base"],
+          ["a.txt", "a"],
+        ],
+        [base],
+      );
+      const second = yield* write(
+        [
+          ["readme", "base"],
+          ["b.txt", "b"],
+        ],
+        [base],
+      );
+
+      const propose = Effect.fn("test.propose")(function* (head: Oid) {
+        const { pr } = yield* PullRequest.open({
+          repo: where.genesis.repoId,
+          title: "t",
+          base: "refs/heads/main",
+          head,
+          key: where.dev,
+        });
+        yield* PullRequest.review({
+          repo: where.genesis.repoId,
+          pr,
+          head,
+          decision: "approve",
+          key: where.reviewer,
+        });
+        return pr;
+      });
+      const firstPr = yield* propose(first);
+      const secondPr = yield* propose(second);
+
+      /** The chain the queue would build: each head merged onto the step before. */
+      const step = (onto: Oid, head: Oid) =>
+        Effect.map(
+          repository.merge({ ours: onto, theirs: head, author, noFastForward: true }),
+          (outcome) => present(outcome.commit, "merge commit"),
+        );
+      const one = yield* step(base, first);
+      const two = yield* step(one, second);
+
+      return {
+        where,
+        base,
+        first,
+        second,
+        firstPr,
+        secondPr,
+        chain: { one, two },
+        rules: {
+          ...OPEN,
+          protected: ["refs/heads/main"],
+          requiredApprovals: 1,
+          queueCandidates: true,
+          ...rules,
+        } satisfies Rules,
+      };
+    });
+
+    const land = (world: { where: World; rules: Rules }, value: Oid) =>
+      judge(world.where, { name: "refs/heads/main", value }, world.rules);
+
+    it("lands a chain of approved pull requests in one push", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const queue = yield* queued();
+          return yield* land(queue, queue.chain.two);
+        }),
+      );
+      assert.equal(decision.ok, true, "two approved revisions land as one verified chain");
+    });
+
+    it("refuses a chain whose tree is not the merge it claims to be", async () => {
+      // The whole rule. A merge commit's tree is unconstrained by git, so a
+      // candidate that merely *names* two approved parents could carry anything
+      // at all — which is exactly why hub.md §11 refuses merge commits outright.
+      // What makes one admissible here is that the tree is recomputed.
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const queue = yield* queued();
+          const smuggled = yield* repository.writeFiles({
+            changes: [
+              { path: "readme", content: new TextEncoder().encode("base"), mode: "100644" },
+              { path: "a.txt", content: new TextEncoder().encode("a"), mode: "100644" },
+              // Never reviewed, never proposed, and invisible in the parents.
+              { path: "backdoor.txt", content: new TextEncoder().encode("x"), mode: "100644" },
+            ],
+          });
+          const forged = yield* repository.commitTree({
+            tree: smuggled,
+            parents: [queue.base, queue.first],
+            message: "merge\n",
+            author,
+          });
+          return yield* land(queue, forged);
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /does not hold the merge/);
+    });
+
+    it("refuses a chain when the rules do not admit candidates", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const queue = yield* queued({ queueCandidates: false });
+          return yield* land(queue, queue.chain.two);
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(
+        decision.ok === false ? decision.reason : "",
+        /may only be moved by an approved pull request/,
+      );
+    });
+
+    it("refuses a chain deeper than the rules allow", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const queue = yield* queued({ queueDepth: 1 });
+          return yield* land(queue, queue.chain.two);
+        }),
+      );
+      assert.equal(
+        decision.ok,
+        false,
+        "the ceiling bounds what one push can make a host recompute",
+      );
+    });
+
+    it("clamps a queue depth beyond what the host will walk", async () => {
+      const held = await scenario(
+        Effect.gen(function* () {
+          yield* publish({ ...OPEN, queueCandidates: true, queueDepth: 1_000_000 });
+          return yield* Policy.rulesOf();
+        }),
+      );
+      assert.equal(held.queueDepth, Policy.MAX_QUEUE_DEPTH);
+    });
+
+    it("refuses a step merging a revision no open pull request proposes", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const queue = yield* queued();
+          // A branch nobody proposed, merged honestly — the tree *is* the merge.
+          const stranger = yield* repository.writeFiles({
+            changes: [
+              { path: "readme", content: new TextEncoder().encode("base"), mode: "100644" },
+              { path: "c.txt", content: new TextEncoder().encode("c"), mode: "100644" },
+            ],
+          });
+          const tip = yield* repository.commitTree({
+            tree: stranger,
+            parents: [queue.base],
+            message: "c\n",
+            author,
+          });
+          const merged = yield* repository.merge({
+            ours: queue.base,
+            theirs: tip,
+            author,
+            noFastForward: true,
+          });
+          return yield* land(queue, present(merged.commit, "merge commit"));
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /no open pull request/);
+    });
+
+    it("refuses a chain carrying an unapproved pull request", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const queue = yield* queued({ requiredApprovals: 2 });
+          return yield* land(queue, queue.chain.two);
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /approvals/);
+    });
+
+    it("does not count a self-approval inside a chain", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world(["repo.admin"]);
+          const base = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "base\n",
+            author,
+          });
+          yield* repository.setRef({ name: "refs/heads/main", to: base });
+          const head = yield* repository.writeFiles({
+            changes: [{ path: "a.txt", content: new TextEncoder().encode("a"), mode: "100644" }],
+          });
+          const tip = yield* repository.commitTree({
+            tree: head,
+            parents: [base],
+            message: "c\n",
+            author,
+          });
+          const { pr } = yield* PullRequest.open({
+            repo: where.genesis.repoId,
+            title: "t",
+            base: "refs/heads/main",
+            head: tip,
+            key: where.dev,
+          });
+          // The opener approving their own work, which is not review anywhere
+          // else and must not become review by being wrapped in a candidate.
+          yield* PullRequest.review({
+            repo: where.genesis.repoId,
+            pr,
+            head: tip,
+            decision: "approve",
+            key: where.dev,
+          });
+          const merged = yield* repository.merge({
+            ours: base,
+            theirs: tip,
+            author,
+            noFastForward: true,
+          });
+          return yield* judge(
+            where,
+            { name: "refs/heads/main", value: present(merged.commit, "merge commit") },
+            {
+              ...OPEN,
+              protected: ["refs/heads/main"],
+              requiredApprovals: 1,
+              queueCandidates: true,
+            },
+          );
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /approvals/);
+    });
+
+    it("requires checks against the candidate, not against the head alone", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const queue = yield* queued({ requiredChecks: ["test"] });
+          // Green on the pull request's own head — which says nothing about the
+          // combination, and is the failure a queue exists to catch.
+          // Signed by a key the fold will accept a `test` check from: the scope
+          // is `hub.check:test`, and `repo.admin` carries it.
+          const pass = (pr: string, head: Oid) =>
+            PullRequest.checkCompleted({
+              repo: queue.where.genesis.repoId,
+              pr,
+              head,
+              name: "test",
+              provider: "ci",
+              status: "success",
+              key: queue.where.dev,
+            });
+          yield* pass(queue.firstPr, queue.first);
+          yield* pass(queue.secondPr, queue.second);
+          const onHeads = yield* land(queue, queue.chain.two);
+
+          // And now green on the candidates themselves.
+          yield* pass(queue.firstPr, queue.chain.one);
+          yield* pass(queue.secondPr, queue.chain.two);
+          return { onHeads, onCandidates: yield* land(queue, queue.chain.two) };
+        }),
+      );
+      assert.equal(outcome.onHeads.ok, false);
+      assert.match(
+        outcome.onHeads.ok === false ? outcome.onHeads.reason : "",
+        /against candidate/,
+        "a check bound to the head does not vouch for the combination",
+      );
+      assert.equal(outcome.onCandidates.ok, true);
+    });
+
+    it("refuses a step whose merge conflicts", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world(["repo.admin"]);
+          const write = (content: string, parents: ReadonlyArray<Oid>) =>
+            Effect.gen(function* () {
+              const tree = yield* repository.writeFiles({
+                changes: [
+                  { path: "same.txt", content: new TextEncoder().encode(content), mode: "100644" },
+                ],
+              });
+              return yield* repository.commitTree({ tree, parents, message: "c\n", author });
+            });
+
+          const base = yield* write("base\n", []);
+          yield* repository.setRef({ name: "refs/heads/main", to: base });
+          // Both sides rewrite the same line, so no merge can settle it.
+          const mine = yield* write("mine\n", [base]);
+          const yours = yield* write("yours\n", [base]);
+
+          const propose = Effect.fn("test.propose")(function* (head: Oid) {
+            const { pr } = yield* PullRequest.open({
+              repo: where.genesis.repoId,
+              title: "t",
+              base: "refs/heads/main",
+              head,
+              key: where.dev,
+            });
+            yield* PullRequest.review({
+              repo: where.genesis.repoId,
+              pr,
+              head,
+              decision: "approve",
+              key: where.reviewer,
+            });
+          });
+          yield* propose(mine);
+          yield* propose(yours);
+
+          const one = yield* repository.merge({
+            ours: base,
+            theirs: mine,
+            author,
+            noFastForward: true,
+          });
+          // Built anyway, markers and all — which the boundary must not take
+          // for a merge that settled.
+          const conflicted = yield* repository.merge({
+            ours: present(one.commit, "merge commit"),
+            theirs: yours,
+            author,
+            noFastForward: true,
+          });
+          const tip = yield* repository.commitTree({
+            tree: present(conflicted.tree, "merge tree"),
+            parents: [present(one.commit, "merge commit"), yours],
+            message: "merge\n",
+            author,
+          });
+          return yield* judge(
+            where,
+            { name: "refs/heads/main", value: tip },
+            {
+              ...OPEN,
+              protected: ["refs/heads/main"],
+              requiredApprovals: 1,
+              queueCandidates: true,
+            },
+          );
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /conflicts in same\.txt/);
+    });
+
+    it("refuses a tip that wraps a chain in an ordinary commit", async () => {
+      // First parents are the chain, and a plain commit on top is not a step —
+      // its tree is unconstrained, which is the whole thing being prevented.
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const queue = yield* queued();
+          const wrapped = yield* repository.writeFiles({
+            changes: [
+              { path: "extra.txt", content: new TextEncoder().encode("x"), mode: "100644" },
+            ],
+          });
+          const tip = yield* repository.commitTree({
+            tree: wrapped,
+            parents: [queue.chain.two],
+            message: "wrap\n",
+            author,
+          });
+          return yield* land(queue, tip);
+        }),
+      );
+      assert.equal(decision.ok, false);
+    });
+
+    it("carries the branch's own value as the compare-and-swap", async () => {
+      // A chain is judged against what `main` held when it was judged, so a
+      // push landing in between fails the swap rather than merging past it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const queue = yield* queued();
+          return { decision: yield* land(queue, queue.chain.two), base: queue.base };
+        }),
+      );
+      assert.equal(outcome.decision.ok, true);
+      assert.equal(
+        outcome.decision.ok === true ? outcome.decision.allowed.expected : null,
+        outcome.base,
+        "the chain lands only while the branch still holds what it was judged against",
+      );
+    });
+
+    it("still allows a direct push of an approved head", async () => {
+      // The queue is an addition, not a replacement: a repository that turns it
+      // on does not stop being one an approved revision can be pushed to.
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const queue = yield* queued();
+          return yield* land(queue, queue.first);
+        }),
+      );
+      assert.equal(decision.ok, true);
+    });
+  });
 });

@@ -1389,18 +1389,39 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
   return [...latest.values()].filter((review) => review.decision === "approve");
 };
 
-/** Whether every named check has succeeded against the current head. */
-export const checksPassed = (
+/**
+ * Whether every named check has succeeded against a stated revision.
+ *
+ * A check is bound to an exact object id, so which revision is being asked
+ * about is the caller's to say. Usually it is the pull request's own head —
+ * `checksPassed` is that question. A merge queue candidate is the other one:
+ * what a required check has to have run against there is the *combination*
+ * being landed, not the pull request's head in isolation, because the failure
+ * a queue exists to catch is the one that appears only once the changes are
+ * composed. Both readings share this so neither can drift from the capability
+ * scoping the fold already applied — a check counts here only because
+ * `hub.check:<name>` let it into `checks` in the first place.
+ *
+ * `null` is "no revision", which nothing can have run against: it passes only
+ * a repository that requires no checks at all.
+ */
+export const checksPassedAt = (
   pullRequest: PullRequest,
   required: ReadonlyArray<string>,
+  revision: Oid | null,
 ): boolean => {
+  if (revision === null) return required.length === 0;
   for (const name of required) {
     const check = pullRequest.checks.find(
-      (candidate) => candidate.name === name && candidate.head === pullRequest.head,
+      (candidate) => candidate.name === name && candidate.head === revision,
     );
     if (check === undefined || check.status !== "success") return false;
   }
   return true;
 };
+
+/** Whether every named check has succeeded against the current head. */
+export const checksPassed = (pullRequest: PullRequest, required: ReadonlyArray<string>): boolean =>
+  checksPassedAt(pullRequest, required, pullRequest.head);
 
 export type ProjectionError = Invalid | ObjectNotFound | StorageFailure;
