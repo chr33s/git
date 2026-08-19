@@ -54,9 +54,13 @@ const open = Command.make(
       Flag.withDefault(""),
       Flag.withDescription("Pull requests it concerns, comma-separated"),
     ),
+    parent: Flag.string("parent").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("The task this one belongs to — a release, an epic, a parent story"),
+    ),
     repo: repoArgument,
   },
-  ({ description, key, pull, ref, repo, root, title }) =>
+  ({ description, key, parent, pull, ref, repo, root, title }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
       const task = yield* withRepo(
@@ -69,6 +73,7 @@ const open = Command.make(
             description,
             refs: listOf(ref),
             pulls: listOf(pull),
+            parent,
             key: signer,
           });
           return opened.task;
@@ -192,6 +197,39 @@ const reopen = Command.make(
     }),
 );
 
+/**
+ * Move a task under another, or out from under one.
+ *
+ * Its own subcommand rather than a flag on `open`, because where work sits is
+ * the thing that changes: this is what a slipped release or a split epic
+ * looks like on an append-only ref.
+ */
+const reparent = Command.make(
+  "reparent",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    parent: Flag.string("parent").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("The task it now belongs to; omit to detach it"),
+    ),
+    repo: repoArgument,
+    task: taskArgument,
+  },
+  ({ key, parent, repo, root, task }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          yield* Task.reparent({ repo: yield* identityOf(repo), task, parent, key: signer });
+        }),
+      );
+      yield* Console.log(parent === "" ? `Detached ${task}` : `Filed ${task} under ${parent}`);
+    }),
+);
+
 /** As `session redact`, on the namespace that shares its one way back. */
 const redact = Command.make(
   "redact",
@@ -260,7 +298,9 @@ const show = Command.make(
 );
 
 export const taskCommand = Command.make("task", {}, () =>
-  Console.log("chr33s-git task <open|claim|release|close|reopen|redact|list|show> — see --help"),
+  Console.log(
+    "chr33s-git task <open|claim|release|close|reopen|reparent|redact|list|show> — see --help",
+  ),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record what needs doing")),
@@ -268,6 +308,7 @@ export const taskCommand = Command.make("task", {}, () =>
     release.pipe(Command.withDescription("Let go of a task before its lease ends")),
     close.pipe(Command.withDescription("Record how a task was resolved")),
     reopen.pipe(Command.withDescription("Undo a close, which a ref cannot be rewound to do")),
+    reparent.pipe(Command.withDescription("File a task under another, or detach it")),
     redact.pipe(Command.withDescription("Remove one record's content, needing hub.redact")),
     list.pipe(Command.withDescription("Tasks nobody currently holds")),
     show.pipe(Command.withDescription("What one task amounts to now")),

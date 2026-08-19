@@ -12,7 +12,7 @@
 
 import { Option, Schema } from "effect";
 
-import * as Contract from "../src/server/ApiContract.ts";
+import * as Contract from "../server/ApiContract.ts";
 
 /** Thrown for any non-2xx answer, carrying the server's tagged error name. */
 export class ApiError extends Error {
@@ -637,7 +637,7 @@ export const clientFromDocument = (): GitApi => {
 /**
  * What the Code screen needs from its client — satisfied structurally by
  * both this module's HTTP `GitApi` and the OPFS-backed `LocalGitApi`
- * (`ui/local.ts`), so the screen never knows which it holds.
+ * (`local.ts`), so the screen never knows which it holds.
  */
 export interface CodeApi {
   readonly repo: string;
@@ -662,7 +662,7 @@ export interface SearchApi {
   grep(pattern: string, ref: string, maxMatches?: number): Promise<GrepResponse>;
 }
 
-/** Where a branch stands against origin's copy of it; see `ui/local.ts`. */
+/** Where a branch stands against origin's copy of it; see `local.ts`. */
 export interface SyncState {
   readonly branch: string;
   readonly ahead: number;

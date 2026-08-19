@@ -86,12 +86,14 @@ export class GpTasks extends GitPlusElement {
     const title = titleField.value.trim();
     if (title === "") return;
     const desc = descField.value.trim();
+    const parentField = form.elements.namedItem("parent");
+    const parent = parentField instanceof HTMLSelectElement ? parentField.value : "";
 
     // The hub first: signed with this browser's key and appended for real.
     // Only when the event cannot land — offline, or a key the repository
     // does not (yet) trust — does the task stay in this tab, as the dialog
     // warns.
-    const remote = await store.createRemote({ title, description: desc });
+    const remote = await store.createRemote({ title, description: desc, parent });
     form.reset();
     this.querySelector("ui-dialog")?.hide();
     if (remote !== null) {
@@ -100,11 +102,14 @@ export class GpTasks extends GitPlusElement {
     }
     const name = this.viewer ?? "anonymous";
     const task = store.create({ title, desc, author: { name, avatar: initials(name) } });
+    // The tab-local fallback files it too, so the two paths agree about where
+    // a task the dialog was told to file ends up.
+    if (parent !== "") await store.move(task.id, parent);
     navigate(this, { screen: "detail", id: task.id });
   };
 
   protected override render(): TemplateResult {
-    const rows = store.rows(this.filter);
+    const groups = store.groups(this.filter);
     return html`
       <div class="gp-screen">
         ${
@@ -134,11 +139,33 @@ export class GpTasks extends GitPlusElement {
         </div>
 
         ${
-          rows.length === 0
+          groups.every((group) => group.rows.length === 0)
             ? html`<div class="gp-empty">Nothing here.</div>`
-            : html`<div class="gp-task-list">
-                ${rows.map(({ task, depth }) => this.#row(task, depth))}
-              </div>`
+            : groups.map(
+                (group) => html`
+                  ${
+                    group.milestone === null
+                      ? nothing
+                      : html`<button
+                          class="gp-milestone-head"
+                          type="button"
+                          @click=${() =>
+                            navigate(this, { screen: "detail", id: group.milestone?.id ?? "" })}
+                        >
+                          <span class="gp-milestone-title">${group.milestone.title}</span>
+                          <span class="gp-milestone-count"
+                            >${String(
+                              group.rows.filter(({ task }) => !isTerminal(task.status)).length,
+                            )}
+                            open</span
+                          >
+                        </button>`
+                  }
+                  <div class="gp-task-list">
+                    ${group.rows.map(({ task, depth }) => this.#row(task, depth))}
+                  </div>
+                `,
+              )
         }
       </div>
     `;
@@ -174,6 +201,18 @@ export class GpTasks extends GitPlusElement {
               autocomplete="off"
               placeholder="What needs doing?"
             />
+            <label class="gp-field-label" for="gp-new-parent">Belongs to</label>
+            <select id="gp-new-parent" class="gp-input" name="parent">
+              <option value="">Nothing</option>
+              ${store
+                .list()
+                .map(
+                  (candidate) =>
+                    html`<option value=${candidate.id}>
+                      ${candidate.id} — ${candidate.title}
+                    </option>`,
+                )}
+            </select>
             <label class="gp-field-label" for="gp-new-desc">Description</label>
             <textarea
               id="gp-new-desc"

@@ -28,10 +28,44 @@ const mkessler = person("mkessler", "MK");
 const rbaek = person("rbaek", "RB");
 const atran = person("atran", "AT");
 
-const IDENTITY = "v0.4 — Identity";
+/**
+ * The releases, as tasks.
+ *
+ * A milestone is not a type here: it is a task other tasks belong to, which
+ * is what `src/hub/Task.ts` records and all the hub can say. Everything the
+ * detail screen shows under "Milestone" is read back off that edge.
+ */
+const V4: Task = {
+  id: "M-4",
+  kind: "Task",
+  title: "v0.4 — Identity",
+  status: "In progress",
+  avatar: "V4",
+  updated: "today",
+  desc: "Keys, membership and signing: the release the authentication work lands in.",
+  assignees: [mkessler],
+  labels: [label("release", "blue")],
+  comments: [],
+  children: ["T-12", "T-17", "CR-19"],
+};
+
+const V5: Task = {
+  id: "M-5",
+  kind: "Task",
+  title: "v0.5 — Scale",
+  status: "Todo",
+  avatar: "V5",
+  updated: "last week",
+  desc: "What follows Identity: replication, packing and the numbers behind them.",
+  assignees: [rbaek],
+  labels: [label("release", "blue")],
+  comments: [],
+  children: ["T-20"],
+};
 
 const T12: Task = {
   id: "T-12",
+  parent: "M-4",
   kind: "Task",
   title: "Implement authentication",
   status: "In progress",
@@ -40,7 +74,6 @@ const T12: Task = {
   desc: "Add first-party authentication to git+ core: session-based for the web UI, token-based for the CLI. Child work is split between pure Tasks and Change Requests carrying the actual diffs.",
   assignees: [mkessler, rbaek],
   labels: [label("auth", "accent"), label("epic", "blue")],
-  milestone: IDENTITY,
   comments: [
     {
       avatar: "RB",
@@ -69,7 +102,6 @@ const T13: Task = {
   desc: "Decide session storage, expiry, and rotation strategy. Outcome: opaque server-side sessions with 30-day sliding expiry, rotated on privilege change.",
   assignees: [mkessler],
   labels: [label("auth", "accent"), label("design", "amber")],
-  milestone: IDENTITY,
   comments: [
     {
       avatar: "MK",
@@ -91,7 +123,6 @@ const CR14: ChangeRequest = {
   desc: "Implements the session middleware from T-13: cookie parsing, session lookup, and the auth context available to all handlers.",
   assignees: [rbaek],
   labels: [label("auth", "accent")],
-  milestone: IDENTITY,
   sourceRef: "rbaek/auth-middleware",
   targetRef: "main",
   diffStat: "+214 −38",
@@ -143,7 +174,6 @@ const CR15: ChangeRequest = {
   desc: "Login and logout pages for the web UI, using the middleware from CR-14. Blocked on a flaky e2e check.",
   assignees: [atran],
   labels: [label("auth", "accent"), label("frontend", "purple")],
-  milestone: IDENTITY,
   sourceRef: "atran/login-ui",
   targetRef: "main",
   diffStat: "+402 −12",
@@ -196,12 +226,12 @@ const T16: Task = {
   desc: "Document the auth setup flow for self-hosted installs: session config, token creation, and CLI login.",
   assignees: [atran],
   labels: [label("docs", "amber")],
-  milestone: IDENTITY,
   comments: [],
 };
 
 const T17: Task = {
   id: "T-17",
+  parent: "M-4",
   kind: "Task",
   title: "Migrate CI to runners v2",
   status: "In progress",
@@ -210,7 +240,6 @@ const T17: Task = {
   desc: "Move all pipelines to the v2 runner fleet before the v1 fleet is decommissioned at the end of the quarter.",
   assignees: [rbaek],
   labels: [label("infra", "orange")],
-  milestone: IDENTITY,
   comments: [
     {
       avatar: "RB",
@@ -233,7 +262,6 @@ const CR18: ChangeRequest = {
   desc: "Points all pipeline definitions at the v2 runner labels and bumps the cache key format.",
   assignees: [rbaek],
   labels: [label("infra", "orange")],
-  milestone: IDENTITY,
   sourceRef: "rbaek/runners-v2",
   targetRef: "main",
   diffStat: "+61 −59",
@@ -265,6 +293,7 @@ const CR18: ChangeRequest = {
 
 const CR19: ChangeRequest = {
   id: "CR-19",
+  parent: "M-4",
   kind: "CR",
   title: "Fix flaky clone test",
   status: "Open",
@@ -273,7 +302,6 @@ const CR19: ChangeRequest = {
   desc: "test/clone_test.go intermittently fails on slow disks; this pins the fixture repo size and adds a retry.",
   assignees: [mkessler],
   labels: [label("tests", "blue")],
-  milestone: IDENTITY,
   sourceRef: "mkessler/fix-clone-test",
   targetRef: "main",
   diffStat: "+18 −6",
@@ -302,6 +330,7 @@ const CR19: ChangeRequest = {
 
 const T20: Task = {
   id: "T-20",
+  parent: "M-5",
   kind: "Task",
   title: "Q3 performance audit",
   status: "Todo",
@@ -310,38 +339,12 @@ const T20: Task = {
   desc: "Profile pack transfer and task-tree queries under load; produce a prioritized list of follow-up Tasks.",
   assignees: [atran],
   labels: [label("perf", "red")],
-  milestone: "v0.5 — Scale",
   comments: [],
 };
 
-export const tasks: readonly Task[] = [T12, T13, CR14, CR15, T16, T17, CR18, CR19, T20];
+export const tasks: readonly Task[] = [V4, V5, T12, T13, CR14, CR15, T16, T17, CR18, CR19, T20];
 
 export const byId: ReadonlyMap<string, Task> = new Map(tasks.map((task) => [task.id, task]));
-
-/**
- * The list order: every root, each followed by its children.
- *
- * The design deliberately mixes Tasks and Change Requests in one hierarchy
- * rather than splitting them into separate lists — that is the whole point of
- * Change Requests being a specialization rather than a sibling type.
- */
-export interface Row {
-  readonly task: Task;
-  readonly depth: number;
-}
-
-export const rows = (): readonly Row[] => {
-  const out: Row[] = [];
-  for (const task of tasks) {
-    if (task.parent !== undefined) continue;
-    out.push({ task, depth: 0 });
-    for (const childId of task.children ?? []) {
-      const child = byId.get(childId);
-      if (child !== undefined) out.push({ task: child, depth: 1 });
-    }
-  }
-  return out;
-};
 
 /** Where each timeline card sits: 14 columns, one per day of the fortnight. */
 export interface TimelineEvent {

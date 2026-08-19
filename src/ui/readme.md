@@ -194,8 +194,8 @@ npm run ui:dev              # watch and serve on :8000 — the one to reach for
 npm run ui:build            # bundle to dist/ui
 npm run ui:verify           # build, then drive it in a browser
 
-node ui/build.ts --watch    # watch only, for serving dist/ui yourself
-node ui/build.ts --debug    # unminified, for reading a stack trace
+node src/ui/build.ts --watch    # watch only, for serving dist/ui yourself
+node src/ui/build.ts --debug    # unminified, for reading a stack trace
 ```
 
 `--serve` and `--watch` both stay in the foreground and rebuild on change; that
@@ -269,7 +269,7 @@ shape, end to end.
   weight and the elements silently never register. `elements.ts` imports the
   classes and holds them instead.
 
-- **The UI is its own TypeScript project.** `ui/tsconfig.json` sets
+- **The UI is its own TypeScript project.** `src/ui/tsconfig.json` sets
   `lib: ["ES2024", "DOM", "DOM.Iterable"]`; the root project keeps `WebWorker`
   for `src/`. Both in one program mis-resolves DOM members — it made
   `input.after(button)` typecheck against a `Response`-shaped overload, and
@@ -281,7 +281,7 @@ shape, end to end.
   Three unguarded `items[i]` reads in `src/roving.ts` failed this repository's
   `noUncheckedIndexedAccess`; they were fixed upstream in `1.0.1`, which is what
   the lockfile now pins. Anything similar in a future version will surface as a
-  `npm run check` failure in `node_modules/`, not in `ui/` — fix it upstream by
+  `npm run check` failure in `node_modules/`, not in `src/ui/` — fix it upstream by
   preference, or carry it in `patches/` as the `alchemy` dependency does.
 
 - **Reactive fields use `accessor`.** This repository sets no

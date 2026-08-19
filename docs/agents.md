@@ -1178,13 +1178,56 @@ task.released   the claimant lets go early
 task.closed     outcome: completed | abandoned |
                 superseded; names the PRs or
                 sessions that resolved it
+task.reopened   undo a close, which a ref cannot
+                be rewound to do
+task.reparented the task this one belongs to, from
+                now on; empty detaches it
 ```
 
 All task events are signed and carry the `RepoID`; one new capability,
 `hub.task`, gates appends, granted like any other (Part I). `repo.admin`
 implies it. This is **built**: `task open | claim | release | close |
-list | show`, where `list` is what an agent woken by a task ref reads —
-the tasks nobody currently holds.
+reopen | reparent | redact | list | show`, where `list` is what an agent
+woken by a task ref reads — the tasks nobody currently holds.
+
+**A task can belong to another task**, and that is the whole hierarchy:
+there is no milestone type, no epic type, no label vocabulary. A release,
+an epic and a parent story are all just tasks that other tasks name, so
+they inherit claiming, closing, redaction and provenance for free — and
+`task.closed`'s `superseded` says something true about a release that was
+re-cut. What the edge _means_ is the reader's to name: the web UI reads a
+parent's title as a task's "milestone".
+
+The edge is recorded on the **child**, in `task.opened` or a later
+`task.reparented`. Writing it on the parent instead would make a busy
+release a ref every member contends on, and would mean needing rights
+over a release to file work under it; as it stands an agent only ever
+writes the ref it already owns. The parent's children are therefore
+derived by whoever lists tasks, not stored — one pass over the listing
+`GET /hub/tasks` already makes.
+
+`task.reparented` exists because **work moves**: a release slips, an epic
+is split. Encoding the parent only in `task.opened` would fix where a
+task sits for as long as the ref exists, which is not how anyone plans.
+Projection takes the last one that counts.
+
+A loop is refused where it can be seen and **severed where it cannot**.
+`task.reparented` walks up from the proposed parent and declines to write an
+edge that would close a cycle — but that is a courtesy, not a guarantee: the
+edges live on separate refs, the event endpoint appends signed bytes without
+asking, and two members filing A under B and B under A concurrently each
+write a ref that is sound alone. The task listing is the first place that
+holds every edge at once, so a task whose chain reaches itself is reported
+with no parent. Every chain a reader walks is therefore finite, and readers
+are owed no cycle guard of their own.
+
+Re-filing is **any member's to do**, and closing is not — the two rules
+differ deliberately. Filing work under a release is triage: it is undone
+by another `task.reparented`, and §16's boundary has already asked for a
+`hub.*` capability before this ref can be appended to at all. A close
+ends the work and a redaction destroys content; neither comes back by
+saying so again, so both stay the opener's. A record nobody signed still
+decides nothing, here as everywhere.
 
 **Claims are leases, and advisory.** A claim is live until its `expiresAt`
 or a `task.released`, so a sandbox that dies claiming work frees it by

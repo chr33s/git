@@ -494,20 +494,35 @@ describe("hub projection", () => {
           // every byte of it is the author's to write.
           const ref = Event.refOf(pr);
           const approved = yield* repository.resolve(ref);
-          yield* PullRequest.open({
-            repo: where.genesis.repoId,
-            id: pr,
-            title: "Add a thing",
-            description: "It does the thing.",
-            base: "refs/heads/main",
-            head: REVISION,
-            key: where.author,
-          });
-          const { events } = yield* Event.entries(pr);
-          const retarget = events.find(
-            (entry) =>
-              entry.payload?.type === "pr.opened" && entry.payload.base === "refs/heads/main",
-          );
+
+          // The retarget has to *supersede* the opening for it to supply the
+          // base at all, and two concurrent openings are separated by their
+          // ids (`supersedes`). Those are UUIDv7s: ordered by the millisecond
+          // they were minted in, and — within one millisecond — by randomness.
+          // Written back to back, these two land in the same millisecond often
+          // enough that leaving it to chance made this test fail about one run
+          // in seven. Retried until the id actually sorts above, which is the
+          // condition the scenario needs rather than one it hopes for. The
+          // extra appends are orphaned by the `setRef` below.
+          const openedId = first?.payload?.id ?? "";
+          let retarget: Event.Walked["events"][number] | undefined;
+          for (let round = 0; round < 32 && retarget === undefined; round++) {
+            yield* PullRequest.open({
+              repo: where.genesis.repoId,
+              id: pr,
+              title: "Add a thing",
+              description: "It does the thing.",
+              base: "refs/heads/main",
+              head: REVISION,
+              key: where.author,
+            });
+            retarget = (yield* Event.entries(pr)).events.find(
+              (entry) =>
+                entry.payload?.type === "pr.opened" &&
+                entry.payload.base === "refs/heads/main" &&
+                entry.payload.id > openedId,
+            );
+          }
 
           // Ground into the window *between* the two, which is the only
           // placement that demonstrates anything. Below the opening, the
@@ -532,11 +547,17 @@ describe("hub projection", () => {
 
           return {
             ground: sibling > first!.commit && sibling < approval,
+            supersedes: retarget !== undefined,
             state: yield* projectionOf(where, pr),
           };
         }),
       );
 
+      assert.equal(
+        outcome.supersedes,
+        true,
+        "the fixture must mint a retarget whose id sorts above the opening's",
+      );
       assert.equal(
         outcome.ground,
         true,

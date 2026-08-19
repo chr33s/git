@@ -12,8 +12,8 @@
  * `src/server/Api.ts` and the browser client. It therefore runs without a
  * Worker while still failing immediately if a fixture drifts from the wire.
  *
- *   node ui/build.ts && node ui/verify.ts
- *   node ui/verify.ts --shots <dir>    # also write screenshots
+ *   node src/ui/build.ts && node src/ui/verify.ts
+ *   node src/ui/verify.ts --shots <dir>    # also write screenshots
  *
  * Playwright is already a devDependency, and Chromium is expected on PATH or at
  * PLAYWRIGHT_BROWSERS_PATH; pass --executable to point at a specific binary.
@@ -23,24 +23,25 @@ import { Effect, Layer, Schema } from "effect";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, extname, join, normalize } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { generate } from "../src/crypto/SshSignature.ts";
-import { stores as nodeStores } from "../src/git/Node.ts";
-import * as GitRepository from "../src/git/Repository.ts";
-import * as HubTask from "../src/hub/Task.ts";
-import { serve as serveHost } from "../src/host/Node.ts";
-import * as Contract from "../src/server/ApiContract.ts";
-import { enableHubUnder } from "../src/testing/Hub.ts";
-import * as Certificate from "../src/trust/Certificate.ts";
-import * as Log from "../src/trust/Log.ts";
+import { generate } from "../crypto/SshSignature.ts";
+import { stores as nodeStores } from "../git/Node.ts";
+import * as GitRepository from "../git/Repository.ts";
+import * as HubTask from "../hub/Task.ts";
+import { serve as serveHost } from "../host/Node.ts";
+import * as Contract from "../server/ApiContract.ts";
+import { assetResponse } from "../server/Static.ts";
+import { enableHubUnder } from "../testing/Hub.ts";
+import * as Certificate from "../trust/Certificate.ts";
+import * as Log from "../trust/Log.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-/** Output lives at the repository root alongside `dist/sea`, not under `ui/`. */
-const dist = join(here, "..", "dist", "ui");
+/** Output lives at the repository root alongside `dist/sea`, not under `src/ui/`. */
+const dist = join(here, "..", "..", "dist", "ui");
 
 const flag = (name: string): string | undefined => {
   const at = process.argv.indexOf(name);
@@ -49,22 +50,6 @@ const flag = (name: string): string | undefined => {
 
 const shots = flag("--shots");
 const executable = flag("--executable") ?? process.env["CHROMIUM_PATH"];
-
-/** The extensions the built UI actually serves; anything else is a byte stream. */
-const mimeOf = (extension: string): string => {
-  switch (extension) {
-    case ".css":
-      return "text/css";
-    case ".html":
-      return "text/html";
-    case ".js":
-      return "text/javascript";
-    case ".map":
-      return "application/json";
-    default:
-      return "application/octet-stream";
-  }
-};
 
 const failures: string[] = [];
 
@@ -672,15 +657,13 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         }
       }
 
-      const file = join(dist, normalize(path === "/" ? "/index.html" : path));
-      try {
-        await stat(file);
-      } catch {
+      const asset = await assetResponse(dist, new Request(`http://localhost${path}`));
+      if (asset === null) {
         response.writeHead(404);
         return response.end("not found");
       }
-      response.writeHead(200, { "content-type": mimeOf(extname(file)) });
-      response.end(await readFile(file));
+      response.writeHead(asset.status, Object.fromEntries(asset.headers));
+      response.end(Buffer.from(await asset.arrayBuffer()));
     })();
   });
   await new Promise<void>((resolve) => server.listen(port, resolve));
@@ -692,7 +675,7 @@ const verifyProxy = async (upstream: string, port: number): Promise<void> => {
   console.info("\nproxy");
   const proxyOut = await mkdtemp(join(tmpdir(), "git-plus-ui-proxy-"));
   const child = spawn(process.execPath, [join(here, "build.ts"), "--serve"], {
-    cwd: join(here, ".."),
+    cwd: join(here, "..", ".."),
     env: {
       ...process.env,
       GIT_API: upstream,
@@ -720,7 +703,7 @@ const verifyProxy = async (upstream: string, port: number): Promise<void> => {
       child.stderr.on("data", append);
       child.once("error", reject);
       child.once("exit", (code) => {
-        if (!output.includes("git+ UI on")) {
+        if (!output.includes(`http://localhost:${String(port)}`)) {
           clearTimeout(timeout);
           reject(new Error(`dev proxy exited ${String(code)}:\n${output}`));
         }
@@ -742,6 +725,89 @@ const verifyProxy = async (upstream: string, port: number): Promise<void> => {
       await once(child, "exit");
     }
     await rm(proxyOut, { force: true, recursive: true });
+  }
+};
+
+/**
+ * `chr33s-git serve --ui`: the page and the API from one process, one origin.
+ *
+ * The proxy above fakes that arrangement for development; this is the shipped
+ * one, and the thing worth proving is that no proxy is involved — the bundle
+ * and `/{repo}/...` answer on the same port, which is the only shape a browser
+ * will let the UI use.
+ */
+const verifyServeUi = async (browser: Browser, port: number): Promise<void> => {
+  console.info("\nserve --ui");
+  const root = await mkdtemp(join(tmpdir(), "git-plus-serve-ui-"));
+  const cli = join(here, "..", "cli", "bin.ts");
+  const init = spawn(process.execPath, [cli, "init", "--root", root, "core"], { stdio: "ignore" });
+  await once(init, "exit");
+
+  const child = spawn(
+    process.execPath,
+    [cli, "serve", "--root", root, "--port", String(port), "--ui"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const page = await browser.newPage();
+  const thrown: string[] = [];
+  page.on("pageerror", (error) => thrown.push(error.message));
+  let output = "";
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`serve --ui did not start:\n${output}`)),
+        15_000,
+      );
+      const append = (chunk: Buffer): void => {
+        output += chunk.toString("utf8");
+        if (!output.includes("browser UI on")) return;
+        clearTimeout(timeout);
+        resolve();
+      };
+      child.stdout.on("data", append);
+      child.stderr.on("data", append);
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (!output.includes("browser UI on")) {
+          clearTimeout(timeout);
+          reject(new Error(`serve --ui exited ${String(code)}:\n${output}`));
+        }
+      });
+    });
+
+    const origin = `http://127.0.0.1:${String(port)}`;
+    const index = await fetch(`${origin}/`);
+    check(
+      "serve --ui answers the page itself",
+      index.status === 200 && (index.headers.get("content-type") ?? "").startsWith("text/html"),
+      `${String(index.status)} ${index.headers.get("content-type") ?? ""}`,
+    );
+    const bundle = await fetch(`${origin}/main.js`);
+    check(
+      "and the bundle beside it",
+      bundle.status === 200 && (bundle.headers.get("content-type") ?? "") === "text/javascript",
+      `${String(bundle.status)} ${bundle.headers.get("content-type") ?? ""}`,
+    );
+    // The same origin, which is the whole point: a path the bundle does not
+    // hold falls through to the repository the server is hosting.
+    const api = await fetch(`${origin}/core/hub/tasks`);
+    check("and the API on that same origin", api.status === 200, String(api.status));
+
+    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1500);
+    check(
+      "the UI it served actually mounts",
+      (await page.locator(".gp-sidebar").count()) === 1 &&
+        (await page.locator(".gp-task-row").count()) > 0,
+    );
+    check("with no uncaught errors", thrown.length === 0, thrown.join("; "));
+  } finally {
+    await page.close();
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, "exit");
+    }
+    await rm(root, { force: true, recursive: true });
   }
 };
 
@@ -831,6 +897,13 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   await page.waitForTimeout(800);
 
   check("tasks list shows the whole hierarchy", (await page.locator(".gp-task-row").count()) === 9);
+  // The releases head their work rather than taking rows of their own, so the
+  // hierarchy the design drew keeps the depths it was drawn at.
+  check(
+    "and heads it with the releases the work belongs to",
+    (await page.locator(".gp-milestone-head").count()) === 2 &&
+      ((await page.textContent(".gp-milestone-head")) ?? "").includes("v0.4 — Identity"),
+  );
 
   // --- the kind filter ----------------------------------------------------
   await page.click('.gp-segment[value="crs"]');
@@ -847,7 +920,9 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   await page.waitForTimeout(400);
   check(
     "the Tasks segment shows only pure Tasks",
-    (await page.locator(".gp-task-row").count()) === 5,
+    // Seven, not five: a release is a task, and a narrowed list has no
+    // hierarchy left to group by, so they take rows like everything else.
+    (await page.locator(".gp-task-row").count()) === 7,
   );
   await page.click('.gp-segment[value="all"]');
   await page.waitForTimeout(400);
@@ -872,6 +947,24 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   check(
     "the detail names the Change Request",
     (await page.textContent(".gp-detail-title"))?.trim() === "Add auth middleware",
+  );
+  // The crumbs alone, not the whole sidebar: the move control below them
+  // lists every task as an option, so `.gp-meta` contains every title there
+  // is. Read as one chain, outermost first — this sits under the epic T-12,
+  // which sits under the release, and one row says both.
+  const crumbs = (): Promise<readonly string[]> =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".gp-crumbs .gp-parent-link")].map(
+        (crumb) => crumb.textContent?.trim() ?? "",
+      ),
+    );
+  const belongsTo = (): Promise<string> =>
+    page.textContent(".gp-meta-value").then((text) => text?.trim() ?? "");
+  const CHAIN = JSON.stringify(["v0.4 — Identity", "Implement authentication"]);
+  check(
+    "the detail reads the whole chain a task hangs from",
+    JSON.stringify(await crumbs()) === CHAIN,
+    JSON.stringify(await crumbs()),
   );
 
   for (const [tab, rows] of [
@@ -898,9 +991,10 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     (await page.locator(".gp-diff-static .gp-diff-line").count()) === 7,
   );
 
-  await page.click(".gp-parent-link");
+  // The last crumb is the task's own parent; the first is the release.
+  await page.click(".gp-crumbs .gp-parent-link:last-of-type");
   await page.waitForTimeout(500);
-  check("the parent link walks up the hierarchy", (await hash()) === "#/detail/T-12");
+  check("the last crumb walks up the hierarchy", (await hash()) === "#/detail/T-12");
   check(
     "the parent lists its four subtasks",
     (await page.locator(".gp-subtask-row").count()) === 4,
@@ -909,6 +1003,19 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   await page.click(".gp-subtask-row:nth-child(2)");
   await page.waitForTimeout(500);
   check("a subtask walks back down", (await hash()) === "#/detail/CR-14");
+
+  // Last of the checks on this hierarchy: re-filing appends rather than
+  // restoring a position, so T-12's subtask order changes and the reads by
+  // position above would no longer mean what they say.
+  await page.selectOption(".gp-meta-select", "");
+  await page.waitForTimeout(1500);
+  check(
+    "the move control detaches a fixture task in the tab",
+    (await crumbs()).length === 0 && (await belongsTo()) === "—",
+  );
+  await page.selectOption(".gp-meta-select", "T-12");
+  await page.waitForTimeout(1500);
+  check("and files it back under the epic it came from", JSON.stringify(await crumbs()) === CHAIN);
 
   const before = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
   await page.click(".gp-theme-toggle");
@@ -969,8 +1076,11 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     }),
   );
   check(
+    // Eight, not six: the two releases are tasks, and open ones. Counting them
+    // is the premise of this design rather than an oversight — a release that
+    // is not a task would need a type of its own again.
     "and the rail badge counts one fewer open item",
-    (await page.textContent(".gp-nav-badge"))?.trim() === "6",
+    (await page.textContent(".gp-nav-badge"))?.trim() === "8",
   );
 
   // --- creating a task ----------------------------------------------------
@@ -991,7 +1101,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   );
   check(
     "and the rail badge counts it as open",
-    (await page.textContent(".gp-nav-badge"))?.trim() === "7",
+    (await page.textContent(".gp-nav-badge"))?.trim() === "9",
   );
 
   // --- the comment composer ----------------------------------------------
@@ -1644,10 +1754,14 @@ const localMode = async (browser: Browser): Promise<void> => {
         author,
       });
       const key = yield* generate("fleet@example.com");
+      // A release is an ordinary task, and the work belongs to it — which is
+      // all "Milestone" is on the detail screen.
+      const milestone = yield* HubTask.open({ repo: "core", title: "v0.4 — Identity", key });
       yield* HubTask.open({
         repo: "core",
         title: "Review the local mode",
         description: "Adopted from the hub, not the fixtures.",
+        parent: milestone.task,
         key,
       });
       return commit;
@@ -1661,14 +1775,13 @@ const localMode = async (browser: Browser): Promise<void> => {
   const front = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
-      const file = join(dist, normalize(url.pathname === "/" ? "/index.html" : url.pathname));
-      const served = await stat(file).then(
-        () => true,
-        () => false,
+      const asset = await assetResponse(
+        dist,
+        new Request(url, { method: request.method ?? "GET" }),
       );
-      if (request.method === "GET" && served) {
-        response.writeHead(200, { "content-type": mimeOf(extname(file)) });
-        return response.end(await readFile(file));
+      if (asset !== null) {
+        response.writeHead(asset.status, Object.fromEntries(asset.headers));
+        return response.end(Buffer.from(await asset.arrayBuffer()));
       }
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -1787,9 +1900,24 @@ const localMode = async (browser: Browser): Promise<void> => {
       ((await page.textContent(".gp-task-list")) ?? "").includes("Review the local mode") &&
         (await page.locator(".gp-task-row").count()) === 1,
     );
+    check(
+      "the release the hub recorded heads the work filed under it",
+      (await page.locator(".gp-milestone-head").count()) === 1 &&
+        ((await page.textContent(".gp-milestone-head")) ?? "").includes("v0.4 — Identity"),
+    );
+    await page.click(".gp-task-row");
+    await page.waitForTimeout(900);
+    // The parent edge, read as a chain of one: the title, not the id the hub
+    // actually records.
+    check(
+      "the detail names the release the task belongs to",
+      ((await page.textContent(".gp-crumbs")) ?? "").trim() === "v0.4 — Identity",
+    );
 
     // A task created here: signed with the browser's own key, appended over
     // POST /hub/events, and read back from the server's projection.
+    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1200);
     await page.click(".gp-tasks-head .gp-btn-primary");
     await page.waitForTimeout(400);
     await page.fill("#gp-new-title", "Opened by the browser key");
@@ -1809,7 +1937,41 @@ const localMode = async (browser: Browser): Promise<void> => {
     );
     await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
-    check("the list counts both hub tasks", (await page.locator(".gp-task-row").count()) === 2);
+    // Two rows and one header: the release, the work under it, and the task
+    // this browser opened, which belongs to nothing.
+    check("the list counts every hub task", (await page.locator(".gp-task-row").count()) === 2);
+
+    // The move control: a `task.reparented` signed in the page, appended over
+    // POST /hub/events, and read back from the server's own projection —
+    // filing work this browser did not open, which is what the looser rule on
+    // re-filing (see `hub/Task.ts`) exists to allow.
+    const idOf = (title: string): string =>
+      served.tasks.find((task) => task.title === title)?.task ?? "";
+    const created = idOf("Opened by the browser key");
+    const release = idOf("v0.4 — Identity");
+    await page.goto(`${origin}/#/detail/${created}`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1200);
+    await page.selectOption(".gp-meta-select", release);
+    await page.waitForTimeout(2500);
+    const filed = await fetch(`${upstream}/core/hub/tasks`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.HubTasksResponse)(await response.json()),
+    );
+    check(
+      "the move control files a task in the hub itself",
+      filed.tasks.find((task) => task.task === created)?.parent === release,
+    );
+    check(
+      "and the release reads it back as its own",
+      (filed.tasks.find((task) => task.task === release)?.children ?? []).includes(created),
+    );
+    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1200);
+    check(
+      "so the list draws it under that release",
+      (await page.locator(".gp-milestone-head").count()) === 1 &&
+        (await page.locator(".gp-task-row").count()) === 2,
+    );
+
     // --- enrolment: a genesis lands, and the browser's key is granted ------
     // Stage the proposal's branch while writes are still open: a browser's
     // git push has no envelope, so on a genesis'd repository the push comes
@@ -1986,6 +2148,7 @@ try {
     await live(browser, "http://localhost:8132");
   }
   await localMode(browser);
+  await verifyServeUi(browser, 8134);
 } finally {
   await browser.close();
   offline.close();

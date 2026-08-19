@@ -12,9 +12,9 @@
  * returns an atom tracking an endpoint's `AsyncResult` (initial → waiting →
  * success/failure), memoized per request, and `mutation` returns a writable
  * atom that runs the call and can invalidate reactivity keys. Screens
- * subscribe through `ui/atoms.ts`.
+ * subscribe through `atoms.ts`.
  *
- * The hand-written `ui/api.ts` remains beside this for the screens that
+ * The hand-written `api.ts` remains beside this for the screens that
  * predate it; new surfaces (the hub) start here. The two share the schemas
  * in `src/server/ApiContract.ts` either way.
  */
@@ -22,10 +22,10 @@ import { Layer } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { AtomHttpApi } from "effect/unstable/reactivity";
 
-import { api } from "../src/server/Api.ts";
+import { api } from "../server/Api.ts";
 
 /**
- * Where the API lives, read from the page exactly as `ui/api.ts` reads it:
+ * Where the API lives, read from the page exactly as `api.ts` reads it:
  *   <meta name="gp-api-base" content="https://git.example.com">
  * An empty or absent base means same-origin, which is the deployed case.
  */

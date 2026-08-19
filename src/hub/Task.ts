@@ -79,6 +79,32 @@ export const TaskOpened = Schema.Struct({
   /** What it concerns: refs, commits, pull requests. */
   refs: Schema.Array(Schema.String),
   pulls: Schema.Array(Schema.String),
+  /**
+   * The task this one belongs to, if any.
+   *
+   * Optional rather than an empty string, so a task with no parent encodes
+   * exactly the bytes it always did — these records are signed, and a field
+   * that appeared in every payload would invalidate every existing signature.
+   */
+  parent: Schema.optional(Schema.String),
+});
+
+/**
+ * The task this one belongs to, from now on.
+ *
+ * Work moves between the things it belongs to — a release slips, an epic is
+ * split — and `task.opened` is issued once on a ref that cannot be rewound.
+ * Without this, where a task sits would be decided for good by whoever opened
+ * it, which is not how anyone plans. The empty string detaches it.
+ *
+ * This is deliberately the general edge and not a "milestone": the hub knows
+ * that one task belongs to another, and what that means — a release, an epic,
+ * a parent story — is the reader's to name.
+ */
+export const TaskReparented = Schema.Struct({
+  type: Schema.tag("task.reparented"),
+  ...envelope,
+  parent: Schema.String,
 });
 
 /**
@@ -126,6 +152,7 @@ export const TaskPayload = Schema.Union([
   TaskReleased,
   TaskClosed,
   TaskReopened,
+  TaskReparented,
   RecordRedacted,
 ]);
 export type TaskPayload = (typeof TaskPayload)["Type"];
@@ -180,10 +207,17 @@ const prose = (payload: TaskPayload): string => {
       return payload.outcome;
     case "task.reopened":
       return "";
+    // A task id, not prose: high-entropy by construction, like the envelope's.
+    case "task.reparented":
+      return "";
     case "event.redacted":
       return payload.reason;
   }
 };
+
+/** The edge a record carries, or `undefined` where it carries none. */
+const parentOf = (payload: TaskPayload): string | undefined =>
+  payload.type === "task.opened" || payload.type === "task.reparented" ? payload.parent : undefined;
 
 export const issue = Effect.fn("hub.Task.issue")(function* (payload: TaskPayload, key: PrivateKey) {
   if (!isTaskId(payload.task)) {
@@ -204,6 +238,34 @@ export const issue = Effect.fn("hub.Task.issue")(function* (payload: TaskPayload
       field: "expiresAt",
       reason: `'${payload.expiresAt}' is not a time; a claim is a lease and has to say when it ends`,
     });
+  }
+
+  // Refused here for the reason the expiry above is: an append-only ref keeps
+  // whatever it is given, and a parent that cannot name a task is an edge no
+  // reader can follow.
+  //
+  // Not a guarantee, and not meant as one: `POST /hub/events` appends signed
+  // bytes without coming through here, and two members filing A under B and B
+  // under A at the same time each write a ref that is sound on its own. What
+  // this catches is the mistake made in one place, early, with a reason
+  // attached — `tasks()` is where a loop that got in anyway stops being one.
+  const parent = parentOf(payload);
+  if (parent !== undefined && parent !== "") {
+    if (!isTaskId(parent)) {
+      return yield* new Invalid({
+        field: "parent",
+        reason: `'${parent}' cannot name a task; it must be one ref path component`,
+      });
+    }
+    if (yield* loops(payload.task, parent)) {
+      return yield* new Invalid({
+        field: "parent",
+        reason:
+          parent === payload.task
+            ? `${payload.task} cannot belong to itself`
+            : `filing ${payload.task} under ${parent} would close a loop`,
+      });
+    }
   }
 
   const bytes = encode(payload);
@@ -245,21 +307,45 @@ export const open = Effect.fn("hub.Task.open")(function* (input: {
   readonly refs?: ReadonlyArray<string>;
   readonly pulls?: ReadonlyArray<string>;
   readonly task?: string;
+  readonly parent?: string;
 }) {
   const task = input.task ?? newId();
   const base = yield* context(input.repo, task);
+  const opened: TaskPayload = {
+    ...base,
+    type: "task.opened",
+    title: input.title,
+    description: input.description ?? "",
+    refs: input.refs ?? [],
+    pulls: input.pulls ?? [],
+  };
+  // The field is left off entirely when there is no parent, so the encoded
+  // bytes are the ones this record has always had; see `TaskOpened.parent`.
   const commit = yield* issue(
-    {
-      ...base,
-      type: "task.opened",
-      title: input.title,
-      description: input.description ?? "",
-      refs: input.refs ?? [],
-      pulls: input.pulls ?? [],
-    },
+    input.parent === undefined || input.parent === ""
+      ? opened
+      : { ...opened, parent: input.parent },
     input.key,
   );
   return { task, commit };
+});
+
+/**
+ * File a task under another one, or detach it with an empty `parent`.
+ *
+ * Written on the moving task's own ref rather than on the one it joins: an
+ * agent already writes there, one ref per task keeps a busy parent from
+ * becoming a ref every member contends on, and filing work under a release
+ * does not need rights over the release.
+ */
+export const reparent = Effect.fn("hub.Task.reparent")(function* (input: {
+  readonly repo: string;
+  readonly task: string;
+  readonly parent: string;
+  readonly key: PrivateKey;
+}) {
+  const base = yield* context(input.repo, input.task);
+  return yield* issue({ ...base, type: "task.reparented", parent: input.parent }, input.key);
 });
 
 export const claim = Effect.fn("hub.Task.claim")(function* (input: {
@@ -436,6 +522,27 @@ export const redact = Effect.fn("hub.Task.redact")(function* (input: {
 });
 
 /**
+ * Whether filing `task` under `parent` would close a loop.
+ *
+ * Walked upwards from the proposed parent, which is the only direction the
+ * edge is recorded in. A chain that is already circular above the proposed
+ * parent ends the walk without blaming this record for it: the answer is
+ * about the edge being written, not about the state it is being written into.
+ */
+const loops = Effect.fn("hub.Task.loops")(function* (task: string, parent: string) {
+  const seen = new Set<string>();
+  let at = parent;
+  while (!seen.has(at)) {
+    if (at === task) return true;
+    seen.add(at);
+    const above = (yield* project(at)).parent;
+    if (above === null) return false;
+    at = above;
+  }
+  return false;
+});
+
+/**
  * What a task amounts to now: is it open, is it claimed, and by whom.
  *
  * The lease is judged against a clock the caller supplies, because the events
@@ -458,6 +565,7 @@ export const project = Effect.fn("hub.Task.project")(function* (task: string, no
     readonly expiresAt: string;
   } | null = null;
   let closed: { readonly outcome: string; readonly pulls: ReadonlyArray<string> } | null = null;
+  let parent: string | null = null;
   const sessions: Array<string> = [];
   const ignored: Array<Oid> = [];
   const redacted: Array<string> = [];
@@ -468,7 +576,10 @@ export const project = Effect.fn("hub.Task.project")(function* (task: string, no
   for (const { commit, payload, signer } of walked.events) {
     switch (payload.type) {
       case "task.opened":
-        if (opened === null) opened = { payload, by: signer };
+        if (opened === null) {
+          opened = { payload, by: signer };
+          parent = payload.parent === undefined || payload.parent === "" ? null : payload.parent;
+        }
         break;
 
       case "task.claimed":
@@ -492,6 +603,24 @@ export const project = Effect.fn("hub.Task.project")(function* (task: string, no
         // is gone. Whether the tombstone counted is the trust graph's answer,
         // asked where it decides something — `Tombstone.counts`, for `gc`.
         redacted.push(payload.targetCommit);
+        break;
+
+      case "task.reparented":
+        // Any member's to re-file, unlike closing it — deliberately the looser
+        // rule of the two. Filing work under a release is triage, it is undone
+        // by another `task.reparented`, and the boundary already asks for a
+        // `hub.*` capability before this ref can be appended to at all. A
+        // close ends the work and a redaction destroys content; neither is
+        // taken back by saying so again, which is why those stay the opener's.
+        //
+        // A record nobody signed still decides nothing, here as everywhere.
+        if (opened === null || signer === null) {
+          ignored.push(commit);
+          break;
+        }
+        // The last one that counts is where the task sits — this is the event
+        // that exists precisely so the answer can change.
+        parent = payload.parent === "" ? null : payload.parent;
         break;
 
       case "task.closed":
@@ -523,6 +652,8 @@ export const project = Effect.fn("hub.Task.project")(function* (task: string, no
     title: first?.type === "task.opened" ? first.title : "",
     description: first?.type === "task.opened" ? first.description : "",
     refs: first?.type === "task.opened" ? first.refs : [],
+    /** The task this one belongs to; `children` is the lister's to derive. */
+    parent,
     // `available` is the question an agent woken by a task actually asks.
     available: opened !== null && closed === null && !holding,
     claim: holding && claim !== null ? { by: claim.by, expiresAt: claim.expiresAt } : null,

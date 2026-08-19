@@ -711,8 +711,27 @@ export class GpDetail extends GitPlusElement {
     `;
   }
 
+  /**
+   * Move this task under another, and re-render from the store's answer.
+   *
+   * The select carries task ids; the empty option detaches. Any member may
+   * re-file work in the hub, so this is offered on every task rather than
+   * only on the ones this browser opened.
+   */
+  #move = (event: Event): void => {
+    const select = event.currentTarget;
+    if (!(select instanceof HTMLSelectElement)) return;
+    void store.move(this.taskId, select.value);
+  };
+
   #meta(task: Task): TemplateResult {
-    const parent = task.parent === undefined ? undefined : store.get(task.parent);
+    // One chain, outermost first. Rendering the release and the parent as two
+    // rows said the same thing twice for anything filed straight under a
+    // release, and claimed two relationships where the hub records one edge.
+    const chain = store.ancestorsOf(task);
+    // Nothing may be filed under its own descendants, and nothing under
+    // itself — offering either would only earn a refusal from the hub.
+    const under = new Set<string>([task.id, ...descendants(task)]);
     return html`
       <aside class="gp-meta">
         <div>
@@ -739,29 +758,66 @@ export class GpDetail extends GitPlusElement {
           </div>
         </div>
         <div>
-          <div class="gp-meta-label">Milestone</div>
-          <div class="gp-meta-value">${task.milestone}</div>
+          <div class="gp-meta-label">Belongs to</div>
+          ${
+            chain.length === 0
+              ? html`<div class="gp-meta-value">—</div>`
+              : html`<div class="gp-crumbs">
+                  ${chain.map(
+                    (ancestor, index) => html`
+                      ${
+                        index === 0
+                          ? nothing
+                          : html`<span class="gp-crumb-sep" aria-hidden="true">›</span>`
+                      }
+                      <button
+                        class="gp-parent-link"
+                        type="button"
+                        title=${ancestor.id}
+                        @click=${() => navigate(this, { screen: "detail", id: ancestor.id })}
+                      >
+                        ${ancestor.title}
+                      </button>
+                    `,
+                  )}
+                </div>`
+          }
+          <select class="gp-meta-select" aria-label="Move this task" @change=${this.#move}>
+            <option value="" ?selected=${task.parent === undefined}>Belongs to nothing</option>
+            ${store
+              .list()
+              .filter((candidate) => !under.has(candidate.id))
+              .map(
+                (candidate) => html`<option
+                  value=${candidate.id}
+                  ?selected=${candidate.id === task.parent}
+                >
+                  ${candidate.id} — ${candidate.title}
+                </option>`,
+              )}
+          </select>
         </div>
-        ${
-          parent === undefined
-            ? nothing
-            : html`
-                <div>
-                  <div class="gp-meta-label">Parent task</div>
-                  <button
-                    class="gp-parent-link"
-                    type="button"
-                    @click=${() => navigate(this, { screen: "detail", id: parent.id })}
-                  >
-                    ${parent.id} — ${parent.title}
-                  </button>
-                </div>
-              `
-        }
       </aside>
     `;
   }
 }
+
+/**
+ * Every task below this one, so the move control cannot offer a descendant.
+ *
+ * Cycle-guarded like `store.ancestorsOf`, and for the reason given there.
+ */
+const descendants = (task: Task, seen: Set<string> = new Set()): readonly string[] => {
+  const out: string[] = [];
+  for (const childId of task.children ?? []) {
+    if (seen.has(childId)) continue;
+    seen.add(childId);
+    out.push(childId);
+    const child = store.get(childId);
+    if (child !== undefined) out.push(...descendants(child, seen));
+  }
+  return out;
+};
 
 /** Only reachable if the fixtures are emptied; keeps `#task` total. */
 const EMPTY: Task = {
@@ -773,7 +829,6 @@ const EMPTY: Task = {
   desc: "",
   assignees: [],
   labels: [],
-  milestone: "",
   comments: [],
   updated: "",
 };

@@ -2,7 +2,7 @@
   /**
    * The UI is a separate program from the server.
    *
-   * `../tsconfig.json` compiles `src/` with `lib: ["ES2024", "WebWorker", "DOM"]`
+   * `../../tsconfig.json` compiles the server half with `lib: ["ES2024", "WebWorker", "DOM"]`
    * — right for a Worker, wrong here. DOM and WebWorker declare overlapping
    * globals, and having both in one program mis-resolves DOM members: it is why
    * `input.after(button)` resolved against a `Response`-shaped overload and why
@@ -13,10 +13,18 @@
    * `@types/node` stays available because `build.ts` and `verify.ts` are node
    * scripts that live beside the browser modules they build and drive.
    */
-  "extends": "../tsconfig.json",
+  "extends": "../../tsconfig.json",
   "compilerOptions": {
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": ["node"]
   },
-  "include": ["**/*.ts", "globals.d.ts"]
+  "include": ["**/*.ts", "globals.d.ts"],
+  /**
+   * The root excludes this directory so its own `src/**` glob does not pull
+   * the browser half into the Worker program. Inherited here that exclusion
+   * would empty this project of every file it exists to compile, so it is
+   * dropped — nothing outside this directory is reachable from the include
+   * above anyway.
+   */
+  "exclude": []
 }

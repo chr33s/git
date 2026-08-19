@@ -31,6 +31,27 @@ export interface Row {
   readonly depth: number;
 }
 
+/**
+ * A release and the work filed under it.
+ *
+ * `milestone` is `null` for the trailing group of work that belongs to no
+ * release — and for every narrowed list, where there is no hierarchy left to
+ * group by.
+ */
+export interface Group {
+  readonly milestone: Task | null;
+  readonly rows: readonly Row[];
+}
+
+/** The children list, with `id` taken out of it / put into it. */
+const detach = (task: Task, id: string): Task => ({
+  ...task,
+  children: (task.children ?? []).filter((child) => child !== id),
+});
+
+const attach = (task: Task, id: string): Task =>
+  (task.children ?? []).includes(id) ? task : { ...task, children: [...(task.children ?? []), id] };
+
 class TaskStore extends EventTarget {
   #tasks: Task[] = [...seed];
   #sessions: readonly SessionRow[] = [];
@@ -90,19 +111,85 @@ class TaskStore extends EventTarget {
    * that hides a parent has nothing to hang its children under, so pretending
    * the hierarchy survived would misdraw it.
    */
-  rows(filter: Filter = "all", query = ""): readonly Row[] {
-    const needle = query.trim().toLowerCase();
-    if (filter === "all" && needle === "") {
+  /**
+   * Where a task sits, outermost first: its release, then whatever is between.
+   *
+   * One chain rather than a "milestone" and a "parent" read separately — the
+   * hub records a single edge, and two rows claiming otherwise said the same
+   * thing twice for anything filed straight under a release. The first entry
+   * is the root the task hangs from; the last is its own parent. Empty for a
+   * task that belongs to nothing.
+   *
+   * Guarded against a cycle even so. `GET /hub/tasks` severs one before it
+   * reaches here, but this store also holds fixtures and tab-local moves that
+   * never went near it, and a walk that trusted the data would hang the tab
+   * rather than misdraw one row.
+   */
+  ancestorsOf(task: Task): readonly Task[] {
+    const seen = new Set<string>([task.id]);
+    const chain: Task[] = [];
+    let at = task;
+    for (;;) {
+      const parent = at.parent === undefined ? undefined : this.get(at.parent);
+      if (parent === undefined || seen.has(parent.id)) break;
+      seen.add(parent.id);
+      chain.unshift(parent);
+      at = parent;
+    }
+    return chain;
+  }
+
+  /**
+   * The Tasks list, grouped by release.
+   *
+   * A release is a task like any other, so it heads its group rather than
+   * taking a row of its own: the design's two levels — an epic, and the work
+   * under it — are the two the list draws, and nesting a third would push
+   * every row across at an indent the design set deliberately.
+   *
+   * A root with no children is not a release, only work nobody filed, and it
+   * lands in the trailing group. A narrowed list is one flat unlabelled group,
+   * for the reason `rows` gives.
+   */
+  groups(filter: Filter = "all"): readonly Group[] {
+    if (filter !== "all") return [{ milestone: null, rows: this.rows(filter) }];
+
+    const under = (task: Task): Row[] => {
       const out: Row[] = [];
-      for (const task of this.#tasks) {
-        if (task.parent !== undefined) continue;
-        out.push({ task, depth: 0 });
-        for (const childId of task.children ?? []) {
-          const child = this.get(childId);
-          if (child !== undefined) out.push({ task: child, depth: 1 });
+      for (const childId of task.children ?? []) {
+        const child = this.get(childId);
+        if (child === undefined) continue;
+        out.push({ task: child, depth: 0 });
+        for (const grandchildId of child.children ?? []) {
+          const grandchild = this.get(grandchildId);
+          if (grandchild !== undefined) out.push({ task: grandchild, depth: 1 });
         }
       }
       return out;
+    };
+
+    const groups: Group[] = [];
+    const loose: Row[] = [];
+    for (const task of this.#tasks) {
+      if (task.parent !== undefined) continue;
+      if ((task.children ?? []).length === 0) loose.push({ task, depth: 0 });
+      else groups.push({ milestone: task, rows: under(task) });
+    }
+    if (loose.length > 0) groups.push({ milestone: null, rows: loose });
+    return groups;
+  }
+
+  rows(filter: Filter = "all", query = ""): readonly Row[] {
+    const needle = query.trim().toLowerCase();
+    if (filter === "all" && needle === "") {
+      return this.groups().flatMap((group) =>
+        group.milestone === null
+          ? group.rows
+          : [
+              { task: group.milestone, depth: 0 },
+              ...group.rows.map((row) => ({ ...row, depth: 1 })),
+            ],
+      );
     }
     return this.#tasks
       .filter((task) => (filter === "tasks" ? task.kind === "Task" : true))
@@ -137,7 +224,6 @@ class TaskStore extends EventTarget {
       desc: input.desc,
       assignees: [input.author],
       labels: [],
-      milestone: "—",
       comments: [],
     };
     this.#tasks = [...this.#tasks, task];
@@ -224,8 +310,29 @@ class TaskStore extends EventTarget {
   async createRemote(input: {
     readonly title: string;
     readonly description: string;
+    readonly parent?: string;
   }): Promise<string | null> {
     return await import("./hub.ts").then((hub) => hub.createTask(input)).catch(() => null);
+  }
+
+  /**
+   * Move a task under another, or out from under one.
+   *
+   * Tried in the hub first; a fixture task has no ref to append to, so it
+   * moves in this tab only — the same split every other write here makes.
+   */
+  async move(id: string, parent: string): Promise<void> {
+    const landed = await import("./hub.ts")
+      .then((hub) => hub.moveTask(id, parent))
+      .catch(() => false);
+    if (landed) return;
+    const was = this.get(id)?.parent;
+    if (was !== undefined) this.#replace(was, (task) => detach(task, id));
+    if (parent !== "") this.#replace(parent, (task) => attach(task, id));
+    this.#replace(id, (task) => {
+      const { parent: _, ...rest } = task;
+      return parent === "" ? rest : { ...rest, parent };
+    });
   }
 
   /** Comment on a hub pull request; `false` falls back to `comment`. */

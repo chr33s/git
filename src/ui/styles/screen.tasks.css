@@ -21,6 +21,45 @@
   overflow: hidden;
 }
 
+/* A release heads the work filed under it rather than taking a row of its
+   own, so the two levels the design drew — an epic, and its work — keep the
+   indentation they were given. */
+.gp-milestone-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 0 4px 8px;
+  margin-top: 22px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.gp-task-list:first-child + .gp-milestone-head,
+.gp-milestone-head:first-child {
+  margin-top: 0;
+}
+
+/* Not upper-cased like the design's static section labels: this is a release
+   name somebody typed, and "v0.4" is not "V0.4". */
+.gp-milestone-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gp-fg-muted);
+}
+
+.gp-milestone-head:hover .gp-milestone-title {
+  color: var(--gp-fg);
+}
+
+.gp-milestone-count {
+  font-size: 12px;
+  color: var(--gp-fg-faint);
+}
+
 .gp-task-row {
   display: flex;
   align-items: center;

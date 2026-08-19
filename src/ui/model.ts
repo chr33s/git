@@ -106,7 +106,6 @@ export interface Task {
   readonly desc: string;
   readonly assignees: readonly Person[];
   readonly labels: readonly Label[];
-  readonly milestone: string;
   readonly comments: readonly Comment[];
   readonly updated: string;
   readonly parent?: string;

@@ -18,10 +18,10 @@
  * file directly is the smallest fix available from this side; the alias can go
  * once the package exports it.
  *
- *   node ui/build.ts            # once
- *   node ui/build.ts --serve    # watch, and serve it on :8000
- *   node ui/build.ts --watch    # watch only, for an external server
- *   node ui/build.ts --debug    # unminified, for reading a stack trace
+ *   node src/ui/build.ts            # once
+ *   node src/ui/build.ts --serve    # watch, and serve it on :8000
+ *   node src/ui/build.ts --watch    # watch only, for an external server
+ *   node src/ui/build.ts --debug    # unminified, for reading a stack trace
  *
  * `--serve` fronts the bundle with a proxy so the page and the API share an
  * origin, which is the arrangement the deployed Worker gives them and the only
@@ -41,7 +41,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pwd = dirname(fileURLToPath(import.meta.url));
-const outdir = process.env["GIT_UI_OUTDIR"] ?? join(pwd, "..", "dist", "ui");
+const outdir = process.env["GIT_UI_OUTDIR"] ?? join(pwd, "..", "..", "dist", "ui");
 
 /** See the note above: reached by file path because the package does not
  * export it. Located relative to the `.` entry — which the package *does*
@@ -251,7 +251,7 @@ if (watch || serve) {
   } else {
     // Watch-only serves nothing, which is worth saying out loud: the process
     // then sits in the foreground by design, waiting for the next change.
-    console.info("\nwatching ui/ — nothing is being served; use --serve for that\n");
+    console.info("\nwatching src/ui/ — nothing is being served; use --serve for that\n");
   }
 } else {
   await esbuild(options);

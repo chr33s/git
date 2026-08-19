@@ -13,7 +13,7 @@
  * ordinary state between syncs.
  *
  * The class implements the same surface the Code screen already consumes
- * from the HTTP client (`CodeApi` in `ui/api.ts`), so the screen cannot tell
+ * from the HTTP client (`CodeApi` in `api.ts`), so the screen cannot tell
  * which it holds — except through `sync`, which only this one answers.
  *
  * Loaded lazily by the shell: OPFS, the pack machinery and the Effect
@@ -22,17 +22,17 @@
  */
 import { Effect, Layer, Stream } from "effect";
 
-import * as Opfs from "../src/adapters/Opfs.ts";
-import * as Client from "../src/client/Client.ts";
-import { fetchRepository } from "../src/client/Fetch.ts";
-import { push as pushBranches, type PushResult } from "../src/client/Push.ts";
-import { isBinary, unified } from "../src/git/Diff.ts";
-import { isGitlink, isTree, type Signature } from "../src/git/Format.ts";
-import { cherryPick as replayCommit, rebase as replayBranch } from "../src/git/Rebase.ts";
-import { next as bisectNext } from "../src/git/Bisect.ts";
-import { forPath as pathHistory } from "../src/git/History.ts";
-import { Repository, treeAt } from "../src/git/Repository.ts";
-import { ObjectStore, RefStore, type Oid } from "../src/git/Store.ts";
+import * as Opfs from "../adapters/Opfs.ts";
+import * as Client from "../client/Client.ts";
+import { fetchRepository } from "../client/Fetch.ts";
+import { push as pushBranches, type PushResult } from "../client/Push.ts";
+import { isBinary, unified } from "../git/Diff.ts";
+import { isGitlink, isTree, type Signature } from "../git/Format.ts";
+import { cherryPick as replayCommit, rebase as replayBranch } from "../git/Rebase.ts";
+import { next as bisectNext } from "../git/Bisect.ts";
+import { forPath as pathHistory } from "../git/History.ts";
+import { Repository, treeAt } from "../git/Repository.ts";
+import { ObjectStore, RefStore, type Oid } from "../git/Store.ts";
 
 import {
   ApiError,

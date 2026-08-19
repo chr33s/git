@@ -420,6 +420,20 @@
   color: var(--gp-fg-secondary);
 }
 
+/* The chain a task hangs from, outermost first. Wraps rather than truncating:
+   a sidebar this narrow would otherwise clip the release, which is the part
+   worth reading. */
+.gp-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.gp-crumb-sep {
+  color: var(--gp-fg-fainter);
+}
+
 .gp-parent-link {
   color: var(--gp-accent);
   cursor: pointer;
@@ -472,4 +486,19 @@
 }
 .gp-task-actions .gp-field-label {
   margin-right: auto;
+}
+
+/* The move control: where this task belongs, changed in place. Sized to the
+   sidebar rather than to its longest option, which is a task title. */
+.gp-meta-select {
+  width: 100%;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--gp-fg-secondary);
+  background: var(--gp-surface-input);
+  border: 1px solid var(--gp-border);
+  border-radius: var(--gp-radius-sm);
 }

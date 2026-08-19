@@ -29,7 +29,7 @@ import type {
   HubSessionSummary,
   HubTask,
   HubThread,
-} from "../src/server/ApiContract.ts";
+} from "../server/ApiContract.ts";
 
 import { ApiError } from "./api.ts";
 import { registry } from "./atoms.ts";
@@ -55,6 +55,13 @@ const shortAuthor = (fingerprint: string | null): string =>
 const taskStatus = (task: HubTask): Status =>
   task.closed !== null ? "Done" : task.claim !== null ? "In progress" : "Todo";
 
+/**
+ * A task, and what it belongs to.
+ *
+ * Only the edge is carried across. What it *means* — a release, an epic, a
+ * parent story — is the reader's to name, and `store.ancestorsOf` is where
+ * this UI names it.
+ */
 const mapTask = (task: HubTask): Task => ({
   id: task.task,
   kind: "Task",
@@ -64,10 +71,11 @@ const mapTask = (task: HubTask): Task => ({
   desc: task.description,
   assignees: [],
   labels: task.refs.map((name) => ({ name, hue: "blue" })),
-  milestone: task.closed?.outcome ?? "—",
   comments: [],
   updated: "in the hub",
   hub: true,
+  parent: task.parent ?? undefined,
+  children: task.children,
 });
 
 const pullStatus = (pull: HubPullSummary): Status =>
@@ -123,7 +131,6 @@ const mapPull = (pull: HubPullSummary): ChangeRequest => ({
   desc: "",
   assignees: [],
   labels: [],
-  milestone: "—",
   comments: [],
   updated: ago(new Date(pull.at)),
   sourceRef: pull.head ?? "",
@@ -351,6 +358,7 @@ const settled = async (id: string): Promise<boolean> => {
 export const createTask = async (input: {
   readonly title: string;
   readonly description: string;
+  readonly parent?: string;
 }): Promise<string | null> => {
   try {
     const { openTask } = await import("./identity.ts");
@@ -363,6 +371,24 @@ export const createTask = async (input: {
     return task;
   } catch {
     return null;
+  }
+};
+
+/**
+ * Move a hub task under another, or out from under one.
+ *
+ * `false` where the repository refused the event — a key that is not a member
+ * — and the caller says so rather than showing a move that did not happen.
+ */
+export const moveTask = async (task: string, parent: string): Promise<boolean> => {
+  if (!fromHub.has(task)) return false;
+  try {
+    const { reparentTask } = await import("./identity.ts");
+    await reparentTask({ task, parent });
+    refreshListings();
+    return true;
+  } catch {
+    return false;
   }
 };
 

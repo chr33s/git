@@ -154,18 +154,28 @@ history (`log`, `history`, `show`, `diff`, `grep`, `bisect`, `files`), refs
 
 ## Web UI
 
-`ui/` is a browser interface for a hosted repository — a file explorer and code
+`src/ui/` is a browser interface for a hosted repository — a file explorer and code
 view over the JSON API, plus Tasks and Change Requests. Built with Lit,
 [`@chr33s/base-wc`](https://github.com/chr33s/base-wc) and Pierre's tree and
 diff components; light and dark.
 
 ```sh
-npm run ui:build          # bundle to dist/ui
-node ui/build.ts --serve  # and serve it on :8000
-npm run ui:verify         # drive it in a browser
+npm run ui:build              # bundle to dist/ui
+node src/ui/build.ts --serve  # watch, and serve it on :8000
+npm run ui:verify             # drive it in a browser
 ```
 
-See [`ui/readme.md`](ui/readme.md) for what is wired to the server and what is
+To serve it for real, hand the bundle to the server itself — the page and the
+API then share one origin, which is the only arrangement a browser permits:
+
+```sh
+chr33s-git serve --root /path/to/repos --ui
+```
+
+`--ui-dir` points at a bundle built somewhere else. Which repository the page
+shows is `<meta name="gp-repo">` in its `index.html`, `core` by default.
+
+See [`src/ui/readme.md`](src/ui/readme.md) for what is wired to the server and what is
 still fixture data.
 
 ## Single binary

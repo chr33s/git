@@ -32,16 +32,16 @@ import {
   parsePublicKey,
   sign,
   type PrivateKey,
-} from "../src/crypto/SshSignature.ts";
-import * as HubEvent from "../src/hub/Event.ts";
-import * as HubTask from "../src/hub/Task.ts";
+} from "../crypto/SshSignature.ts";
+import * as HubEvent from "../hub/Event.ts";
+import * as HubTask from "../hub/Task.ts";
 import {
   HubEventAppended,
   HubMerged,
   RefsResponse,
   WhoamiAnswer,
-} from "../src/server/ApiContract.ts";
-import { signEnvelope } from "../src/server/Auth.ts";
+} from "../server/ApiContract.ts";
+import { signEnvelope } from "../server/Auth.ts";
 import { Schema } from "effect";
 
 import { type Authorize, nonceOf, repoOf, type SignedCommand } from "../src/client/Authorize.ts";
@@ -384,7 +384,7 @@ const append = async (bytes: Uint8Array, key: PrivateKey): Promise<HubEventAppen
   if (!response.ok) {
     const failure: unknown = await response.json().catch((): undefined => undefined);
     // SAFETY: every field is read optionally and defaulted; the shape is the
-    // same loose error body `ui/api.ts` decodes at its own boundary.
+    // same loose error body `api.ts` decodes at its own boundary.
     const body_ = failure as { _tag?: string; message?: string; reason?: string } | undefined;
     throw new ApiError(
       body_?._tag ?? "HttpError",
@@ -420,6 +420,7 @@ const stamp = async (): Promise<{
 export const openTask = async (input: {
   readonly title: string;
   readonly description: string;
+  readonly parent?: string;
 }): Promise<string> => {
   const key = await identity();
   const task = HubTask.newId();
@@ -440,8 +441,38 @@ export const openTask = async (input: {
     refs: [],
     pulls: [],
   };
-  await append(HubTask.encode(payload), key);
+  // Omitted entirely when there is none, so the bytes this browser signs are
+  // the ones a parentless `task.opened` has always had; see `hub/Task.ts`.
+  const opened: HubTask.TaskPayload =
+    input.parent === undefined || input.parent === ""
+      ? payload
+      : { ...payload, parent: input.parent };
+  await append(HubTask.encode(opened), key);
   return task;
+};
+
+/**
+ * File a task under another, or detach it with an empty `parent`.
+ *
+ * Any member may re-file work, including work this browser did not open —
+ * `hub/Task.ts` says why that is looser than closing it.
+ */
+export const reparentTask = async (input: {
+  readonly task: string;
+  readonly parent: string;
+}): Promise<void> => {
+  const key = await identity();
+  const payload: HubTask.TaskPayload = {
+    type: "task.reparented",
+    version: 1,
+    repo: (await repoIdOf()) ?? repo,
+    task: input.task,
+    id: HubEvent.newId(),
+    issuedAt: new Date().toISOString(),
+    trustHead: null,
+    parent: input.parent,
+  };
+  await append(HubTask.encode(payload), key);
 };
 
 /** Comment on a pull request, signed by this browser. */
