@@ -29,6 +29,7 @@ import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import * as Policy from "../server/Policy.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
+import * as Verify from "../trust/Verify.ts";
 import { readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
 const identityOf = Effect.fn("queue.identityOf")(function* (repo: string) {
@@ -72,6 +73,17 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
 }) {
   if (input.queue !== "") {
     const state = yield* Queue.project(input.queue);
+    // Both named and disagreeing is a caller that thinks it is talking about
+    // one branch while this talks about another — a drifted hook appending
+    // records to, or landing on, a branch its invocation never named. Refused
+    // rather than resolved by precedence, because either precedence is silently
+    // wrong for somebody.
+    if (input.target !== "" && state.target !== targetRef(input.target)) {
+      return yield* new Invalid({
+        field: "target",
+        reason: `${input.queue} serves ${state.target ?? "no branch"}, and --target names ${targetRef(input.target)}`,
+      });
+    }
     // A queue nobody opened is a queue nothing reads. Refused here because
     // appending anyway would *create* `refs/hub/queue/<typo>` — on a namespace
     // that cannot be deleted, holding records the projection ignores for ever,
@@ -555,6 +567,19 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     member,
     capabilities: member?.capabilities ?? [],
   };
+
+  // The staleness bound every other door applies. `Policy.evaluate` judges one
+  // ref update against the rules; the bound on how old a membership view may be
+  // lives in `gate` and `gateWrite`, because it is about the *request* rather
+  // than about the update. A runner that judged itself with `evaluate` alone
+  // was the one writer exempt from it — landing batch after batch on a branch
+  // whose every `git push` was being refused for exactly that reason.
+  if (rules.maxTrustAgeSeconds > 0) {
+    const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
+    if (!stale.ok) {
+      return yield* new Invalid({ field: "trust", reason: stale.reason });
+    }
+  }
 
   const dropped: Array<{ readonly pr: string; readonly reason: string }> = [];
   const unbuilt: Array<{ readonly pr: string; readonly reason: string }> = [];
@@ -1071,7 +1096,7 @@ const run = Command.make(
 );
 
 export const queueCommand = Command.make("queue", {}, () =>
-  Console.log("git+ queue <open|enter|leave|run|list|show> — see --help"),
+  Console.log("git+ queue <open|enter|leave|run|close|list|show> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Start a queue for a branch")),

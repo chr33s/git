@@ -1413,6 +1413,50 @@ describe("cli queue", () => {
     );
   });
 
+  it("refuses when --queue and --target name different branches", async () => {
+    // A caller that thinks it is talking about one branch while this talks
+    // about another is a drifted hook appending records to, or landing on, a
+    // branch its invocation never named.
+    const refused = await failing([
+      "queue",
+      "enter",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "--target",
+      "release",
+      "project",
+      await propose("one"),
+    ]);
+    assert.match(refused, /--target names refs\/heads\/release/);
+  });
+
+  it("holds itself to the staleness bound every other door applies", async () => {
+    // `Policy.evaluate` judges one ref update; how old a membership view may be
+    // is a rule about the request, enforced in `gate`. A runner judging itself
+    // with `evaluate` alone was the one writer exempt from it — landing batches
+    // on a branch whose every `git push` was being refused for that reason.
+    await publish(protectedRules({ maxTrustAgeSeconds: 1 }));
+    await enter(await propose("one"));
+
+    const refused = await failing([
+      "queue",
+      "run",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "project",
+    ]);
+    assert.match(refused, /checkpoint/i);
+    assert.equal(await mainAt(), base, "and the branch is where it was");
+  });
+
   it("refuses a second queue for a branch that already has one", async () => {
     // `refs/hub/queue/*` cannot be deleted, so a second queue for one branch is
     // a permanent split: entries divide invisibly across the two and two
