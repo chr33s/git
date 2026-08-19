@@ -16,6 +16,7 @@ import { ObjectStore, type Oid, type RefUpdate, storageOf } from "../git/Store.t
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Session from "../hub/Session.ts";
+import * as Task from "../hub/Task.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, GENESIS_REF, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
@@ -1279,6 +1280,35 @@ describe("Policy", () => {
 
       assert.equal(outcome.ok, false, "a removal is not something hub.session buys");
       assert.match(outcome.ok === false ? outcome.reason : "", /hub\.redact/);
+    });
+
+    it("charges hub.task for a task ref, not merely any hub capability", async () => {
+      // The task fold deliberately never re-judges its signers, so this
+      // boundary is the only place `hub.task` is ever asked for. Charged
+      // "any hub.* capability", a `hub.comment` holder could open, claim and
+      // close tasks — which is exactly the coarse door the docs say
+      // `hub.task` exists to close.
+      const write = (capabilities: ReadonlyArray<string>) =>
+        scenario(
+          Effect.gen(function* () {
+            const where = yield* world(capabilities);
+            const repository = yield* Repository;
+            const opened = yield* Task.open({
+              repo: where.genesis.repoId,
+              title: "who may say so",
+              key: where.dev,
+            });
+            const head = yield* repository.resolve(Task.refOf(opened.task));
+            return yield* judge(where, { name: Task.refOf(opened.task), value: head });
+          }),
+        );
+
+      const refused = await write(["hub.comment", "source.push"]);
+      assert.equal(refused.ok, false, "hub.comment does not buy the task namespace");
+      assert.match(refused.ok === false ? refused.reason : "", /hub\.task/);
+
+      const allowed = await write(["hub.task", "source.push"]);
+      assert.equal(allowed.ok, true, "hub.task is exactly what the namespace charges");
     });
 
     it("admits a session ref, which is the other shape this namespace holds", async () => {

@@ -56,7 +56,8 @@ endpoints declared in `src/server/Api.ts`:
 | Search   | `POST /:repo/grep`                                                                              | File contents matching the query           |
 | Activity | `GET /:repo/commits/:oid`                                                                       | The timeline, one card per commit          |
 | Detail   | `POST /:repo/diff`                                                                              | Which files a Change Request touches       |
-| Detail   | `POST /:repo/merge`                                                                             | Merging a Change Request whose refs exist  |
+| Detail   | `POST /:repo/merge`                                                                             | Merging a *fixture* Change Request         |
+| Detail   | `POST /:repo/hub/pulls/:id/merge`                                                               | Settling a hub Change Request atomically   |
 | Settings | `GET /:repo/branches`, `DELETE /:repo/branches/:name`, `POST /:repo/reset`                      | Branch administration                      |
 | Settings | `GET/POST /:repo/tags`, `DELETE /:repo/tags/:name`                                              | Tags                                       |
 | Settings | `GET/POST /:repo/remotes`, `DELETE /:repo/remotes/:name`, `POST /:repo/fetch`, `/push`, `/pull` | Remotes and sync                           |
@@ -91,12 +92,19 @@ documented sample, never passed off as live.
 OPFS is proposed from the Code screen's **Propose** dialog: the branch is
 pushed, a `pr.opened` event is signed and appended, and the new Change
 Request opens in Detail — where **Approve** / **Request changes** submit
-reviews of the exact revision, threads resolve and take replies, and a merge
-that lands also records `pr.merged`. Hub tasks carry their lease: claim,
-release, complete or abandon from the detail screen. The Activity screen
-lists the hub's **sessions** — what each agent was told and produced — and
-the commits panel picks up cherry-pick, bisect marks, and a rebase entry in
-the branch menu (all local in local mode, over the JSON API otherwise).
+reviews of the exact revision and threads resolve and take replies. Whether
+**Merge** is offered is the *server's* judgment (`mergeable` on the pull
+answers, computed under the published rules), and the merge itself is one
+transition: `POST /hub/pulls/:id/merge` fast-forwards the base to the exact
+approved head and appends the browser's signed `pr.merged` beside it, judged
+together — a refused or offline merge leaves the Change Request open with
+the reason, and "Merged" appears only after the projection is re-read. Hub
+tasks carry their lease: claim, release, complete or abandon from the detail
+screen (task *comments* are disabled with the reason: no task-comment event
+exists in the protocol yet, and task ids must never reach the pull-request
+namespace). The Activity screen lists the hub's **sessions**, and the
+commits panel picks up cherry-pick, bisect marks, and a rebase entry in the
+branch menu (all local in local mode, over the JSON API otherwise).
 Settings shows grant expiry, trust freshness and the usage budget beside the
 identity, badges remotes with their stored key and standing sync
 instruction, and the **Branch policy** card reads `GET /policy` and
@@ -104,19 +112,28 @@ publishes edits back through `policy.write`'s own door.
 
 **The browser holds a signing key.** `identity.ts` generates an Ed25519 key
 on first use (WebCrypto, through the same `SshSignature` module every other
-author uses), keeps the seed in OPFS beside the clone, and signs hub events
-with it: creating a Task opens a real `task.opened` event over
-`POST /hub/events`, commenting on a hub Change Request appends
+author uses) and keeps it in OPFS as **one versioned record** — seed and
+public line together, the public point re-derived from the seed on every
+load and repaired *from the seed* with a visible note if the two ever
+disagree, so the browser can never sign with one key while advertising
+another. It signs hub events: creating a Task opens a real `task.opened`
+event over `POST /hub/events`, commenting on a hub Change Request appends
 `comment.created`, and both are read back from the server's projection —
-never shown optimistically. When the server answers a 401 nonce challenge,
-the request retries once under a signed `auth.request` envelope, the same
-native scheme the CLI presents — and every JSON write in `api.ts` retries a
-401 the same way, so a granted key authenticates merges, commits and policy
-edits transparently. A fresh key is nobody: the Settings identity card shows
-its public half so an operator can `hub grant` it, and until a repository
-accepts the key (or is served `--open`), mutations fall back to tab-local
-state and the dialogs say which happened. The projection half of a
-fixture merge remains tab-local, as before.
+never shown optimistically. When the server answers a 401, its challenge
+carries the nonce *and the RepoID* — which is what lets a key bootstrap on a
+**private** repository, where the unauthenticated `/whoami` that used to
+supply the identity is itself refused — and the request retries once under a
+signed `auth.request` envelope, the same native scheme the CLI presents.
+Every request answers the challenge the same way: the JSON verbs in
+`api.ts`, the derived client's hub reads and writes, and smart HTTP itself —
+clone, fetch and push hand their challenges to the browser key
+(`src/client/Authorize.ts`), a push's envelope binding the exact ref
+commands it was signed for. A fresh key is nobody: the Settings identity
+card shows its public half so an operator can `hub grant` it, and until a
+repository accepts the key (or is served `--open`), mutations report the
+refusal. An authentication refusal is never dressed up as the offline
+sample: a private repository that turns the key away empties the screens and
+says what to grant.
 
 When the API cannot be reached, Code and Diff fall back to the design's sample
 repository and **say so** in an inline note, rather than passing fixtures off as
@@ -128,9 +145,14 @@ HTTP with `src/client/Fetch.ts`, and from then on the Code screen's reads and
 commits run against the same `Repository` service the server uses — over
 `src/adapters/Opfs.ts` — with the server demoted to a remote named `origin`.
 The header grows a sync control: **Push ↑n** sends the branch with
-`src/client/Push.ts`, **Fetch ↓n** brings origin's movement in, and nothing
-moves without being asked. A browser without OPFS (or with origin unreachable
-on first load) simply keeps the HTTP client; nothing about the page changes.
+`src/client/Push.ts`, **Fetch ↓n** brings origin's movement in (one
+advertisement, one pack, both refspecs), and nothing moves without being
+asked. The `refs/remotes/origin/*` tracking refs are *observations* of
+origin — written at clone, after a successful push, and by a fetch, never
+copied from local heads — so an unpushed commit is still ↑1 after a full
+reload, and Push stays enabled over exactly the work that needs it. A
+browser without OPFS (or with origin unreachable on first load) simply keeps
+the HTTP client; nothing about the page changes.
 
 **The client is derived, not written.** `client.ts` derives an atom-backed
 client from `src/server/Api.ts`'s own `HttpApi` declaration

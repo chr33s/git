@@ -26,6 +26,9 @@ import { Repository } from "../git/Repository.ts";
 import { isOid, type ObjectStore, type Oid, type RefStore, type RefUpdate } from "../git/Store.ts";
 import { ObjectStore as ObjectStoreTag, RefStore as RefStoreTag } from "../git/Store.ts";
 import { PktReader } from "../git/Pkt.ts";
+import { type Authorize, fetchAuthorized, operationOf } from "./Authorize.ts";
+
+export type { Authorize };
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -115,13 +118,17 @@ const authorization = (token: string | undefined): Record<string, string> =>
 
 const advertisement = (
   url: string,
-  options?: { readonly token?: string | undefined },
+  options?: { readonly token?: string | undefined; readonly authorize?: Authorize | undefined },
 ): Effect.Effect<Advertisement, Invalid> =>
   Effect.tryPromise({
     try: async () => {
-      const response = await fetch(`${url}/info/refs?service=git-upload-pack`, {
-        headers: authorization(options?.token),
-      });
+      const target = `${url}/info/refs?service=git-upload-pack`;
+      const response = await fetchAuthorized(
+        target,
+        { headers: authorization(options?.token) },
+        { operation: operationOf("GET", target), commands: [] },
+        options?.authorize,
+      );
       if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
       return advertisedRefs(response.body);
     },
@@ -143,6 +150,7 @@ const lsRefsV2 = (
   url: string,
   prefixes: ReadonlyArray<string>,
   token: string | undefined,
+  authorize?: Authorize,
 ): Effect.Effect<ReadonlyArray<RemoteRef>, Invalid> =>
   Effect.tryPromise({
     try: async () => {
@@ -153,17 +161,22 @@ const lsRefsV2 = (
         "0000",
       ].join("");
 
-      const response = await fetch(`${url}/git-upload-pack`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-git-upload-pack-request",
-          // The version travels in a header, not the body: the server has to
-          // know which conversation this is before it reads a pkt-line.
-          "git-protocol": "version=2",
-          ...authorization(token),
+      const response = await fetchAuthorized(
+        `${url}/git-upload-pack`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-git-upload-pack-request",
+            // The version travels in a header, not the body: the server has to
+            // know which conversation this is before it reads a pkt-line.
+            "git-protocol": "version=2",
+            ...authorization(token),
+          },
+          body: lines,
         },
-        body: lines,
-      });
+        { operation: "git-upload-pack", commands: [] },
+        authorize,
+      );
       // A server with no v2 to offer answers 404 or 501, and has no hub state
       // either. Anything else is a failure the caller has to see, or a
       // replication run reports success having fetched nothing, revocations
@@ -289,15 +302,21 @@ const uploadPack = async (
   url: string,
   token: string | undefined,
   body: Uint8Array<ArrayBuffer>,
+  authorize?: Authorize,
 ): Promise<AsyncIterable<Uint8Array>> => {
-  const response = await fetch(`${url}/git-upload-pack`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-git-upload-pack-request",
-      ...authorization(token),
+  const response = await fetchAuthorized(
+    `${url}/git-upload-pack`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-git-upload-pack-request",
+        ...authorization(token),
+      },
+      body,
     },
-    body,
-  });
+    { operation: "git-upload-pack", commands: [] },
+    authorize,
+  );
   if (!response.ok || response.body === null) {
     throw new Error(`upload-pack returned ${response.status}`);
   }
@@ -452,8 +471,9 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
   readonly wants: ReadonlyArray<Oid>;
   readonly haves: ReadonlyArray<Oid>;
   readonly capabilities: ReadonlyArray<string>;
+  readonly authorize?: Authorize | undefined;
 }) {
-  const { capabilities, haves, token, url, wants } = input;
+  const { authorize, capabilities, haves, token, url, wants } = input;
   let offered = 0;
   while (offered < haves.length) {
     const next = Math.min(offered + HAVES_PER_ROUND, haves.length);
@@ -463,6 +483,7 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
           url,
           token,
           negotiation({ wants, haves: haves.slice(0, next), done: false, capabilities }),
+          authorize,
         );
         const { lines } = await prelude(body);
         return acknowledged(lines);
@@ -497,6 +518,7 @@ export const requestPack = (input: {
   readonly haves: ReadonlyArray<Oid>;
   readonly depth?: number | undefined;
   readonly capabilities?: ReadonlyArray<string> | undefined;
+  readonly authorize?: Authorize | undefined;
 }): Effect.Effect<AsyncIterable<Uint8Array>, Invalid> =>
   Effect.tryPromise({
     try: async () => {
@@ -513,6 +535,7 @@ export const requestPack = (input: {
           depth: input.depth,
           capabilities: input.capabilities ?? [],
         }),
+        input.authorize,
       );
       const { rest } = await prelude(body);
       return rest;
@@ -539,10 +562,12 @@ export const fetchRepository = (options: {
    * line needs to know what a hub event is.
    */
   readonly refspecs?: ReadonlyArray<Refspec.Refspec> | undefined;
+  /** How to answer a `Hub-SSH-v1` challenge; absent, a 401 stays a 401. */
+  readonly authorize?: Authorize | undefined;
 }): Effect.Effect<FetchResult, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> =>
   Effect.gen(function* () {
-    const { branch, stores, token, url } = options;
-    const advertised = yield* advertisement(url, { token });
+    const { authorize, branch, stores, token, url } = options;
+    const advertised = yield* advertisement(url, { token, authorize });
     const capabilities = requestedCapabilities(advertised.capabilities);
 
     const specs =
@@ -567,7 +592,7 @@ export const fetchRepository = (options: {
     // remote that has no v2 to offer, so a *failure* here is a real one and
     // reporting success without it would be reporting a replication that did
     // not happen.
-    const extra = hidden.length === 0 ? [] : yield* lsRefsV2(url, hidden, token);
+    const extra = hidden.length === 0 ? [] : yield* lsRefsV2(url, hidden, token, authorize);
 
     const seen = new Set(advertised.refs.map((ref) => ref.name));
     const available = [...advertised.refs, ...extra.filter((ref) => !seen.has(ref.name))];
@@ -613,7 +638,7 @@ export const fetchRepository = (options: {
     // Empty target, empty offer: the clone case sends `done` straight away
     // rather than a round that could only say "I have nothing".
     const haves = yield* localHaves(stores);
-    const offered = yield* negotiate({ url, token, wants, haves, capabilities });
+    const offered = yield* negotiate({ url, token, wants, haves, capabilities, authorize });
 
     const packBody = yield* requestPack({
       url,
@@ -621,6 +646,7 @@ export const fetchRepository = (options: {
       wants,
       haves: haves.slice(0, offered),
       capabilities,
+      authorize,
     });
 
     yield* Pack.unpack(

@@ -31,9 +31,18 @@ import type {
   HubThread,
 } from "../src/server/ApiContract.ts";
 
+import { ApiError } from "./api.ts";
 import { registry } from "./atoms.ts";
-import { GitPlusApi, repoFromDocument } from "./client.ts";
-import type { ChangeRequest, Comment, SessionRow, Status, Task, Thread } from "./model.ts";
+import { apiBase, GitPlusApi, repoFromDocument } from "./client.ts";
+import {
+  type ChangeRequest,
+  type Comment,
+  isChangeRequest,
+  type SessionRow,
+  type Status,
+  type Task,
+  type Thread,
+} from "./model.ts";
 import { ago, initials } from "./time.ts";
 import { store } from "./store.ts";
 
@@ -89,12 +98,18 @@ const reviewCard = (pull: HubPullSummary): ChangeRequest["review"] => {
         ? "checks green"
         : "checks failing";
   const approved = pull.approvals > 0;
+  // Whether Merge is offered is the *server's* judgment — approvals,
+  // required checks, threads, target movement, all under the published
+  // rules — never a reconstruction of branch policy from these counts.
   return {
     headline: approved
       ? `${pull.approvals} approval${pull.approvals === 1 ? "" : "s"}`
       : "Review required",
-    detail: `${checks} · ${pull.threads.unresolved} open thread${pull.threads.unresolved === 1 ? "" : "s"}`,
-    ok: pull.state === "open" && approved && (pull.checks.total === 0 || pull.checks.passed),
+    detail: pull.mergeable.ok
+      ? `${checks} · ${pull.threads.unresolved} open thread${pull.threads.unresolved === 1 ? "" : "s"}`
+      : (pull.mergeable.reasons[0] ??
+        `${checks} · ${pull.threads.unresolved} open thread${pull.threads.unresolved === 1 ? "" : "s"}`),
+    ok: pull.state === "open" && pull.mergeable.ok,
     action: "Merge",
   };
 };
@@ -155,6 +170,30 @@ const threadComments = (threads: readonly HubThread[]): readonly Comment[] =>
 /** The ids the hub answered for, so hydration never touches a fixture. */
 const fromHub = new Set<string>();
 
+/**
+ * Whether the hub's refusal was authentication, asked of the server itself.
+ *
+ * An authentication refusal and an unreachable server are different product
+ * states — a private repository that turned this key away must not be
+ * dressed up as the offline sample. Rather than dissecting the derived
+ * client's failure shapes, one cheap probe re-asks the listing and reads
+ * the status plainly: a 401/403 here means even the signed retry was
+ * refused (the client's transport already presents the browser key), and a
+ * network fault means offline, which keeps the fixtures.
+ */
+const deniedByServer = async (): Promise<boolean> => {
+  try {
+    const base = apiBase() ?? "";
+    const response = await fetch(`${base}/${encodeURIComponent(repo)}/hub/tasks?limit=1`);
+    return response.status === 401 || response.status === 403;
+  } catch {
+    return false;
+  }
+};
+
+const DENIED =
+  "this repository requires authentication to read — grant this browser's key to see live state";
+
 const tasksAtom = GitPlusApi.query("hub", "tasks", { params: { repo }, query: {} });
 const pullsAtom = GitPlusApi.query("hub", "pulls", { params: { repo }, query: {} });
 
@@ -206,6 +245,10 @@ export const seed = (): void => {
       if (AsyncResult.isSuccess(result)) {
         tasks = result.value.items.filter((task) => task.exists);
         apply();
+      } else if (AsyncResult.isFailure(result)) {
+        void deniedByServer().then((was) => {
+          if (was) store.denyLive(DENIED);
+        });
       }
     },
     { immediate: true },
@@ -216,6 +259,10 @@ export const seed = (): void => {
       if (AsyncResult.isSuccess(result)) {
         pulls = result.value.items;
         apply();
+      } else if (AsyncResult.isFailure(result)) {
+        void deniedByServer().then((was) => {
+          if (was) store.denyLive(DENIED);
+        });
       }
     },
     { immediate: true },
@@ -254,11 +301,30 @@ export const hydrate = (id: string): void => {
           threads: detail.threadList.map(mapThread),
           reviewHead: detail.head ?? undefined,
         };
-        if (task.kind !== "CR") return hydrated;
+        if (!isChangeRequest(task)) return hydrated;
         return {
           ...hydrated,
-          checks: detail.checkList.map(mapCheck),
-          commitCount: String(detail.reviews.length),
+          // Only the revision under review: superseded heads' checks are
+          // history, not current evidence, and the server's own count of
+          // the commit range replaces the review-count proxy that once
+          // stood in for it.
+          checks: detail.checkList
+            .filter((check) => detail.head !== null && check.head === detail.head)
+            .map(mapCheck),
+          commitCount: String(detail.commits),
+          // The Merge button states the server's judgment — approvals,
+          // required checks, threads, target movement — never a client-side
+          // reconstruction of branch policy from counts.
+          review:
+            task.review.merged === true
+              ? task.review
+              : {
+                  ...task.review,
+                  ok: detail.mergeable.ok,
+                  detail: detail.mergeable.ok
+                    ? task.review.detail
+                    : (detail.mergeable.reasons[0] ?? task.review.detail),
+                },
         };
       });
     },
@@ -307,7 +373,12 @@ export const createTask = async (input: {
  * for any event the repository refused.
  */
 export const commentOn = async (id: string, body: string): Promise<boolean> => {
-  if (!fromHub.has(id)) return false;
+  // Only a Change Request: pull-request and task ids share one shape, so a
+  // task id reaching the pull-request comment API would *create* a ghost
+  // `refs/hub/pr/<task>` ref. Live task discussion waits for a task-comment
+  // event to exist in the protocol; the detail screen says so.
+  const task = store.get(id);
+  if (!fromHub.has(id) || task === undefined || !isChangeRequest(task)) return false;
   try {
     const { commentOnPull } = await import("./identity.ts");
     await commentOnPull({ pr: id, body });
@@ -387,17 +458,33 @@ export const resolveThread = async (
   }
 };
 
-/** Record a hub Change Request as merged, after its branch really moved. */
-export const recordMerged = async (id: string, mergeCommit: string): Promise<boolean> => {
+/**
+ * Settle a hub Change Request through the hub's own merge endpoint — one
+ * judged server-side transition, never a generic branch merge followed by a
+ * separate record. `null` on success; otherwise the reason to show, with
+ * canonical state untouched: an offline or refused merge leaves the Change
+ * Request open, because it *is* open.
+ */
+export const merge = async (id: string): Promise<string | null> => {
   const task = store.get(id);
-  if (!fromHub.has(id) || task?.reviewHead === undefined) return false;
+  if (
+    !fromHub.has(id) ||
+    task === undefined ||
+    !isChangeRequest(task) ||
+    task.reviewHead === undefined
+  ) {
+    return "this is not a hub Change Request the browser can settle";
+  }
   try {
     const identity = await import("./identity.ts");
-    await identity.recordMerged({ pr: id, head: task.reviewHead, mergeCommit });
+    await identity.mergePull({ pr: id, head: task.reviewHead, base: task.targetRef });
+    // What shows next is the projection, re-read — never an optimistic flip.
     refreshPull(id);
-    return true;
-  } catch {
-    return false;
+    return null;
+  } catch (error) {
+    return error instanceof ApiError
+      ? error.message
+      : "the hub could not be reached — the Change Request stays open";
   }
 };
 

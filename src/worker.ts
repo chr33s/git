@@ -40,6 +40,19 @@ export default Git.make(
   {
     main: import.meta.url,
     compatibility,
+    // The compiled UI (`node ui/build.ts` → `dist/ui`) rides along as the
+    // Worker's static assets, so `/` serves the page and the page's requests
+    // to `/:repo/...` stay same-origin — the arrangement the UI's readme
+    // promises. Routing is assets-first: a request matching a file (the
+    // entry page, `main.js`, a hashed chunk) is answered by the asset layer
+    // and never invokes this script; everything else — every repository
+    // route — falls through to the router below. Cache rules ship as
+    // `dist/ui/_headers`, written by the build. The build fails if the
+    // entry outputs are missing, so a deploy cannot publish the API with no
+    // UI behind it; a repository whose *name* collides with an asset file
+    // would be shadowed, which the path shapes make implausible (assets live
+    // at the root and repository routes always carry a second segment).
+    assets: "dist/ui",
   },
   Effect.gen(function* () {
     const repos = yield* Repo;
@@ -49,7 +62,10 @@ export default Git.make(
         const request = yield* HttpServerRequest.HttpServerRequest;
         const route = routeOf(new URL(request.url, "http://x").pathname);
         if (route === null) {
-          return HttpServerResponse.text("No repository in URL", { status: 400 });
+          // The asset layer already served everything that matches a file,
+          // `/` included — so a path that names neither an asset nor a
+          // repository is simply not found, not a malformed API call.
+          return HttpServerResponse.text("not found", { status: 404 });
         }
 
         // SAFETY: the effect wrapper was built from the platform request

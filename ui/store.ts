@@ -34,6 +34,25 @@ export interface Row {
 class TaskStore extends EventTarget {
   #tasks: Task[] = [...seed];
   #sessions: readonly SessionRow[] = [];
+  #liveNotice: string | null = null;
+
+  /** Why live state is withheld — an authentication refusal, not offline. */
+  get liveNotice(): string | null {
+    return this.#liveNotice;
+  }
+
+  /**
+   * The repository refused to be read. Refusal is not absence: the fixtures
+   * are the documented *offline sample*, and presenting them over a private
+   * repository that turned this browser away would dress a denial up as
+   * data. The store empties and says why instead.
+   */
+  denyLive(reason: string): void {
+    this.#liveNotice = reason;
+    this.#tasks = [];
+    this.#sessions = [];
+    this.#notify();
+  }
 
   /** The hub's sessions, for the Activity screen; empty until it answers. */
   get sessions(): readonly SessionRow[] {
@@ -43,6 +62,7 @@ class TaskStore extends EventTarget {
   /** Adopt the hub's session listing; see `adopt` for the tasks half. */
   adoptSessions(sessions: readonly SessionRow[]): void {
     this.#sessions = [...sessions];
+    this.#liveNotice = null;
     this.#notify();
   }
 
@@ -177,6 +197,7 @@ class TaskStore extends EventTarget {
    */
   adopt(tasks: readonly Task[]): void {
     this.#tasks = [...tasks];
+    this.#liveNotice = null;
     this.#notify();
   }
 
@@ -239,11 +260,15 @@ class TaskStore extends EventTarget {
       .catch(() => false);
   }
 
-  /** Record that a hub Change Request merged, once the branch moved. */
-  async mergedRemote(id: string, mergeCommit: string): Promise<boolean> {
+  /**
+   * Settle a hub Change Request through the hub's merge endpoint — `null`
+   * on success (the projection re-read shows the merge), otherwise the
+   * reason it stays open. Never falls back to a tab-local "merged".
+   */
+  async mergeRemote(id: string): Promise<string | null> {
     return await import("./hub.ts")
-      .then((hub) => hub.recordMerged(id, mergeCommit))
-      .catch(() => false);
+      .then((hub) => hub.merge(id))
+      .catch(() => "the hub could not be reached — the Change Request stays open");
   }
 
   /** Claim, release, or close a hub task — its advisory lease and its end. */

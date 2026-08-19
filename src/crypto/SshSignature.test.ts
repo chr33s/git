@@ -9,6 +9,7 @@ import {
   encodeArmored,
   fingerprint,
   formatPublicKey,
+  fromSeed,
   generate,
   isFingerprint,
   NAMESPACE,
@@ -318,6 +319,39 @@ describe("SshSignature", () => {
       const short = encodeArmored({ ...signed, signature: signed.signature.subarray(0, 20) });
       const failure = await Effect.runPromise(
         verify(short, encoder.encode("x"), NAMESPACE).pipe(Effect.flip),
+      );
+      assert.equal(failure._tag, "Invalid");
+    });
+  });
+
+  describe("derivation", () => {
+    it("re-derives exactly the public key the seed was generated with", async () => {
+      // The property key storage repair rests on: the seed alone determines
+      // the public half, so two halves that disagree can always be settled
+      // in the seed's favour — and a signature made with the derived key
+      // verifies, which is the whole point of the repair.
+      const original = await Effect.runPromise(generate("original@example.com"));
+      const derived = await Effect.runPromise(fromSeed(original.seed, "rebuilt"));
+      assert.deepEqual([...derived.publicKey.point], [...original.publicKey.point]);
+      assert.equal(
+        await Effect.runPromise(fingerprint(derived.publicKey)),
+        await Effect.runPromise(fingerprint(original.publicKey)),
+      );
+
+      const armored = await Effect.runPromise(sign(derived, encoder.encode("m"), NAMESPACE));
+      const verified = await Effect.runPromise(verify(armored, encoder.encode("m"), NAMESPACE));
+      assert.notEqual(verified, null);
+
+      // And a *different* seed derives a different key — the mismatch the
+      // storage check exists to catch, not to paper over.
+      const other = await Effect.runPromise(generate("other@example.com"));
+      const stranger = await Effect.runPromise(fromSeed(other.seed, "rebuilt"));
+      assert.notDeepEqual([...stranger.publicKey.point], [...original.publicKey.point]);
+    });
+
+    it("refuses a seed that is not thirty-two bytes", async () => {
+      const failure = await Effect.runPromise(
+        fromSeed(new Uint8Array(16), "short").pipe(Effect.flip),
       );
       assert.equal(failure._tag, "Invalid");
     });

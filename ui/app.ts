@@ -10,7 +10,7 @@
  * Settings start directly with their own heading, so `gp-code` renders that
  * header itself rather than the shell rendering it for everyone.
  */
-import { html, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 
 import { UISearchField } from "@chr33s/base-wc/src/search-field";
@@ -42,6 +42,24 @@ const SCREENS: readonly string[] = ["activity", "code", "tasks", "detail", "sett
  */
 const isScreen = (value: string): value is Screen => SCREENS.includes(value);
 
+/**
+ * Route ids, encoded per segment. A file path keeps its `/` as route
+ * structure while everything inside a segment — spaces, `%`, `#`, Unicode —
+ * is component-encoded, so a copied URL survives the address bar and a
+ * refresh instead of being truncated at the first character the hash format
+ * claims for itself.
+ */
+const encodeId = (id: string): string => id.split("/").map(encodeURIComponent).join("/");
+
+/** One decoded segment, or `null` for a malformed escape — never a throw. */
+const decodeSegment = (segment: string): string | null => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+};
+
 @customElement("gp-app")
 export class GpApp extends GitPlusElement {
   @state() private accessor screen: Screen = "code";
@@ -59,6 +77,9 @@ export class GpApp extends GitPlusElement {
 
   /** Which file the Code screen should open, when navigation named one. */
   @state() private accessor codePath: string | null = null;
+
+  /** A malformed route's explanation, shown above the screen it fell back to. */
+  @state() private accessor navError: string | null = null;
 
   /**
    * The OPFS-backed local repository, once its first-load clone lands.
@@ -169,27 +190,41 @@ export class GpApp extends GitPlusElement {
   #onNavigate = (event: Event): void => {
     if (!(event instanceof NavigateEvent)) return;
     event.stopPropagation();
+    this.navError = null;
     this.screen = event.detail.screen;
     if (event.detail.screen === "code") this.codePath = event.detail.id ?? null;
     else if (event.detail.id !== undefined) this.selected = event.detail.id;
     const hash =
       event.detail.id === undefined
         ? `#/${event.detail.screen}`
-        : `#/${event.detail.screen}/${event.detail.id}`;
+        : `#/${event.detail.screen}/${encodeId(event.detail.id)}`;
     if (globalThis.location.hash !== hash) globalThis.location.hash = hash;
   };
 
   /**
    * `#/tasks`, `#/detail/CR-14`, `#/code/src/server/Api.ts` — deep-linkable,
    * and survives a refresh. Only the first segment is the screen; the rest is
-   * the id, joined back together because a file path carries slashes.
+   * the id, decoded segment by segment and rejoined because a file path
+   * carries slashes. A malformed escape becomes a visible navigation error on
+   * the screen's bare state, never an exception during shell initialisation —
+   * and a route that names no id clears whatever an earlier one selected.
    */
   #fromHash(): void {
     const [screen, ...rest] = globalThis.location.hash.replace(/^#\/?/, "").split("/");
     if (screen === undefined || !isScreen(screen)) return;
+    this.navError = null;
     this.screen = screen;
-    const id = rest.join("/");
-    if (id === "") return;
+    const segments = rest.map(decodeSegment);
+    if (segments.some((segment) => segment === null)) {
+      this.navError = `this link's address is malformed — showing ${screen} instead`;
+      if (screen === "code") this.codePath = null;
+      return;
+    }
+    const id = segments.join("/");
+    if (id === "") {
+      if (screen === "code") this.codePath = null;
+      return;
+    }
     if (screen === "code") this.codePath = id;
     else this.selected = id;
   }
@@ -203,6 +238,11 @@ export class GpApp extends GitPlusElement {
           .subject=${this.#viewer}
           .theme=${this.theme}
         ></gp-sidebar>
+        ${
+          this.navError === null
+            ? nothing
+            : html`<p class="gp-notice gp-nav-error" data-error>${this.navError}</p>`
+        }
         ${this.#screen()}
       </div>
     `;

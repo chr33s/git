@@ -693,11 +693,33 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // that does not exist, which reads as tighter and is in fact a lockout —
     // `repo.admin` and nobody else could grow the log, so a `member.revoke`
     // holder could sign a revocation and never publish it.
-    const kind = update.name.startsWith("refs/hub/") ? "hub." : "member.";
-    if (
-      !input.principal.capabilities.some((held) => held.startsWith(kind) || held === "repo.admin")
-    ) {
-      return refused(update.name, `appending to ${update.name} needs a ${kind}* capability`);
+    //
+    // Task and session refs are charged their own capability rather than the
+    // kind: their folds deliberately never re-judge a signer (which is what
+    // makes two hosts agree about a task), so the boundary is the only place
+    // `hub.task` and `hub.session` are ever asked for — charged "any hub.*",
+    // a `hub.comment` holder could open, claim and close tasks. A redaction
+    // holder still passes: a tombstone is the one event either namespace
+    // accepts from a signer outside its own capability.
+    const needed = (name: string): { exact: ReadonlyArray<string> } | { prefix: string } =>
+      Task.taskOf(name) !== null
+        ? { exact: ["hub.task", "hub.redact"] }
+        : Session.sessionOf(name) !== null
+          ? { exact: ["hub.session", "hub.redact"] }
+          : name.startsWith("refs/hub/")
+            ? { prefix: "hub." }
+            : { prefix: "member." };
+    const charge = needed(update.name);
+    const passes =
+      "exact" in charge
+        ? charge.exact.some((capability) => permits(input.principal.capabilities, capability))
+        : input.principal.capabilities.some(
+            (held) => held.startsWith(charge.prefix) || held === "repo.admin",
+          );
+    if (!passes) {
+      const wanted =
+        "exact" in charge ? charge.exact.join(" or ") : `a ${charge.prefix}* capability`;
+      return refused(update.name, `appending to ${update.name} needs ${wanted}`);
     }
   }
 

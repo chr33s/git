@@ -18,6 +18,7 @@
  * predate it; new surfaces (the hub) start here. The two share the schemas
  * in `src/server/ApiContract.ts` either way.
  */
+import { Layer } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { AtomHttpApi } from "effect/unstable/reactivity";
 
@@ -40,8 +41,29 @@ export const apiBase = (): string | undefined => {
 export const repoFromDocument = (): string =>
   document.querySelector('meta[name="gp-repo"]')?.getAttribute("content") ?? "core";
 
+/**
+ * `fetch`, taught the native challenge: a 401 with a `Hub-SSH-v1` nonce is
+ * retried once under a signed envelope from the browser's key (`identity.ts`,
+ * loaded lazily so anonymous pages never pay for it). This is the same rule
+ * `ui/api.ts` applies in `#json`, provided here as the transport under the
+ * derived client — so the hub's reads and writes answer a private
+ * repository's challenge exactly as every other request does.
+ */
+const challengedFetch: typeof globalThis.fetch = async (input, init) => {
+  const response = await globalThis.fetch(input, init);
+  if (response.status !== 401) return response;
+  const url =
+    input instanceof URL ? input.toString() : input instanceof Request ? input.url : input;
+  const retried = await import("./identity.ts")
+    .then((identity) => identity.retryAuthorized(url, init ?? {}, response))
+    .catch((): Response | null => null);
+  return retried ?? response;
+};
+
 export class GitPlusApi extends AtomHttpApi.Service<GitPlusApi>()("GitPlusApi", {
   api,
-  httpClient: FetchHttpClient.layer,
+  httpClient: FetchHttpClient.layer.pipe(
+    Layer.provide(Layer.succeed(FetchHttpClient.Fetch)(challengedFetch)),
+  ),
   baseUrl: apiBase(),
 }) {}
