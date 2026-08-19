@@ -98,9 +98,13 @@ export const none = Layer.succeed(Subscribers, {
 export const of = (
   subscribers: ReadonlyArray<Omit<Subscriber, "createdAt"> & { readonly createdAt?: Date }>,
 ) => {
+  // The default *after* the spread, and read through `??` rather than left to
+  // key order: a caller who writes `createdAt: undefined` — which is what
+  // spreading an optional field through another helper produces — overwrote
+  // the default with nothing, and the row went out with no date on it.
   const rows = subscribers.map((subscriber) => ({
-    createdAt: new Date(0),
     ...subscriber,
+    createdAt: subscriber.createdAt ?? new Date(0),
   }));
   return Layer.succeed(Subscribers, {
     forEvent: () => Effect.succeed(rows),

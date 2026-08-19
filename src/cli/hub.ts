@@ -497,12 +497,24 @@ const presented = Effect.fn("hub.presented")(function* (url: string, token: stri
 /** Where a remote's genesis lands while it is still only a claim. */
 const PRESENTED_REF = "refs/meta/presented/genesis";
 
+/**
+ * A yes/no question, answered `no` where there is nobody to ask.
+ *
+ * `question` resolves when a line arrives and never when the input ends, so a
+ * command run from a pipeline, a hook or a CI job — stdin closed, which is the
+ * ordinary way an agent runs anything — hung with the prompt on stderr and no
+ * way to answer it. End-of-input is not consent, and `--yes` is how a script
+ * says yes.
+ */
 const ask = (question: string): Effect.Effect<boolean> =>
   Effect.promise(async () => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
     try {
-      const answer = await rl.question(question);
-      return answer.trim().toLowerCase() === "yes";
+      const ended = new Promise<null>((resolve) => {
+        rl.once("close", () => resolve(null));
+      });
+      const answer = await Promise.race([rl.question(question), ended]);
+      return answer !== null && answer.trim().toLowerCase() === "yes";
     } finally {
       rl.close();
     }

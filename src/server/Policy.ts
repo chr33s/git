@@ -1447,6 +1447,45 @@ const membership = Effect.fn("Policy.membership")(function* (
   return reached.head === head ? reached : yield* project(genesis);
 });
 
+/**
+ * The requester as the membership standing *now* sees them.
+ *
+ * The guard decided who this is against the log as it stood when the request
+ * arrived, and `membership` above re-folds when the log has moved since — but
+ * the capabilities came from the guard either way. So a revocation that landed
+ * between the two was applied to every namespace rule and to none of the
+ * capability checks: the revoked member's own push, already in flight, was
+ * judged by the grant they no longer had.
+ *
+ * Only ever narrows. Each capability the guard granted is re-asked of the
+ * current projection — which is where revocation, expiry and a narrowed grant
+ * all live — and a credential's own scoping survives because what is re-asked
+ * is the scoped list rather than the member's full one.
+ */
+const standing = Effect.fn("Policy.standing")(function* (
+  who: Auth.Authenticated,
+  trust: TrustProjection | null,
+) {
+  const held = { member: who.principal, capabilities: who.capabilities };
+  // Nothing to re-ask: an anonymous requester holds nothing that a membership
+  // could take away, and an unchanged projection is the one the guard used.
+  if (trust === null || who.signer === null || trust === who.projection) return held;
+
+  const now = new Date();
+  const capabilities: Array<string> = [];
+  for (const capability of who.capabilities) {
+    const authorized = yield* Verify.authorizeKey({
+      projection: trust,
+      signer: who.signer,
+      capability,
+      at: now,
+    });
+    if (authorized.ok) capabilities.push(capability);
+  }
+  const member = trust.members.get(who.signer) ?? null;
+  return { member: capabilities.length === 0 ? null : member, capabilities };
+});
+
 const repairable = (ref: string, principal: Principal, open: boolean): boolean =>
   ref === RULES_REF && (open || may(principal, "policy.write"));
 
@@ -1638,7 +1677,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
   // fix it still lands; see `repairable`. A rules file that will not parse
   // otherwise refused every write on the repository including its own repair,
   // and the only way back was filesystem access to the host.
-  const principal = { member: who.principal, capabilities: who.capabilities };
+  const principal = yield* standing(who, trust);
   const published = yield* rulesOf().pipe(Effect.orElseSucceed(() => null));
   if (published === null) {
     const anonymous = yield* Effect.serviceOption(Auth.AnonymousWrites);

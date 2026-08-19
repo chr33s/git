@@ -1184,6 +1184,60 @@ describe("Policy", () => {
       assert.match(outcome.bare.refused[0]?.reason ?? "", /Session: trailer/);
     });
 
+    it("judges a push by the membership standing now, not the one the guard saw", async () => {
+      // The guard folds the log to decide who is asking; `gate` re-folds when
+      // the log has moved since. It re-folded for the namespace rules and kept
+      // the guard's capabilities — so a revocation that landed between the two
+      // was applied to every rule that reads the trust graph and to none of the
+      // capability checks, and the revoked member's push, already in flight,
+      // was judged by the grant they no longer had.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const repository = yield* Repository;
+          const commit = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "in flight\n",
+            author,
+          });
+
+          // What the guard reached, a moment before the revocation.
+          const seen = yield* projectTrust(where.genesis);
+          const signer = yield* fingerprint(where.dev.publicKey);
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: signer,
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          return yield* Policy.gate([{ name: "refs/heads/main", value: commit }], true).pipe(
+            Effect.provide(
+              Auth.requester({
+                principal: where.principal.member,
+                signer,
+                capabilities: where.principal.capabilities,
+                projection: seen,
+                envelope: null,
+              }),
+            ),
+          );
+        }),
+      );
+
+      assert.equal(outcome.updates.length, 0, "a revoked member's push does not land");
+      assert.equal(outcome.refused.length, 1);
+      // A member who holds nothing any more is nobody, and that is what the
+      // refusal says: the push is turned away for the same reason a stranger's
+      // is, rather than on the strength of a capability list nobody still has.
+      assert.match(outcome.refused[0]?.reason ?? "", /authentication required/);
+    });
+
     it("charges hub.redact for a tombstone on a session, not just on a pull request", async () => {
       // The gate below read the record with `Event.decode`, which is the pull
       // request's union — a session's tombstone decoded as nothing there and

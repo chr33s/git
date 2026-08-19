@@ -9,14 +9,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Logger } from "effect";
 
-import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
+import { concatBytes, EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
+import { FLUSH, pkt } from "../git/Pkt.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Hooks, Repository } from "../git/Repository.ts";
-import { covered, hooks } from "./Sending.ts";
 import { of as fixedRemotes, type Remote } from "./Remotes.ts";
+import { covered, hooks } from "./Sending.ts";
 
 const author: Signature = {
   name: "Alice",
@@ -101,6 +102,85 @@ describe("what a standing instruction carries", () => {
       named(covered(remote({ mode: "push", refs: [] }), results)).includes("refs/heads/refused"),
       false,
     );
+  });
+
+  it("says which refs a remote refused, rather than reporting nothing", async () => {
+    // A receive-pack that answers at all answers `200`, and the refusals ride
+    // inside the response — so a mirror rejecting every ref looked exactly
+    // like one keeping up, and the only symptom was a downstream that was
+    // quietly months behind. The forward still cannot fail the push that
+    // caused it; what it can do is name the ref and the reason.
+    const logged: Array<string> = [];
+    const capture = Logger.make<unknown, void>(({ message }) => {
+      logged.push(String(message));
+    });
+
+    // The remote advertises a `main` this repository has never heard of, which
+    // is a divergence `push` refuses on its own — no second request, and no
+    // pack to build. The refusal is the point, not how it was reached.
+    const elsewhere = "b".repeat(40);
+    const advertisement = concatBytes([
+      pkt("# service=git-receive-pack\n"),
+      FLUSH,
+      pkt(`${elsewhere} refs/heads/main\0report-status\n`),
+      FLUSH,
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = () =>
+      Promise.resolve(
+        new Response(advertisement, {
+          headers: { "content-type": "application/x-git-upload-pack-advertisement" },
+        }),
+      );
+
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const hook = yield* Hooks;
+          const commit = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "mine\n",
+            author,
+          });
+          yield* repository.setRef({ name: "refs/heads/main", to: commit, expected: null });
+          yield* hook.postReceive([{ ref: "refs/heads/main", from: null, to: commit, ok: true }]);
+        }).pipe(
+          Effect.provide(
+            hooks({ background: (effect) => effect.pipe(Effect.asVoid, Effect.ignoreCause) }).pipe(
+              Layer.provide(
+                fixedRemotes([
+                  {
+                    name: "mirror",
+                    url: "http://127.0.0.1:1/nothing",
+                    sync: { mode: "mirror", refs: [] },
+                  },
+                ]),
+              ),
+              Layer.provideMerge(
+                GitRepository.layer.pipe(
+                  Layer.provide(GitRepository.hooksNoop),
+                  Layer.provideMerge(stores),
+                ),
+              ),
+              Layer.merge(Logger.layer([capture])),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+
+    const warned = logged.find((line) => line.includes("mirror"));
+    assert.notEqual(
+      warned,
+      undefined,
+      `nothing said the mirror refused anything: ${logged.join(" | ")}`,
+    );
+    assert.match(warned ?? "", /refs\/heads\/main/);
+    assert.match(warned ?? "", /non-fast-forward/);
   });
 
   it("does not roll back the push when the remote is unreachable", async () => {

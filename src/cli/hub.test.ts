@@ -703,6 +703,37 @@ describe("cli hub", () => {
     assert.match(failed ?? "", /not enabled/);
   });
 
+  it("declines trust on first use when stdin has already ended", async () => {
+    // The prompt waits for a line, and a closed stdin never sends one — so
+    // every non-interactive caller, which is every hook, pipeline and agent,
+    // hung on a question printed to a terminal nobody was watching. End of
+    // input is not consent: the answer is no, and `--yes` is how a script
+    // says yes.
+    await enableHubUnder(root, "unattended", ["repo.read"]);
+    const remote = await hostile(path.join(root, "unattended"));
+    try {
+      const failed = await new Promise<string>((resolve, reject) => {
+        // stdin closed outright rather than fed an answer: that is the state
+        // the hang needs, and a test that wrote "no" would pass either way.
+        const child = execFile(
+          process.execPath,
+          [entry, "hub", "enable", "--root", root, remote.url],
+          { encoding: "utf8", timeout: 20_000 },
+          (error, stdout, stderr) =>
+            error === null
+              ? reject(new Error(`the prompt must not be taken as a yes: ${stdout}${stderr}`))
+              : resolve(`${stdout}${stderr}`),
+        );
+        child.stdin?.end();
+      });
+
+      assert.match(failed, /not trusted/);
+      assert.match(await cli(["hub", "status", remote.url]), /not trusted/);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("will not pin an identity whose own roots never signed it", async () => {
     // Trust on first use is where an identity is *adopted*, so this is the
     // check that matters most: `presented()` loaded the remote's genesis
