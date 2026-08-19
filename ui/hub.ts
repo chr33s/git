@@ -139,8 +139,8 @@ const threadComments = (threads: readonly HubThread[]): readonly Comment[] =>
 /** The ids the hub answered for, so hydration never touches a fixture. */
 const fromHub = new Set<string>();
 
-const tasksAtom = GitPlusApi.query("hub", "tasks", { params: { repo } });
-const pullsAtom = GitPlusApi.query("hub", "pulls", { params: { repo } });
+const tasksAtom = GitPlusApi.query("hub", "tasks", { params: { repo }, query: {} });
+const pullsAtom = GitPlusApi.query("hub", "pulls", { params: { repo }, query: {} });
 
 /** Ask the hub again; every mounted subscription folds the answer back in. */
 export const refreshListings = (): void => {
@@ -172,7 +172,7 @@ export const seed = (): void => {
     tasksAtom,
     (result) => {
       if (AsyncResult.isSuccess(result)) {
-        tasks = result.value.tasks.filter((task) => task.exists);
+        tasks = result.value.items.filter((task) => task.exists);
         apply();
       }
     },
@@ -182,7 +182,7 @@ export const seed = (): void => {
     pullsAtom,
     (result) => {
       if (AsyncResult.isSuccess(result)) {
-        pulls = result.value.pulls;
+        pulls = result.value.items;
         apply();
       }
     },

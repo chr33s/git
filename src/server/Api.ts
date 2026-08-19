@@ -19,8 +19,14 @@
  * algorithms in `git/`.
  */
 import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
-import { Etag, HttpPlatform } from "effect/unstable/http";
-import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
+import { Etag, HttpPlatform, HttpServerResponse } from "effect/unstable/http";
+import {
+  HttpApi,
+  HttpApiBuilder,
+  HttpApiEndpoint,
+  HttpApiGroup,
+  HttpApiSchema,
+} from "effect/unstable/httpapi";
 
 import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
@@ -38,6 +44,8 @@ import {
   type PullRequest as ProjectedPull,
 } from "../hub/Projection.ts";
 import * as HubTask from "../hub/Task.ts";
+import * as HubSession from "../hub/Session.ts";
+import { archive as archiveTree, type Format as ArchiveFormat } from "./Archive.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
 import {
   NAMESPACE as SIGNING_NAMESPACE,
@@ -73,11 +81,18 @@ import {
   HistoryPage,
   HubEventAppended,
   HubEventRequest,
+  HubMembersResponse,
   HubPullDetail,
-  HubPullsResponse,
+  HubPullPage,
   HubPullSummary,
-  HubTasksResponse,
+  HubSessionDetail,
+  HubSessionPage,
+  HubSessionSummary,
+  HubTaskPage,
   LogResponse,
+  PolicyAnswer,
+  PolicyRules,
+  PolicyWritten,
   MergeResult,
   OidString,
   Page,
@@ -542,6 +557,12 @@ const treeFor = (
   });
 
 /** The tree a ref names, defaulting to HEAD — what "at this revision" means. */
+const ARCHIVE_TYPES = {
+  tar: "application/x-tar",
+  "tar.gz": "application/gzip",
+  zip: "application/zip",
+} as const satisfies Record<ArchiveFormat, string>;
+
 const treeOfRef = (repository: Repository["Service"], ref: string | undefined) =>
   Effect.gen(function* () {
     const name = ref === undefined || ref === "" ? "HEAD" : ref;
@@ -896,6 +917,39 @@ const repo = HttpApiGroup.make("repo")
     // The ref name has slashes, so it is a query parameter rather than a
     // path segment — `refs/heads/main` in a path would need escaping every
     // caller would get wrong.
+    HttpApiEndpoint.get("policy", "/policy", {
+      params: RepoParam,
+      success: PolicyAnswer,
+      // Unreadable rules refuse the read for the reason `Policy.rulesOf`
+      // gives: a parse failure is the repository's stated protection still in
+      // force, not an empty rule set.
+      error: Invalid,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.put("policyWrite", "/policy", {
+      params: RepoParam,
+      payload: PolicyRules,
+      success: PolicyWritten,
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("archive", "/archive", {
+      params: RepoParam,
+      query: {
+        ref: Schema.optional(Schema.String),
+        /** `tar`, `zip`, or the default `tar.gz`. */
+        format: Schema.optional(Schema.String),
+        prefix: Schema.optional(Schema.String),
+      },
+      success: Schema.Uint8Array.pipe(
+        HttpApiSchema.asUint8Array({ contentType: "application/octet-stream" }),
+      ),
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
     HttpApiEndpoint.get("reflog", "/reflog", {
       params: RepoParam,
       query: { ref: Schema.String },
@@ -1097,14 +1151,41 @@ const hub = HttpApiGroup.make("hub")
   .add(
     HttpApiEndpoint.get("tasks", "/hub/tasks", {
       params: RepoParam,
-      success: HubTasksResponse,
+      query: Cursor,
+      success: HubTaskPage,
       error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.get("pulls", "/hub/pulls", {
       params: RepoParam,
-      success: HubPullsResponse,
+      query: Cursor,
+      success: HubPullPage,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("sessions", "/hub/sessions", {
+      params: RepoParam,
+      query: Cursor,
+      success: HubSessionPage,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("session", "/hub/sessions/:id", {
+      params: { ...RepoParam, id: Schema.String },
+      success: HubSessionDetail,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    // The trust projection's public half: who this repository answers to.
+    // A read, not an enrolment door — grants and revocations stay signed
+    // records on the log, exactly as `hub grant` writes them.
+    HttpApiEndpoint.get("members", "/hub/members", {
+      params: RepoParam,
+      success: HubMembersResponse,
       error: [ObjectNotFound, Invalid],
     }),
   )
@@ -1771,6 +1852,61 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         };
       }),
     )
+    .handle("policy", () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const rules = yield* Policy.rulesOf().pipe(
+          Effect.catchTag("ObjectNotFound", () =>
+            Effect.fail(
+              new Invalid({
+                field: "policy",
+                reason: "the repository's branch rules could not be read",
+              }),
+            ),
+          ),
+        );
+        const ref = yield* repository.resolve(Policy.RULES_REF);
+        return { rules, ref };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("policyWrite", ({ payload }) =>
+      Effect.gen(function* () {
+        // `policy.write`'s door, exactly as a push of `refs/meta/policy`
+        // meets it: `source.push` holders may not rewrite the protection
+        // they are subject to.
+        yield* gateWrite(Policy.RULES_REF);
+        const repository = yield* Repository;
+        const current = yield* repository.resolve(Policy.RULES_REF);
+        const blob = yield* repository.writeBlob(Policy.encodeRules(payload));
+        const tree = yield* repository.writeTree([
+          { mode: "100644", name: Policy.RULES_PATH, oid: blob },
+        ]);
+        const commit = yield* repository.commitTree({
+          tree,
+          parents: current === null ? [] : [current],
+          message: "policy\n",
+          author: signatureFrom(undefined),
+        });
+        yield* repository.setRef({ name: Policy.RULES_REF, to: commit, expected: current });
+        return { rules: payload, commit };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("archive", ({ query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const tree = yield* treeOfRef(repository, query.ref);
+        const format: ArchiveFormat =
+          query.format === "tar" || query.format === "zip" ? query.format : "tar.gz";
+        const stream = yield* (
+          query.prefix === undefined
+            ? archiveTree({ tree, format })
+            : archiveTree({ tree, format, prefix: query.prefix })
+        ).pipe(Effect.catchTag("StorageFailure", Effect.die));
+        // Streamed, not buffered: the declaration promises bytes, and this is
+        // how a repository-sized answer keeps that promise.
+        return HttpServerResponse.stream(stream, { contentType: ARCHIVE_TYPES[format] });
+      }),
+    )
     .handle("reflog", ({ query }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -2237,14 +2373,19 @@ const fromBase64 = (content: string): Uint8Array | null => {
 
 export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
   group
-    .handle("tasks", () =>
+    .handle("tasks", ({ query }) =>
       Effect.gen(function* () {
         const ids = yield* HubTask.tasks();
-        const states = yield* Effect.forEach(ids, (id) => HubTask.project(id), {
+        // Page the ids before projecting: each projection is a ref walk, and
+        // a listing should cost what its page shows, not what the namespace
+        // holds.
+        const paged = page(ids, query);
+        const states = yield* Effect.forEach(paged.items, (id) => HubTask.project(id), {
           concurrency: 4,
         });
         return {
-          tasks: states.map((state) => ({
+          ...paged,
+          items: states.map((state) => ({
             task: state.task,
             exists: state.exists,
             title: state.title,
@@ -2258,10 +2399,18 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
         };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
-    .handle("pulls", () =>
+    .handle("pulls", ({ query }) =>
       Effect.gen(function* () {
         const view = yield* hubView();
-        if (!view.enabled) return { enabled: false, reason: view.reason, pulls: [] };
+        if (!view.enabled) {
+          return {
+            enabled: false,
+            reason: view.reason,
+            items: [],
+            next_cursor: null,
+            has_more: false,
+          };
+        }
 
         const repository = yield* Repository;
         const ids: Array<string> = [];
@@ -2269,12 +2418,13 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
           const id = HubEvent.prOf(name);
           if (id !== null) ids.push(id);
         }
+        const paged = page(ids.sort(), query);
         const pulls = yield* Effect.forEach(
-          ids.sort(),
+          paged.items,
           (id) => projectPull(view.genesis, view.trust, id),
           { concurrency: 4 },
         );
-        return { enabled: true, reason: null, pulls: pulls.map(pullSummary) };
+        return { enabled: true, reason: null, ...paged, items: pulls.map(pullSummary) };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
     .handle("pull", ({ params }) =>
@@ -2296,6 +2446,74 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
         const pull = yield* projectPull(view.genesis, view.trust, params.id);
         return pullDetail(pull);
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("sessions", ({ query }) =>
+      Effect.gen(function* () {
+        const ids = yield* HubSession.sessions();
+        const paged = page(ids, query);
+        const states = yield* Effect.forEach(paged.items, (id) => HubSession.project(id), {
+          concurrency: 4,
+        });
+        const items: Array<HubSessionSummary> = states.map((state) => ({
+          session: state.session,
+          agent: state.agent,
+          refs: state.refs,
+          pulls: state.pulls,
+          commits: state.commits.length,
+          decisions: {
+            total: state.decisions.length,
+            open: state.decisions.filter((decision) => decision.chose === null).length,
+          },
+          usage: state.usage,
+        }));
+        return { ...paged, items };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("session", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        if (
+          !HubSession.isSessionId(params.id) ||
+          (yield* repository.readRef(HubSession.refOf(params.id))) === null
+        ) {
+          return yield* new Invalid({
+            field: "session",
+            reason: `this repository holds no session '${params.id}'`,
+          });
+        }
+        const state = yield* HubSession.project(params.id);
+        return {
+          session: state.session,
+          exists: state.exists,
+          agent: state.agent,
+          instructions: state.instructions,
+          prompts: state.prompts,
+          commits: state.commits,
+          refs: state.refs,
+          pulls: state.pulls,
+          notes: state.notes,
+          decisions: state.decisions,
+          redacted: state.redacted,
+          usage: state.usage,
+        };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("members", () =>
+      Effect.gen(function* () {
+        const view = yield* hubView();
+        if (!view.enabled) return { enabled: false, reason: view.reason, members: [] };
+        return {
+          enabled: true,
+          reason: null,
+          members: [...view.trust.members.values()].map((member) => ({
+            fingerprint: member.fingerprint,
+            publicKey: member.publicKey,
+            capabilities: member.capabilities,
+            grantedAt: member.grantedAt.toISOString(),
+            expiresAt: member.expiresAt === null ? null : member.expiresAt.toISOString(),
+          })),
+        };
+      }),
     )
     .handle("append", ({ payload }) =>
       Effect.gen(function* () {
@@ -2343,11 +2561,21 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
                 field: "task",
               })),
               Effect.catchTag("Invalid", () =>
-                Effect.fail(
-                  new Invalid({
-                    field: "payload",
-                    reason: "the payload is neither a pull-request event nor a task event",
-                  }),
+                HubSession.decode(bytes).pipe(
+                  Effect.map((event) => ({
+                    ref: HubSession.refOf(event.session),
+                    message: `${event.type} ${event.id}\n`,
+                    valid: HubSession.isSessionId(event.session),
+                    field: "session",
+                  })),
+                  Effect.catchTag("Invalid", () =>
+                    Effect.fail(
+                      new Invalid({
+                        field: "payload",
+                        reason: "the payload is not a pull-request, task or session event",
+                      }),
+                    ),
+                  ),
                 ),
               ),
             ),

@@ -130,7 +130,7 @@ export const OPEN: Rules = {
 
 /** Where a repository keeps its branch rules, if it has any. */
 export const RULES_REF = "refs/meta/policy";
-const RULES_PATH = "policy.json";
+export const RULES_PATH = "policy.json";
 
 const RulesDocument = Schema.Struct({
   version: Schema.Literal(1),

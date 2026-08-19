@@ -367,9 +367,6 @@ export const HubTask = Schema.Struct({
 });
 export type HubTask = (typeof HubTask)["Type"];
 
-export const HubTasksResponse = Schema.Struct({ tasks: Schema.Array(HubTask) });
-export type HubTasksResponse = (typeof HubTasksResponse)["Type"];
-
 export const HubReview = Schema.Struct({
   id: Schema.String,
   author: Schema.String,
@@ -431,18 +428,6 @@ export const HubPullSummary = Schema.Struct({
 });
 export type HubPullSummary = (typeof HubPullSummary)["Type"];
 
-/**
- * The listing carries its own availability: pull requests need a genesis to
- * judge signatures against, and a repository without one has an empty hub
- * rather than an erroring one.
- */
-export const HubPullsResponse = Schema.Struct({
-  enabled: Schema.Boolean,
-  reason: Schema.NullOr(Schema.String),
-  pulls: Schema.Array(HubPullSummary),
-});
-export type HubPullsResponse = (typeof HubPullsResponse)["Type"];
-
 export const HubPullDetail = Schema.Struct({
   ...HubPullSummary.fields,
   description: Schema.String,
@@ -475,3 +460,114 @@ export const HubEventAppended = Schema.Struct({
   commit: OidString,
 });
 export type HubEventAppended = (typeof HubEventAppended)["Type"];
+
+/** One page of tasks; the same `Page` discipline every git listing follows. */
+export const HubTaskPage = Page(HubTask);
+export type HubTaskPage = (typeof HubTaskPage)["Type"];
+
+/** One page of pull requests, carrying the hub's availability beside it. */
+export const HubPullPage = Schema.Struct({
+  enabled: Schema.Boolean,
+  reason: Schema.NullOr(Schema.String),
+  ...Page(HubPullSummary).fields,
+});
+export type HubPullPage = (typeof HubPullPage)["Type"];
+
+/** A question a session asked, and what — if anything — a person chose. */
+export const HubSessionDecision = Schema.Struct({
+  id: Schema.String,
+  question: Schema.String,
+  options: Schema.Array(Schema.String),
+  chose: Schema.NullOr(Schema.String),
+});
+export type HubSessionDecision = (typeof HubSessionDecision)["Type"];
+
+const HubSessionAgent = Schema.Struct({
+  kind: Schema.String,
+  model: Schema.String,
+  harness: Schema.String,
+});
+
+const HubSessionUsage = Schema.Struct({
+  inputTokens: Schema.Int,
+  outputTokens: Schema.Int,
+});
+
+/** One session in a listing: the projection, minus its heavy members. */
+export const HubSessionSummary = Schema.Struct({
+  session: Schema.String,
+  agent: Schema.NullOr(HubSessionAgent),
+  refs: Schema.Array(Schema.String),
+  pulls: Schema.Array(Schema.String),
+  commits: Schema.Int,
+  decisions: Schema.Struct({ total: Schema.Int, open: Schema.Int }),
+  usage: HubSessionUsage,
+});
+export type HubSessionSummary = (typeof HubSessionSummary)["Type"];
+
+export const HubSessionPage = Page(HubSessionSummary);
+export type HubSessionPage = (typeof HubSessionPage)["Type"];
+
+/** One session, whole: what it was told, produced, asked and learned. */
+export const HubSessionDetail = Schema.Struct({
+  session: Schema.String,
+  exists: Schema.Boolean,
+  agent: Schema.NullOr(HubSessionAgent),
+  /** The standing instructions in force, as a blob or tree id. */
+  instructions: Schema.NullOr(Schema.String),
+  prompts: Schema.Array(
+    Schema.Struct({ role: Schema.Literals(["user", "system"]), prompt: Schema.String }),
+  ),
+  commits: Schema.Array(Schema.String),
+  refs: Schema.Array(Schema.String),
+  pulls: Schema.Array(Schema.String),
+  notes: Schema.Array(Schema.String),
+  decisions: Schema.Array(HubSessionDecision),
+  redacted: Schema.Array(Schema.String),
+  usage: HubSessionUsage,
+});
+export type HubSessionDetail = (typeof HubSessionDetail)["Type"];
+
+/** A member as the trust projection holds it — the public record only. */
+export const HubMember = Schema.Struct({
+  fingerprint: Schema.String,
+  publicKey: Schema.String,
+  capabilities: Schema.Array(Schema.String),
+  grantedAt: Schema.String,
+  expiresAt: Schema.NullOr(Schema.String),
+});
+export type HubMember = (typeof HubMember)["Type"];
+
+export const HubMembersResponse = Schema.Struct({
+  enabled: Schema.Boolean,
+  reason: Schema.NullOr(Schema.String),
+  members: Schema.Array(HubMember),
+});
+export type HubMembersResponse = (typeof HubMembersResponse)["Type"];
+
+/** The branch rules, exactly as `server/Policy.ts` evaluates them. */
+export const PolicyRules = Schema.Struct({
+  protected: Schema.Array(Schema.String),
+  requiredApprovals: Schema.Int,
+  requiredChecks: Schema.Array(Schema.String),
+  requireResolvedThreads: Schema.Boolean,
+  requirePullRequest: Schema.Boolean,
+  maxTrustAgeSeconds: Schema.Int,
+  requireProvenance: Schema.Boolean,
+  maxUsageTokens: Schema.Int,
+  usageWindowSeconds: Schema.Int,
+});
+export type PolicyRules = (typeof PolicyRules)["Type"];
+
+/** What the repository enforces now; `ref` is `null` on unpublished defaults. */
+export const PolicyAnswer = Schema.Struct({
+  rules: PolicyRules,
+  ref: Schema.NullOr(OidString),
+});
+export type PolicyAnswer = (typeof PolicyAnswer)["Type"];
+
+export const PolicyWritten = Schema.Struct({
+  rules: PolicyRules,
+  commit: OidString,
+});
+export type PolicyWritten = (typeof PolicyWritten)["Type"];

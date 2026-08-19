@@ -640,13 +640,15 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         // no tasks, so the store keeps the fixtures — which is exactly the
         // fallback these suites' expectations are written against.
         if (path === "/core/hub/tasks") {
-          return json(Contract.HubTasksResponse, { tasks: [] });
+          return json(Contract.HubTaskPage, { items: [], next_cursor: null, has_more: false });
         }
         if (path === "/core/hub/pulls") {
-          return json(Contract.HubPullsResponse, {
+          return json(Contract.HubPullPage, {
             enabled: false,
             reason: "the sample repository has no genesis",
-            pulls: [],
+            items: [],
+            next_cursor: null,
+            has_more: false,
           });
         }
       }
@@ -1700,11 +1702,11 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.click('.gp-dialog button[type="submit"]');
     await page.waitForTimeout(2500);
     const served = await fetch(`${upstream}/core/hub/tasks`).then(async (response) =>
-      Schema.decodeUnknownSync(Contract.HubTasksResponse)(await response.json()),
+      Schema.decodeUnknownSync(Contract.HubTaskPage)(await response.json()),
     );
     check(
       "the signed task landed in the repository's hub",
-      served.tasks.some((task) => task.title === "Opened by the browser key"),
+      served.items.some((task) => task.title === "Opened by the browser key"),
     );
     check(
       "and its detail is the projection, not a tab-local copy",
