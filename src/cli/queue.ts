@@ -308,6 +308,14 @@ interface Pass {
   /** What it holds now — the same value where nothing landed. */
   readonly to: Oid | null;
   readonly landed: ReadonlyArray<string>;
+  /**
+   * What a dry run would have landed, and nothing on a pass that landed it.
+   *
+   * Kept out of `landed` deliberately: a hook gating on that field would read
+   * an untouched branch as a merged one, and `dryRun: true` sitting beside it
+   * is not something a shell one-liner is going to check.
+   */
+  readonly wouldLand: ReadonlyArray<string>;
   readonly built: ReadonlyArray<{ readonly pr: string; readonly commit: Oid }>;
   readonly dropped: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
   /**
@@ -450,6 +458,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       from,
       to: from,
       landed: [],
+      wouldLand: [],
       built,
       dropped,
       unbuilt,
@@ -743,6 +752,8 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   }
 
   const landed: Array<string> = [];
+  /** What a dry run would have landed; empty on a pass that actually lands. */
+  const wouldLand: Array<string> = [];
   if (landedAt >= 0 && !input.dryRun) {
     const top = chain[landedAt]!;
     // The value the judgement was made against travels with the write, exactly
@@ -788,7 +799,11 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       yield* Queue.reset({ repo: genesis.repoId, queue: state.queue, at: now, key: input.key });
     }
   } else if (landedAt >= 0) {
-    for (const step of chain.slice(0, landedAt + 1)) landed.push(step.pr);
+    // A dry run moved nothing, so nothing landed. Reported separately rather
+    // than in `landed`, because a hook gating on that field would read an
+    // untouched branch as a merged one — and `dryRun: true` beside it is not
+    // something a shell one-liner is going to check.
+    for (const step of chain.slice(0, landedAt + 1)) wouldLand.push(step.pr);
   }
 
   // A required check that came back *failing* against a candidate is the one
@@ -836,7 +851,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   }
 
   const waiting = chain
-    .slice(landed.length)
+    .slice(landed.length + wouldLand.length)
     .filter((step) => !dropped.some((entry) => entry.pr === step.pr));
 
   // Candidate branches are ordinary branches, so they are cleaned up like
@@ -862,6 +877,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     from,
     to: yield* repository.resolve(target),
     landed,
+    wouldLand,
     built,
     dropped,
     unbuilt,

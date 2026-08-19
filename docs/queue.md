@@ -114,6 +114,16 @@ keeps the review meaning what hub.md §18 says it means: an approval of
 `H_i` for this base, staled by retargeting and by head movement, with
 self-approval excluded as always.
 
+What the five rules constrain is a candidate's **content and ancestry**,
+and not its commit header. The message, author and committer are
+whatever the builder wrote, exactly as they are on any merge commit a
+member makes on a branch of their own. That is deliberate rather than an
+oversight: they are not code, nothing downstream reads them — a
+repository that requires provenance takes no candidates at all, for
+reasons below — and pinning them would bake one builder's conventions
+into the boundary, which is precisely what would stop somebody
+hand-building a candidate and landing it with no queue running.
+
 Rule 3 names one function rather than a definition of merging, and that
 is the point: the builder and the verifier both call
 `Repository.mergeTree`, so they agree about the base and about the merge

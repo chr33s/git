@@ -294,6 +294,8 @@ describe("cli queue", () => {
     const pass = await run(["--dry-run"]);
     assert.equal(pass.dryRun, true);
     assert.equal(pass.built.length, 1, "a dry run still computes the candidate");
+    assert.deepEqual(pass.landed, [], "nothing landed, because nothing moved");
+    assert.equal(pass.wouldLand.length, 1, "and what would have is said separately");
     assert.equal(await mainAt(), base, "and leaves the branch exactly where it was");
 
     const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));

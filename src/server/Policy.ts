@@ -1485,6 +1485,20 @@ type Chain =
  * ask `Repository.mergeTree`, so they agree about the base and the merge by
  * construction. A replica that cannot read the objects computes no answer and
  * refuses, which is the safe direction.
+ *
+ * What is constrained is a candidate's **content and its ancestry** — its tree,
+ * its two parents, and the chain they form — and deliberately not its commit
+ * header. The message, author and committer are whatever the builder wrote,
+ * exactly as they are on any merge commit a member with `source.push` makes on
+ * a branch of their own: they are not code, nothing downstream parses them (a
+ * repository requiring provenance takes no candidates at all — see
+ * `cli/queue.ts`), and pinning them would bake one builder's conventions into
+ * the boundary. That last part is the point rather than an oversight: a
+ * candidate is a shape, not a tool's output, so a person can build one by hand
+ * and land it with no queue running at all, and two implementations can
+ * interoperate. `cli/queue.ts` makes its own candidates a pure function of what
+ * they merge — which is what lets a check bound to one runner's candidate name
+ * another's — but that is a convention among runners, not a rule this enforces.
  */
 const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
   readonly ref: string;
