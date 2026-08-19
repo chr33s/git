@@ -13,10 +13,12 @@
  * that before first paint (the same argument `highlight.ts` makes for
  * Shiki).
  *
- * Writes are deliberately absent. Hub events are signed by their author and
- * the server holds nobody's key, so a browser without one cannot author
- * events; `POST /hub/events` exists for callers that can sign (the CLI, an
- * agent). Until the UI holds a key, its mutations stay tab-local and say so.
+ * Writes go through the browser's own signing key (`identity.ts`): a task
+ * opened here, or a comment on a hub pull request, is signed locally and
+ * appended over `POST /hub/events`, then read back by refreshing the same
+ * query atoms — so what the screens show is always the server's projection,
+ * never an optimistic guess. When the repository refuses the event (a fresh
+ * key is not a member), the caller falls back to tab-local state and says so.
  */
 import { AsyncResult } from "effect/unstable/reactivity";
 
@@ -137,6 +139,15 @@ const threadComments = (threads: readonly HubThread[]): readonly Comment[] =>
 /** The ids the hub answered for, so hydration never touches a fixture. */
 const fromHub = new Set<string>();
 
+const tasksAtom = GitPlusApi.query("hub", "tasks", { params: { repo } });
+const pullsAtom = GitPlusApi.query("hub", "pulls", { params: { repo } });
+
+/** Ask the hub again; every mounted subscription folds the answer back in. */
+export const refreshListings = (): void => {
+  registry.refresh(tasksAtom);
+  registry.refresh(pullsAtom);
+};
+
 /**
  * Subscribe the store to the hub listings.
  *
@@ -145,9 +156,6 @@ const fromHub = new Set<string>();
  * screens exactly as a local mutation would.
  */
 export const seed = (): void => {
-  const tasksAtom = GitPlusApi.query("hub", "tasks", { params: { repo } });
-  const pullsAtom = GitPlusApi.query("hub", "pulls", { params: { repo } });
-
   let tasks: readonly HubTask[] | null = null;
   let pulls: readonly HubPullSummary[] | null = null;
 
@@ -213,4 +221,57 @@ export const hydrate = (id: string): void => {
     },
     { immediate: true },
   );
+};
+
+/** Poll the store briefly for an id the refresh is about to deliver. */
+const settled = async (id: string): Promise<boolean> => {
+  for (let waited = 0; waited < 4000; waited += 200) {
+    if (store.get(id) !== undefined) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+};
+
+/**
+ * Open a task in the hub, signed by this browser's key.
+ *
+ * `null` — not an error — when the event could not land (offline, or the
+ * key holds no membership on a repository that requires one): the caller
+ * keeps its tab-local fallback, which is the documented behaviour.
+ */
+export const createTask = async (input: {
+  readonly title: string;
+  readonly description: string;
+}): Promise<string | null> => {
+  try {
+    const { openTask } = await import("./identity.ts");
+    const task = await openTask(input);
+    fromHub.add(task);
+    refreshListings();
+    // Wait for the projection to arrive so the navigation that follows finds
+    // the task in the store rather than an empty detail screen.
+    await settled(task);
+    return task;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Comment on a hub pull request, signed by this browser's key.
+ *
+ * `false` for a fixture id — the design's data is not a place to write — and
+ * for any event the repository refused.
+ */
+export const commentOn = async (id: string, body: string): Promise<boolean> => {
+  if (!fromHub.has(id)) return false;
+  try {
+    const { commentOnPull } = await import("./identity.ts");
+    await commentOnPull({ pr: id, body });
+    registry.refresh(GitPlusApi.query("hub", "pull", { params: { repo, id } }));
+    refreshListings();
+    return true;
+  } catch {
+    return false;
+  }
 };

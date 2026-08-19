@@ -28,7 +28,7 @@ import { api } from "../src/server/Api.ts";
  *   <meta name="gp-api-base" content="https://git.example.com">
  * An empty or absent base means same-origin, which is the deployed case.
  */
-const base = (): string | undefined => {
+export const apiBase = (): string | undefined => {
   const content = document
     .querySelector('meta[name="gp-api-base"]')
     ?.getAttribute("content")
@@ -43,5 +43,5 @@ export const repoFromDocument = (): string =>
 export class GitPlusApi extends AtomHttpApi.Service<GitPlusApi>()("GitPlusApi", {
   api,
   httpClient: FetchHttpClient.layer,
-  baseUrl: base(),
+  baseUrl: apiBase(),
 }) {}

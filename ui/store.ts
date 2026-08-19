@@ -183,6 +183,23 @@ class TaskStore extends EventTarget {
     void import("./hub.ts").then((hub) => hub.hydrate(id)).catch(() => {});
   }
 
+  /**
+   * Open a task in the hub, signed by the browser's key; the id once the
+   * server holds it, `null` when it could not land — the caller then falls
+   * back to `create` and the tab-local story above.
+   */
+  async createRemote(input: {
+    readonly title: string;
+    readonly description: string;
+  }): Promise<string | null> {
+    return await import("./hub.ts").then((hub) => hub.createTask(input)).catch(() => null);
+  }
+
+  /** Comment on a hub pull request; `false` falls back to `comment`. */
+  async commentRemote(id: string, body: string): Promise<boolean> {
+    return await import("./hub.ts").then((hub) => hub.commentOn(id, body)).catch(() => false);
+  }
+
   #replace(id: string, update: (task: Task) => Task): void {
     const at = this.#tasks.findIndex((task) => task.id === id);
     const before = this.#tasks[at];

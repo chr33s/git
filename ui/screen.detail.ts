@@ -145,8 +145,12 @@ export class GpDetail extends GitPlusElement {
     store.merge(cr.id);
   }
 
-  /** Append a comment as whoever `/whoami` said is asking. */
-  #comment = (event: SubmitEvent): void => {
+  /**
+   * Append a comment — to the hub when this is a hub pull request (signed
+   * with the browser's key, read back from the projection), and to the
+   * tab-local store otherwise, authored as whoever `/whoami` said is asking.
+   */
+  #comment = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
     const form = event.currentTarget;
     if (!(form instanceof HTMLFormElement)) return;
@@ -154,8 +158,11 @@ export class GpDetail extends GitPlusElement {
     if (!(field instanceof HTMLTextAreaElement)) return;
     const text = field.value.trim();
     if (text === "") return;
-    const author = this.viewer ?? "anonymous";
-    store.comment(this.#task.id, { avatar: initials(author), author, when: "just now", text });
+    const sent = await store.commentRemote(this.#task.id, text);
+    if (!sent) {
+      const author = this.viewer ?? "anonymous";
+      store.comment(this.#task.id, { avatar: initials(author), author, when: "just now", text });
+    }
     form.reset();
   };
 

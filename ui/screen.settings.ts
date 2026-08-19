@@ -68,6 +68,17 @@ export class GpSettings extends GitPlusElement {
   /** Injected by the shell so every screen shares one client. */
   api: GitApi | null = null;
 
+  /**
+   * The browser's own signing key, for the identity card — resolved lazily
+   * because describing it *generates* one on first visit, which is exactly
+   * what this card is for: showing the public half so an operator can grant
+   * it membership.
+   */
+  @state() private accessor browserKey: {
+    readonly fingerprint: string;
+    readonly publicKey: string;
+  } | null = null;
+
   /** The `/whoami` answer, resolved once by the shell. */
   @property({ attribute: false }) accessor who: Whoami | null = null;
 
@@ -84,6 +95,11 @@ export class GpSettings extends GitPlusElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.#load();
+    void import("./identity.ts")
+      .then(async (identity) => {
+        this.browserKey = await identity.describeIdentity();
+      })
+      .catch(() => {});
   }
 
   async #load(): Promise<void> {
@@ -190,6 +206,40 @@ export class GpSettings extends GitPlusElement {
         <div class="gp-field-value">
           ${who === null || who.capabilities.length === 0 ? "none" : who.capabilities.join(", ")}
         </div>
+        <div class="gp-field-label">Browser signing key</div>
+        ${
+          this.browserKey === null
+            ? html`<div class="gp-field-value">—</div>`
+            : html`
+                <div class="gp-field-value">${this.browserKey.fingerprint}</div>
+                <div class="gp-field-value gp-field-value--row">
+                  <input
+                    class="gp-input"
+                    readonly
+                    aria-label="Browser public key"
+                    .value=${this.browserKey.publicKey}
+                    @focus=${(event: FocusEvent) => {
+                      if (event.target instanceof HTMLInputElement) event.target.select();
+                    }}
+                  />
+                  <button
+                    class="gp-btn-quiet"
+                    type="button"
+                    @click=${() => {
+                      if (this.browserKey !== null) {
+                        void navigator.clipboard.writeText(this.browserKey.publicKey);
+                      }
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+                <p class="gp-setting-hint">
+                  Hub events this browser writes are signed with this key. Grant it membership with
+                  <code>chr33s-git hub grant</code> to have a repository with a genesis accept them.
+                </p>
+              `
+        }
         ${
           verdicts.length === 0
             ? nothing

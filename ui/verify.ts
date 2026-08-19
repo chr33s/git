@@ -968,7 +968,9 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   await page.fill("#gp-new-title", "Verify the composer");
   await page.fill("#gp-new-desc", "Created by verify.ts");
   await page.click('.gp-dialog button[type="submit"]');
-  await page.waitForTimeout(500);
+  // The submit signs and tries the hub first; offline that fails fast and
+  // falls back to the tab-local store, but the round trip needs a moment.
+  await page.waitForTimeout(1200);
   check("creating a task opens its detail", (await hash()) === "#/detail/T-21");
   check(
     "and it carries the typed title",
@@ -1688,6 +1690,29 @@ const localMode = async (browser: Browser): Promise<void> => {
       ((await page.textContent(".gp-task-list")) ?? "").includes("Review the local mode") &&
         (await page.locator(".gp-task-row").count()) === 1,
     );
+
+    // A task created here: signed with the browser's own key, appended over
+    // POST /hub/events, and read back from the server's projection.
+    await page.click(".gp-tasks-head .gp-btn-primary");
+    await page.waitForTimeout(400);
+    await page.fill("#gp-new-title", "Opened by the browser key");
+    await page.fill("#gp-new-desc", "Signed in the page, appended by the server.");
+    await page.click('.gp-dialog button[type="submit"]');
+    await page.waitForTimeout(2500);
+    const served = await fetch(`${upstream}/core/hub/tasks`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.HubTasksResponse)(await response.json()),
+    );
+    check(
+      "the signed task landed in the repository's hub",
+      served.tasks.some((task) => task.title === "Opened by the browser key"),
+    );
+    check(
+      "and its detail is the projection, not a tab-local copy",
+      ((await page.textContent(".gp-detail-title")) ?? "").includes("Opened by the browser key"),
+    );
+    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1200);
+    check("the list counts both hub tasks", (await page.locator(".gp-task-row").count()) === 2);
     await shot(page, "local-mode");
   } finally {
     await page.close();
