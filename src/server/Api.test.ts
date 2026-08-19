@@ -15,10 +15,16 @@ import { Effect, FileSystem, Layer, Path } from "effect";
 import { Etag, HttpPlatform, HttpRouter } from "effect/unstable/http";
 import { HttpApiTest } from "effect/unstable/httpapi";
 
+import { fingerprint, formatPublicKey, generate } from "../crypto/SshSignature.ts";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
+import * as Certificate from "../trust/Certificate.ts";
+import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
+import * as Log from "../trust/Log.ts";
+import { project } from "../trust/Projection.ts";
 import * as Api from "./Api.ts";
+import * as Auth from "./Auth.ts";
 import * as Policy from "./Policy.ts";
 import * as Subscribers from "./Subscribers.ts";
 
@@ -237,6 +243,202 @@ describe("Api", () => {
     assert.equal(outcome.side, false, "nor does a merge whose other side reaches it");
     assert.equal(outcome.apart, true, "a destination neither base reaches is a rewrite");
   });
+
+  it.live("tells an anonymous request what it may do, rather than refusing the question", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+        const answer = yield* client.repo.whoami({ params: { repo: "r" } });
+
+        // Answered, not refused: a caller may always be told what it may do,
+        // and being told "nothing" is the useful form of that answer.
+        assert.equal(answer.member, false);
+        assert.equal(answer.repo, null);
+        assert.equal(answer.subject, null);
+        assert.match(answer.why ?? "", /no genesis/);
+        assert.equal(answer.branches["(any other ref)"]?.push, "refused");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("answers over the wire for what the credential holds, not what the member does", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        // A repository with an identity, one member, and a protected branch.
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.create-pr"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const blob = yield* git.writeBlob(
+          Policy.encodeRules({
+            ...Policy.OPEN,
+            protected: ["refs/heads/main"],
+            requiredApprovals: 1,
+            requiredChecks: ["test"],
+            requirePullRequest: true,
+          }),
+        );
+        const tree = yield* git.writeTree([{ mode: "100644", name: "policy.json", oid: blob }]);
+        const commit = yield* git.commitTree({
+          tree,
+          parents: [],
+          message: "policy\n",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+        yield* git.setRef({ name: Policy.RULES_REF, to: commit });
+
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(member.publicKey);
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const answer = yield* client.repo.whoami({ params: { repo: "r" } }).pipe(
+          Effect.provideService(Auth.Requester, {
+            principal: projection.members.get(signer) ?? null,
+            signer,
+            // The credential was minted narrower than the grant: what this
+            // *request* may do is the intersection, and that is the answer
+            // its holder needs — reported as the member's full grant, an
+            // agent would plan a push its own credential cannot make.
+            capabilities: ["repo.read"],
+            projection,
+            envelope: null,
+          }),
+        );
+
+        assert.equal(answer.member, true);
+        assert.equal(answer.repo, genesis.repoId);
+        assert.equal(answer.subject, signer);
+        assert.deepEqual(answer.capabilities, ["repo.read"]);
+        assert.equal(
+          answer.branches["(any other ref)"]?.push,
+          "refused",
+          "a credential without source.push may not write, whatever its member holds",
+        );
+
+        // The nearest obstacle, not every obstacle: this credential cannot
+        // write at all, so saying what `main` additionally requires would be
+        // advice about a push it could never make.
+        const main = answer.branches["refs/heads/main"];
+        assert.equal(main?.push, "refused");
+        assert.deepEqual(main?.why, ["source.push is not granted to this key"]);
+
+        // Widen the credential to what the member actually holds, and the
+        // branch's own requirements are what is left to answer.
+        const wider = yield* client.repo.whoami({ params: { repo: "r" } }).pipe(
+          Effect.provideService(Auth.Requester, {
+            principal: projection.members.get(signer) ?? null,
+            signer,
+            capabilities: ["repo.read", "source.push"],
+            projection,
+            envelope: null,
+          }),
+        );
+        assert.equal(wider.branches["(any other ref)"]?.push, "allowed");
+        assert.deepEqual(wider.branches["refs/heads/main"]?.why, [
+          "requirePullRequest",
+          "requiredApprovals: 1",
+          "requiredChecks: [test]",
+          "a direct push meets none of these; open a pull request",
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("reports what a key holds when the request was served as a public read", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["source.push"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+        yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "first",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(member.publicKey);
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        // What the guard hands a member who holds no `repo.read` on a
+        // repository anonymous readers may clone: a real signer, no principal,
+        // and the literal capability the *read* was served under. Read as the
+        // credential's scope, this told a member holding `source.push` that
+        // every push would be refused — an answer the boundary contradicts.
+        const answer = yield* client.repo.whoami({ params: { repo: "r" } }).pipe(
+          Effect.provideService(Auth.Requester, {
+            principal: null,
+            signer,
+            capabilities: ["repo.read"],
+            projection,
+            envelope: null,
+          }),
+        );
+
+        assert.equal(answer.member, true);
+        assert.deepEqual(answer.capabilities, ["source.push"]);
+        assert.equal(answer.branches["(any other ref)"]?.push, "allowed");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("says nothing about trust freshness for a repository with no identity", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const blob = yield* git.writeBlob(
+          Policy.encodeRules({ ...Policy.OPEN, maxTrustAgeSeconds: 60 }),
+        );
+        const tree = yield* git.writeTree([{ mode: "100644", name: "policy.json", oid: blob }]);
+        const commit = yield* git.commitTree({
+          tree,
+          parents: [],
+          message: "policy\n",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+        yield* git.setRef({ name: Policy.RULES_REF, to: commit });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        // `Auth.anonymous` is what the guard hands a request to a repository
+        // with no genesis, and it carries the *empty* projection rather than
+        // none at all — which is the whole point of this case.
+        const answer = yield* client.repo
+          .whoami({ params: { repo: "r" } })
+          .pipe(Effect.provideService(Auth.Requester, Auth.anonymous));
+
+        // That empty projection is not a membership view, and judging its
+        // staleness reported a bound the CLI — handed no projection at all —
+        // says nothing about.
+        assert.equal(answer.repo, null);
+        assert.equal(answer.trust, null);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
 
   it.live("drives the derived client end to end, typed errors included", () =>
     dispatched(

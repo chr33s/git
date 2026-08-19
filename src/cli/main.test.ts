@@ -136,24 +136,37 @@ describe("cli", () => {
       // server strips that suffix before it looks for a directory, so a helper
       // that does not reports every `host/repo.git` push as a repository with
       // no identity while the same push to `host/repo` works.
-      const answered = await withStdin(
-        ["credential-helper", "--root", root, "--key", keyFile, "get"],
-        "protocol=http\nhost=git.example.com\npath=helped.git\n\n",
-      );
-
-      assert.match(answered, /^username=/m);
-      const password = /^password=(.+)$/m.exec(answered)?.[1] ?? "";
-      assert.notEqual(password, "", `no credential in: ${answered}`);
-
-      // And it is the real thing: the server takes it.
       const server = await serve({ root });
       try {
+        const asked = async (host: string) => {
+          const answered = await withStdin(
+            ["credential-helper", "--root", root, "--key", keyFile, "get"],
+            `protocol=http\nhost=${host}\npath=helped.git\n\n`,
+          );
+          assert.match(answered, /^username=/m);
+          const password = /^password=(.+)$/m.exec(answered)?.[1] ?? "";
+          assert.notEqual(password, "", `no credential in: ${answered}`);
+          return password;
+        };
+
         const refused = await fetch(`${server.url}/helped/info/refs?service=git-upload-pack`);
         assert.equal(refused.status, 401, "the repository is not public");
+
         const allowed = await fetch(`${server.url}/helped/info/refs?service=git-upload-pack`, {
-          headers: { authorization: `Basic ${btoa(`x:${password}`)}` },
+          headers: { authorization: `Basic ${btoa(`x:${await asked(new URL(server.url).host)}`)}` },
         });
         assert.equal(allowed.status, 200, "and the minted credential opens it");
+
+        // git asks whichever helper matches for whatever URL it is about to
+        // talk to, so the host it names is the only one the credential may be
+        // spent at. Unbound, a redirect or a typo'd remote was enough to hand
+        // somebody else's server a credential that works against this one —
+        // a repository and its replicas share a RepoID, so the wrong host is
+        // not the wrong repository.
+        const elsewhere = await fetch(`${server.url}/helped/info/refs?service=git-upload-pack`, {
+          headers: { authorization: `Basic ${btoa(`x:${await asked("git.example.com")}`)}` },
+        });
+        assert.equal(elsewhere.status, 401, "a credential minted for another host opens nothing");
       } finally {
         await server.close();
       }

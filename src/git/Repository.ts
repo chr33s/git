@@ -435,6 +435,16 @@ export class Repository extends Context.Service<
       readonly tree: Oid;
       readonly parents: ReadonlyArray<Oid>;
       readonly message: string;
+      /**
+       * The message as bytes, for a caller copying one it did not write.
+       *
+       * A replay — a rebase, a cherry-pick — carries somebody else's message
+       * forward, and a message is bytes: handed the decoded string alone, a
+       * Latin-1 message came back as U+FFFD and the new commit said something
+       * its author had not. `CommitInfo.raw` is what this takes, and it is
+       * absent on every message that survives a decode.
+       */
+      readonly raw?: Uint8Array;
       readonly author: Signature;
       readonly committer?: Signature;
     }) => Effect.Effect<Oid, StorageFailure>;
@@ -859,7 +869,12 @@ export const layer = Layer.effect(
             // normal shape, not a failure to walk.
             Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
           );
-          if (commit !== null) stack.push(...commit.parents);
+          // Appended one at a time rather than spread. A commit object states
+          // its own parents, and a client can write as many as it likes: past
+          // the argument limit — which is around a hundred thousand — the
+          // spread throws a `RangeError`, so one crafted commit took out every
+          // walk that met it, `gc` and merge-base included.
+          if (commit !== null) for (const parent of commit.parents) stack.push(parent);
         }
         return seen;
       });
@@ -965,7 +980,7 @@ export const layer = Layer.effect(
             const next: Oid[] = [];
             for (const [oid, commit] of yield* commitsOf(layer)) {
               if (commit !== null) {
-                next.push(...commit.parents);
+                for (const parent of commit.parents) next.push(parent);
                 continue;
               }
               // Not a commit: an annotated tag peels to its target.
@@ -1379,8 +1394,30 @@ export const layer = Layer.effect(
               readCommit(oid).pipe(Effect.map((commit) => ({ ...commit, oid }))),
             );
 
-            const latest = Math.max(...commits.map((commit) => commit.committer.at.getTime()));
-            const tied = commits.filter((commit) => commit.committer.at.getTime() === latest);
+            /**
+             * When a commit says it was made, with an unparseable date read
+             * as the epoch.
+             *
+             * A commit object can carry anything a client wrote, and a
+             * timestamp that will not parse is a `NaN` — which compares equal
+             * to nothing, itself included. So `latest` became `NaN`, `tied`
+             * came out empty, and the reduce below threw `Reduce of empty
+             * array` on a repository whose only fault was one odd commit:
+             * `git log` stopped working and nothing said which commit did it.
+             * Oldest is the honest reading of a date nobody can read.
+             */
+            const when = (commit: { readonly committer: Signature }): number => {
+              const at = commit.committer.at.getTime();
+              return Number.isNaN(at) ? 0 : at;
+            };
+
+            // Folded rather than spread, for the reason `ancestry` appends
+            // its parents one at a time: the frontier is as wide as the widest
+            // commit in it, and `Math.max` handed a hundred thousand arguments
+            // is a `RangeError` rather than a maximum.
+            let latest = Number.NEGATIVE_INFINITY;
+            for (const commit of commits) latest = Math.max(latest, when(commit));
+            const tied = commits.filter((commit) => when(commit) === latest);
 
             /**
              * Date order alone would sometimes print a parent above its
@@ -1401,8 +1438,8 @@ export const layer = Layer.effect(
                 if (visited.has(oid) || state.seen.has(oid)) continue;
                 visited.add(oid);
                 const commit = yield* readCommit(oid);
-                if (commit.committer.at.getTime() !== latest) continue;
-                pending.push(...commit.parents);
+                if (when(commit) !== latest) continue;
+                for (const parent of commit.parents) pending.push(parent);
               }
               return false;
             });
@@ -1615,10 +1652,14 @@ export const layer = Layer.effect(
 
       reflog: refs.reflog,
 
-      commitTree: ({ author, committer, message, parents, tree }) =>
+      commitTree: ({ author, committer, message, parents, raw, tree }) =>
         objects.write({
           type: "commit",
-          data: encodeCommit({ tree, parents, author, committer: committer ?? author, message }),
+          data: encodeCommit(
+            raw === undefined
+              ? { tree, parents, author, committer: committer ?? author, message }
+              : { tree, parents, author, committer: committer ?? author, message, raw },
+          ),
         }),
 
       merge: Effect.fn("Repository.merge")(function* (input) {

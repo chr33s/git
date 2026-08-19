@@ -500,30 +500,56 @@ export interface Entry {
  * authors appending at once produce one winner and one retry rather than a
  * lost event. Retrying is safe: adding an event does not change what it says.
  */
-export const append = Effect.fn("hub.Event.append")(
-  function* (payload: HubPayload, bytes: Uint8Array, signatures: ReadonlyArray<string>) {
+/**
+ * Add one signed record to the end of an append-only hub ref.
+ *
+ * The ref is the caller's, not this module's: a pull request writes to
+ * `refs/hub/pr/<id>` and a session to `refs/hub/session/<id>`, and neither
+ * differs in how a record is added — the same parent, the same
+ * compare-and-swap, the same retry. Written once so that the class of thing
+ * being appended cannot change what appending means.
+ */
+export const appendTo = Effect.fn("hub.Event.appendTo")(
+  function* (input: {
+    readonly ref: string;
+    readonly message: string;
+    readonly payload: Uint8Array;
+    readonly signatures: ReadonlyArray<string>;
+  }) {
     const repository = yield* Repository;
 
-    const ref = refOf(payload.pr);
     // `readRef`, not `resolve`: this value is both the parent and the
     // compare-and-swap, and a symbolic ref resolves to an oid the store never
     // wrote — so the swap would conflict against a value nobody holds, on
     // every append, with nothing to point at as the cause.
-    const head = yield* repository.readRef(ref);
+    const head = yield* repository.readRef(input.ref);
 
     const commit = yield* Record.write({
       name: RECORD,
-      payload: bytes,
-      signatures,
+      payload: input.payload,
+      signatures: input.signatures,
       parents: head === null ? [] : [head],
-      message: `${payload.type} ${payload.id}\n`,
+      message: input.message,
     });
 
-    yield* repository.setRef({ name: ref, to: commit, expected: head });
+    yield* repository.setRef({ name: input.ref, to: commit, expected: head });
     return commit;
   },
   Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }),
 );
+
+export const append = Effect.fn("hub.Event.append")(function* (
+  payload: HubPayload,
+  bytes: Uint8Array,
+  signatures: ReadonlyArray<string>,
+) {
+  return yield* appendTo({
+    ref: refOf(payload.pr),
+    message: `${payload.type} ${payload.id}\n`,
+    payload: bytes,
+    signatures,
+  });
+});
 
 /**
  * Sign an event and append it.

@@ -34,6 +34,7 @@ import * as Redaction from "../hub/Redaction.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import * as Policy from "./Policy.ts";
 import * as Auth from "./Auth.ts";
+import * as Whoami from "./Whoami.ts";
 import { permits } from "../trust/Certificate.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
@@ -625,6 +626,23 @@ const FetchedRef = Schema.Struct({
 });
 
 const repo = HttpApiGroup.make("repo")
+  .add(
+    // Answered for whoever is asking: an anonymous request is told that it may
+    // do nothing rather than being refused the question, and a credential is
+    // told what that credential may do rather than what its key was granted.
+    //
+    // Charged `repo.read` all the same, because the guard charges every GET
+    // one and this is a GET. On a private repository that is a real edge: a
+    // key granted `source.push` and nothing else cannot ask this over the
+    // wire, and has to use the CLI form or be granted `repo.read` as well —
+    // which agents.md tells operators to do anyway, since such a key cannot
+    // clone either.
+    HttpApiEndpoint.get("whoami", "/whoami", {
+      params: RepoParam,
+      success: Whoami.Answer,
+      error: [Invalid],
+    }),
+  )
   .add(
     HttpApiEndpoint.post("create", "/commit", {
       params: RepoParam,
@@ -1389,6 +1407,75 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const repository = yield* Repository;
         const refs = yield* repository.refs.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { refs: refs.map(([name, oid]) => ({ name, oid })) };
+      }),
+    )
+    .handle("whoami", () =>
+      Effect.gen(function* () {
+        const stored = yield* readGenesis().pipe(
+          Effect.mapError(
+            () =>
+              new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+          ),
+        );
+
+        // The projection the guard already folded, not a fresh one: it is the
+        // state this request was authenticated against, so answering from
+        // anything else would describe a different request than the one asked
+        // about.
+        const requester = yield* Effect.serviceOption(Auth.Requester);
+        const who = Option.getOrUndefined(requester);
+
+        // A delegated credential narrows what this *request* may do, and that
+        // narrowing is the answer its holder is asking for — but only where
+        // the guard actually authorized the signer. On the anonymous-read
+        // fallback it reports the literal `repo.read` beside a real signer,
+        // because the request was served as a public read rather than as that
+        // member; taken as the credential's scope, a member holding
+        // `source.push` on a public repository was told every push would be
+        // refused, while the boundary would have accepted it. `principal` is
+        // what separates the two: null there means nobody was authorized.
+        const scoped = who?.principal === null ? undefined : who?.capabilities;
+
+        const held =
+          stored === null
+            ? Whoami.withoutMembership(
+                "this repository has no genesis, so it has no membership: writes are refused unless the host serves --open",
+              )
+            : who === undefined || who.signer === null
+              ? Whoami.withoutMembership(
+                  "this request proved possession of no key; present a credential to be told more",
+                )
+              : Whoami.standingOf(who.projection, who.signer, new Date(), scoped);
+
+        // Fails closed on unreadable rules, for the reason `Policy.rulesOf`
+        // gives: rules that will not parse leave the repository's stated
+        // protection in force. Answered as "no rules" instead, this would tell
+        // a caller a protected branch was open at the moment storage was least
+        // trustworthy — and unlike a refusal, an answer gets acted on.
+        return yield* Whoami.answer({
+          subject: who?.signer ?? null,
+          repoId: stored === null ? null : stored.genesis.repoId,
+          // The empty projection a genesis-less repository carries is not a
+          // membership view, and answering freshness against it produced a
+          // `trust` block here where the CLI, handed no projection at all,
+          // reports none. Two answers to one question is the drift this
+          // shares an implementation to avoid.
+          projection: stored === null ? null : (who?.projection ?? null),
+          held,
+        }).pipe(
+          Effect.catchTags({
+            ObjectNotFound: () =>
+              new Invalid({
+                field: "policy",
+                reason: "the repository's branch rules could not be read",
+              }),
+            StorageFailure: () =>
+              new Invalid({
+                field: "policy",
+                reason: "the repository's branch rules could not be read",
+              }),
+          }),
+        );
       }),
     )
     .handle("branches", ({ query }) =>

@@ -18,10 +18,17 @@ import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
 import { Effect, Layer, Stream } from "effect";
 
+import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
+
 import { hasGit } from "../testing/Git.ts";
+import { ObjectNotFound, StorageFailure } from "./Error.ts";
+import { concatBytes as concat } from "./Format.ts";
 import * as Maintenance from "./Maintenance.ts";
 import { stores as memoryStores } from "./Memory.ts";
-import { PackStore } from "./Packed.ts";
+import { bufferSource } from "./PackFile.ts";
+import { buildPackIndex } from "./PackIndex.ts";
+import { packed, PackStore } from "./Packed.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
@@ -392,5 +399,91 @@ describe.skipIf(!hasGit)("packs at rest, on disk", () => {
     );
     assert.equal(readBack.message, "commit 7");
     assert.equal(readBack.files.length, 9);
+  });
+});
+
+describe("a read that fails on the way to a delta base", () => {
+  it("says the storage failed, not that the pack is corrupt", async () => {
+    // A thin pack's ref-delta names a base that lives outside it, so reading
+    // one goes back through the loose store. A failure there was answered as
+    // `null` — "the base is nowhere" — and the pack reader turned that into
+    // `PackCorrupt`, which is the worst available diagnosis: it names the pack
+    // as damaged and invites an operator to throw away objects over what a
+    // retry would have fixed.
+    const encoder = new TextEncoder();
+    const sha1 = (bytes: Uint8Array) => new Uint8Array(createHash("sha1").update(bytes).digest());
+    // SAFETY: a SHA-1 digest in hex is forty lowercase hex characters, which
+    // is what an `Oid` is.
+    const oidOf = (type: string, data: Uint8Array): Oid =>
+      createHash("sha1").update(`${type} ${data.length}\0`).update(data).digest("hex") as Oid;
+    const header = (code: number, size: number): Array<number> => {
+      const bytes: Array<number> = [];
+      let current = (code << 4) | (size & 0x0f);
+      let rest = Math.floor(size / 16);
+      while (rest > 0) {
+        bytes.push(current | 0x80);
+        current = rest & 0x7f;
+        rest = Math.floor(rest / 128);
+      }
+      bytes.push(current);
+      return bytes;
+    };
+    const hexBytes = (hex: string): Array<number> => {
+      const bytes: Array<number> = [];
+      for (let at = 0; at < hex.length; at += 2) {
+        bytes.push(Number.parseInt(hex.slice(at, at + 2), 16));
+      }
+      return bytes;
+    };
+
+    const base = encoder.encode("the quick brown fox jumps over the lazy dog");
+    const baseOid = oidOf("blob", base);
+    const target = encoder.encode("quick brown fox");
+    // size of base, size of target, then one copy instruction.
+    const delta = Uint8Array.from([base.length, target.length, 0x80 | 0x01 | 0x10, 4, 15]);
+    const targetOid = oidOf("blob", target);
+
+    const entry = concat([
+      Uint8Array.from(header(7, delta.length)),
+      Uint8Array.from(hexBytes(baseOid)),
+      new Uint8Array(deflateSync(delta)),
+    ]);
+    const body = concat([Uint8Array.from([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 1]), entry]);
+    const checksum = sha1(body);
+    const pack = concat([body, checksum]);
+    const index = buildPackIndex([{ oid: targetOid, offset: 12, crc32: 0 }], checksum);
+
+    // The one thing this store does is fail, which is the case under test.
+    const unreadable: ObjectStore["Service"] = {
+      read: (oid) =>
+        oid === baseOid
+          ? Effect.fail(new StorageFailure({ operation: "read", path: oid, cause: "backend down" }))
+          : Effect.fail(new ObjectNotFound({ oid })),
+      readStream: (oid) => Effect.fail(new ObjectNotFound({ oid })),
+      write: () => Effect.fail(new StorageFailure({ operation: "write", path: "", cause: "no" })),
+      has: () => Effect.succeed(false),
+      delete: () => Effect.void,
+      list: Stream.empty,
+    };
+
+    const store = packed(
+      unreadable,
+      {
+        list: Effect.succeed([{ name: "pack-thin", index, source: bufferSource(pack) }]),
+        write: () => Effect.void,
+        delete: () => Effect.void,
+      },
+      "memory",
+    );
+
+    const failure = await Effect.runPromise(Effect.flip(store.read(targetOid)));
+    assert.equal(failure._tag, "StorageFailure");
+    // And it says *why*. Both readings arrive as a `StorageFailure` — the read
+    // path wraps whatever the pack reader threw — so the difference is the
+    // cause an operator is handed, and "delta base is nowhere" is a claim
+    // about the pack's contents rather than about the backend that went away.
+    const told = JSON.stringify(failure);
+    assert.match(told, /backend down/);
+    assert.doesNotMatch(told, /nowhere/);
   });
 });

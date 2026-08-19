@@ -22,6 +22,8 @@ import { Effect, Layer } from "effect";
 import { push, type PushRef } from "../client/Push.ts";
 import { Hooks, type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Auth from "./Auth.ts";
+import * as Session from "../hub/Session.ts";
+import * as Task from "../hub/Task.ts";
 import { type Remote, Remotes, sends } from "./Remotes.ts";
 
 /**
@@ -39,11 +41,19 @@ export const covered = (
   results: ReadonlyArray<ReceiveResult>,
 ): ReadonlyArray<ReceiveResult> => {
   const patterns = remote.sync?.refs ?? [];
-  return results.filter(
-    (result) =>
-      result.ok &&
-      (patterns.length === 0 || patterns.some((pattern) => matches(pattern, result.ref))),
-  );
+  return results.filter((result) => {
+    if (!result.ok) return false;
+    // Sessions and tasks are never carried by a default. They hold the prompts
+    // an agent was given and the descriptions of work it was asked to do,
+    // which is the most leak-prone thing this repository stores,
+    // and "everything" configured once — a mirror, a backup, a fork — would
+    // put them somewhere nobody chose to put them. Named explicitly they go,
+    // which is what a provenance remote is (docs/agents.md §10).
+    if (patterns.length === 0) {
+      return Session.sessionOf(result.ref) === null && Task.taskOf(result.ref) === null;
+    }
+    return patterns.some((pattern) => matches(pattern, result.ref));
+  });
 };
 
 /** A `push` call under construction: a credential is present or it is not. */
@@ -85,7 +95,21 @@ const forward = Effect.fn("Sending.forward")(function* (
   const request: PushRequest = { url: remote.url, refs, force: false };
   if (token !== undefined) request.token = token;
 
-  yield* push(request);
+  // The per-ref verdicts, not just the call. A receive-pack that answers at
+  // all answers `ok`, and the refusals ride inside the response — so a mirror
+  // rejecting every ref, on a stale credential or a ref it will not
+  // fast-forward, was indistinguishable here from one keeping up. The
+  // forwarding still cannot fail the push that caused it, so what this can do
+  // about a refusal is say which ref and why, in the log the operator reads
+  // when the mirror turns out to be behind.
+  const refused = (yield* push(request)).filter((result) => !result.ok);
+  if (refused.length > 0) {
+    yield* Effect.logWarning(
+      `replication to ${remote.name} refused ${refused
+        .map((result) => `${result.ref} (${result.reason ?? "no reason given"})`)
+        .join(", ")}`,
+    );
+  }
 });
 
 export interface SendingOptions {

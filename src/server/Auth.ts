@@ -283,6 +283,23 @@ export const Delegation = Schema.Struct({
   version: Schema.Literal(1),
   repo: Schema.String,
   capabilities: Schema.Array(Schema.String),
+  /**
+   * The host this credential may be presented at, when it was minted for one.
+   *
+   * A replica shares its origin's `RepoID` — that is what makes it a replica —
+   * so a credential minted to push *to* a mirror authenticates just as well
+   * back *at* the origin. Handing one over is therefore handing the
+   * destination a live token for the sender, and the destination is exactly
+   * the party a mirror does not have to trust. The audience is inside the
+   * signed bytes, so the holder cannot widen it, and it names the host rather
+   * than the repository because the repository is the part the two share.
+   *
+   * Absent on a credential minted for no particular host — `hub credential`
+   * hands one to a person, who knows where they are going to spend it — and
+   * absent on every credential minted before this field existed, which is why
+   * a missing audience is unbound rather than refused.
+   */
+  audience: Schema.optional(Schema.String),
   expiresAt: Schema.String,
   /** Distinguishes two credentials minted in the same second. */
   nonce: Schema.String,
@@ -331,6 +348,9 @@ export const encodeDelegation = (delegation: Delegation): Uint8Array =>
     type: delegation.type,
     repo: delegation.repo,
     capabilities: delegation.capabilities,
+    // `undefined` drops the key, which is what keeps an unbound credential
+    // byte-identical to the shape that existed before audiences did.
+    audience: delegation.audience,
     expiresAt: delegation.expiresAt,
     nonce: delegation.nonce,
   });
@@ -420,6 +440,8 @@ export const mintDelegation = Effect.fn("Auth.mintDelegation")(function* (input:
   readonly repo: RepoId;
   readonly capabilities: ReadonlyArray<string>;
   readonly ttlSeconds: number;
+  /** The host it may be spent at; omitted for one that names no host. */
+  readonly audience?: string;
   readonly now?: Date;
 }) {
   if (input.ttlSeconds <= 0 || input.ttlSeconds > MAX_DELEGATION_SECONDS) {
@@ -435,6 +457,7 @@ export const mintDelegation = Effect.fn("Auth.mintDelegation")(function* (input:
     version: 1,
     repo: input.repo,
     capabilities: input.capabilities,
+    audience: input.audience,
     expiresAt: new Date(now.getTime() + input.ttlSeconds * 1000).toISOString(),
     nonce: crypto.randomUUID(),
   } satisfies Delegation;
@@ -465,10 +488,31 @@ export const REPLICATION_TTL_SECONDS = 3600;
  * exactly what the key's owner could have pushed by hand and nothing more.
  * `repo.admin` is left out because it is the one capability that would widen
  * rather than narrow — an admin's key already covers this list by implication.
+ *
+ * A claim this wide is only safe because the credential names the host it may
+ * be spent at — see `audience`. Without that, a mirror was handed a token good
+ * for nearly everything back at the origin.
  */
 export const REPLICATION_CAPABILITIES: ReadonlyArray<string> = CAPABILITIES.filter(
   (capability) => capability !== "repo.admin",
 );
+
+/**
+ * The host half of a URL, which is what an audience names.
+ *
+ * The host and not the origin: a destination reached over `http://` on an
+ * internal network and `https://` from outside it is one destination, and a
+ * check that disagreed would refuse a mirror on account of the scheme its
+ * proxy terminated. The port stays, because a second service on the same
+ * machine is a different destination.
+ */
+export const audienceOf = (url: string): string | null => {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+};
 
 /**
  * The bearer token to present to a registered remote, if any.
@@ -479,12 +523,16 @@ export const REPLICATION_CAPABILITIES: ReadonlyArray<string> = CAPABILITIES.filt
  * `MAX_DELEGATION_SECONDS`, so a token written into a registry authenticates
  * until tomorrow and then stops. Minting per use has no such day.
  *
- * The delegation is bound to *this* repository's `RepoID`, which is the right
- * one exactly when the destination is a replica of this repository — which is
- * what §25 replication is. Against anything else it presents as garbage, the
- * same as a credential minted for the wrong repository always has.
+ * The delegation is bound to *this* repository's `RepoID` and to the remote's
+ * host. The `RepoID` alone was not a bound at all in the case that matters: a
+ * replica of this repository carries the same one — that is what makes it a
+ * replica — so the token a mirror was handed authenticated back at the sender,
+ * for everything but `repo.admin`, until it expired. The destination is
+ * precisely the party a mirror does not have to trust, so the host it was
+ * registered with travels inside the signed bytes and nowhere else accepts it.
  */
 export const present = Effect.fn("Auth.present")(function* (remote: {
+  readonly url: string;
   readonly credential: string | null;
   readonly key: string | null;
 }) {
@@ -501,10 +549,22 @@ export const present = Effect.fn("Auth.present")(function* (remote: {
     });
   }
 
+  const audience = audienceOf(remote.url);
+  if (audience === null) {
+    // Refused rather than minted unbound: a credential nobody can name a host
+    // for is one that works everywhere, which is the failure this binding
+    // exists to close.
+    return yield* new Invalid({
+      field: "url",
+      reason: `'${remote.url}' has no host to bind a minted credential to`,
+    });
+  }
+
   return yield* mintDelegation({
     key: parsed.success,
     repo: stored.genesis.repoId,
     capabilities: REPLICATION_CAPABILITIES,
+    audience,
     ttlSeconds: REPLICATION_TTL_SECONDS,
   });
 });
@@ -525,6 +585,8 @@ export const openDelegation = Effect.fn("Auth.openDelegation")(function* (
   credential: string,
   repo: RepoId,
   now: Date,
+  /** The host this request arrived at, or `null` where none is known. */
+  audience: string | null,
 ) {
   if (!credential.startsWith(DELEGATION_PREFIX)) return null;
 
@@ -547,6 +609,13 @@ export const openDelegation = Effect.fn("Auth.openDelegation")(function* (
   // The repository is inside the signed bytes, so a credential minted for one
   // repository presents as garbage at any other.
   if (delegation.repo !== repo) return null;
+  // And a credential minted for one *host* presents as garbage at any other,
+  // which is the check the `RepoID` cannot make: every replica of this
+  // repository answers to the same one. Unbound credentials — what
+  // `hub credential` hands a person — carry no audience and skip this;
+  // a bound one arriving where the host is unknown is refused rather than
+  // waved through, since the holder chose the binding and can mint without.
+  if (delegation.audience !== undefined && delegation.audience !== audience) return null;
   const expiry = Date.parse(delegation.expiresAt);
   if (Number.isNaN(expiry) || expiry <= now.getTime()) return null;
   // Enforced on the verifying side as well as the minting side. The holder
@@ -742,7 +811,12 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
 
   const identified =
     presented.kind === "delegated"
-      ? yield* openDelegation(presented.credential, projection.repoId, now)
+      ? yield* openDelegation(
+          presented.credential,
+          projection.repoId,
+          now,
+          audienceOf(input.request.url),
+        )
       : yield* openEnvelope({
           payload: presented.payload,
           signature: presented.signature,

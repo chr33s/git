@@ -40,6 +40,9 @@ import {
   type Projection as TrustProjection,
 } from "../trust/Projection.ts";
 import * as Event from "../hub/Event.ts";
+import * as Tombstone from "../hub/Tombstone.ts";
+import * as Session from "../hub/Session.ts";
+import * as Task from "../hub/Task.ts";
 import {
   approvals,
   checksPassed,
@@ -87,6 +90,26 @@ export interface Rules {
    * and a bound nobody asked for is a bound that breaks working repositories.
    */
   readonly maxTrustAgeSeconds: number;
+  /**
+   * Whether every commit a push introduces must name the session that made it.
+   *
+   * Off by default, and a real cost when on: it is a rule about *every* new
+   * commit, so on a repository where people push directly it asks people to
+   * publish session records too. Scoping it by signer would be kinder and is
+   * deferred — an unsigned commit would become the way around it, and a rule
+   * with a hole in it is worse than one an operator turned on knowingly.
+   */
+  readonly requireProvenance: boolean;
+  /**
+   * What a repository will accept being told it cost, per window.
+   *
+   * Observability and advisory restraint, not defence: usage is self-reported
+   * by the signer, so this bounds what the repository *accepts* rather than
+   * what anybody spent. The wallet is bounded where the tokens are actually
+   * counted, which is not here. `0` is unbounded, and the default.
+   */
+  readonly maxUsageTokens: number;
+  readonly usageWindowSeconds: number;
 }
 
 /** Re-exported where the boundary reads it; defined beside the guard. */
@@ -100,6 +123,9 @@ export const OPEN: Rules = {
   requireResolvedThreads: false,
   requirePullRequest: false,
   maxTrustAgeSeconds: 0,
+  requireProvenance: false,
+  maxUsageTokens: 0,
+  usageWindowSeconds: 0,
 };
 
 /** Where a repository keeps its branch rules, if it has any. */
@@ -115,6 +141,10 @@ const RulesDocument = Schema.Struct({
   requirePullRequest: Schema.Boolean,
   /** Optional, so a rules file written before this existed still decodes. */
   maxTrustAgeSeconds: Schema.optional(Schema.Int),
+  /** Optional, so a rules file written before this existed still decodes. */
+  requireProvenance: Schema.optional(Schema.Boolean),
+  maxUsageTokens: Schema.optional(Schema.Int),
+  usageWindowSeconds: Schema.optional(Schema.Int),
 });
 
 const decodeRules = Schema.decodeUnknownEffect(RulesDocument);
@@ -132,6 +162,9 @@ export const encodeRules = (rules: Rules): Uint8Array =>
         requireResolvedThreads: rules.requireResolvedThreads,
         requirePullRequest: rules.requirePullRequest,
         maxTrustAgeSeconds: rules.maxTrustAgeSeconds,
+        requireProvenance: rules.requireProvenance,
+        maxUsageTokens: rules.maxUsageTokens,
+        usageWindowSeconds: rules.usageWindowSeconds,
       },
       null,
       2,
@@ -183,6 +216,9 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     requireResolvedThreads: loaded.requireResolvedThreads,
     requirePullRequest: loaded.requirePullRequest,
     maxTrustAgeSeconds: loaded.maxTrustAgeSeconds ?? 0,
+    requireProvenance: loaded.requireProvenance ?? false,
+    maxUsageTokens: loaded.maxUsageTokens ?? 0,
+    usageWindowSeconds: loaded.usageWindowSeconds ?? 0,
   };
 });
 
@@ -383,7 +419,7 @@ const refused = (ref: string, reason: string): Decision => ({ ok: false, ref, re
  * it. Two patterns that overlap *anywhere* are treated as a match, which is the
  * conservative reading and the only one a namespace-wide write can be held to.
  */
-const isProtected = (rules: Rules, ref: string): boolean => {
+export const isProtected = (rules: Rules, ref: string): boolean => {
   const asked = ref.endsWith("*") ? ref.slice(0, -1) : null;
   return rules.protected.some((pattern) => {
     if (!pattern.endsWith("*")) return asked === null ? ref === pattern : pattern.startsWith(asked);
@@ -394,6 +430,103 @@ const isProtected = (rules: Rules, ref: string): boolean => {
         prefix.startsWith(asked) || asked.startsWith(prefix);
   });
 };
+
+/**
+ * How far a provenance check will walk a push.
+ *
+ * The rule is about every commit a push introduces, and a push chooses how
+ * many that is. Bounded for the reason every other walk on this path is: an
+ * unbounded one is a push that never returns rather than a push that is
+ * refused, and the refusal says which bound it hit.
+ */
+const MAX_PROVENANCE = 4096;
+
+/**
+ * Whether every commit this push introduces names the session that made it.
+ *
+ * The session refs of the *same push* count. A branch and the record of what
+ * produced it arrive in one receive-pack — that is the flow the rule is for —
+ * so reading the session as it stands on disk would refuse exactly the push
+ * that did everything right.
+ */
+const provenanceOf = Effect.fn("Policy.provenanceOf")(function* (input: {
+  readonly update: RefUpdate;
+  readonly current: Oid | null;
+  readonly sessions: ReadonlyMap<string, Oid>;
+}) {
+  const repository = yield* Repository;
+  const to = input.update.value;
+  if (to === null) return null;
+
+  // Bounded by everything this repository already reaches, not by the ref's
+  // own previous value alone. A create has no previous value, so a walk
+  // bounded that way went to the root and demanded a trailer on every commit
+  // the branch was cut from — `git push origin HEAD:refs/heads/feature` was
+  // refused on the first commit predating the rule, which is not what the rule
+  // says (agents.md §9: what the push *introduces*).
+  //
+  // Every ref's tip is a boundary, which covers what a branch is actually cut
+  // from: `main`, another topic, a tag. A commit reachable from an existing
+  // ref without being a tip is still re-judged, and that residual is why this
+  // is a bound and not a connectivity check — the alternative is walking every
+  // ref's whole history on every push.
+  const stop = new Set<Oid>();
+  for (const [, value] of yield* repository.refs) stop.add(value);
+  stop.delete(to);
+
+  const introduced = yield* Dag.reachable(
+    to,
+    input.current,
+    (commit) => Effect.succeed(!stop.has(commit)),
+    MAX_PROVENANCE,
+  ).pipe(
+    // Every failure here is a refusal, not an error. Receive-pack checks only
+    // that the tip object exists, so a commit naming a parent that never
+    // arrived is a push this cannot judge — and every other walk in this file
+    // catches the same thing rather than letting it out, because escaping
+    // turns a refusable push into a 404 anybody holding `source.push` can ask
+    // for on demand.
+    Effect.catchTags({
+      Invalid: () => Effect.succeed(null),
+      ObjectNotFound: () => Effect.succeed(null),
+      StorageFailure: () => Effect.succeed(null),
+    }),
+  );
+  if (introduced === null) {
+    return `${input.update.name} could not be walked for provenance; it introduces more than ${MAX_PROVENANCE} commits, or names an object this repository does not hold`;
+  }
+
+  // Walked once per session named, not once per commit: a push of fifty
+  // commits from one session reads that session's events once.
+  const produced = new Map<string, ReadonlySet<string>>();
+  for (const commit of introduced.keys()) {
+    const info = yield* repository.readCommit(commit).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+    if (info === null) return `${commit} cannot be read, so its provenance cannot be judged`;
+
+    const named = Session.trailerOf(info.message);
+    if (!("session" in named)) {
+      return `${commit} has ${named.reason}; this branch requires one`;
+    }
+
+    if (!produced.has(named.session)) {
+      const head = input.sessions.get(named.session) ?? null;
+      produced.set(
+        named.session,
+        head === null ? new Set<string>() : yield* Session.producedBy(head),
+      );
+    }
+    if (produced.get(named.session)?.has(commit) !== true) {
+      return `session ${named.session} does not say it produced ${commit}`;
+    }
+  }
+
+  return null;
+});
 
 export interface Principal {
   /** `null` for an anonymous request, which may never write. */
@@ -425,6 +558,11 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
    * ref. The map is the caller's, so nothing survives the request that built
    * it, and a fold cannot go stale inside one.
    */
+  /**
+   * Where each session named by this push stands, the push's own moves
+   * included; see `provenanceOf`.
+   */
+  readonly sessions?: ReadonlyMap<string, Oid>;
   readonly folds?: FoldCache;
   /** As `folds`, for the walk that decides which pull requests to fold. */
   readonly mentions?: MentionCache;
@@ -602,6 +740,22 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     if (refusal !== null) return refused(update.name, refusal);
   }
 
+  // Asked of every branch this rule covers, before protection is considered:
+  // provenance is about what a commit *is*, not about which branch it landed
+  // on, and a repository that turned this on meant all of them.
+  if (
+    input.rules.requireProvenance &&
+    update.name.startsWith("refs/heads/") &&
+    update.value !== null
+  ) {
+    const missing = yield* provenanceOf({
+      update,
+      current,
+      sessions: input.sessions ?? new Map(),
+    });
+    if (missing !== null) return refused(update.name, missing);
+  }
+
   if (!isProtected(input.rules, update.name)) return namespace;
 
   if (deleting) return refused(update.name, `${update.name} is protected and may not be deleted`);
@@ -650,14 +804,19 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     return refused(update.name, `${update.name} is append-only and may not be deleted`);
   }
 
-  // A ref in this namespace is a pull request, and nothing else. `refs/hub/`
-  // as a whole is undeletable, so a name outside that shape is a permanent
-  // entry nothing counts, nothing folds and nothing can ever remove — one
-  // more object graph pinned into every ref listing, every advertisement,
-  // every collection root and every memo key for the life of the repository.
-
-  if (update.name.startsWith("refs/hub/") && Event.prOf(update.name) === null) {
-    return refused(update.name, `${update.name} does not name a pull request`);
+  // A ref in this namespace is a pull request or a session, and nothing else.
+  // `refs/hub/` as a whole is undeletable, so a name outside those shapes is a
+  // permanent entry nothing counts, nothing folds and nothing can ever remove
+  // — one more object graph pinned into every ref listing, every
+  // advertisement, every collection root and every memo key for the life of
+  // the repository.
+  if (
+    update.name.startsWith("refs/hub/") &&
+    Event.prOf(update.name) === null &&
+    Session.sessionOf(update.name) === null &&
+    Task.taskOf(update.name) === null
+  ) {
+    return refused(update.name, `${update.name} does not name a pull request, session or task`);
   }
 
   // And its value is a commit of this namespace's own kind. Nothing else here
@@ -689,9 +848,30 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // could open as many pull requests as it liked. `refs/hub/*` is
     // undeletable, so what that costs every later protected-branch push,
     // collection and deepening fetch is permanent.
-    const count = (yield* Event.pullRequests()).length + opening.size;
+    //
+    // Counted per class. Sessions are opened far faster than pull requests —
+    // one per agent run rather than one per proposal — so a shared bound would
+    // let a fleet's ordinary week exhaust what a repository's pull requests
+    // are allowed, and a session ref is exactly as undeletable as a pull
+    // request's.
+    const classOf = (name: string): "sessions" | "tasks" | "pull requests" =>
+      Session.sessionOf(name) !== null
+        ? "sessions"
+        : Task.taskOf(name) !== null
+          ? "tasks"
+          : "pull requests";
+
+    const kind = classOf(update.name);
+    const held =
+      kind === "sessions"
+        ? yield* Session.sessions()
+        : kind === "tasks"
+          ? yield* Task.tasks()
+          : yield* Event.pullRequests();
+    const opened = [...opening].filter((name) => classOf(name) === kind).length;
+    const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
-      return refused(update.name, `this repository already holds ${count} pull requests`);
+      return refused(update.name, `this repository already holds ${count} ${kind}`);
     }
   }
 
@@ -902,7 +1082,12 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // judge the tombstone by what its signer held at the head it declares,
     // which is the fold's question — and the fold's question is exactly what
     // the decoy attack above is built to answer wrongly.
-    if (payload?.type !== "event.redacted") continue;
+    // Asked of the bytes rather than of the decoded pull-request payload: a
+    // session and a task write the same tombstone inside their own envelopes,
+    // which `Event.decode` reads as nothing at all — so this gate covered
+    // `refs/hub/pr/*` and left the two namespaces whose records are prompts,
+    // the ones most likely to need removing, ungated.
+    if (!(yield* Tombstone.claims(record.payload))) continue;
     // Expiry as well as the capability. A permanent verdict does not consult
     // expiry — it cannot, or the answer would move on a wall clock and the
     // host that acted on it would fold a history no replica agrees with — so
@@ -1262,6 +1447,45 @@ const membership = Effect.fn("Policy.membership")(function* (
   return reached.head === head ? reached : yield* project(genesis);
 });
 
+/**
+ * The requester as the membership standing *now* sees them.
+ *
+ * The guard decided who this is against the log as it stood when the request
+ * arrived, and `membership` above re-folds when the log has moved since — but
+ * the capabilities came from the guard either way. So a revocation that landed
+ * between the two was applied to every namespace rule and to none of the
+ * capability checks: the revoked member's own push, already in flight, was
+ * judged by the grant they no longer had.
+ *
+ * Only ever narrows. Each capability the guard granted is re-asked of the
+ * current projection — which is where revocation, expiry and a narrowed grant
+ * all live — and a credential's own scoping survives because what is re-asked
+ * is the scoped list rather than the member's full one.
+ */
+const standing = Effect.fn("Policy.standing")(function* (
+  who: Auth.Authenticated,
+  trust: TrustProjection | null,
+) {
+  const held = { member: who.principal, capabilities: who.capabilities };
+  // Nothing to re-ask: an anonymous requester holds nothing that a membership
+  // could take away, and an unchanged projection is the one the guard used.
+  if (trust === null || who.signer === null || trust === who.projection) return held;
+
+  const now = new Date();
+  const capabilities: Array<string> = [];
+  for (const capability of who.capabilities) {
+    const authorized = yield* Verify.authorizeKey({
+      projection: trust,
+      signer: who.signer,
+      capability,
+      at: now,
+    });
+    if (authorized.ok) capabilities.push(capability);
+  }
+  const member = trust.members.get(who.signer) ?? null;
+  return { member: capabilities.length === 0 ? null : member, capabilities };
+});
+
 const repairable = (ref: string, principal: Principal, open: boolean): boolean =>
   ref === RULES_REF && (open || may(principal, "policy.write"));
 
@@ -1341,6 +1565,17 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     Effect.orElseSucceed(() => (repairable(ref, principal, false) ? OPEN : null)),
   );
   if (rules === null) return "the repository's policy could not be evaluated";
+
+  // A verb that makes the commit cannot also carry the record that names it:
+  // the session has to say it produced a commit that does not exist until
+  // this call creates it. So where a repository requires provenance, these
+  // verbs do not move a branch at all — refused rather than exempt, because
+  // an exemption is the way around the rule. Left only on receive-pack, the
+  // two doors disagreed: `git push` was refused for a missing trailer while
+  // `POST /commit` wrote the same change to the same branch.
+  if (rules.requireProvenance && ref.startsWith("refs/heads/")) {
+    return `${ref} requires provenance, which this route cannot supply; push the commit with the session record that names it`;
+  }
 
   // The same staleness bound `gate` applies. Left only on receive-pack, a
   // repository that had asked for one still accepted `commit`, `branch`,
@@ -1442,7 +1677,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
   // fix it still lands; see `repairable`. A rules file that will not parse
   // otherwise refused every write on the repository including its own repair,
   // and the only way back was filesystem access to the host.
-  const principal = { member: who.principal, capabilities: who.capabilities };
+  const principal = yield* standing(who, trust);
   const published = yield* rulesOf().pipe(Effect.orElseSucceed(() => null));
   if (published === null) {
     const anonymous = yield* Effect.serviceOption(Auth.AnonymousWrites);
@@ -1510,17 +1745,42 @@ export const gate = Effect.fn("Policy.gate")(function* (
     };
   }
 
+  // Built once for the batch, and only where the rule is on: it is a read of
+  // every session ref, which a repository that does not require provenance
+  // should not pay for on every push.
+  const sessions = new Map<string, Oid>();
+  if (rules.requireProvenance) {
+    const repository = yield* Repository;
+    for (const [name, value] of yield* repository.refs) {
+      const id = Session.sessionOf(name);
+      if (id !== null) sessions.set(id, value);
+    }
+  }
+
+  // Session commands are judged first, and what they vouch for is added only
+  // once they have passed. Seeded from the batch's *unjudged* commands, a
+  // member holding `source.push` and no hub capability could send a session
+  // ref this boundary refuses beside a branch whose commits name it: the
+  // session was thrown away and the branch landed with a trailer pointing at
+  // a record the repository does not hold.
+  const order = [...updates.keys()].sort((left, right) => {
+    const first = Session.sessionOf(updates[left]!.name) === null ? 1 : 0;
+    const second = Session.sessionOf(updates[right]!.name) === null ? 1 : 0;
+    return first - second || left - right;
+  });
+
   const decisions: Decision[] = [];
   const folds: FoldCache = new Map();
   const mentions: MentionCache = new Map();
   const opening: Openings = new Set();
-  for (const update of updates) {
+  for (const at of order) {
+    const update = updates[at]!;
     // A native client signed an envelope naming the refs it was moving and
     // where to. Checking it here rather than in the guard is not a weakening:
     // the guard runs before the push body exists, so this is the first moment
     // the commands are knowable at all — and the last before they are applied.
     if (withheld.has(update.name) && stale !== null && !stale.ok) {
-      decisions.push({ ok: false, ref: update.name, reason: stale.reason });
+      decisions[at] = { ok: false, ref: update.name, reason: stale.reason };
       continue;
     }
 
@@ -1528,7 +1788,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
       ? coveredByEnvelope(who.envelope, update)
       : ({ ok: true } as const);
     if (!covered.ok) {
-      decisions.push(covered);
+      decisions[at] = covered;
       continue;
     }
     const decision = yield* evaluate({
@@ -1537,6 +1797,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
       genesis: stored?.genesis ?? null,
       trust,
       rules,
+      sessions,
       folds,
       mentions,
       opening,
@@ -1546,7 +1807,15 @@ export const gate = Effect.fn("Policy.gate")(function* (
     // this batch does not actually get would otherwise spend a population slot
     // the create beside it was entitled to.
     if (!decision.ok) opening.delete(update.name);
-    decisions.push(decision);
+
+    // Only now, and only if it passed: a session ref this batch is refusing
+    // vouches for nothing.
+    const id = rules.requireProvenance ? Session.sessionOf(update.name) : null;
+    if (id !== null && decision.ok) {
+      if (update.value === null) sessions.delete(id);
+      else sessions.set(id, update.value);
+    }
+    decisions[at] = decision;
   }
 
   const refusals = decisions.flatMap((decision) => (decision.ok ? [] : [decision]));

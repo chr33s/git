@@ -16,7 +16,12 @@ import * as readline from "node:readline/promises";
 import { Console, Effect, Layer } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import { type Fingerprint, formatPublicKey, isFingerprint } from "../crypto/SshSignature.ts";
+import {
+  type Fingerprint,
+  fingerprint,
+  formatPublicKey,
+  isFingerprint,
+} from "../crypto/SshSignature.ts";
 import { fetchRepository, lsRemote } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
@@ -49,7 +54,15 @@ import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
 import { openWindow, project } from "../trust/Projection.ts";
 import { reconcile } from "../server/Replication.ts";
-import { readPrivateKey, readPublicKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
+import * as Whoami from "../server/Whoami.ts";
+import {
+  readAnyPublicKey,
+  readPrivateKey,
+  readPublicKey,
+  repoArgument,
+  rootFlag,
+  withRepo,
+} from "./shared.ts";
 
 /**
  * One repository's stores *and* the domain service over them.
@@ -353,6 +366,71 @@ const confirmRevoked = Effect.fn("hub.confirmRevoked")(function* (
   }
 });
 
+// -- what a key may do here -------------------------------------------------
+
+/**
+ * The answer, as one read of this repository's own refs.
+ *
+ * The join itself lives in `server/Whoami.ts`, because the JSON verb answers
+ * the same question for a credential presented over the wire and the two must
+ * not drift. What is local here is only where the pieces come from: a
+ * repository on this disk, and a key on it.
+ */
+const standing = Effect.fn("hub.standing")(function* (subject: Fingerprint) {
+  const stored = yield* readGenesis();
+  const projection = stored === null ? null : yield* project(stored.genesis);
+
+  // A repository with no genesis has no membership to grant anything, so the
+  // honest answer names the host's `--open` rather than claiming an authority
+  // that cannot exist here.
+  const held =
+    projection === null
+      ? Whoami.withoutMembership(
+          "this repository has no genesis, so it has no membership: writes are refused unless the host serves --open",
+        )
+      : Whoami.standingOf(projection, subject, new Date());
+
+  return yield* Whoami.answer({
+    subject,
+    repoId: stored === null ? null : stored.genesis.repoId,
+    projection,
+    held,
+  });
+});
+
+/**
+ * What this key may do here, and what its push will be judged by.
+ *
+ * The answer a client otherwise learns by being refused. Membership says what
+ * the repository has granted; the branch rules say what a granted push still
+ * has to satisfy — and a caller that reads both before it works branches
+ * correctly and opens the pull request the rules ask for, instead of
+ * discovering each rule one refusal at a time. That is a poor trade for
+ * anybody and a bad one for an agent, which pays for the discovery in context
+ * and tokens.
+ *
+ * Read-only: it moves nothing, invents no capability, and answers out of the
+ * same projection and rules document the boundary itself reads.
+ */
+const whoami = Command.make(
+  "whoami",
+  {
+    root: rootFlag,
+    key: Flag.string("key").pipe(
+      Flag.withDescription("Path to the SSH key to answer for; either half will do"),
+    ),
+    repo: repoArgument,
+  },
+  ({ key, repo, root }) =>
+    Effect.gen(function* () {
+      const subject = yield* fingerprint(yield* readAnyPublicKey(key));
+      const answer = yield* withRepo(root, repo, standing(subject));
+      // JSON because the caller is usually a hook piping this into an agent's
+      // context, and prose would have to be parsed back out of it.
+      yield* Console.log(JSON.stringify(answer, null, 2));
+    }),
+);
+
 const mustBeEnabled = Effect.fn("hub.mustBeEnabled")(function* (repo: string) {
   const stored = yield* readGenesis();
   if (stored === null) {
@@ -419,12 +497,24 @@ const presented = Effect.fn("hub.presented")(function* (url: string, token: stri
 /** Where a remote's genesis lands while it is still only a claim. */
 const PRESENTED_REF = "refs/meta/presented/genesis";
 
+/**
+ * A yes/no question, answered `no` where there is nobody to ask.
+ *
+ * `question` resolves when a line arrives and never when the input ends, so a
+ * command run from a pipeline, a hook or a CI job — stdin closed, which is the
+ * ordinary way an agent runs anything — hung with the prompt on stderr and no
+ * way to answer it. End-of-input is not consent, and `--yes` is how a script
+ * says yes.
+ */
 const ask = (question: string): Effect.Effect<boolean> =>
   Effect.promise(async () => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
     try {
-      const answer = await rl.question(question);
-      return answer.trim().toLowerCase() === "yes";
+      const ended = new Promise<null>((resolve) => {
+        rl.once("close", () => resolve(null));
+      });
+      const answer = await Promise.race([rl.question(question), ended]);
+      return answer !== null && answer.trim().toLowerCase() === "yes";
     } finally {
       rl.close();
     }
@@ -641,7 +731,7 @@ const forget = Command.make("forget", { url: Argument.string("url") }, ({ url })
 
 export const hubCommand = Command.make("hub", {}, () =>
   Console.log(
-    "chr33s-git hub <init|grant|revoke|members|enable|disable|status|forget> — see --help",
+    "chr33s-git hub <init|grant|revoke|members|whoami|enable|disable|status|forget> — see --help",
   ),
 ).pipe(
   Command.withSubcommands([
@@ -649,6 +739,7 @@ export const hubCommand = Command.make("hub", {}, () =>
     grant.pipe(Command.withDescription("Issue a membership certificate")),
     revoke.pipe(Command.withDescription("Revoke a member's key")),
     members.pipe(Command.withDescription("Who this repository trusts, and with what")),
+    whoami.pipe(Command.withDescription("What one key may do here, and what will judge its push")),
     enable.pipe(Command.withDescription("Trust a remote repository and fetch its hub state")),
     disable.pipe(Command.withDescription("Stop synchronizing a repository's hub state")),
     status.pipe(Command.withDescription("What identity is pinned for a URL")),

@@ -149,11 +149,17 @@ export const packed = (
               // readable once it has been stored. `at` carries the chain
               // depth across that hop, so a cycle is caught rather than
               // recursed into forever.
+              // A failure to *read* is not an absence. Answering `null` for one
+              // made `readAt` report "delta base is nowhere" — a `PackCorrupt`
+              // — for what was a transient storage error, which is the worst
+              // diagnosis available: it names the pack as damaged and invites
+              // an operator to throw it away. Left to reject, it comes back
+              // through `catch` below as the `StorageFailure` it is, and a
+              // retry can succeed.
               Effect.runPromiseWith(context)(
                 loose.read(base).pipe(
                   Effect.map((object): RawObject | null => object),
                   Effect.catchTag("ObjectNotFound", () => fromPack(base, at)),
-                  Effect.catchTag("StorageFailure", () => Effect.succeed(null)),
                 ),
               ),
             depth,

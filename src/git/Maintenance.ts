@@ -129,7 +129,12 @@ export const reachable = (
             Effect.mapError(() => new ObjectNotFound({ oid })),
           );
           stack.push(commit.tree);
-          if (options.boundary?.has(oid) !== true) stack.push(...commit.parents);
+          // One at a time: a commit names as many parents as its author
+          // wrote, and spreading a hundred thousand of them is a `RangeError`
+          // rather than a walk. See `Repository.ancestry`.
+          if (options.boundary?.has(oid) !== true) {
+            for (const parent of commit.parents) stack.push(parent);
+          }
           break;
         }
         case "tree": {

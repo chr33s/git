@@ -15,6 +15,7 @@ import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid, type RefUpdate, storageOf } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
+import * as Session from "../hub/Session.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, GENESIS_REF, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
@@ -120,6 +121,20 @@ const history = Effect.fn("test.history")(function* (branch: string) {
     author,
   });
   return { first, second };
+});
+
+/** The rules a repository has published, written the way it publishes them. */
+const publish = Effect.fn("test.publish")(function* (rules: Rules) {
+  const repository = yield* Repository;
+  const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
+  const tree = yield* repository.writeTree([{ mode: "100644", name: "policy.json", oid: blob }]);
+  const commit = yield* repository.commitTree({
+    tree,
+    parents: [],
+    message: "policy\n",
+    author,
+  });
+  yield* repository.setRef({ name: Policy.RULES_REF, to: commit });
 });
 
 /**
@@ -1101,6 +1116,198 @@ describe("Policy", () => {
       assert.match(outcome.nested.ok === false ? outcome.nested.reason : "", /pull request/);
       assert.equal(outcome.beside.ok, false);
       assert.equal(outcome.proper.ok, true, "a pull request still moves");
+    });
+
+    it("requires a commit to name the session that produced it, in the same push", async () => {
+      // The flow the rule is for: a branch and the record of what produced it
+      // travel in one receive-pack. Judged against the session as it stands on
+      // disk, the push that did everything right would be the one refused —
+      // its session ref has not been applied yet either.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+
+          const opened = yield* Session.open({
+            repo: where.genesis.repoId,
+            agent: { kind: "claude-code", model: "m", harness: "h" },
+            prompt: "do the thing",
+            key: where.dev,
+          });
+          const before = yield* repository.resolve(Session.refOf(opened.session));
+
+          const provenanced = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: `did the thing\n\nSession: ${opened.session}\n`,
+            author,
+          });
+          const bare = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "did the thing quietly\n",
+            author,
+          });
+
+          yield* Session.produced({
+            repo: where.genesis.repoId,
+            session: opened.session,
+            key: where.dev,
+            commits: [provenanced],
+          });
+          const head = yield* repository.resolve(Session.refOf(opened.session));
+
+          // Rewound, so the repository holds what it held before the push and
+          // the batch carries the rest — which is what a receive-pack is.
+          yield* repository.setRef({ name: Session.refOf(opened.session), to: before! });
+
+          yield* publish({ ...OPEN, requireProvenance: true });
+
+          return {
+            together: yield* gateAs(where, [
+              { name: Session.refOf(opened.session), value: head },
+              { name: "refs/heads/main", value: provenanced },
+            ]),
+            alone: yield* gateAs(where, [{ name: "refs/heads/topic", value: provenanced }]),
+            bare: yield* gateAs(where, [{ name: "refs/heads/other", value: bare }]),
+          };
+        }),
+      );
+
+      assert.deepEqual(
+        outcome.together.refused,
+        [],
+        "a branch and its provenance in one push are the case this is for",
+      );
+      assert.equal(outcome.alone.refused.length, 1, "and the record has to be there at all");
+      assert.equal(outcome.bare.refused.length, 1);
+      assert.match(outcome.bare.refused[0]?.reason ?? "", /Session: trailer/);
+    });
+
+    it("judges a push by the membership standing now, not the one the guard saw", async () => {
+      // The guard folds the log to decide who is asking; `gate` re-folds when
+      // the log has moved since. It re-folded for the namespace rules and kept
+      // the guard's capabilities — so a revocation that landed between the two
+      // was applied to every rule that reads the trust graph and to none of the
+      // capability checks, and the revoked member's push, already in flight,
+      // was judged by the grant they no longer had.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const repository = yield* Repository;
+          const commit = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "in flight\n",
+            author,
+          });
+
+          // What the guard reached, a moment before the revocation.
+          const seen = yield* projectTrust(where.genesis);
+          const signer = yield* fingerprint(where.dev.publicKey);
+
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: signer,
+              reason: "compromised",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          return yield* Policy.gate([{ name: "refs/heads/main", value: commit }], true).pipe(
+            Effect.provide(
+              Auth.requester({
+                principal: where.principal.member,
+                signer,
+                capabilities: where.principal.capabilities,
+                projection: seen,
+                envelope: null,
+              }),
+            ),
+          );
+        }),
+      );
+
+      assert.equal(outcome.updates.length, 0, "a revoked member's push does not land");
+      assert.equal(outcome.refused.length, 1);
+      // A member who holds nothing any more is nobody, and that is what the
+      // refusal says: the push is turned away for the same reason a stranger's
+      // is, rather than on the strength of a capability list nobody still has.
+      assert.match(outcome.refused[0]?.reason ?? "", /authentication required/);
+    });
+
+    it("charges hub.redact for a tombstone on a session, not just on a pull request", async () => {
+      // The gate below read the record with `Event.decode`, which is the pull
+      // request's union — a session's tombstone decoded as nothing there and
+      // fell through the `event.redacted` check entirely. So the namespace
+      // whose records are prompts, the one this matters most for, let any
+      // holder of `hub.session` push a removal of somebody else's prompt.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["hub.session", "source.push"]);
+          const repository = yield* Repository;
+
+          const opened = yield* Session.open({
+            repo: where.genesis.repoId,
+            agent: { kind: "claude-code", model: "m", harness: "h" },
+            prompt: "do the thing",
+            key: where.dev,
+          });
+          const { events } = yield* Session.entries(opened.session);
+          const first = events[0]!;
+          const before = yield* repository.resolve(Session.refOf(opened.session));
+
+          const base = yield* Session.context(where.genesis.repoId, opened.session);
+          yield* Session.issue(
+            {
+              ...base,
+              type: "event.redacted",
+              target: first.payload.id,
+              targetCommit: Event.qualify(first.commit),
+              reason: "I would rather that were not there",
+            },
+            where.dev,
+          );
+          const head = yield* repository.resolve(Session.refOf(opened.session));
+          yield* repository.setRef({ name: Session.refOf(opened.session), to: before! });
+
+          return yield* judge(where, { name: Session.refOf(opened.session), value: head });
+        }),
+      );
+
+      assert.equal(outcome.ok, false, "a removal is not something hub.session buys");
+      assert.match(outcome.ok === false ? outcome.reason : "", /hub\.redact/);
+    });
+
+    it("admits a session ref, which is the other shape this namespace holds", async () => {
+      // Sessions live under `refs/hub/session/<id>` on the same machinery a
+      // pull request uses, so the namespace rules have to know about both:
+      // read as pull requests only, every session push was refused as a name
+      // that does not belong here.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["repo.admin"]);
+          const repository = yield* Repository;
+          const opened = yield* Session.open({
+            repo: where.genesis.repoId,
+            agent: { kind: "claude-code", model: "m", harness: "h" },
+            prompt: "do the thing",
+            key: where.dev,
+          });
+          const head = yield* repository.resolve(Session.refOf(opened.session));
+          return {
+            proper: yield* judge(where, { name: Session.refOf(opened.session), value: head }),
+            nested: yield* judge(where, {
+              name: `refs/hub/session/${opened.session}/extra`,
+              value: head,
+            }),
+          };
+        }),
+      );
+      assert.equal(outcome.proper.ok, true, "a session ref moves");
+      assert.equal(outcome.nested.ok, false, "a name outside either shape does not");
     });
 
     it("refuses a hub update that grafts a second beginning onto the history", async () => {

@@ -134,6 +134,31 @@ codec) stays synchronous: Effect buys nothing there and costs an allocation per
 call. Functions that would throw return a `Result`; anything that reaches for
 storage moves up into `Repository`.
 
+The codecs there round-trip: `encodeCommit(parseCommit(bytes))` is `bytes`, and
+the same for trees and tags. That is a requirement rather than a nicety,
+because an object's id is a hash of exactly those bytes — a codec that
+paraphrased would have a replay silently publish something its author never
+wrote. Two rules make it hold, and both cost nothing on an object that has
+neither problem:
+
+```text
+raw      the bytes a text field was read from, kept only where
+         decoding is not reversible. git stores names, messages
+         and signature lines as bytes; a TextDecoder turns what
+         is not UTF-8 into U+FFFD, and encoding that back writes
+         different bytes. `TreeEntry`, `Signature`, `CommitInfo`
+         and `TagInfo` each carry one
+
+headers  the header lines a codec does not interpret —
+         `encoding`, `gpgsig`, `mergetag` — kept in order, with
+         their continuation lines, and written back after
+         `committer` where git puts them
+```
+
+A rewrite decides for itself what to carry. `Rebase` copies `raw` — it is the
+same message — and deliberately drops `headers`: a signature over the commit it
+was made on says nothing true about the new one.
+
 ## Conventions
 
 ### Errors

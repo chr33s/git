@@ -57,6 +57,9 @@ import {
   rootFlag,
   withRepo,
 } from "./shared.ts";
+import { sessionCommand } from "./session.ts";
+import { taskCommand } from "./task.ts";
+import { wakeCommand } from "./wake.ts";
 import * as work from "./work.ts";
 
 /** One repository's stores as raw instances, for code that needs them directly. */
@@ -273,6 +276,14 @@ const readStdin = Effect.promise(
  * The repository comes from `--repo` when given and otherwise from the
  * `path` git supplies, which is the last segment of the URL being pushed to:
  * one helper line then serves every repository on a host.
+ *
+ * The `host` git supplies is bound into the credential. git asks whichever
+ * helper matches for whatever URL it is about to fetch from or push to, so
+ * without that a redirect, a stale remote or a typo'd hostname was enough to
+ * have this hand a live credential for the local repository to somebody
+ * else's server — one that authenticates at the real host, since a repository
+ * and its replicas share a `RepoID`. Bound, it is spendable only where git
+ * said it was going.
  */
 const credentialHelper = Command.make(
   "credential-helper",
@@ -326,6 +337,18 @@ const credentialHelper = Command.make(
         });
       }
 
+      // What git is about to talk to, and therefore the only host this
+      // credential may be spent at. git supplies the port here only when it is
+      // not the scheme's default, which is the same rule `new URL().host`
+      // follows on the server side, so the two spellings agree.
+      const audience = fields.get("host")?.toLowerCase() ?? "";
+      if (audience === "") {
+        return yield* new Invalid({
+          field: "host",
+          reason: "git named no host to bind the credential to",
+        });
+      }
+
       const signer = yield* readPrivateKey(key);
       const minted = yield* withRepo(
         root,
@@ -342,6 +365,7 @@ const credentialHelper = Command.make(
             key: signer,
             repo: stored.genesis.repoId,
             capabilities: capability.split(",").map((value) => value.trim()),
+            audience,
             ttlSeconds: ttl,
           });
         }),
@@ -364,8 +388,12 @@ const serveCommand = Command.make(
       Flag.withDefault(false),
       Flag.withDescription("Serve writes to repositories that have no genesis"),
     ),
+    wake: Flag.boolean("wake").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
+    ),
   },
-  ({ hostname, open, port, root }) =>
+  ({ hostname, open, port, root, wake }) =>
     Effect.gen(function* () {
       // There is no `--secret` any more: a repository with a genesis is
       // guarded by its own membership, and no server secret enters into it.
@@ -373,9 +401,16 @@ const serveCommand = Command.make(
       // it has no membership at all — where the choice really is the host's,
       // and the safe answer is the one you have to ask for.
       const server = yield* Effect.promise(() =>
-        serve({ root, port, hostname, allowAnonymousWrites: open }),
+        serve({ root, port, hostname, allowAnonymousWrites: open, wake }),
       );
       yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
+      // Said out loud, because it is the one switch that makes this process
+      // start other processes.
+      if (wake) {
+        yield* Console.error(
+          "--wake: a push that moves a repository's hub refs runs the rules in its wake.json",
+        );
+      }
       yield* Console.error(
         (open
           ? "--open: repositories with no genesis accept writes from anyone who can reach the port. "
@@ -911,7 +946,12 @@ const git = Command.make("chr33s-git").pipe(
     work.switchCommand.pipe(
       Command.withDescription("Check out a branch, replacing index and work tree"),
     ),
+    sessionCommand.pipe(
+      Command.withDescription("Record what an agent was told, and what came of it"),
+    ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
+    taskCommand.pipe(Command.withDescription("What needs doing, and who is on it")),
+    wakeCommand,
     credential.pipe(Command.withDescription("Mint a short-lived credential stock git can present")),
     credentialHelper.pipe(Command.withDescription("Answer git's credential helper protocol")),
   ]),

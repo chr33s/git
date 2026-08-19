@@ -26,7 +26,7 @@ import { hasGit } from "../testing/Git.ts";
 import { cherryPick, rebase } from "./Rebase.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
-import { type Oid, RefStore } from "./Store.ts";
+import { ObjectStore, type Oid, RefStore } from "./Store.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -66,7 +66,7 @@ const disk = (root: string) =>
   );
 
 /** Each test gets its own stores, so there is no shared global state to reset. */
-const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore>) =>
+const scenario = <A, E>(effect: Effect.Effect<A, E, ObjectStore | Repository | RefStore>) =>
   Effect.runPromise(effect.pipe(Effect.provide(memory)));
 
 /** The same, backed by a directory `git` itself can be pointed at. */
@@ -239,6 +239,73 @@ describe("cherryPick", () => {
     assert.equal(result.picked.author.email, "alice@example.com", "authorship travels along");
     assert.equal(result.picked.committer.email, "bob@example.com", "the picker committed it");
     assert.equal(result.main, result.outcome.head, "`into` moved to the new commit");
+  });
+
+  it("copies the message byte for byte, not as it happened to decode", async () => {
+    // A replay carries somebody else's words forward, and a commit message is
+    // bytes: a Latin-1 message decoded to U+FFFD and was re-encoded as three
+    // UTF-8 bytes, so the picked commit said something its author had not
+    // written — and nothing in the output said the message had changed.
+    const result = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+
+        yield* commitOn({ branch: "main", message: "root", files: { "a.txt": "alpha\n" } });
+        yield* repository.branch({ name: "topic", base: "refs/heads/main" });
+        yield* commitOn({
+          branch: "main",
+          message: "main moves on",
+          files: { "a.txt": "edited\n" },
+        });
+
+        // Written as bytes, because nothing in this codebase would produce it:
+        // `café` as Latin-1 stores 0xe9, which is not a UTF-8 sequence.
+        const tree = yield* repository.writeFiles({
+          base: (yield* repository.readCommit((yield* repository.resolve("refs/heads/topic"))!))
+            .tree,
+          changes: [{ path: "b.txt", content: encoder.encode("beta\n") }],
+        });
+        const message = Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+        const original = yield* repository.commitTree({
+          tree,
+          parents: [(yield* repository.resolve("refs/heads/topic"))!],
+          message: "caf\ufffd\n",
+          raw: message,
+          author: alice,
+        });
+        yield* repository.setRef({ name: "refs/heads/topic", to: original });
+
+        const outcome = yield* cherryPick({
+          commit: "refs/heads/topic",
+          onto: "refs/heads/main",
+          author: bob,
+          into: "refs/heads/main",
+        });
+
+        return {
+          original: (yield* objects.read(original)).data,
+          picked: (yield* objects.read(outcome.head!)).data,
+          message,
+        };
+      }),
+    );
+
+    // The bytes after the blank line, on both objects: same message, and the
+    // one the author wrote rather than the one a decode produced.
+    const messageOf = (data: Uint8Array): ReadonlyArray<number> => {
+      for (let at = 0; at + 1 < data.length; at++) {
+        if (data[at] === 0x0a && data[at + 1] === 0x0a) return [...data.subarray(at + 2)];
+      }
+      return [];
+    };
+
+    assert.deepEqual(messageOf(result.original), [...result.message], "the fixture must store it");
+    assert.deepEqual(
+      messageOf(result.picked),
+      [...result.message],
+      "the replay must copy the message it was given, byte for byte",
+    );
   });
 
   it("reports a conflicting pick, commits nothing and leaves the ref where it was", async () => {
