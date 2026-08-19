@@ -208,6 +208,15 @@ const leave = Command.make(
         Effect.gen(function* () {
           const genesis = yield* identityOf(repo);
           const state = yield* resolve({ queue, target });
+          // Refused for the reason a mistyped queue id is: a record about
+          // something that is not queued is one the projection ignores for
+          // ever, on a ref nothing can shorten, reported as success.
+          if (!state.entries.some((entry) => entry.pr === pr)) {
+            return yield* new Invalid({
+              field: "pr",
+              reason: `${pr} is not in ${state.queue}`,
+            });
+          }
           yield* Queue.leave({
             repo: genesis.repoId,
             queue: state.queue,
@@ -489,14 +498,27 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     }
 
     // Whatever put it in the queue, what it proposes *now* is what can land.
-    // Separated from the read failure above deliberately: this is a fact about
-    // the pull request, which is what a permanent `queue.left` may record.
-    if (
-      pullRequest.state !== "open" ||
-      pullRequest.base !== target ||
-      pullRequest.head !== entry.head
-    ) {
+    // Separated from the read failure above deliberately: these are facts about
+    // the pull request, which is what a permanent `queue.left` may record. A
+    // pull request that is closed, merged or aimed somewhere else is not
+    // waiting on anything — it has stopped being a candidate for this branch.
+    if (pullRequest.state !== "open" || pullRequest.base !== target) {
       yield* drop(entry.pr, "stale");
+      continue;
+    }
+
+    // A moved head is a different thing, and recording it as settled made the
+    // projection's own re-entry rule unreachable: `Queue.project` updates an
+    // entry's head *in place*, keeping the position it already had, which is
+    // exactly what somebody who pushed a fix to a queued pull request should
+    // get — but only if the entry is still there when they re-enter. Dropping
+    // it the moment a pass noticed the push sent them to the back instead, and
+    // the faster the wake, the more certain that was.
+    if (pullRequest.head !== entry.head) {
+      unbuilt.push({
+        pr: entry.pr,
+        reason: `proposes ${pullRequest.head} now and was entered at ${entry.head}; enter it again`,
+      });
       continue;
     }
 
@@ -538,7 +560,17 @@ const pass = Effect.fn("queue.pass")(function* (input: {
                 StorageFailure: (error) => Effect.succeed(error),
               }),
             );
-      if (!("_tag" in withBranch) && withBranch.conflicts.length === 0) {
+      if ("_tag" in withBranch) {
+        // The same rule every other read failure here follows: this says what
+        // *this replica* could not read, which is no basis for a permanent
+        // record about somebody else's work.
+        unbuilt.push({
+          pr: entry.pr,
+          reason: `could not be merged against ${target}: ${withBranch._tag}`,
+        });
+        continue;
+      }
+      if (withBranch.conflicts.length === 0) {
         // Clean against the branch, so it waits for a pass this batch does not
         // stand in the way of. Nothing recorded: the queue has said nothing
         // about it, because there is nothing settled to say.

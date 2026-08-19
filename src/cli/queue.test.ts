@@ -492,7 +492,7 @@ describe("cli queue", () => {
     );
   });
 
-  it("drops an entry whose pull request moved on", async () => {
+  it("keeps a queued pull request whose head moved, for it to enter again", async () => {
     await publish(protectedRules());
     const first = await propose("one");
     await enter(first);
@@ -517,10 +517,50 @@ describe("cli queue", () => {
 
     const pass = await run();
     assert.deepEqual(pass.landed, []);
+    // Nothing permanent: a pushed fix is not a reason to take somebody out of
+    // the queue, and `Queue.project` updates a re-entered head in place — which
+    // it can only do if the entry is still there to update.
+    assert.deepEqual(pass.dropped, []);
+    assert.deepEqual(
+      pass.unbuilt.map((entry: { pr: string }) => entry.pr),
+      [first],
+    );
+
+    await enter(first);
+    const again = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(again.entries[0].pr, first, "and it keeps the place it had");
+    assert.equal(again.entries[0].head, moved);
+  });
+
+  it("drops an entry whose pull request stopped being a candidate", async () => {
+    // Closed, merged or aimed somewhere else: not waiting on anything, so the
+    // record that says so is settled and permanent.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+    await cli(["pr", "close", "--root", root, "--key", key, "project", first]);
+
+    const pass = await run();
     assert.deepEqual(
       pass.dropped.map((entry: { pr: string; reason: string }) => entry.reason),
       ["stale"],
     );
+  });
+
+  it("refuses to take out a pull request that is not queued", async () => {
+    const refused = await failing([
+      "queue",
+      "leave",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "project",
+      await propose("one"),
+    ]);
+    assert.match(refused, /is not in/);
   });
 
   it("refuses to land what the boundary would refuse from anybody", async () => {
