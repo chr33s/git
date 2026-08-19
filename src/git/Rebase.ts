@@ -129,7 +129,7 @@ const replayOne = Effect.fn("Rebase.replayOne")(function* (input: {
     return { original: input.commit, replayed: null, conflicts: [] } satisfies Replayed;
   }
 
-  const replayed = yield* repository.commitTree({
+  const carried = {
     tree,
     parents: [input.onto],
     // Authorship travels with the change — it is the same change, by the same
@@ -138,7 +138,19 @@ const replayOne = Effect.fn("Rebase.replayOne")(function* (input: {
     author: commit.author,
     committer: input.author ?? commit.committer,
     message: commit.message,
-  });
+  };
+  // The message as it was *stored*, where the decode did not survive the round
+  // trip: a replay copies somebody else's words, and a Latin-1 message came
+  // back as U+FFFD — so the replayed commit said something its author had not
+  // written, under an oid nobody could match to the original. Absent on every
+  // message that decodes reversibly, which is nearly all of them.
+  //
+  // `commit.headers` is deliberately *not* carried. `gpgsig` signs the commit
+  // it was made over, and this is a different commit: copying the header
+  // forward would publish a signature that verifies against nothing.
+  const replayed = yield* repository.commitTree(
+    commit.raw === undefined ? carried : { ...carried, raw: commit.raw },
+  );
 
   return { original: input.commit, replayed, conflicts: [] } satisfies Replayed;
 });

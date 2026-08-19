@@ -30,8 +30,31 @@ import { enableHubUnder, grantMemberUnder, shortOfQuorum, writeKeyPair } from ".
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "bin.ts");
 
+/** Each test's own directory, which is also where its trust pins go. */
+let root = "";
+
+/**
+ * The environment a spawned command gets, with its trust pins kept local.
+ *
+ * `hub enable` records which identity a URL presented in
+ * `$XDG_CONFIG_HOME/chr33s-git/known_repos`, which is a *user's* file and
+ * outside any test's directory. Left alone, this suite wrote its pins into the
+ * developer's own config and read them back on the next run — and since every
+ * server here binds an ephemeral port, a port the kernel recycled between runs
+ * came back pinned to a different repository and `hub enable` refused it as an
+ * identity that had changed. A flake, a growing file nobody asked for, and a
+ * test suite that could not be trusted about the one thing this command does.
+ */
+const environment = (): NodeJS.ProcessEnv => ({
+  ...process.env,
+  XDG_CONFIG_HOME: path.join(root, "config"),
+});
+
 const cli = async (args: ReadonlyArray<string>): Promise<string> => {
-  const result = await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" });
+  const result = await execFileAsync(process.execPath, [entry, ...args], {
+    encoding: "utf8",
+    env: environment(),
+  });
   return `${result.stdout}${result.stderr}`;
 };
 
@@ -102,8 +125,6 @@ const hostile = async (directory: string) => {
 };
 
 describe("cli hub", () => {
-  let root = "";
-
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-hub-"));
   });
@@ -718,7 +739,7 @@ describe("cli hub", () => {
         const child = execFile(
           process.execPath,
           [entry, "hub", "enable", "--root", root, remote.url],
-          { encoding: "utf8", timeout: 20_000 },
+          { encoding: "utf8", env: environment(), timeout: 20_000 },
           (error, stdout, stderr) =>
             error === null
               ? reject(new Error(`the prompt must not be taken as a yes: ${stdout}${stderr}`))

@@ -435,6 +435,16 @@ export class Repository extends Context.Service<
       readonly tree: Oid;
       readonly parents: ReadonlyArray<Oid>;
       readonly message: string;
+      /**
+       * The message as bytes, for a caller copying one it did not write.
+       *
+       * A replay — a rebase, a cherry-pick — carries somebody else's message
+       * forward, and a message is bytes: handed the decoded string alone, a
+       * Latin-1 message came back as U+FFFD and the new commit said something
+       * its author had not. `CommitInfo.raw` is what this takes, and it is
+       * absent on every message that survives a decode.
+       */
+      readonly raw?: Uint8Array;
       readonly author: Signature;
       readonly committer?: Signature;
     }) => Effect.Effect<Oid, StorageFailure>;
@@ -1642,10 +1652,14 @@ export const layer = Layer.effect(
 
       reflog: refs.reflog,
 
-      commitTree: ({ author, committer, message, parents, tree }) =>
+      commitTree: ({ author, committer, message, parents, raw, tree }) =>
         objects.write({
           type: "commit",
-          data: encodeCommit({ tree, parents, author, committer: committer ?? author, message }),
+          data: encodeCommit(
+            raw === undefined
+              ? { tree, parents, author, committer: committer ?? author, message }
+              : { tree, parents, author, committer: committer ?? author, message, raw },
+          ),
         }),
 
       merge: Effect.fn("Repository.merge")(function* (input) {
