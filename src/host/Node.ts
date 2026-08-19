@@ -446,8 +446,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     });
   });
 
-  await new Promise<void>((resolve) => {
-    server.listen(options.port ?? 0, hostname, resolve);
+  await new Promise<void>((resolve, reject) => {
+    // Rejected on `error` as well as resolved on `listening`. A port already
+    // in use — the ordinary mistake, and what a second `serve` on a fixed port
+    // does — emitted an `error` nobody had subscribed to: node turned that
+    // into an uncaught exception that killed the process, and the promise this
+    // awaited never settled either way. Now the caller is told which port and
+    // why, and `serve` fails like anything else that cannot start.
+    server.once("error", reject);
+    server.listen(options.port ?? 0, hostname, () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
   });
 
   // Known only now, because port 0 means "whichever one is free".

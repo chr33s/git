@@ -101,6 +101,27 @@ describe("the per-repository gate", () => {
  * this is the test that would fail if the requester were ever baked back into
  * the layer graph the router is built from.
  */
+describe("starting up", () => {
+  it("reports a port it cannot bind instead of dying on it", async () => {
+    // `listen` reports failure by emitting `error`, and with nobody
+    // subscribed node promotes that to an uncaught exception — so a second
+    // `serve` on a taken port took the whole process down, while the promise
+    // this awaits never settled and the caller learned nothing at all.
+    const taken = await serve({ root });
+    try {
+      const port = Number(new URL(taken.url).port);
+      const refused = await serve({ root, port }).then(
+        () => null,
+        (error: Error) => String(error),
+      );
+      assert.notEqual(refused, null, "a port already in use is not a successful start");
+      assert.match(refused ?? "", /EADDRINUSE/);
+    } finally {
+      await taken.close();
+    }
+  });
+});
+
 describe("a memoised router", () => {
   it("judges every request as whoever made it, not as the first caller", async () => {
     const repo = "requesters";

@@ -95,7 +95,21 @@ const forward = Effect.fn("Sending.forward")(function* (
   const request: PushRequest = { url: remote.url, refs, force: false };
   if (token !== undefined) request.token = token;
 
-  yield* push(request);
+  // The per-ref verdicts, not just the call. A receive-pack that answers at
+  // all answers `ok`, and the refusals ride inside the response — so a mirror
+  // rejecting every ref, on a stale credential or a ref it will not
+  // fast-forward, was indistinguishable here from one keeping up. The
+  // forwarding still cannot fail the push that caused it, so what this can do
+  // about a refusal is say which ref and why, in the log the operator reads
+  // when the mirror turns out to be behind.
+  const refused = (yield* push(request)).filter((result) => !result.ok);
+  if (refused.length > 0) {
+    yield* Effect.logWarning(
+      `replication to ${remote.name} refused ${refused
+        .map((result) => `${result.ref} (${result.reason ?? "no reason given"})`)
+        .join(", ")}`,
+    );
+  }
 });
 
 export interface SendingOptions {
