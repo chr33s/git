@@ -245,7 +245,7 @@ class: candidates are published as **plain branches** under a
 conventional prefix,
 
 ```text
-refs/heads/queue/<target>/<n>
+refs/heads/queue/<target>/<pr>
 ```
 
 named in `queue.candidate` events, deletable and force-pushable by
@@ -255,6 +255,17 @@ hub payloads _name_ candidate OIDs as strings, and hub.md §23 already
 forbids hub commits reaching source commits as parents — so a deleted
 candidate's objects genuinely go away. No new ref class, no new
 advertisement rule, no new GC root.
+
+The name is the pull request's, not the step's position in the chain.
+An earlier draft used the position, and it was wrong for a reason worth
+recording: a position moves when an entry ahead of it is skipped, so one
+pull request's published branch was force-moved to another's candidate
+while the `queue.candidate` record for the first still named it — a
+branch CI had been told to fetch, quietly holding somebody else's work.
+A pass deletes exactly the branches of the entries it settled, which is
+the one set it knows is finished; sweeping the prefix for anything a
+keep-list did not mention deleted a concurrent runner's freshly
+published candidate and any branch a person kept under the same prefix.
 
 CI needs no new anything either: it fetches the candidate branch, runs,
 and signs `check.completed` with `head = C_i` under its existing

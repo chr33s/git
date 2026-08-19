@@ -1504,6 +1504,7 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
   // A chain merges onto something. A branch being created has nothing to merge
   // onto, and a repository that has not turned this on has no chains at all.
   if (!rules.queueCandidates || rules.queueDepth <= 0 || input.from === null) return absent;
+  const from = input.from;
 
   const read = (commit: Oid) =>
     repository.readCommit(commit).pipe(
@@ -1524,8 +1525,17 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
     readonly tree: Oid;
   }> = [];
   let at = input.to;
-  while (at !== input.from) {
-    if (steps.length >= rules.queueDepth) return absent;
+  while (at !== from) {
+    if (steps.length >= rules.queueDepth) {
+      // Named rather than left to the generic refusal. Everything walked so far
+      // was a well-formed step, so whoever built this was building a chain —
+      // and "may only be moved by an approved pull request" tells them nothing
+      // about the ceiling they actually hit.
+      return {
+        kind: "refused",
+        reason: `${input.to} does not reach ${from} within ${String(rules.queueDepth)} merge steps, which is as deep a chain as ${input.ref} takes`,
+      } satisfies Chain;
+    }
     const info = yield* read(at);
     if (info === null) return absent;
     const [onto, head] = info.parents;
@@ -1628,12 +1638,18 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
 
   const chain = yield* candidateChain(input);
   if (chain.kind === "verified") return null;
+
+  // The direct path's own shortfall wins where it has one. A pull request whose
+  // head *is* a merge commit is a candidate chain by shape, so a push of it one
+  // approval short was refused for the second parent naming no pull request —
+  // true of the chain reading, and useless to somebody who has an approved pull
+  // request for exactly this revision and needs to know it is short a review.
+  // A chain's reason is the better answer only when nothing proposed the
+  // revision at all, which is what an actual candidate looks like.
+  if (direct.shortfall !== null) return direct.shortfall;
   if (chain.kind === "refused") return refused(input.ref, chain.reason);
 
-  return (
-    direct.shortfall ??
-    refused(input.ref, `${input.ref} may only be moved by an approved pull request`)
-  );
+  return refused(input.ref, `${input.ref} may only be moved by an approved pull request`);
 });
 
 /**

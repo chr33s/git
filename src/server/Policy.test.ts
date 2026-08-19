@@ -3166,7 +3166,7 @@ describe("Policy", () => {
       );
     });
 
-    it("refuses a chain deeper than the rules allow", async () => {
+    it("refuses a chain deeper than the rules allow, and says so", async () => {
       const decision = await scenario(
         Effect.gen(function* () {
           const queue = yield* queued({ queueDepth: 1 });
@@ -3177,6 +3177,74 @@ describe("Policy", () => {
         decision.ok,
         false,
         "the ceiling bounds what one push can make a host recompute",
+      );
+      // Named rather than left to the generic refusal: everything walked was a
+      // well-formed step, so whoever built it was building a chain, and "open a
+      // pull request" tells them nothing about the ceiling they hit.
+      assert.match(decision.ok === false ? decision.reason : "", /merge steps/);
+    });
+
+    it("reports the direct path's own shortfall ahead of a chain's", async () => {
+      // A pull request whose head *is* a merge commit is a candidate chain by
+      // shape, so a push of it one approval short was refused for its second
+      // parent naming no pull request — true of the chain reading, and useless
+      // to somebody holding an approved pull request for exactly this revision.
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const queue = yield* queued({ requiredApprovals: 2 });
+          // A branch nobody proposed, merged onto the target honestly — so the
+          // chain reading finds no pull request for the second parent …
+          const stranger = yield* repository.writeFiles({
+            changes: [
+              { path: "readme", content: new TextEncoder().encode("base"), mode: "100644" },
+              { path: "c.txt", content: new TextEncoder().encode("c"), mode: "100644" },
+            ],
+          });
+          const tip = yield* repository.commitTree({
+            tree: stranger,
+            parents: [queue.base],
+            message: "c\n",
+            author,
+          });
+          const merged = present(
+            (yield* repository.merge({
+              ours: queue.base,
+              theirs: tip,
+              author,
+              noFastForward: true,
+            })).commit,
+            "merge commit",
+          );
+          // … while the merge itself is proposed, reviewed once, and short of
+          // the two approvals this branch asks for.
+          const { pr } = yield* PullRequest.open({
+            repo: queue.where.genesis.repoId,
+            title: "a merge, proposed",
+            base: "refs/heads/main",
+            head: merged,
+            key: queue.where.dev,
+          });
+          yield* PullRequest.review({
+            repo: queue.where.genesis.repoId,
+            pr,
+            head: merged,
+            decision: "approve",
+            key: queue.where.reviewer,
+          });
+          return yield* land(queue, merged);
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(
+        decision.ok === false ? decision.reason : "",
+        /approvals/,
+        "the answer is about the review it is short, not about its second parent",
+      );
+      assert.doesNotMatch(
+        decision.ok === false ? decision.reason : "",
+        /no open pull request/,
+        "which is what the chain reading would have said",
       );
     });
 
