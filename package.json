@@ -23,6 +23,7 @@
     "postinstall": "patch-package && npx wrangler types -c wrangler.test.json && npm run fix",
     "prepare": "effect-tsgo patch",
     "test": "vitest run",
+    "ui:api": "GIT_ROOT=$(pwd) PORT=8787 node src/host/Node.ts",
     "ui:build": "node ui/build.ts",
     "ui:dev": "node ui/build.ts --serve",
     "ui:verify": "node ui/build.ts && node ui/verify.ts"

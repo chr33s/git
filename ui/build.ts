@@ -53,27 +53,28 @@ const diffsWebComponents = join(
 );
 
 /**
- * Say where the UI is, and whether the API behind it is actually up.
+ * Say where everything is, and whether the API behind it is actually up.
+ *
+ * Three ports are in play and only `ui` is meant to be opened, so all three are
+ * named together rather than left to be pieced together from esbuild's output:
+ * `api` is what the proxy forwards to, and `dev` is esbuild's own asset server,
+ * which is ephemeral and serves the bundle without the API beside it.
  *
  * Probed at startup because the alternative is what it replaced: the page loads,
  * every request 502s, and the UI quietly shows its fixtures. Any HTTP answer
  * counts as reachable — `/` is not a route, so even a 400 from the router
  * proves something is listening.
  */
-const announce = async (port: number, upstream: string): Promise<void> => {
+const announce = async (port: number, upstream: string, assets: number): Promise<void> => {
   const reachable = await fetch(new URL("/", upstream))
     .then(() => true)
     .catch(() => false);
 
-  console.info(`\ngit+ UI on http://localhost:${String(port)}`);
-  if (reachable) {
-    console.info(`  API proxied from ${upstream}\n`);
-    return;
-  }
-  console.info(`  API at ${upstream} is not answering, so the UI will show its fixtures.`);
-  console.info("  Start one alongside this, in another terminal:\n");
-  console.info("    GIT_ROOT=/path/to/repos PORT=8787 node src/host/Node.ts\n");
-  console.info("  Already running elsewhere? Point at it with GIT_API.\n");
+  console.info(`\nui:   http://localhost:${String(port)}`);
+  console.info(
+    `api:  ${new URL(upstream).origin}${reachable ? "" : "  (\u2716 :-> GIT_API | GIT_ROOT)"}`,
+  );
+  console.info(`dev:  http://127.0.0.1:${String(assets)}\n`);
 };
 
 /**
@@ -139,12 +140,22 @@ const HEADERS = `${[
   ),
 ].join("\n\n")}\n`;
 
+let built = false;
 const page: Plugin = {
   name: "index-html",
   setup(build) {
     build.onEnd(async (result) => {
       await cp(join(pwd, "index.html"), join(outdir, "index.html"), { force: true });
       await writeFile(join(outdir, "_headers"), HEADERS);
+      // `--serve` turns esbuild's info logging off so its own ephemeral-port
+      // line does not precede — and contradict — the boot message below. That
+      // also costs the rebuild line, which is worth keeping, so it is reprinted
+      // here. Not for the first build: that one is announced in full.
+      //
+      // Said before the check below returns, so a build that failed says so
+      // rather than going quiet exactly when the notice matters most.
+      if (serve && built) console.info(result.errors.length ? "  build failed" : "  rebuilt");
+      built = true;
       if (result.errors.length > 0) return;
       // The deploy path serves exactly these three names (`index.html`
       // references the other two), so a build that did not produce them is a
@@ -172,7 +183,7 @@ const options = {
   splitting: true,
   sourcemap: true,
   minify: !watch && !serve && !debug,
-  logLevel: "info" as const,
+  logLevel: serve ? ("warning" as const) : ("info" as const),
   loader: { ".svg": "text" as const },
   alias: { "@pierre/diffs/components/web-components": diffsWebComponents },
   plugins: [page],
@@ -235,7 +246,7 @@ if (watch || serve) {
         }
       })();
     }).listen(port, () => {
-      void announce(port, upstream);
+      void announce(port, upstream, assets.port);
     });
   } else {
     // Watch-only serves nothing, which is worth saying out loud: the process
