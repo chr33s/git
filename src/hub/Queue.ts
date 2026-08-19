@@ -437,6 +437,18 @@ export interface Entry {
   } | null;
 }
 
+/** What `project` answers with, named so a caller can hold a list of them. */
+export interface Projection {
+  readonly queue: string;
+  readonly exists: boolean;
+  readonly target: string | null;
+  readonly entries: ReadonlyArray<Entry>;
+  readonly left: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
+  readonly resets: number;
+  readonly ignored: ReadonlyArray<Oid>;
+  readonly unreadable: ReadonlyArray<Oid>;
+}
+
 /**
  * What a queue amounts to now: what it is for, and who is in it.
  *
@@ -533,7 +545,7 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
     // exactly what somebody will be looking for.
     ignored,
     unreadable: walked.unreadable,
-  };
+  } satisfies Projection;
 });
 
 /**

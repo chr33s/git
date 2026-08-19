@@ -106,6 +106,18 @@ const open = Command.make(
         root,
         repo,
         Effect.gen(function* () {
+          // One queue per target, refused here because it cannot be undone
+          // there: `refs/hub/queue/*` is append-only, so a second queue for one
+          // branch is a permanent split — `forTarget` picks between them by
+          // sorted id, entries divide invisibly across the two, and two runners
+          // delete each other's candidate branches.
+          const existing = yield* Queue.forTarget(target);
+          if (existing !== null) {
+            return yield* new Invalid({
+              field: "target",
+              reason: `${target} already has a queue: ${existing.queue}`,
+            });
+          }
           const opened = yield* Queue.open({
             repo: (yield* identityOf(repo)).repoId,
             target,
@@ -215,7 +227,26 @@ const list = Command.make("list", { root: rootFlag, repo: repoArgument }, ({ rep
       root,
       repo,
       Effect.gen(function* () {
-        return yield* Effect.forEach(yield* Queue.queues(), (queue) => Queue.project(queue));
+        const queues: Array<Queue.Projection> = [];
+        const unreadable: Array<{ readonly queue: string; readonly reason: string }> = [];
+        for (const id of yield* Queue.queues()) {
+          // One queue this replica cannot walk is one entry in this list it
+          // cannot fill, and not a listing that fails. A history that arrived by
+          // replication was never held to this host's ceiling, so failing would
+          // let whoever grew one queue hide every other one. Reported rather
+          // than skipped: a queue nothing lists and a queue that is not there
+          // read identically otherwise.
+          const state = yield* Queue.project(id).pipe(
+            Effect.catchTags({
+              Invalid: (error) => Effect.succeed(error),
+              ObjectNotFound: (error) => Effect.succeed(error),
+              StorageFailure: (error) => Effect.succeed(error),
+            }),
+          );
+          if ("_tag" in state) unreadable.push({ queue: id, reason: state._tag });
+          else queues.push(state);
+        }
+        return { queues, unreadable };
       }),
     );
     yield* Console.log(JSON.stringify(found, null, 2));
@@ -343,6 +374,14 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   }
 
   const from = yield* repository.resolve(target);
+  // Two readings of "what the branch is now", and they differ for a symbolic
+  // ref. Merging wants the commit it resolves to; the compare-and-swap wants
+  // exactly what the store compares against, which is the ref's own value. The
+  // same split `Policy.evaluate` and `Event.appendTo` both make, and for the
+  // same reason: handing over the resolved oid names a value nobody wrote, so
+  // the swap can never match and every pass records another `queue.reset` on a
+  // ref that only grows.
+  const held = yield* repository.readRef(target);
 
   const trust = yield* projectTrust(genesis);
   const print = yield* fingerprint(input.key.publicKey);
@@ -605,7 +644,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // The value the judgement was made against travels with the write, exactly
     // as it does on the receive-pack path: a push landing in between fails the
     // swap rather than being overwritten by this one.
-    const applied = yield* repository.setRef({ name: target, to: top.commit, expected: from }).pipe(
+    const applied = yield* repository.setRef({ name: target, to: top.commit, expected: held }).pipe(
       Effect.as(true),
       Effect.catchTag("RefConflict", () => Effect.succeed(false)),
     );
@@ -669,13 +708,22 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     .filter((step) => !dropped.some((entry) => entry.pr === step.pr));
 
   // Candidate branches are ordinary branches, so they are cleaned up like
-  // ordinary branches: what is still waiting keeps its branch, because that is
-  // what CI fetches, and everything else goes. Left behind, every candidate the
-  // queue had ever built stayed a ref — pinning its objects out of reach of
-  // collection for good, on a repository whose whole point is that it can be
-  // collected.
+  // ordinary branches: what is still in the queue keeps its branch, because
+  // that is what CI fetches, and everything else goes. Left behind, every
+  // candidate the queue had ever built stayed a ref — pinning its objects out
+  // of reach of collection for good, on a repository whose whole point is that
+  // it can be collected.
+  //
+  // Every entry still queued, not only the steps this pass built. An entry can
+  // flip to `unbuilt` — the batch ahead of it conflicts, or this replica is
+  // missing an object — while the `queue.candidate` record naming its branch
+  // stands, and deleting it then pointed `queue show` at a branch nothing could
+  // fetch. What is settled about an entry is whether it is still queued.
   if (!input.dryRun) {
-    const keep = new Set(waiting.map((step) => step.branch));
+    const settled = new Set([...landed, ...dropped.map((entry) => entry.pr)]);
+    const keep = new Set(
+      state.entries.filter((entry) => !settled.has(entry.pr)).map((entry) => branchOf(entry.pr)),
+    );
     const prefix = `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/`;
     for (const [name] of yield* repository.refs) {
       if (!name.startsWith(prefix) || keep.has(name)) continue;

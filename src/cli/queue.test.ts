@@ -665,7 +665,7 @@ describe("cli queue", () => {
 
     const listed = JSON.parse(await cli(["queue", "list", "--root", root, "project"]));
     assert.deepEqual(
-      listed.map((held: { queue: string }) => held.queue),
+      listed.queues.map((held: { queue: string }) => held.queue),
       [queue],
       "the typo left no ref behind",
     );
@@ -851,6 +851,57 @@ describe("cli queue", () => {
       1,
       "what is still waiting keeps its branch, and nothing else does",
     );
+  });
+
+  it("refuses a second queue for a branch that already has one", async () => {
+    // `refs/hub/queue/*` cannot be deleted, so a second queue for one branch is
+    // a permanent split: entries divide invisibly across the two and two
+    // runners delete each other's candidate branches.
+    const refused = await failing([
+      "queue",
+      "open",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--target",
+      "refs/heads/main",
+      "project",
+    ]);
+    assert.match(refused, /already has a queue/);
+  });
+
+  it("keeps the published branch of an entry a later pass could not build", async () => {
+    // An entry can stop being built while the `queue.candidate` record naming
+    // its branch stands. Deleting the branch then points `queue show` — and the
+    // CI it tells to fetch — at something nothing can resolve.
+    await publish(protectedRules({ requiredChecks: ["test"], queueDepth: 2 }));
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+
+    const both = await run();
+    assert.equal(both.built.length, 2, "both are built and published");
+
+    // The branch stops taking chains that deep, so the second entry is one this
+    // pass cannot build — with its record from the pass before still standing.
+    await publish(protectedRules({ requiredChecks: ["test"], queueDepth: 1 }));
+    const shallower = await run();
+    assert.deepEqual(
+      shallower.unbuilt.map((entry: { pr: string }) => entry.pr),
+      [second],
+    );
+
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    const held = state.entries.find((entry: { pr: string }) => entry.pr === second);
+    assert.notEqual(held.candidate, null, "the record still names a branch");
+    const branch = await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.resolve(held.candidate.branch),
+      ),
+    );
+    assert.notEqual(branch, null, "and the branch it names is still there");
   });
 
   it("refuses an entry for a pull request aimed somewhere else", async () => {
