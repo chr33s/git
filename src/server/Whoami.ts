@@ -111,7 +111,13 @@ const requirementsOf = (rules: Policy.Rules): ReadonlyArray<string> => {
  * setting that widens what may land, reported as though it narrowed it.
  */
 const alternativesOf = (rules: Policy.Rules): ReadonlyArray<string> =>
-  rules.queueCandidates ? [`or a queue candidate, up to ${String(rules.queueDepth)} deep`] : [];
+  // And not while provenance is required, where the boundary refuses every
+  // candidate for want of a session trailer and `queue run` refuses the target
+  // by name. Advertising a route nothing can take is worse than advertising
+  // none: it is the answer an agent would act on.
+  rules.queueCandidates && !rules.requireProvenance
+    ? [`or a queue candidate, up to ${String(rules.queueDepth)} deep`]
+    : [];
 
 /**
  * The standing verdict for one ref, before any particular push exists.

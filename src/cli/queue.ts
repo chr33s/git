@@ -326,11 +326,23 @@ const close = Command.make(
             key: signer,
           });
           // The branches it published go with it: nothing will name them again,
-          // and each pins its candidate out of reach of collection.
+          // and each pins its candidate out of reach of collection. Everything
+          // this queue ever held, not only what is in it now — an entry that
+          // left had its branch deleted by the pass that settled it, but one
+          // removed by hand did not, and after the close nothing can name it.
+          //
+          // A pass racing this close can still publish a branch after the
+          // sweep, which no verb will then delete. There is no compare-and-swap
+          // across refs to have instead, and it is the same race two `open`
+          // calls have; the residue is one ref rather than a wrong answer.
           if (state.target !== null) {
             const repository = yield* Repository;
-            for (const entry of state.entries) {
-              yield* repository.deleteRef(Queue.candidateBranch(state.target, entry.pr));
+            const everyone = new Set([
+              ...state.entries.map((entry) => entry.pr),
+              ...state.left.map((entry) => entry.pr),
+            ]);
+            for (const pr of everyone) {
+              yield* repository.deleteRef(Queue.candidateBranch(state.target, pr));
             }
           }
         }),

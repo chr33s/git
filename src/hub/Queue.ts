@@ -608,6 +608,13 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
       }
 
       case "queue.candidate": {
+        // Nothing is built for a queue that has ended, for the reason nothing
+        // joins one: a candidate recorded after a close is one whose branch the
+        // close has already swept past, and no verb will name it again.
+        if (closed !== null) {
+          ignored.push(commit);
+          break;
+        }
         const held = queued.get(payload.pr);
         const commitOid = Event.unqualify(payload.commit);
         const onto = Event.unqualify(payload.onto);
