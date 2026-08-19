@@ -1054,6 +1054,44 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
         document.querySelector("ui-menu.gp-branch-menu") === null,
     ),
   );
+
+  // --- hash routes carry any path, and malformed ones fail visibly --------
+  // Spaces, a literal `%`, a `#`, Unicode and nesting all ride inside
+  // component-encoded segments, so the copied URL and a refresh reopen the
+  // same path instead of truncating at the first reserved character.
+  const tricky = "docs/a b%c✓/file #1.md";
+  const encoded = tricky
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  await page.goto(`${origin}/#/code/${encoded}`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(700);
+  const wantedPath = () =>
+    page.evaluate(() => {
+      const code = document.querySelector("gp-code");
+      // SAFETY: `wanted` is gp-code's reactive property, set by the shell's
+      // route parsing; absent means the element or the property is not there.
+      return (code as { wanted?: string | null } | null)?.wanted ?? null;
+    });
+  check(
+    "an encoded file path survives navigation and refresh",
+    (await hash()) === `#/code/${encoded}` && (await wantedPath()) === tricky,
+  );
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(700);
+  check("and the reload decodes it back to the same file", (await wantedPath()) === tricky);
+
+  await page.goto(`${origin}/#/code/%E0%A4%A`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(700);
+  check(
+    "a malformed escape leaves the shell usable with a visible navigation error",
+    await page.evaluate(
+      () =>
+        document.querySelector(".gp-shell") !== null &&
+        document.querySelector(".gp-nav-error") !== null,
+    ),
+  );
+
   await page.close();
 };
 
@@ -1692,6 +1730,22 @@ const localMode = async (browser: Browser): Promise<void> => {
       "the sync badge counts the unpushed commit",
       ((await page.textContent(".gp-sync")) ?? "").includes("↑1"),
     );
+
+    // Reload before pushing. The tracking refs are observations of origin,
+    // recorded at clone, push and fetch — a reload must not rewrite them
+    // from local heads, or the unpushed commit above would read as "nothing
+    // to push" and Push would disable over exactly the work that needs it.
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector(".gp-sync", { timeout: 30_000 });
+    await page.waitForTimeout(800);
+    const reloaded = (await page.textContent(".gp-sync")) ?? "";
+    check(
+      "the unpushed commit is still ahead after a full reload",
+      reloaded.includes("↑1"),
+      reloaded,
+    );
+    check("and being ahead does not read as also being behind", !reloaded.includes("↓"), reloaded);
+
     const before = await fetch(`${upstream}/core/refs`).then(async (response) =>
       Schema.decodeUnknownSync(Contract.RefsResponse)(await response.json()),
     );
@@ -1792,6 +1846,7 @@ const localMode = async (browser: Browser): Promise<void> => {
               "hub.create-pr",
               "hub.approve",
               "hub.comment",
+              "hub.task",
               "hub.merge",
               "policy.write",
             ],
@@ -1842,6 +1897,32 @@ const localMode = async (browser: Browser): Promise<void> => {
       reviewed.reviews.length === 1 && reviewed.reviews[0]?.decision === "approve",
     );
 
+    // --- the merge, as one hub transition ----------------------------------
+    // The button waits for the server's own mergeability, and the merged
+    // state the screen shows afterwards is the projection re-read — the
+    // endpoint advanced the base and appended pr.merged as one judged batch.
+    await page.waitForSelector('.gp-merge-btn[data-state="ready"]', { timeout: 10_000 });
+    await page.click(".gp-merge-btn");
+    await page.waitForTimeout(3000);
+    const settledPull = await fetch(`${upstream}/core/hub/pulls/${prId}`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.HubPullDetail)(await response.json()),
+    );
+    check("the merge settles the pull request in the hub", settledPull.state === "merged");
+    const refsAfterMerge = await fetch(`${upstream}/core/refs`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.RefsResponse)(await response.json()),
+    );
+    check(
+      "and the base advanced to exactly the approved head",
+      settledPull.mergeCommit !== null &&
+        settledPull.mergeCommit === reviewed.head &&
+        refsAfterMerge.refs.find((ref) => ref.name === "refs/heads/main")?.oid ===
+          settledPull.mergeCommit,
+    );
+    check(
+      "the screen shows it merged only after re-reading the projection",
+      ((await page.textContent(".gp-detail-eyebrow .gp-status")) ?? "").trim() === "Merged",
+    );
+
     // --- branch rules, published from the Settings form --------------------
     await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
     await page.waitForSelector('[data-card="policy"] form', { timeout: 15_000 });
@@ -1861,6 +1942,27 @@ const localMode = async (browser: Browser): Promise<void> => {
     await rm(root, { recursive: true, force: true });
   }
 };
+
+// --- the deployment artifact --------------------------------------------
+// `worker.ts` binds `dist/ui` as the deployed Worker's static assets, so the
+// build output is a deployment contract, not just this suite's fixture: the
+// entry page, the two entry bundles it references, and the cache rules the
+// asset layer applies. A missing one of these is a deploy that would publish
+// the API with no UI behind it.
+for (const artifact of ["index.html", "main.js", "main.css", "_headers"]) {
+  const present = await stat(join(dist, artifact)).then(
+    () => true,
+    () => false,
+  );
+  check(`the deployable asset directory carries ${artifact}`, present);
+}
+check(
+  "the cache rules pin the entry page to revalidation",
+  await readFile(join(dist, "_headers"), "utf8").then(
+    (rules) => rules.includes("/index.html") && rules.includes("must-revalidate"),
+    () => false,
+  ),
+);
 
 const offline = await serve(false, 8131);
 const online = await serve(true, 8132);

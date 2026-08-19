@@ -104,18 +104,35 @@ export class GpDetail extends GitPlusElement {
   /**
    * Merge a mergeable Change Request.
    *
-   * Two layers, honestly separated: the server's `POST /merge` moves the real
-   * target ref when the named refs exist, and the store's projection records
-   * the Change Request as merged either way. The fixture Change Requests name
-   * refs that live only in the design, so the server answering "unknown ref"
-   * is the expected case there — the projection still lands. A merge the
-   * server *could* run but refused — conflicts — blocks the projection too,
-   * because pretending a conflicted merge landed would be a lie.
+   * Two entirely separate stories, split on provenance. A *hub* Change
+   * Request settles through the hub's own merge endpoint: one server-side
+   * transition that advances the base to the approved head and appends the
+   * signed `pr.merged` beside it, judged together — and what shows next is
+   * the projection, re-read. A refused or unreachable merge leaves the
+   * Change Request open with the reason beside the button; there is no
+   * tab-local "merged" for something the repository still holds open.
+   *
+   * A *fixture* Change Request keeps the design's tab-local story: the
+   * server's generic `POST /merge` is offered the refs (which usually do
+   * not exist outside the design), and the store's sample projection
+   * records the merge either way — clearly sample behaviour, never
+   * reachable by a hub entity.
    */
   async #merge(cr: ChangeRequest): Promise<void> {
     const api = this.api;
     this.mergeNotice = null;
-    let landed: string | null = null;
+
+    if (cr.hub === true) {
+      this.acting = true;
+      try {
+        const refused = await store.mergeRemote(cr.id);
+        if (refused !== null) this.mergeNotice = refused;
+      } finally {
+        this.acting = false;
+      }
+      return;
+    }
+
     if (api !== null) {
       try {
         const result = await api.merge({
@@ -129,7 +146,6 @@ export class GpDetail extends GitPlusElement {
           this.mergeNotice = `merge conflicted on ${paths} — resolve on the branch first`;
           return;
         }
-        landed = result.commit;
       } catch (error) {
         if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
         // Refs this repository does not have — the fixture case — fall through
@@ -146,14 +162,6 @@ export class GpDetail extends GitPlusElement {
           return;
         }
       }
-    }
-    // A hub Change Request's merge is recorded where every replica reads it:
-    // the pr.merged event, signed by this browser, appended once the branch
-    // really moved. The fixtures keep their tab-local projection.
-    if (cr.hub === true && landed !== null) {
-      const recorded = await store.mergedRemote(cr.id, landed);
-      if (!recorded) this.mergeNotice = "merged, but the hub refused the pr.merged record";
-      return;
     }
     store.merge(cr.id);
   }
@@ -192,9 +200,14 @@ export class GpDetail extends GitPlusElement {
   }
 
   /**
-   * Append a comment — to the hub when this is a hub pull request (signed
-   * with the browser's key, read back from the projection), and to the
-   * tab-local store otherwise, authored as whoever `/whoami` said is asking.
+   * Append a comment, split on provenance. A hub Change Request's comment is
+   * a signed event, read back from the projection — a refusal shows *as* a
+   * refusal, never as a tab-local comment pretending to be repository state.
+   * A fixture's comment stays tab-local, authored as whoever `/whoami` said
+   * is asking, which is the design's documented sample behaviour. A hub
+   * *Task* never reaches here: its form is disabled with the reason
+   * (`#commentForm`), because no canonical task-comment event exists yet and
+   * the pull-request namespace is not a place to improvise one.
    */
   #comment = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
@@ -204,13 +217,55 @@ export class GpDetail extends GitPlusElement {
     if (!(field instanceof HTMLTextAreaElement)) return;
     const text = field.value.trim();
     if (text === "") return;
-    const sent = await store.commentRemote(this.#task.id, text);
-    if (!sent) {
+    const task = this.#task;
+    if (task.hub === true) {
+      const sent = await store.commentRemote(task.id, text);
+      if (!sent) {
+        this.mergeNotice = "the hub refused the comment — is this key a member?";
+        return;
+      }
+    } else {
       const author = this.viewer ?? "anonymous";
-      store.comment(this.#task.id, { avatar: initials(author), author, when: "just now", text });
+      store.comment(task.id, { avatar: initials(author), author, when: "just now", text });
     }
     form.reset();
   };
+
+  /**
+   * The comment form — or, for a live hub Task, the honest absence of one.
+   *
+   * Task and pull-request ids share one shape, so a task comment written
+   * into the pull-request namespace would *create* a ghost Change Request
+   * ref; and a tab-local comment on live repository state would vanish on
+   * reload while looking canonical. Until a task-comment event exists in
+   * the protocol, saying so beats either lie.
+   */
+  #commentForm(task: Task): TemplateResult {
+    if (task.hub === true && !isChangeRequest(task)) {
+      return html`
+        <p class="gp-notice">
+          Live task discussion is not part of the hub protocol yet — there is no signed task-comment
+          event for this browser to append, so commenting is off rather than written somewhere it
+          does not belong.
+        </p>
+      `;
+    }
+    return html`
+      <form class="gp-comment-form" @submit=${this.#comment}>
+        <textarea
+          class="gp-textarea"
+          name="text"
+          rows="3"
+          required
+          placeholder="Leave a comment…"
+          aria-label="Leave a comment"
+        ></textarea>
+        <div class="gp-comment-actions">
+          <button class="gp-btn-primary" type="submit">Comment</button>
+        </div>
+      </form>
+    `;
+  }
 
   #select(tab: Tab): void {
     this.tab = tab;
@@ -346,19 +401,7 @@ export class GpDetail extends GitPlusElement {
                     `,
                   )
             }
-            <form class="gp-comment-form" @submit=${this.#comment}>
-              <textarea
-                class="gp-textarea"
-                name="text"
-                rows="3"
-                required
-                placeholder="Leave a comment…"
-                aria-label="Leave a comment"
-              ></textarea>
-              <div class="gp-comment-actions">
-                <button class="gp-btn-primary" type="submit">Comment</button>
-              </div>
-            </form>
+            ${this.#commentForm(task)}
           </div>
 
           ${this.#meta(task)}
@@ -524,7 +567,7 @@ export class GpDetail extends GitPlusElement {
           class="gp-merge-btn"
           type="button"
           data-state=${state}
-          ?disabled=${state !== "ready"}
+          ?disabled=${state !== "ready" || this.acting}
           @click=${() => void this.#merge(cr)}
         >
           ${cr.review.action}

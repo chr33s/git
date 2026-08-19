@@ -412,6 +412,17 @@ export const HubCheck = Schema.Struct({
 });
 export type HubCheck = (typeof HubCheck)["Type"];
 
+/**
+ * Whether the repository would settle this pull request now, and — when it
+ * would not — every rule still standing in the way, in the server's words.
+ * The UI renders this instead of reconstructing branch policy from counts.
+ */
+export const HubMergeable = Schema.Struct({
+  ok: Schema.Boolean,
+  reasons: Schema.Array(Schema.String),
+});
+export type HubMergeable = (typeof HubMergeable)["Type"];
+
 /** One pull request in a listing: the projection, minus its heavy members. */
 export const HubPullSummary = Schema.Struct({
   id: Schema.String,
@@ -422,8 +433,10 @@ export const HubPullSummary = Schema.Struct({
   author: Schema.NullOr(Schema.String),
   /** Fresh, undismissed approvals of the current head, for the current base. */
   approvals: Schema.Int,
+  /** Checks for the *current* proposed revision only; history stays in the detail's `checkList`. */
   checks: Schema.Struct({ total: Schema.Int, passed: Schema.Boolean }),
   threads: Schema.Struct({ total: Schema.Int, unresolved: Schema.Int }),
+  mergeable: HubMergeable,
   at: Schema.String,
 });
 export type HubPullSummary = (typeof HubPullSummary)["Type"];
@@ -432,6 +445,8 @@ export const HubPullDetail = Schema.Struct({
   ...HubPullSummary.fields,
   description: Schema.String,
   mergeCommit: Schema.NullOr(OidString),
+  /** Commits the proposal carries beyond its base, capped at 250. */
+  commits: Schema.Int,
   reviews: Schema.Array(HubReview),
   threadList: Schema.Array(HubThread),
   checkList: Schema.Array(HubCheck),
@@ -460,6 +475,39 @@ export const HubEventAppended = Schema.Struct({
   commit: OidString,
 });
 export type HubEventAppended = (typeof HubEventAppended)["Type"];
+
+/**
+ * Settle a pull request: advance its base to the exact approved revision and
+ * append the pre-signed `pr.merged` event, as one judged transition.
+ *
+ * The two client requests this replaces — a generic `/merge`, then an event
+ * append — could not keep the branch and the hub's account of it consistent
+ * under interruption, and the generic route refuses protected branches
+ * outright (it cannot see approvals). This one names everything the server
+ * re-checks at execution time: the head that was reviewed, the base tip the
+ * caller saw, and the signed record of what the transition means.
+ */
+export const HubMergeRequest = Schema.Struct({
+  /** The approved revision; the base advances to exactly this, or not at all. */
+  head: OidString,
+  /** The base tip the caller decided against — the compare-and-swap; `null` for an unborn base. */
+  expected: Schema.NullOr(OidString),
+  /** The pre-signed `pr.merged` bytes (base64) and the signatures over them. */
+  payload: Schema.String,
+  signatures: Schema.Array(Schema.String),
+});
+export type HubMergeRequest = (typeof HubMergeRequest)["Type"];
+
+export const HubMerged = Schema.Struct({
+  pr: Schema.String,
+  /** The base ref that advanced. */
+  base: Schema.String,
+  /** Where it now points — the approved head. */
+  commit: OidString,
+  /** The hub record commit carrying `pr.merged`. */
+  event: OidString,
+});
+export type HubMerged = (typeof HubMerged)["Type"];
 
 /** One page of tasks; the same `Page` discipline every git listing follows. */
 export const HubTaskPage = Page(HubTask);

@@ -107,6 +107,11 @@ export class GpTasks extends GitPlusElement {
     const rows = store.rows(this.filter);
     return html`
       <div class="gp-screen">
+        ${
+          store.liveNotice === null
+            ? nothing
+            : html`<p class="gp-notice" data-error>${store.liveNotice}</p>`
+        }
         <div class="gp-tasks-head">
           <h1 class="gp-heading">Tasks</h1>
           <ui-toggle-group

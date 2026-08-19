@@ -48,6 +48,7 @@ import {
 } from "./api.ts";
 import type { BisectAnswer, ReplayResult } from "../src/server/ApiContract.ts";
 
+import { authorizeSmartHttp } from "./identity.ts";
 import type { SyncState } from "./api.ts";
 
 export type { PushResult, SyncState };
@@ -156,7 +157,11 @@ export class LocalGitApi {
         const fetched = await local.#run(
           Effect.gen(function* () {
             const target = { objects: yield* ObjectStore, refs: yield* RefStore };
-            return yield* fetchRepository({ url: options.cloneUrl, stores: target });
+            return yield* fetchRepository({
+              url: options.cloneUrl,
+              stores: target,
+              authorize: authorizeSmartHttp,
+            });
           }),
         );
         const head = fetched.defaultBranch ?? "main";
@@ -166,8 +171,15 @@ export class LocalGitApi {
             yield* repository.setHead(`${HEADS}${head}`);
           }),
         );
+        // Only here, off the clone: the branches just written *are* origin's,
+        // from the very advertisement that produced them. On every later
+        // open the tracking refs are left exactly where the last clone,
+        // fetch or push observed origin — copying local heads over them on
+        // reload was how an unpushed commit read as "nothing to push" after
+        // every refresh, with Push disabled over exactly the work that
+        // needed it.
+        await local.#mirror();
       }
-      await local.#mirror();
       return local;
     } catch {
       return null;
@@ -215,9 +227,12 @@ export class LocalGitApi {
   /**
    * Record origin's view of each local branch, for ahead/behind.
    *
-   * Written after a clone and after every sync, from what the operation
-   * itself established — a clone's branches *are* origin's, and a push moves
-   * origin to the local tip.
+   * Called exactly once, after the first clone — the moment local branches
+   * and origin's are the same thing by construction. Afterwards a tracking
+   * ref is an *observation* of origin and moves only when origin was
+   * actually observed: a successful push (`#push`) and a fetch
+   * (`#fetchOrigin`) each record what the wire established, and nothing
+   * ever copies a local head over one.
    */
   async #mirror(): Promise<void> {
     await this.#run(
@@ -438,23 +453,39 @@ export class LocalGitApi {
         const remote = yield* repository.resolve(`${REMOTE}${branch}`);
         if (local === null) return { branch, ahead: 0, behind: 0, remote };
 
-        /** Commits reachable from `from` before `until` appears, capped. */
-        const countUntil = (from: Oid, until: Oid | null) =>
+        /** The recent history of `from`, as a membership question. */
+        const reachable = (from: Oid | null) =>
+          from === null
+            ? Effect.succeed(new Set<Oid>())
+            : Stream.runCollect(repository.log(from, { limit: 250 })).pipe(
+                Effect.map((commits) => new Set(commits.map((commit) => commit.oid))),
+              );
+
+        /**
+         * Commits reachable from `from` before *any* commit of the other
+         * side appears. Counting until the other side's exact tip — the
+         * previous rule — miscounted both directions the moment either side
+         * moved: a branch one commit ahead read its origin as one commit
+         * "behind", because origin's tip is an ancestor, not the local tip.
+         */
+        const countUntil = (from: Oid, seen: ReadonlySet<Oid>) =>
           Stream.runCollect(repository.log(from, { limit: 250 })).pipe(
             Effect.map((commits) => {
               let count = 0;
               for (const commit of commits) {
-                if (until !== null && commit.oid === until) return count;
+                if (seen.has(commit.oid)) return count;
                 count += 1;
               }
               return count;
             }),
           );
 
+        const localSeen = yield* reachable(local);
+        const remoteSeen = yield* reachable(remote);
         return {
           branch,
-          ahead: yield* countUntil(local, remote),
-          behind: remote === null ? 0 : yield* countUntil(remote, local),
+          ahead: yield* countUntil(local, remoteSeen),
+          behind: remote === null ? 0 : yield* countUntil(remote, localSeen),
           remote,
         };
       }),
@@ -472,6 +503,7 @@ export class LocalGitApi {
       pushBranches({
         url,
         refs: [{ local: `${HEADS}${branch}`, remote: `${HEADS}${branch}` }],
+        authorize: authorizeSmartHttp,
       }),
     );
     if (results.every((result) => result.ok)) {
@@ -499,25 +531,28 @@ export class LocalGitApi {
 
   async #fetchOrigin(): Promise<{ readonly updated: number; readonly rejected: number }> {
     const url = this.cloneUrl;
+    // One advertisement, one negotiation, one pack — carrying two refspecs.
+    // The tracking half is forced because it *is* origin's state, observed;
+    // the local half fast-forwards what it can and rejects the rest, so a
+    // divergent local branch keeps its commits while its tracking ref
+    // advances and `sync` reports the divergence truthfully.
     const fetched = await this.#run(
-      Effect.gen(function* () {
-        const target = { objects: yield* ObjectStore, refs: yield* RefStore };
-        return yield* fetchRepository({ url, stores: target });
-      }),
-    );
-    const mirrored = await this.#run(
       Effect.gen(function* () {
         const target = { objects: yield* ObjectStore, refs: yield* RefStore };
         return yield* fetchRepository({
           url,
           stores: target,
-          refspecs: [{ force: true, source: "refs/heads/*", destination: `${REMOTE}*` }],
+          authorize: authorizeSmartHttp,
+          refspecs: [
+            { force: false, source: "refs/heads/*", destination: "refs/heads/*" },
+            { force: true, source: "refs/heads/*", destination: `${REMOTE}*` },
+          ],
         });
       }),
     );
     return {
-      updated: fetched.refs.length,
-      rejected: fetched.rejected.length + mirrored.rejected.length,
+      updated: fetched.refs.filter((ref) => ref.name.startsWith(HEADS)).length,
+      rejected: fetched.rejected.filter((ref) => ref.name.startsWith(HEADS)).length,
     };
   }
 

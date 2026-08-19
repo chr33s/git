@@ -36,7 +36,7 @@ import {
   type IncomingMessage,
   type RequestListener,
 } from "node:http";
-import { cp } from "node:fs/promises";
+import { access, cp, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -120,11 +120,40 @@ const debug = process.argv.includes("--debug");
  * picked up in watch mode instead of needing a restart. `fs.cp` creates the
  * parent directory, so this is also what puts the file there on a cold start.
  */
+/**
+ * The asset layer's cache rules, shipped beside the files they govern.
+ *
+ * Cloudflare's asset router reads `_headers` from the upload
+ * (`worker.ts` binds `dist/ui` as the Worker's static assets). Every chunk
+ * except the three entry points carries a content hash in its name, so the
+ * blanket rule marks everything immutable and the later, more specific rules
+ * win the entry points back to revalidation — Cloudflare applies matching
+ * rules top to bottom with the last repeated header winning. The entry
+ * points revalidate cheaply (the asset layer serves strong ETags), so a
+ * deploy is picked up on the next load without ever serving a stale shell.
+ */
+const HEADERS = `${[
+  "/*\n  Cache-Control: public, max-age=31536000, immutable",
+  ...["/index.html", "/main.js", "/main.js.map", "/main.css", "/main.css.map"].map(
+    (entry) => `${entry}\n  Cache-Control: public, max-age=0, must-revalidate`,
+  ),
+].join("\n\n")}\n`;
+
 const page: Plugin = {
   name: "index-html",
   setup(build) {
-    build.onEnd(async () => {
+    build.onEnd(async (result) => {
       await cp(join(pwd, "index.html"), join(outdir, "index.html"), { force: true });
+      await writeFile(join(outdir, "_headers"), HEADERS);
+      if (result.errors.length > 0) return;
+      // The deploy path serves exactly these three names (`index.html`
+      // references the other two), so a build that did not produce them is a
+      // deploy that would publish an API with no UI — fail it here, loudly.
+      for (const expected of ["index.html", "main.js", "main.css"]) {
+        await access(join(outdir, expected)).catch(() => {
+          throw new Error(`ui build produced no ${expected} in ${outdir}`);
+        });
+      }
     });
   },
 };

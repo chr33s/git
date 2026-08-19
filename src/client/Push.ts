@@ -20,6 +20,7 @@ import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import { absent } from "../hub/Redaction.ts";
+import { type Authorize, fetchAuthorized, operationOf } from "./Authorize.ts";
 
 const decoder = new TextDecoder();
 
@@ -186,15 +187,21 @@ export const push = Effect.fn("Client.push")(function* (input: {
   readonly token?: string;
   readonly force?: boolean;
   readonly atomic?: boolean;
+  /** How to answer a `Hub-SSH-v1` challenge; absent, a 401 stays a 401. */
+  readonly authorize?: Authorize;
 }) {
   const repository = yield* Repository;
-  const { atomic, force, refs, token, url } = input;
+  const { atomic, authorize, force, refs, token, url } = input;
 
   const advertisement = yield* Effect.tryPromise({
     try: async () => {
-      const response = await fetch(`${url}/info/refs?service=git-receive-pack`, {
-        headers: authorization(token),
-      });
+      const target = `${url}/info/refs?service=git-receive-pack`;
+      const response = await fetchAuthorized(
+        target,
+        { headers: authorization(token) },
+        { operation: operationOf("GET", target), commands: [] },
+        authorize,
+      );
       if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
       return readAdvertisement(response.body);
     },
@@ -308,14 +315,29 @@ export const push = Effect.fn("Client.push")(function* (input: {
 
   const reported = yield* Effect.tryPromise({
     try: async () => {
-      const response = await fetch(`${url}/git-receive-pack`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-git-receive-pack-request",
-          ...authorization(token),
+      const response = await fetchAuthorized(
+        `${url}/git-receive-pack`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-git-receive-pack-request",
+            ...authorization(token),
+          },
+          body,
         },
-        body,
-      });
+        {
+          operation: "git-receive-pack",
+          // The envelope binds the exact compare-and-swap each command asks
+          // for: the policy boundary refuses a signed request that names
+          // other refs or other revisions, which is the point of signing.
+          commands: commands.map((command) => ({
+            ref: command.ref,
+            from: command.old === ZERO_OID ? null : command.old,
+            to: command.next,
+          })),
+        },
+        authorize,
+      );
       if (!response.ok) throw new Error(`receive-pack returned ${response.status}`);
       return readReport(response.body, sideband);
     },
@@ -355,6 +377,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
   readonly token?: string;
   readonly force?: boolean;
   readonly atomic?: boolean;
+  readonly authorize?: Authorize;
 }) => Effect.Effect<
   ReadonlyArray<PushResult>,
   Invalid | PackCorrupt | ObjectNotFound | StorageFailure,
