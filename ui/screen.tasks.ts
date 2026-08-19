@@ -147,8 +147,8 @@ export class GpTasks extends GitPlusElement {
         <ui-dialog-popup class="gp-dialog">
           <h2 class="gp-dialog-title" data-dialog-title>New task</h2>
           <p class="gp-dialog-hint" data-dialog-description>
-            Stored in this browser tab — the hub has no HTTP surface yet, so nothing is written to
-            the repository.
+            Stored in this browser tab — hub events are signed by their author, and this browser
+            holds no signing key, so nothing is written to the repository.
           </p>
           <form @submit=${this.#create}>
             <label class="gp-field-label" for="gp-new-title">Title</label>

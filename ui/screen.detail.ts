@@ -87,6 +87,10 @@ export class GpDetail extends GitPlusElement {
       this.diffState = { tag: "idle" };
       this.mergeNotice = null;
       this.#renderers.clear();
+      // A hub-sourced task carries only its listing row until someone looks
+      // at it; the store fills the discussion and checks from the detail
+      // endpoint and notifies. For a fixture id this is a no-op.
+      store.hydrate(this.taskId);
     }
   }
 

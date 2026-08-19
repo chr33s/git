@@ -36,7 +36,9 @@ import {
   type CommitSummary,
   describe,
   type FileWrite,
-  type GitApi,
+  type CodeApi,
+  syncCapable,
+  type SyncState,
   type Unavailable,
   type Whoami,
 } from "./api.ts";
@@ -129,8 +131,13 @@ interface CodeSnapshot {
 
 @customElement("gp-code")
 export class GpCode extends GitPlusElement {
-  /** Injected by the shell so every screen shares one client. */
-  api: GitApi | null = null;
+  /**
+   * Injected by the shell so every screen shares one client. Reactive,
+   * because the shell swaps it once the OPFS clone is ready — from the HTTP
+   * client to the local repository — and the screen reloads from whichever
+   * it currently holds.
+   */
+  @property({ attribute: false }) accessor api: CodeApi | null = null;
 
   @property({ type: String }) accessor theme: Theme = currentTheme();
 
@@ -168,6 +175,13 @@ export class GpCode extends GitPlusElement {
   /** Why the last commit attempt failed, shown inside the editor. */
   @state() private accessor editError: string | null = null;
 
+  /** Where the branch stands against origin — local mode only. */
+  @state() private accessor syncState: SyncState | null = null;
+  /** A push or fetch is in flight; the sync buttons disable meanwhile. */
+  @state() private accessor syncing = false;
+  /** What the last sync attempt said, cleared by the next one. */
+  @state() private accessor syncNotice: string | null = null;
+
   /** The tip's full oid at last load — the `expected` for the next commit. */
   #tip: string | null = null;
 
@@ -188,6 +202,11 @@ export class GpCode extends GitPlusElement {
     // place; the initial one is honoured by `#load` before the tree exists.
     if (changed.has("wanted") && this.wanted !== null && this.wanted !== this.selected) {
       void this.#open(this.wanted);
+    }
+    // The shell swapped clients — the OPFS clone came ready. The old value is
+    // `undefined` only on the first update, which `connectedCallback` loads.
+    if (changed.has("api") && changed.get("api") !== undefined) {
+      void this.#load();
     }
   }
 
@@ -247,9 +266,9 @@ export class GpCode extends GitPlusElement {
    * commit should show the file that was just written, not jump to the README.
    */
   async #snapshot(
-    api: GitApi,
+    api: CodeApi,
     ref: string,
-    knownRefs?: Awaited<ReturnType<GitApi["refs"]>>,
+    knownRefs?: Awaited<ReturnType<CodeApi["refs"]>>,
     keep?: string,
   ): Promise<CodeSnapshot> {
     const [refs, files] = await Promise.all([
@@ -351,6 +370,103 @@ export class GpCode extends GitPlusElement {
     this.fileLog = null;
     this.at = null;
     this.#viewer = null;
+    void this.#refreshSync();
+  }
+
+  /**
+   * Where the current branch stands against origin — answered only by the
+   * local client; against the HTTP client there is no "against", and the
+   * controls stay hidden.
+   */
+  async #refreshSync(): Promise<void> {
+    const api = syncCapable(this.api);
+    if (api === null || this.offline) {
+      this.syncState = null;
+      return;
+    }
+    try {
+      this.syncState = await api.sync(this.ref);
+    } catch {
+      this.syncState = null;
+    }
+  }
+
+  async #push(): Promise<void> {
+    const api = syncCapable(this.api);
+    if (api === null || this.syncing) return;
+    this.syncing = true;
+    this.syncNotice = null;
+    try {
+      const results = await api.push(this.ref);
+      const refused = results.filter((result) => !result.ok);
+      this.syncNotice =
+        refused.length === 0
+          ? `Pushed ${this.ref} to origin.`
+          : `origin refused ${refused[0]?.ref ?? this.ref}: ${refused[0]?.reason ?? "unknown"}`;
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.syncNotice = `Push failed — ${describe(error)}.`;
+    } finally {
+      this.syncing = false;
+      void this.#refreshSync();
+    }
+  }
+
+  async #fetchOrigin(): Promise<void> {
+    const api = syncCapable(this.api);
+    if (api === null || this.syncing) return;
+    this.syncing = true;
+    this.syncNotice = null;
+    try {
+      const fetched = await api.fetchOrigin();
+      this.syncNotice =
+        fetched.updated === 0
+          ? "Already up to date with origin."
+          : `Fetched origin — ${fetched.updated} ref${fetched.updated === 1 ? "" : "s"} moved.`;
+      await this.#reload(this.selected ?? undefined);
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.syncNotice = `Fetch failed — ${describe(error)}.`;
+    } finally {
+      this.syncing = false;
+      void this.#refreshSync();
+    }
+  }
+
+  /**
+   * The sync controls: what there is to push, what there is to fetch, and
+   * the buttons that do either. Rendered only in local mode — the header is
+   * otherwise exactly what it always was.
+   */
+  #syncControls(): TemplateResult | typeof nothing {
+    const state = this.syncState;
+    if (state === null || syncCapable(this.api) === null) return nothing;
+    return html`
+      <span class="gp-sync" title="This branch lives in this browser (OPFS); origin is the server.">
+        <button
+          class="gp-btn-quiet"
+          type="button"
+          title=${
+            state.ahead === 0
+              ? "Nothing to push"
+              : `Push ${state.ahead} commit${state.ahead === 1 ? "" : "s"} to origin`
+          }
+          ?disabled=${this.syncing || state.ahead === 0}
+          @click=${() => void this.#push()}
+        >
+          Push ↑${state.ahead}
+        </button>
+        <button
+          class="gp-btn-quiet"
+          type="button"
+          title="Fetch origin"
+          ?disabled=${this.syncing}
+          @click=${() => void this.#fetchOrigin()}
+        >
+          Fetch${state.behind > 0 ? ` ↓${state.behind}` : ""}
+        </button>
+      </span>
+    `;
   }
 
   /**
@@ -704,7 +820,9 @@ export class GpCode extends GitPlusElement {
               >${this.who?.member === true ? "Member" : "Public"}</span
             >
           </div>
-          <div class="gp-repo-actions">${this.#branchMenu()} ${this.#clone()}</div>
+          <div class="gp-repo-actions">
+            ${this.#syncControls()} ${this.#branchMenu()} ${this.#clone()}
+          </div>
         </header>
 
         <div class="gp-screen gp-screen--code">
@@ -715,6 +833,7 @@ export class GpCode extends GitPlusElement {
                 </p>`
               : ""
           }
+          ${this.syncNotice === null ? "" : html`<p class="gp-notice">${this.syncNotice}</p>`}
           ${this.head === null ? "" : this.#commitBar(this.head)} ${this.#panel()}
 
           <div class="gp-card gp-file-card">

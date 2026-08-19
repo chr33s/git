@@ -19,7 +19,7 @@
  * PLAYWRIGHT_BROWSERS_PATH; pass --executable to point at a specific binary.
  */
 import { chromium, type Browser, type Page } from "playwright";
-import { Schema } from "effect";
+import { Effect, Layer, Schema } from "effect";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
@@ -28,6 +28,11 @@ import { tmpdir } from "node:os";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { generate } from "../src/crypto/SshSignature.ts";
+import { stores as nodeStores } from "../src/git/Node.ts";
+import * as GitRepository from "../src/git/Repository.ts";
+import * as HubTask from "../src/hub/Task.ts";
+import { serve as serveHost } from "../src/host/Node.ts";
 import * as Contract from "../src/server/ApiContract.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -628,6 +633,20 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           }
           return json(Contract.DiffResponse, {
             files: [{ path: "src/server/Api.ts", status: "modified", binary: false, patch: "" }],
+          });
+        }
+
+        // The hub, honestly empty: the sample repository has no genesis and
+        // no tasks, so the store keeps the fixtures — which is exactly the
+        // fallback these suites' expectations are written against.
+        if (path === "/core/hub/tasks") {
+          return json(Contract.HubTasksResponse, { tasks: [] });
+        }
+        if (path === "/core/hub/pulls") {
+          return json(Contract.HubPullsResponse, {
+            enabled: false,
+            reason: "the sample repository has no genesis",
+            pulls: [],
           });
         }
       }
@@ -1516,6 +1535,168 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await page.close();
 };
 
+/**
+ * The whole loop, against a real repository: the page clones into OPFS over
+ * smart HTTP, reads and commits locally, and pushes back — with the server
+ * demoted to `origin`. A real node host holds the repository; a small
+ * static-plus-proxy front serves the bundle same-origin over it, which is the
+ * deployed shape (the Worker serves both) and the one a browser's CORS rules
+ * allow.
+ */
+const localMode = async (browser: Browser): Promise<void> => {
+  console.info("\nlocal");
+
+  const root = await mkdtemp(join(tmpdir(), "gp-local-"));
+  const author = {
+    name: "Origin",
+    email: "origin@example.com",
+    at: new Date(1_700_000_000_000),
+    offset: 0,
+  };
+  const repoLayer = GitRepository.layer.pipe(
+    Layer.provide(GitRepository.hooksNoop),
+    Layer.provide(nodeStores(join(root, "core"))),
+  );
+
+  // The origin's history: one commit — and one hub task, signed in-process,
+  // because a task needs no genesis to be projected.
+  const head = await Effect.runPromise(
+    Effect.gen(function* () {
+      const repository = yield* GitRepository.Repository;
+      const blob = yield* repository.writeBlob(
+        new TextEncoder().encode("# core\n\nServed from origin.\n"),
+      );
+      const tree = yield* repository.writeTree([{ mode: "100644", name: "readme.md", oid: blob }]);
+      const commit = yield* repository.commit({
+        branch: "main",
+        tree,
+        message: "first from origin",
+        author,
+      });
+      const key = yield* generate("fleet@example.com");
+      yield* HubTask.open({
+        repo: "core",
+        title: "Review the local mode",
+        description: "Adopted from the hub, not the fixtures.",
+        key,
+      });
+      return commit;
+    }).pipe(Effect.provide(repoLayer)),
+  );
+
+  const host = await serveHost({ root, allowAnonymousWrites: true });
+  const upstream = host.url;
+
+  // Static for the bundle, everything else forwarded — `ui:dev`'s shape.
+  const front = createServer((request, response) => {
+    void (async () => {
+      const url = new URL(request.url ?? "/", "http://localhost");
+      const file = join(dist, normalize(url.pathname === "/" ? "/index.html" : url.pathname));
+      const served = await stat(file).then(
+        () => true,
+        () => false,
+      );
+      if (request.method === "GET" && served) {
+        response.writeHead(200, { "content-type": mimeOf(extname(file)) });
+        return response.end(await readFile(file));
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks);
+      const headers = new Headers();
+      const contentType = request.headers["content-type"];
+      if (contentType !== undefined) headers.set("content-type", contentType);
+      const proxied = await fetch(`${upstream}${request.url ?? "/"}`, {
+        method: request.method ?? "GET",
+        headers,
+        body: body.length === 0 ? undefined : new Uint8Array(body),
+      });
+      const answerType = proxied.headers.get("content-type");
+      response.writeHead(proxied.status, answerType === null ? {} : { "content-type": answerType });
+      response.end(Buffer.from(await proxied.arrayBuffer()));
+    })().catch(() => {
+      response.writeHead(502);
+      response.end("proxy failure");
+    });
+  });
+  await new Promise<void>((resolve) => front.listen(8134, resolve));
+  const origin = "http://localhost:8134";
+
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+
+    // The swap is asynchronous: the clone runs off the boot path, and the
+    // sync controls exist only once the screen holds the local client.
+    await page.waitForSelector(".gp-sync", { timeout: 30_000 });
+    check("the OPFS clone takes over the Code screen", true);
+    await page.waitForTimeout(500);
+    check(
+      "the commit bar shows the origin's commit, read locally",
+      ((await page.textContent(".gp-commit-subject")) ?? "").includes("first from origin"),
+    );
+    check(
+      "there is nothing to push after a fresh clone",
+      ((await page.textContent(".gp-sync")) ?? "").includes("↑0"),
+    );
+
+    // Edit and commit — locally: the tip moves in OPFS, not on the server.
+    await page.click('.gp-file-card button[aria-label="Edit file"]');
+    await page.waitForTimeout(400);
+    await page.fill(".gp-editor", "# core\n\nEdited in the browser, committed to OPFS.\n");
+    await page.fill(".gp-editor-message", "edit readme locally");
+    await page.click(".gp-editor-bar .gp-btn-primary");
+    await page.waitForTimeout(1200);
+    check(
+      "a local commit moves the local tip",
+      ((await page.textContent(".gp-commit-subject")) ?? "").includes("edit readme locally"),
+    );
+    check(
+      "the sync badge counts the unpushed commit",
+      ((await page.textContent(".gp-sync")) ?? "").includes("↑1"),
+    );
+    const before = await fetch(`${upstream}/core/refs`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.RefsResponse)(await response.json()),
+    );
+    check(
+      "the server has not seen the commit yet",
+      before.refs.find((ref) => ref.name === "refs/heads/main")?.oid === head,
+    );
+
+    // Push — the manual sync the whole design argues for.
+    await page.click(".gp-sync button:first-child");
+    await page.waitForTimeout(2000);
+    check(
+      "the push reports success",
+      ((await page.textContent(".gp-notice")) ?? "").includes("Pushed"),
+    );
+    check(
+      "and leaves nothing to push",
+      ((await page.textContent(".gp-sync")) ?? "").includes("↑0"),
+    );
+    const after = await fetch(`${upstream}/core/refs`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.RefsResponse)(await response.json()),
+    );
+    const pushed = after.refs.find((ref) => ref.name === "refs/heads/main")?.oid;
+    check("the server's main moved to the pushed commit", pushed !== undefined && pushed !== head);
+
+    // The hub task, adopted from `GET /hub/tasks` in place of the fixtures.
+    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1200);
+    check(
+      "the Tasks screen shows the hub's task, not the fixtures",
+      ((await page.textContent(".gp-task-list")) ?? "").includes("Review the local mode") &&
+        (await page.locator(".gp-task-row").count()) === 1,
+    );
+    await shot(page, "local-mode");
+  } finally {
+    await page.close();
+    front.close();
+    await host.close();
+    await rm(root, { recursive: true, force: true });
+  }
+};
+
 const offline = await serve(false, 8131);
 const online = await serve(true, 8132);
 await verifyProxy("http://127.0.0.1:8132", 8133);
@@ -1527,6 +1708,7 @@ try {
   await render(browser, "http://localhost:8131");
   await interact(browser, "http://localhost:8131");
   await live(browser, "http://localhost:8132");
+  await localMode(browser);
 } finally {
   await browser.close();
   offline.close();

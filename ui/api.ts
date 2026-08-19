@@ -579,3 +579,55 @@ export const clientFromDocument = (): GitApi => {
   const base = document.querySelector('meta[name="gp-api-base"]')?.getAttribute("content");
   return new GitApi({ repo: repo ?? "core", base: base ?? undefined });
 };
+
+/**
+ * What the Code screen needs from its client — satisfied structurally by
+ * both this module's HTTP `GitApi` and the OPFS-backed `LocalGitApi`
+ * (`ui/local.ts`), so the screen never knows which it holds.
+ */
+export interface CodeApi {
+  readonly repo: string;
+  readonly cloneUrl: string;
+  refs(): Promise<readonly Ref[]>;
+  files(ref: string): Promise<readonly FileEntry[]>;
+  file(ref: string, path: string): Promise<string>;
+  commitFiles(options: Readonly<CommitFilesRequest>): Promise<CommitCreated>;
+  branchCreate(name: string, base: string): Promise<Ref>;
+  commitDetail(oid: string): Promise<CommitDetail>;
+  recentCommits(oid: string, limit?: number): Promise<readonly CommitDetail[]>;
+  history(oid: string, path: string, limit?: string): Promise<readonly CommitSummary[]>;
+}
+
+/** Where a branch stands against origin's copy of it; see `ui/local.ts`. */
+export interface SyncState {
+  readonly branch: string;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly remote: string | null;
+}
+
+/** The sync verbs only the local client carries. */
+export interface SyncCapable {
+  sync(branch: string): Promise<SyncState>;
+  push(
+    branch: string,
+  ): Promise<
+    ReadonlyArray<{ readonly ref: string; readonly ok: boolean; readonly reason?: string }>
+  >;
+  fetchOrigin(): Promise<{ readonly updated: number; readonly rejected: number }>;
+}
+
+/**
+ * Duck-typed on purpose: naming `LocalGitApi` here would pull the whole
+ * OPFS/pack/Effect graph into the entry bundle that this check exists to
+ * keep it out of.
+ */
+export const syncCapable = (api: CodeApi | null): (CodeApi & SyncCapable) | null => {
+  if (api === null) return null;
+  // SAFETY: the two implementations of `CodeApi` are this module's `GitApi`
+  // (no `sync` member) and `LocalGitApi`, which declares the whole
+  // `SyncCapable` contract — so a present `sync` implies the rest of it.
+  const candidate = api as CodeApi & Partial<SyncCapable>;
+  // SAFETY: same invariant — `sync` present means the local client, whole.
+  return candidate.sync === undefined ? null : (candidate as CodeApi & SyncCapable);
+};

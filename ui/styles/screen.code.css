@@ -249,3 +249,10 @@
   border-top: 1px solid var(--gp-divider);
   color: var(--gp-fg-muted);
 }
+
+/* The local-mode sync controls beside the branch menu. */
+.gp-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

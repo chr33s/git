@@ -15,7 +15,10 @@ import { Effect, FileSystem, Layer, Path } from "effect";
 import { Etag, HttpPlatform, HttpRouter } from "effect/unstable/http";
 import { HttpApiTest } from "effect/unstable/httpapi";
 
-import { fingerprint, formatPublicKey, generate } from "../crypto/SshSignature.ts";
+import { fingerprint, formatPublicKey, generate, NAMESPACE, sign } from "../crypto/SshSignature.ts";
+import * as HubEvent from "../hub/Event.ts";
+import * as PullRequest from "../hub/PullRequest.ts";
+import * as HubTask from "../hub/Task.ts";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -35,6 +38,7 @@ const repository = GitRepository.layer.pipe(
 
 const live = Layer.mergeAll(
   Api.handlers,
+  Api.hubHandlers,
   HttpPlatform.layer.pipe(Layer.provide(FileSystem.layerNoop({}))),
   Etag.layerWeak,
   FileSystem.layerNoop({}),
@@ -1280,6 +1284,189 @@ describe("Api", () => {
 
         const empty = yield* client.repo.webhookList({ params: { repo: "r" } });
         assert.deepEqual(empty.webhooks, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+});
+
+describe("Api hub", () => {
+  it.live("lists tasks without needing a genesis", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("worker@example.com");
+        const opened = yield* HubTask.open({
+          repo: "r",
+          title: "wire the hub over HTTP",
+          description: "so a browser can read what the fleet is doing",
+          refs: ["refs/heads/main"],
+          key,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" } });
+
+        assert.equal(answer.tasks.length, 1);
+        const task = answer.tasks[0]!;
+        assert.equal(task.task, opened.task);
+        assert.equal(task.title, "wire the hub over HTTP");
+        assert.equal(task.available, true);
+        assert.equal(task.claim, null);
+        assert.equal(task.closed, null);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("answers an empty, disabled hub for a repository with no genesis", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.pulls({ params: { repo: "r" } });
+        assert.equal(answer.enabled, false);
+        assert.match(answer.reason ?? "", /no genesis/);
+        assert.deepEqual(answer.pulls, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("projects a member's pull request into the listing and the detail", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.create-pr", "hub.comment"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const head = yield* git.commit({
+          branch: "refs/heads/topic",
+          tree: EMPTY_TREE_OID,
+          message: "proposed",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+
+        const opened = yield* PullRequest.open({
+          repo: genesis.repoId,
+          title: "teach the hub HTTP",
+          description: "reads for every screen",
+          base: "refs/heads/main",
+          head,
+          key: member,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+
+        const listing = yield* client.hub.pulls({ params: { repo: "r" } });
+        assert.equal(listing.enabled, true);
+        assert.equal(listing.pulls.length, 1);
+        const summary = listing.pulls[0]!;
+        assert.equal(summary.id, opened.pr);
+        assert.equal(summary.title, "teach the hub HTTP");
+        assert.equal(summary.state, "open");
+        assert.equal(summary.head, head);
+        assert.equal(summary.approvals, 0);
+
+        const detail = yield* client.hub.pull({ params: { repo: "r", id: opened.pr } });
+        assert.equal(detail.description, "reads for every screen");
+        assert.equal(detail.author, yield* fingerprint(member.publicKey));
+        assert.deepEqual(detail.reviews, []);
+        assert.deepEqual(detail.checkList, []);
+
+        const missing = yield* client.hub
+          .pull({ params: { repo: "r", id: "nope" } })
+          .pipe(Effect.flip);
+        assert.equal(missing._tag, "Invalid");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("appends a pre-signed event and refuses bytes nobody signed", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.create-pr"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const head = yield* git.commit({
+          branch: "refs/heads/topic",
+          tree: EMPTY_TREE_OID,
+          message: "proposed",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+
+        // The exact bytes `PullRequest.open` would sign, signed elsewhere —
+        // which is the whole point of the endpoint: the key never travels.
+        const pr = HubEvent.newId();
+        const payload = {
+          version: 1,
+          type: "pr.opened",
+          repo: genesis.repoId,
+          pr,
+          id: HubEvent.newId(),
+          issuedAt: new Date(1_700_000_001_000).toISOString(),
+          trustHead: yield* git.resolve(Log.LOG_REF),
+          title: "opened over JSON",
+          description: "",
+          base: "refs/heads/main",
+          head: HubEvent.qualify(head),
+        } as const;
+        const bytes = HubEvent.encode(payload);
+        const armored = yield* sign(member, bytes, NAMESPACE);
+        const base64 = btoa(String.fromCharCode(...bytes));
+
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(member.publicKey);
+        const asMember = Effect.provideService(Auth.Requester, {
+          principal: projection.members.get(signer) ?? null,
+          signer,
+          capabilities: ["repo.read", "source.push", "hub.create-pr"],
+          projection,
+          envelope: null,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const appended = yield* client.hub
+          .append({
+            params: { repo: "r" },
+            payload: { payload: base64, signatures: [armored] },
+          })
+          .pipe(asMember);
+        assert.equal(appended.ref, HubEvent.refOf(pr));
+
+        const listing = yield* client.hub.pulls({ params: { repo: "r" } });
+        assert.equal(
+          listing.pulls.some((entry) => entry.id === pr),
+          true,
+        );
+
+        // Tampered bytes: the signature no longer covers them, so nothing is
+        // appended — whatever the projection would later have said.
+        const tampered = btoa(String.fromCharCode(...HubEvent.encode({ ...payload, title: "x" })));
+        const refused = yield* client.hub
+          .append({ params: { repo: "r" }, payload: { payload: tampered, signatures: [armored] } })
+          .pipe(asMember, Effect.flip);
+        assert.equal(refused._tag, "Invalid");
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );
