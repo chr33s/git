@@ -391,6 +391,23 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     });
   }
 
+  // And a protected branch that does not admit candidates will refuse every one
+  // this could build. Refused here for the reason above: left to the boundary,
+  // each pass would publish a candidate branch and append a `queue.candidate`
+  // record that can never land — and because a candidate is a pure function of
+  // what it merges, every direct push that moves the branch makes a new one, so
+  // the churn is unbounded on a ref that only grows. `queueCandidates` is off by
+  // default, which makes this the shape a queue is most likely to be run in
+  // before somebody turns the rule on.
+  if (Policy.isProtected(rules, target) && !rules.queueCandidates) {
+    return yield* new Invalid({
+      field: "queue",
+      reason:
+        `${target} is protected and does not admit queue candidates; ` +
+        "set queueCandidates in the branch rules to let it take them",
+    });
+  }
+
   const from = yield* repository.resolve(target);
   // Two readings of "what the branch is now", and they differ for a symbolic
   // ref. Merging wants the commit it resolves to; the compare-and-swap wants
@@ -751,9 +768,17 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     }
     return null;
   };
+  //
+  // And only the *first* of them. A candidate contains every step beneath it,
+  // so one broken pull request fails the checks on every candidate above it as
+  // well — evicting them all would take the whole batch out for one entry's
+  // fault, permanently, on a ref nothing can shorten. The same distinction the
+  // conflict path makes between the batch and the branch, arrived at from the
+  // other side: the steps behind a failure are victims of it, not causes.
   for (const step of chain.slice(landed.length)) {
-    const broke = failing(step);
-    if (broke !== null) yield* drop(step.pr, "failed");
+    if (failing(step) === null) continue;
+    yield* drop(step.pr, "failed");
+    break;
   }
 
   const waiting = chain

@@ -893,6 +893,80 @@ describe("cli queue", () => {
     );
   });
 
+  it("evicts only the entry a failing check is about", async () => {
+    // A candidate contains every step beneath it, so one broken pull request
+    // fails the checks on every candidate above it too. Evicting them all would
+    // take the whole batch out for one entry's fault, permanently.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+
+    const built = await run();
+    assert.equal(built.built.length, 2);
+
+    // The first breaks, and the second's candidate — which contains it — is
+    // red for exactly that reason.
+    const fail = (head: string, pr: string) =>
+      cli([
+        "pr",
+        "check",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--name",
+        "test",
+        "--status",
+        "failure",
+        "--head",
+        head,
+        "project",
+        pr,
+      ]);
+    await fail(built.built[0].commit, first);
+    await fail(built.built[1].commit, second);
+
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { pr: string }) => entry.pr),
+      [first],
+      "the cause is evicted and the victim behind it is not",
+    );
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.deepEqual(
+      state.entries.map((held: { pr: string }) => held.pr),
+      [second],
+    );
+  });
+
+  it("refuses a protected branch that does not admit candidates", async () => {
+    // Every pass would publish a branch and append a record the boundary will
+    // always refuse — and a candidate is a pure function of what it merges, so
+    // each direct push that moves the branch makes a new one. Unbounded churn
+    // on a ref that only grows, in the shape a queue is most likely to be run
+    // in before somebody turns the rule on.
+    await publish(protectedRules({ queueCandidates: false }));
+    await enter(await propose("one"));
+
+    const refused = await failing([
+      "queue",
+      "run",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "project",
+    ]);
+    assert.match(refused, /does not admit queue candidates/);
+
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(state.entries[0].candidate, null, "and nothing was built or recorded");
+  });
+
   it("does not record a reset the branch did not earn", async () => {
     // A chain's foot is the only step built on the branch tip, and finding it
     // by taking the first entry that has a candidate is wrong the moment an
