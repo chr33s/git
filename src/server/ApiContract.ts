@@ -341,11 +341,12 @@ export type WhoamiAnswer = (typeof WhoamiAnswer)["Type"];
 // -- hub ----------------------------------------------------------------------
 
 /**
- * A live claim on a task: who holds the lease (by event commit) and until
- * when. Advisory by design — see `hub/Task.ts`.
+ * A live claim on a task: who holds the lease and until when. `by` is the
+ * claimant's key fingerprint, `null` where the record's signer could not be
+ * established. Advisory by design — see `hub/Task.ts`.
  */
 export const HubClaim = Schema.Struct({
-  by: OidString,
+  by: Schema.NullOr(Schema.String),
   expiresAt: Schema.String,
 });
 
