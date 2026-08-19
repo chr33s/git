@@ -56,7 +56,8 @@ endpoints declared in `src/server/Api.ts`:
 | Search   | `POST /:repo/grep`                                                                              | File contents matching the query           |
 | Activity | `GET /:repo/commits/:oid`                                                                       | The timeline, one card per commit          |
 | Detail   | `POST /:repo/diff`                                                                              | Which files a Change Request touches       |
-| Detail   | `POST /:repo/merge`                                                                             | Merging a Change Request whose refs exist  |
+| Detail   | `POST /:repo/merge`                                                                             | Merging a _fixture_ Change Request         |
+| Detail   | `POST /:repo/hub/pulls/:id/merge`                                                               | Settling a hub Change Request atomically   |
 | Settings | `GET /:repo/branches`, `DELETE /:repo/branches/:name`, `POST /:repo/reset`                      | Branch administration                      |
 | Settings | `GET/POST /:repo/tags`, `DELETE /:repo/tags/:name`                                              | Tags                                       |
 | Settings | `GET/POST /:repo/remotes`, `DELETE /:repo/remotes/:name`, `POST /:repo/fetch`, `/push`, `/pull` | Remotes and sync                           |
@@ -91,12 +92,19 @@ documented sample, never passed off as live.
 OPFS is proposed from the Code screen's **Propose** dialog: the branch is
 pushed, a `pr.opened` event is signed and appended, and the new Change
 Request opens in Detail — where **Approve** / **Request changes** submit
-reviews of the exact revision, threads resolve and take replies, and a merge
-that lands also records `pr.merged`. Hub tasks carry their lease: claim,
-release, complete or abandon from the detail screen. The Activity screen
-lists the hub's **sessions** — what each agent was told and produced — and
-the commits panel picks up cherry-pick, bisect marks, and a rebase entry in
-the branch menu (all local in local mode, over the JSON API otherwise).
+reviews of the exact revision and threads resolve and take replies. Whether
+**Merge** is offered is the _server's_ judgment (`mergeable` on the pull
+answers, computed under the published rules), and the merge itself is one
+transition: `POST /hub/pulls/:id/merge` fast-forwards the base to the exact
+approved head and appends the browser's signed `pr.merged` beside it, judged
+together — a refused or offline merge leaves the Change Request open with
+the reason, and "Merged" appears only after the projection is re-read. Hub
+tasks carry their lease: claim, release, complete or abandon from the detail
+screen (task _comments_ are disabled with the reason: no task-comment event
+exists in the protocol yet, and task ids must never reach the pull-request
+namespace). The Activity screen lists the hub's **sessions**, and the
+commits panel picks up cherry-pick, bisect marks, and a rebase entry in the
+branch menu (all local in local mode, over the JSON API otherwise).
 Settings shows grant expiry, trust freshness and the usage budget beside the
 identity, badges remotes with their stored key and standing sync
 instruction, and the **Branch policy** card reads `GET /policy` and
@@ -104,19 +112,28 @@ publishes edits back through `policy.write`'s own door.
 
 **The browser holds a signing key.** `identity.ts` generates an Ed25519 key
 on first use (WebCrypto, through the same `SshSignature` module every other
-author uses), keeps the seed in OPFS beside the clone, and signs hub events
-with it: creating a Task opens a real `task.opened` event over
-`POST /hub/events`, commenting on a hub Change Request appends
+author uses) and keeps it in OPFS as **one versioned record** — seed and
+public line together, the public point re-derived from the seed on every
+load and repaired _from the seed_ with a visible note if the two ever
+disagree, so the browser can never sign with one key while advertising
+another. It signs hub events: creating a Task opens a real `task.opened`
+event over `POST /hub/events`, commenting on a hub Change Request appends
 `comment.created`, and both are read back from the server's projection —
-never shown optimistically. When the server answers a 401 nonce challenge,
-the request retries once under a signed `auth.request` envelope, the same
-native scheme the CLI presents — and every JSON write in `api.ts` retries a
-401 the same way, so a granted key authenticates merges, commits and policy
-edits transparently. A fresh key is nobody: the Settings identity card shows
-its public half so an operator can `hub grant` it, and until a repository
-accepts the key (or is served `--open`), mutations fall back to tab-local
-state and the dialogs say which happened. The projection half of a
-fixture merge remains tab-local, as before.
+never shown optimistically. When the server answers a 401, its challenge
+carries the nonce _and the RepoID_ — which is what lets a key bootstrap on a
+**private** repository, where the unauthenticated `/whoami` that used to
+supply the identity is itself refused — and the request retries once under a
+signed `auth.request` envelope, the same native scheme the CLI presents.
+Every request answers the challenge the same way: the JSON verbs in
+`api.ts`, the derived client's hub reads and writes, and smart HTTP itself —
+clone, fetch and push hand their challenges to the browser key
+(`src/client/Authorize.ts`), a push's envelope binding the exact ref
+commands it was signed for. A fresh key is nobody: the Settings identity
+card shows its public half so an operator can `hub grant` it, and until a
+repository accepts the key (or is served `--open`), mutations report the
+refusal. An authentication refusal is never dressed up as the offline
+sample: a private repository that turns the key away empties the screens and
+says what to grant.
 
 When the API cannot be reached, Code and Diff fall back to the design's sample
 repository and **say so** in an inline note, rather than passing fixtures off as
@@ -128,9 +145,14 @@ HTTP with `src/client/Fetch.ts`, and from then on the Code screen's reads and
 commits run against the same `Repository` service the server uses — over
 `src/adapters/Opfs.ts` — with the server demoted to a remote named `origin`.
 The header grows a sync control: **Push ↑n** sends the branch with
-`src/client/Push.ts`, **Fetch ↓n** brings origin's movement in, and nothing
-moves without being asked. A browser without OPFS (or with origin unreachable
-on first load) simply keeps the HTTP client; nothing about the page changes.
+`src/client/Push.ts`, **Fetch ↓n** brings origin's movement in (one
+advertisement, one pack, both refspecs), and nothing moves without being
+asked. The `refs/remotes/origin/*` tracking refs are _observations_ of
+origin — written at clone, after a successful push, and by a fetch, never
+copied from local heads — so an unpushed commit is still ↑1 after a full
+reload, and Push stays enabled over exactly the work that needs it. A
+browser without OPFS (or with origin unreachable on first load) simply keeps
+the HTTP client; nothing about the page changes.
 
 **The client is derived, not written.** `client.ts` derives an atom-backed
 client from `src/server/Api.ts`'s own `HttpApi` declaration
@@ -154,42 +176,47 @@ both this page and `/:repo/…`.
 
 ## Working on it
 
-The UI and the API are two processes. `ui:dev` starts the first and proxies to
-the second; it does not start a server for you, and says so at startup if
-nothing is listening:
+One command, and it starts the API too:
 
 ```bash
-GIT_ROOT=/path/to/repos PORT=8787 node src/host/Node.ts   # terminal 1
-npm run ui:dev                                            # terminal 2
+GIT_ROOT=/path/to/repos npm run dev:ui   # page, bundle and API on :8000
 ```
 
-Without terminal 1 the UI still loads — every screen falls back to the design's
-fixtures and each notice names the reason. That is a working UI showing sample
-data, not a broken one.
+`GIT_ROOT` defaults to the working directory. The page asks for the repository
+its `index.html` names — `core` unless you change it — so a root without that
+one answers 404 and every screen falls back to the design's fixtures, each
+notice naming the reason. That is a working UI showing sample data, not a
+broken one, and the startup banner prints the root so the mismatch is visible.
 
 ```bash
-npm run ui:dev              # watch and serve on :8000 — the one to reach for
-npm run ui:build            # bundle to dist/ui
-npm run ui:verify           # build, then drive it in a browser
+npm run dev:ui              # watch and serve on :8000 — the one to reach for
+npm run build:ui            # bundle to dist/ui
+npm run verify:ui           # build, then drive it in a browser
 
-node ui/build.ts --watch    # watch only, for serving dist/ui yourself
-node ui/build.ts --debug    # unminified, for reading a stack trace
+node src/ui/build.ts --watch    # watch only, for serving dist/ui yourself
+node src/ui/build.ts --debug    # unminified, for reading a stack trace
 ```
 
 `--serve` and `--watch` both stay in the foreground and rebuild on change; that
 is the process doing its job, not hanging. Only `--serve` puts a page at a URL.
 
-`--serve` fronts the bundle with a proxy: anything the bundle does not have is
-forwarded to the API, so the page and `/:repo/...` share an origin. That matters
-because a browser blocks the cross-origin alternative outright, and the UI would
-quietly show its fixtures instead. Point it anywhere with `GIT_API`:
+`--serve` hands `dist/ui` to the server itself, so the page, the bundle and
+`/:repo/...` all answer on one port. That matters because a browser blocks the
+cross-origin alternative outright, and the UI would quietly show its fixtures
+instead. `--watch` rewrites `dist/ui` on every change and the server reads it
+per request, so a rebuild needs no restart.
+
+This used to be two servers with a hand-written proxy between them — esbuild's
+own on a random port, because esbuild cannot forward what it does not have
+(its docs say to put a proxy in front, and that is what it was). Nothing is
+between them now, and `dev:ui` runs the same code path that ships:
 
 ```bash
-GIT_API=http://elsewhere:9000 npm run ui:dev
+npm run build:ui && npx chr33s-git serve --root /path/to/repos --ui
 ```
 
-Deployed, no proxy is involved: the Worker serves both the page and the API, and
-`gp-api-base` stays empty.
+Deployed, it is the same shape again: the Worker serves both the page and the
+API, and `gp-api-base` stays empty.
 
 `verify.ts` runs four suites in Chromium: every screen mounts in both palettes
 with nothing thrown; the behaviours from the design conversation still work
@@ -247,7 +274,7 @@ shape, end to end.
   weight and the elements silently never register. `elements.ts` imports the
   classes and holds them instead.
 
-- **The UI is its own TypeScript project.** `ui/tsconfig.json` sets
+- **The UI is its own TypeScript project.** `src/ui/tsconfig.json` sets
   `lib: ["ES2024", "DOM", "DOM.Iterable"]`; the root project keeps `WebWorker`
   for `src/`. Both in one program mis-resolves DOM members — it made
   `input.after(button)` typecheck against a `Response`-shaped overload, and
@@ -259,7 +286,7 @@ shape, end to end.
   Three unguarded `items[i]` reads in `src/roving.ts` failed this repository's
   `noUncheckedIndexedAccess`; they were fixed upstream in `1.0.1`, which is what
   the lockfile now pins. Anything similar in a future version will surface as a
-  `npm run check` failure in `node_modules/`, not in `ui/` — fix it upstream by
+  `npm run check` failure in `node_modules/`, not in `src/ui/` — fix it upstream by
   preference, or carry it in `patches/` as the `alchemy` dependency does.
 
 - **Reactive fields use `accessor`.** This repository sets no

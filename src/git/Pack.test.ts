@@ -7,7 +7,16 @@ import { Effect, Result, Stream } from "effect";
 
 import { encodeCommit, encodeTree } from "./Format.ts";
 import { stores } from "./Memory.ts";
-import { applyDelta, createDelta, encodeOfsDistance, pack, sizeVarint, unpack } from "./Pack.ts";
+import {
+  applyDelta,
+  createDelta,
+  encodeOfsDistance,
+  ingest,
+  pack,
+  sizeVarint,
+  unpack,
+} from "./Pack.ts";
+import { PackStore } from "./Packed.ts";
 import { ObjectStore, type Oid, type RawObject } from "./Store.ts";
 
 const encoder = new TextEncoder();
@@ -387,5 +396,145 @@ describe("deltified writer", () => {
     // or change an oid, and either would surface here.
     const oids = await run(unpack(Stream.fromIterable([bytes])));
     assert.equal(oids.length, 2);
+  });
+});
+
+describe("ingest", () => {
+  const runIngest = <A, E>(effect: Effect.Effect<A, E, ObjectStore | PackStore>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(stores)));
+
+  const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
+
+  const blobEntry = (text: string): Uint8Array => {
+    const data = encoder.encode(text);
+    return concat([
+      Uint8Array.from(objectHeader(3, data.length)),
+      new Uint8Array(deflateSync(data)),
+    ]);
+  };
+
+  it("keeps a pack worth keeping, and serves every read from it", async () => {
+    const texts = Array.from({ length: 8 }, (_, index) => `retained object ${index}\n`);
+    const packBytes = buildPack(texts.map(blobEntry));
+    const name = `pack-${hex(sha1(packBytes.subarray(0, packBytes.length - 20)))}`;
+
+    const outcome = await runIngest(
+      Effect.gen(function* () {
+        const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 7)));
+        const packs = yield* PackStore;
+        const handles = yield* packs.list;
+        const store = yield* ObjectStore;
+        // The overlay's `delete` touches loose objects only — so a read that
+        // survives deleting every oid is a read served from the pack, which
+        // is the whole claim: nothing was exploded.
+        for (const oid of oids) yield* store.delete(oid);
+        const first = yield* store.read(oids[0]!);
+        return { oids, names: handles.map((handle) => handle.name), first };
+      }),
+    );
+
+    assert.deepEqual(outcome.names, [name]);
+    assert.deepEqual(
+      outcome.oids,
+      texts.map((text) => oidOf({ type: "blob", data: encoder.encode(text) })),
+    );
+    assert.equal(decoder.decode(outcome.first.data), texts[0]);
+  });
+
+  it("retains a thin pack, resolving its base from the store", async () => {
+    const baseText = "the base the pack does not carry\n";
+    const targetText = `${baseText} plus what the delta adds`;
+    const base = encoder.encode(baseText);
+    const target = encoder.encode(targetText);
+    const delta = Uint8Array.from([
+      ...sizeVarint(base.length),
+      ...sizeVarint(target.length),
+      ...copy(0, base.length),
+      ...insert(" plus what the delta adds"),
+    ]);
+
+    const fillers = Array.from({ length: 7 }, (_, index) => `filler ${index}\n`);
+    const thinEntry = concat([
+      Uint8Array.from(objectHeader(7, delta.length)),
+      Uint8Array.from(hexBytes(oidOf({ type: "blob", data: base }))),
+      new Uint8Array(deflateSync(delta)),
+    ]);
+    const packBytes = buildPack([...fillers.map(blobEntry), thinEntry]);
+
+    const outcome = await runIngest(
+      Effect.gen(function* () {
+        const store = yield* ObjectStore;
+        yield* store.write({ type: "blob", data: base });
+        const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 11)));
+        const packs = yield* PackStore;
+        const resolved = yield* store.read(oids.at(-1)!);
+        return { oids, packCount: (yield* packs.list).length, resolved };
+      }),
+    );
+
+    assert.equal(outcome.packCount, 1, "a thin pack is still worth keeping");
+    assert.equal(outcome.oids.at(-1), oidOf({ type: "blob", data: target }));
+    assert.equal(decoder.decode(outcome.resolved.data), targetText);
+  });
+
+  it("explodes a small push loose, exactly as before", async () => {
+    const packBytes = buildPack([blobEntry("tiny 0\n"), blobEntry("tiny 1\n")]);
+
+    const outcome = await runIngest(
+      Effect.gen(function* () {
+        const oids = yield* ingest(Stream.fromIterable([packBytes]));
+        const packs = yield* PackStore;
+        const store = yield* ObjectStore;
+        const held = yield* store.read(oids[0]!);
+        // Deleting a loose object removes it — the inverse of the retained
+        // case above, proving where these bytes actually landed.
+        yield* store.delete(oids[0]!);
+        const gone = yield* store.read(oids[0]!).pipe(Effect.flip);
+        return { packCount: (yield* packs.list).length, held, gone: gone._tag };
+      }),
+    );
+
+    assert.equal(outcome.packCount, 0);
+    assert.equal(decoder.decode(outcome.held.data), "tiny 0\n");
+    assert.equal(outcome.gone, "ObjectNotFound");
+  });
+
+  it("streams an oversized push loose rather than buffering it", async () => {
+    const texts = Array.from({ length: 8 }, (_, index) => `too big to hold ${index}\n`);
+    const packBytes = buildPack(texts.map(blobEntry));
+
+    const outcome = await runIngest(
+      Effect.gen(function* () {
+        const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 16)), {
+          retainUpTo: 32,
+        });
+        const packs = yield* PackStore;
+        const store = yield* ObjectStore;
+        const last = yield* store.read(oids.at(-1)!);
+        return { count: oids.length, packCount: (yield* packs.list).length, last };
+      }),
+    );
+
+    assert.equal(outcome.count, 8);
+    assert.equal(outcome.packCount, 0, "past the cap the pack is not retained");
+    assert.equal(decoder.decode(outcome.last.data), texts.at(-1));
+  });
+
+  it("refuses a corrupt trailer before anything is registered", async () => {
+    const packBytes = buildPack(
+      Array.from({ length: 8 }, (_, index) => blobEntry(`honest ${index}\n`)),
+    );
+    packBytes[packBytes.length - 1]! ^= 0xff;
+
+    const outcome = await runIngest(
+      Effect.gen(function* () {
+        const failure = yield* ingest(Stream.fromIterable([packBytes])).pipe(Effect.flip);
+        const packs = yield* PackStore;
+        return { tag: failure._tag, packCount: (yield* packs.list).length };
+      }),
+    );
+
+    assert.equal(outcome.tag, "PackCorrupt");
+    assert.equal(outcome.packCount, 0);
   });
 });

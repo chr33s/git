@@ -694,3 +694,59 @@ export const generate = (comment: string): Effect.Effect<PrivateKey> =>
       seed: seedOf(pkcs8),
     };
   });
+
+/**
+ * The keypair a seed determines, the public half re-derived rather than
+ * trusted from storage.
+ *
+ * WebCrypto will not export a raw public key from a private-only import, but
+ * the JWK form of an Ed25519 private key carries the public point as `x` —
+ * which is exactly what interrupted or mismatched key storage needs: the
+ * seed is the private authority, and everything shown or granted follows
+ * from it. A caller that compares this against a *stored* public half learns
+ * whether the two ever belonged together, instead of signing with one key
+ * while advertising another — signatures that could never verify.
+ */
+export const fromSeed = (seed: Uint8Array, comment: string): Effect.Effect<PrivateKey, Invalid> =>
+  Effect.gen(function* () {
+    if (seed.length !== SEED_BYTES) {
+      return yield* new Invalid({ field: "seed", reason: "an Ed25519 seed is thirty-two bytes" });
+    }
+    const point = yield* Effect.tryPromise({
+      try: async () => {
+        const pkcs8 = concatBytes([PKCS8_ED25519_PREFIX, seed]);
+        const imported = await crypto.subtle.importKey(
+          "pkcs8",
+          pkcs8.slice().buffer,
+          { name: "Ed25519" },
+          true,
+          ["sign"],
+        );
+        const jwk = await crypto.subtle.exportKey("jwk", imported);
+        if (jwk.x === undefined) throw new Error("the JWK export carries no public point");
+        // JWK uses unpadded base64url; the decoder below wants standard base64.
+        const standard = jwk.x.replace(/-/g, "+").replace(/_/g, "/");
+        const padded = standard + "=".repeat((4 - (standard.length % 4)) % 4);
+        const decoded = fromBase64(padded);
+        if (decoded === null || decoded.length !== 32) {
+          throw new Error("the JWK public point did not decode to thirty-two bytes");
+        }
+        return decoded;
+      },
+      catch: (cause) =>
+        new Invalid({
+          field: "seed",
+          reason: `the seed's public key could not be derived: ${String(cause)}`,
+        }),
+    });
+    return {
+      publicKey: {
+        algorithm: ED25519,
+        blob: concatBytes([writeText(ED25519), writeString(point)]),
+        point,
+        application: null,
+        comment,
+      },
+      seed,
+    };
+  });

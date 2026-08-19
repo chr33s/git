@@ -551,14 +551,20 @@ describe("Auth", () => {
       assert.equal(outcome.denied?.status, 401);
     });
 
-    it("carries a nonce, so a native client can sign its retry", async () => {
+    it("carries a nonce and the RepoID, so a native client can sign its retry", async () => {
+      // Both halves of the envelope's binding arrive with the refusal: the
+      // single-use nonce, and the repository identity the envelope must name.
+      // Without the RepoID a client refused its very first read — a private
+      // repository — had nowhere left to learn it from.
       const outcome = await scenario(
         Effect.gen(function* () {
           yield* hub(["repo.read"]);
           return yield* guard(request("r/git-upload-pack", { method: "POST" }));
         }),
       );
-      assert.match(outcome.denied?.headers.get("www-authenticate") ?? "", /nonce="/);
+      const header = outcome.denied?.headers.get("www-authenticate") ?? "";
+      assert.match(header, /nonce="/);
+      assert.match(header, /repo="[^"]+"/);
     });
   });
 

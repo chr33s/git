@@ -65,6 +65,7 @@ export class GpSettings extends GitPlusElement {
   @state() private accessor browserKey: {
     readonly fingerprint: string;
     readonly publicKey: string;
+    readonly note: string | null;
   } | null = null;
 
   /** The branch rules in force, from `GET /policy`; `null` while unanswered. */
@@ -79,6 +80,8 @@ export class GpSettings extends GitPlusElement {
   @state() private accessor webhooks: readonly WebhookWire[] = [];
   @state() private accessor reflog: readonly ReflogEntry[] | null = null;
   @state() private accessor offline = false;
+  /** The offline canary failed with a refusal, not an outage. */
+  @state() private accessor denied = false;
   /** One outcome line per card, keyed by the card that asked. */
   @state() private accessor notes: Readonly<Record<string, string>> = {};
   @state() private accessor busy = false;
@@ -106,6 +109,7 @@ export class GpSettings extends GitPlusElement {
       // theirs to see — one refused card must not blank the other five.
       this.branches = (await api.branches()).filter((ref) => ref.name.startsWith(HEADS));
       this.offline = false;
+      this.denied = false;
       const [tags, remotes, webhooks, rules] = await Promise.all([
         api.tags().catch((): readonly Ref[] => []),
         api.remotes().catch((): readonly RemoteWire[] => []),
@@ -118,6 +122,10 @@ export class GpSettings extends GitPlusElement {
       this.rules = rules;
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      // A refusal is not an outage: a private repository that turned this
+      // key away is reachable and saying so, and the cards should carry
+      // that answer rather than "not reachable".
+      this.denied = error instanceof ApiError && (error.status === 401 || error.status === 403);
       this.offline = true;
     }
   }
@@ -261,6 +269,11 @@ export class GpSettings extends GitPlusElement {
                     Copy
                   </button>
                 </div>
+                ${
+                  this.browserKey.note === null
+                    ? nothing
+                    : html`<p class="gp-notice" data-error>${this.browserKey.note}</p>`
+                }
                 <p class="gp-setting-hint">
                   Hub events this browser writes are signed with this key. Grant it membership with
                   <code>chr33s-git hub grant</code> to have a repository with a genesis accept them.
@@ -766,7 +779,7 @@ export class GpSettings extends GitPlusElement {
         ${
           rules === null
             ? html`<div class="gp-field-value">
-                ${this.offline ? "— the git+ API is not reachable." : "— the policy could not be read."}
+                ${this.#unavailable("the policy could not be read")}
               </div>`
             : html`
                 <form
@@ -907,10 +920,24 @@ export class GpSettings extends GitPlusElement {
     `;
   }
 
+  /**
+   * Why a card cannot answer, in the right words: a refusal names the cure
+   * (grant this browser's key), an outage names the fault. Conflating the
+   * two sent operators of private repositories debugging a network that was
+   * fine.
+   */
+  #unavailable(fallback: string): string {
+    return this.denied
+      ? "— this repository requires authentication; grant this browser's key to administer it."
+      : this.offline
+        ? "— the git+ API is not reachable."
+        : `— ${fallback}.`;
+  }
+
   /** A card's list, or why it is empty — offline and empty read differently. */
   #rows<T>(items: readonly T[], row: (item: T) => TemplateResult): TemplateResult {
     if (this.offline) {
-      return html`<div class="gp-field-value">— the git+ API is not reachable.</div>`;
+      return html`<div class="gp-field-value">${this.#unavailable("unavailable")}</div>`;
     }
     if (items.length === 0) return html`<div class="gp-field-value">None yet.</div>`;
     return html`<div class="gp-admin-list">${items.map(row)}</div>`;

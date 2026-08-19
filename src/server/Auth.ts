@@ -722,8 +722,18 @@ export type Outcome =
   | { readonly ok: true; readonly authenticated: Authenticated }
   | { readonly ok: false; readonly status: 401 | 403; readonly reason: string };
 
-const challenge = (nonce: string) => ({
-  "www-authenticate": `Basic realm="git", Hub-SSH-v1 realm="git", nonce="${nonce}"`,
+/**
+ * The 401's `www-authenticate`, carrying everything a native client needs to
+ * sign its retry: the single-use nonce, and the RepoID the envelope must
+ * bind. The RepoID is the repository's stable public identity, not secret
+ * material or a grant — and without it a browser key on a *private*
+ * repository could never bootstrap: the identity used to be fetched from
+ * `/whoami`, which is exactly the kind of read the 401 was refusing.
+ */
+const challenge = (nonce: string, repo?: RepoId) => ({
+  "www-authenticate": `Basic realm="git", Hub-SSH-v1 realm="git", nonce="${nonce}"${
+    repo === undefined ? "" : `, repo="${repo}"`
+  }`,
 });
 
 /**
@@ -806,6 +816,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
           status: 401,
           reason: "authentication required",
           nonce: yield* nonces.issue(300),
+          repo: projection.repoId,
         } as const);
   }
 
@@ -846,6 +857,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
           status: 401,
           reason: "credential did not verify",
           nonce: yield* nonces.issue(300),
+          repo: projection.repoId,
         } as const);
   }
 
@@ -900,6 +912,7 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
         status: 401,
         reason: "this request has already been made",
         nonce: yield* nonces.issue(300),
+        repo: projection.repoId,
       } as const;
     }
   }
@@ -1082,7 +1095,10 @@ export const guard = Effect.fn("Auth.guard")(function* (request: Request) {
   return {
     denied: new Response(outcome.reason, {
       status: outcome.status,
-      headers: outcome.status === 401 && "nonce" in outcome ? challenge(outcome.nonce) : {},
+      headers:
+        outcome.status === 401 && "nonce" in outcome
+          ? challenge(outcome.nonce, "repo" in outcome ? outcome.repo : undefined)
+          : {},
     }),
     authenticated: anonymous,
   };

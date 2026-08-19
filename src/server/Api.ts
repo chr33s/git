@@ -46,11 +46,17 @@ import {
 import * as HubTask from "../hub/Task.ts";
 import * as HubSession from "../hub/Session.ts";
 import { archive as archiveTree, type Format as ArchiveFormat } from "./Archive.ts";
-import { project as projectTrust } from "../trust/Projection.ts";
 import {
+  project as projectTrust,
+  type Projection as TrustProjection,
+} from "../trust/Projection.ts";
+import {
+  type Fingerprint,
+  fingerprint as fingerprintOf,
   NAMESPACE as SIGNING_NAMESPACE,
   verify as verifySignature,
 } from "../crypto/SshSignature.ts";
+import { authorizeKey } from "../trust/Verify.ts";
 import { write as writeRecord } from "../trust/Record.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import * as Policy from "./Policy.ts";
@@ -82,6 +88,9 @@ import {
   HistoryPage,
   HubEventAppended,
   HubEventRequest,
+  type HubMergeable,
+  HubMerged,
+  HubMergeRequest,
   HubMembersResponse,
   HubPullDetail,
   HubPullPage,
@@ -1179,6 +1188,17 @@ const hub = HttpApiGroup.make("hub")
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
+  .add(
+    // Settling a pull request is one transition, not two requests: the base
+    // advances to the exact approved head and the signed `pr.merged` record
+    // lands beside it, both judged together before either ref moves.
+    HttpApiEndpoint.post("merge", "/hub/pulls/:id/merge", {
+      params: { ...RepoParam, id: Schema.String },
+      payload: HubMergeRequest,
+      success: HubMerged,
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
   .prefix("/:repo");
 
 export const api = HttpApi.make("git").add(repo).add(remotes).add(hub);
@@ -2245,8 +2265,11 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
  * (`requiredChecks`), answered by `/whoami`; this is the observation, not the
  * rule.
  */
-const pullSummary = (pull: ProjectedPull): HubPullSummary => {
-  const onHead = pull.checks.filter((check) => check.head === pull.head);
+const pullSummary = (pull: ProjectedPull, mergeable: HubMergeable): HubPullSummary => {
+  // The status badge speaks only for the revision under review: a new head
+  // arrives with no checks, not with the last head's green ones. History
+  // stays in the detail's `checkList`, labeled with the head it ran against.
+  const onHead = latestChecks(pull);
   return {
     id: pull.id,
     title: pull.title,
@@ -2256,19 +2279,115 @@ const pullSummary = (pull: ProjectedPull): HubPullSummary => {
     author: pull.author,
     approvals: pullApprovals(pull).length,
     checks: {
-      total: pull.checks.length,
+      total: onHead.length,
       passed: onHead.every((check) => check.status === "success"),
     },
     threads: {
       total: pull.threads.length,
       unresolved: pull.threads.filter((thread) => !thread.resolved).length,
     },
+    mergeable,
     at: pull.at.toISOString(),
   };
 };
 
-const pullDetail = (pull: ProjectedPull): HubPullDetail => ({
-  ...pullSummary(pull),
+/** The latest report per check name, for the current proposed revision. */
+const latestChecks = (pull: ProjectedPull): ReadonlyArray<ProjectedPull["checks"][number]> => {
+  const latest = new Map<string, ProjectedPull["checks"][number]>();
+  for (const check of pull.checks) {
+    if (check.head === pull.head) latest.set(check.name, check);
+  }
+  return [...latest.values()];
+};
+
+/**
+ * Whether the repository would settle this pull request now, and every rule
+ * still in the way when it would not — the same questions the merge
+ * endpoint asks at execution time, answered ahead of it so the UI's Merge
+ * button states the server's judgment rather than reconstructing it.
+ */
+const mergeability = Effect.fn("Api.mergeability")(function* (pull: ProjectedPull) {
+  const repository = yield* Repository;
+  const reasons: Array<string> = [];
+  if (pull.state !== "open") reasons.push(`the pull request is ${pull.state}`);
+  if (pull.head === null) {
+    reasons.push("the pull request proposes no revision");
+    return { ok: false, reasons };
+  }
+
+  const baseTip = yield* repository.readRef(pull.base);
+  if (baseTip !== null && !(yield* repository.isAncestor(baseTip, pull.head))) {
+    reasons.push(`${pull.base} holds commits the proposed revision does not contain`);
+  }
+
+  // Unreadable rules refuse nothing here — they refuse at the gate — but
+  // reporting "mergeable" on the strength of rules that would not parse
+  // would be a lie, so the read fails closed into a reason instead.
+  const rules = yield* Policy.rulesOf().pipe(Effect.orElseSucceed(() => null));
+  if (rules === null) {
+    reasons.push("the repository's branch rules could not be read");
+    return { ok: false, reasons };
+  }
+  if (Policy.isProtected(rules, pull.base)) {
+    const approved = pullApprovals(pull).length;
+    if (approved < rules.requiredApprovals) {
+      reasons.push(
+        `needs ${String(rules.requiredApprovals)} approval${rules.requiredApprovals === 1 ? "" : "s"} of the proposed revision, has ${String(approved)}`,
+      );
+    }
+    const reported = new Map(latestChecks(pull).map((check) => [check.name, check.status]));
+    for (const name of rules.requiredChecks) {
+      const status = reported.get(name);
+      if (status === undefined) {
+        reasons.push(`required check '${name}' has not reported on the proposed revision`);
+      } else if (status !== "success") {
+        reasons.push(`required check '${name}' is ${status}`);
+      }
+    }
+    if (rules.requireResolvedThreads) {
+      const unresolved = pull.threads.filter((thread) => !thread.resolved).length;
+      if (unresolved > 0) {
+        reasons.push(
+          `${String(unresolved)} review thread${unresolved === 1 ? "" : "s"} must be resolved first`,
+        );
+      }
+    }
+  }
+  return { ok: reasons.length === 0, reasons };
+});
+
+/**
+ * How many commits the proposal carries beyond its base, walked from the
+ * head until the base's recent history appears; both walks are capped, so
+ * an ancient divergence reads as 250, never as an unbounded walk.
+ */
+const commitSpan = Effect.fn("Api.commitSpan")(function* (pull: ProjectedPull) {
+  if (pull.head === null) return 0;
+  const repository = yield* Repository;
+  const baseTip = yield* repository.readRef(pull.base);
+  const reachable =
+    baseTip === null ? [] : yield* Stream.runCollect(repository.log(baseTip, { limit: 250 }));
+  const seen = new Set(reachable.map((commit) => commit.oid));
+  const walked = yield* Stream.runCollect(repository.log(pull.head, { limit: 250 })).pipe(
+    // A proposal whose head the repository no longer holds — pushed away,
+    // collected — has no range to count, and "0" is the honest answer the
+    // detail's unavailable state renders.
+    Effect.catchTag("ObjectNotFound", () => Effect.succeed([])),
+  );
+  let span = 0;
+  for (const commit of walked) {
+    if (seen.has(commit.oid)) break;
+    span += 1;
+  }
+  return span;
+});
+
+const pullDetail = (
+  pull: ProjectedPull,
+  judged: { readonly mergeable: HubMergeable; readonly commits: number },
+): HubPullDetail => ({
+  ...pullSummary(pull, judged.mergeable),
+  commits: judged.commits,
   description: pull.description,
   mergeCommit: pull.mergeCommit,
   reviews: pull.reviews.map((review) => ({
@@ -2332,6 +2451,57 @@ const hubView = Effect.fn("Api.hubView")(function* () {
     Effect.catchTag("StorageFailure", Effect.die),
   );
   return { enabled: true, genesis: stored.genesis, trust } as const;
+});
+
+/**
+ * The fingerprints whose signatures verify over these exact bytes — every
+ * offered signature must, or the request is refused: bytes nobody signed can
+ * never count, and appending them would only grow a ref every replica then
+ * has to carry.
+ */
+const verifiedSigners = Effect.fn("Api.verifiedSigners")(function* (
+  bytes: Uint8Array,
+  signatures: ReadonlyArray<string>,
+) {
+  if (signatures.length === 0) {
+    return yield* new Invalid({
+      field: "signatures",
+      reason:
+        "an event needs at least one signature; the projection judges unsigned bytes as noise",
+    });
+  }
+  const signers: Array<Fingerprint> = [];
+  for (const armored of signatures) {
+    const key = yield* verifySignature(armored, bytes, SIGNING_NAMESPACE);
+    if (key === null) {
+      return yield* new Invalid({
+        field: "signatures",
+        reason: "a signature does not verify over the payload bytes",
+      });
+    }
+    signers.push(yield* fingerprintOf(key));
+  }
+  return signers;
+});
+
+/**
+ * Whether any of these signers is an unexpired member holding `capability`
+ * under this trust view — `null`, or the denial to report. Judged over the
+ * *signers* rather than the transport principal: a relay may carry bytes
+ * somebody else signed, and it is the signature that makes the statement.
+ */
+const signerAuthorized = Effect.fn("Api.signerAuthorized")(function* (
+  trust: TrustProjection,
+  signers: ReadonlyArray<Fingerprint>,
+  capability: string,
+) {
+  let denial = `no signature comes from a member holding ${capability}`;
+  for (const signer of signers) {
+    const verdict = yield* authorizeKey({ projection: trust, signer, capability });
+    if (verdict.ok) return null;
+    denial = verdict.reason;
+  }
+  return denial;
 });
 
 /** base64 → bytes, the inverse of this file's `toBase64`. */
@@ -2433,10 +2603,15 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
         const paged = page(ids.sort(), query);
         const pulls = yield* Effect.forEach(
           paged.items,
-          (id) => projectPull(view.genesis, view.trust, id),
+          (id) =>
+            projectPull(view.genesis, view.trust, id).pipe(
+              Effect.flatMap((pull) =>
+                mergeability(pull).pipe(Effect.map((mergeable) => pullSummary(pull, mergeable))),
+              ),
+            ),
           { concurrency: 4 },
         );
-        return { enabled: true, reason: null, ...paged, items: pulls.map(pullSummary) };
+        return { enabled: true, reason: null, ...paged, items: pulls };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
     .handle("pull", ({ params }) =>
@@ -2456,7 +2631,10 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
           });
         }
         const pull = yield* projectPull(view.genesis, view.trust, params.id);
-        return pullDetail(pull);
+        return pullDetail(pull, {
+          mergeable: yield* mergeability(pull),
+          commits: yield* commitSpan(pull),
+        });
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
     .handle("sessions", ({ query }) =>
@@ -2533,36 +2711,21 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
         if (bytes === null) {
           return yield* new Invalid({ field: "payload", reason: "payload is not valid base64" });
         }
-        if (payload.signatures.length === 0) {
-          return yield* new Invalid({
-            field: "signatures",
-            reason:
-              "an event needs at least one signature; the projection judges unsigned bytes as noise",
-          });
-        }
-        // Every offered signature must verify over these exact bytes. The
-        // projection is still the judge of *authority* — membership and
-        // capability — but bytes nobody signed can never count, and appending
-        // them would only grow a ref every replica then has to carry.
-        for (const armored of payload.signatures) {
-          const key = yield* verifySignature(armored, bytes, SIGNING_NAMESPACE);
-          if (key === null) {
-            return yield* new Invalid({
-              field: "signatures",
-              reason: "a signature does not verify over the payload bytes",
-            });
-          }
-        }
+        const signers = yield* verifiedSigners(bytes, payload.signatures);
 
         // The payload's own shape names its ref: a pull-request event carries
         // `pr`, a task event `task`. Decoded from the exact signed bytes, so
-        // what is appended is what was signed.
+        // what is appended is what was signed — and the decoded family also
+        // names the repository the event was minted for and the capability
+        // its signer is charged, which the checks below hold it to.
         const target = yield* HubEvent.decode(bytes).pipe(
           Effect.map((event) => ({
             ref: HubEvent.refOf(event.pr),
             message: `${event.type} ${event.id}\n`,
             valid: HubEvent.isPullRequestId(event.pr),
             field: "pr",
+            repo: event.repo,
+            capability: HubEvent.capabilityFor(event),
           })),
           Effect.catchTag("Invalid", () =>
             HubTask.decode(bytes).pipe(
@@ -2571,6 +2734,8 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
                 message: `${event.type} ${event.id}\n`,
                 valid: HubTask.isTaskId(event.task),
                 field: "task",
+                repo: event.repo,
+                capability: event.type === "event.redacted" ? "hub.redact" : "hub.task",
               })),
               Effect.catchTag("Invalid", () =>
                 HubSession.decode(bytes).pipe(
@@ -2579,6 +2744,8 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
                     message: `${event.type} ${event.id}\n`,
                     valid: HubSession.isSessionId(event.session),
                     field: "session",
+                    repo: event.repo,
+                    capability: event.type === "event.redacted" ? "hub.redact" : "hub.session",
                   })),
                   Effect.catchTag("Invalid", () =>
                     Effect.fail(
@@ -2598,6 +2765,30 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
             field: target.field,
             reason: "the event names an id that cannot name a ref",
           });
+        }
+
+        // With a genesis, who signed decides. The transport principal already
+        // passed the guard, but a relay may submit bytes somebody else signed
+        // — so authority is judged over the *signers*: the event must name
+        // this repository, and at least one verifying signature must come
+        // from an unexpired member holding the exact capability the decoded
+        // event requires. The pull-request projection re-judges every event
+        // at read time; the task and session folds deliberately do not, which
+        // makes this boundary the only door where their authority is asked.
+        // Without a genesis there is no membership to hold anybody to, and
+        // the projections read such events as the unjudged claims they are.
+        const view = yield* hubView();
+        if (view.enabled) {
+          if (target.repo !== view.trust.repoId) {
+            return yield* new Invalid({
+              field: "repo",
+              reason: `the event was minted for repository '${target.repo}', not this one`,
+            });
+          }
+          const denial = yield* signerAuthorized(view.trust, signers, target.capability);
+          if (denial !== null) {
+            return yield* new Invalid({ field: "signatures", reason: denial });
+          }
         }
 
         // The same judge a push of this ref meets, on the same shape: write
@@ -2645,6 +2836,161 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
           Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }),
         );
         return { ref: target.ref, commit };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("merge", ({ params, payload }) =>
+      Effect.gen(function* () {
+        const view = yield* hubView();
+        if (!view.enabled) {
+          return yield* new Invalid({ field: "pr", reason: view.reason });
+        }
+        const repository = yield* Repository;
+        const ref = HubEvent.refOf(params.id);
+        if (!HubEvent.isPullRequestId(params.id) || (yield* repository.readRef(ref)) === null) {
+          return yield* new Invalid({
+            field: "pr",
+            reason: `this repository holds no pull request '${params.id}'`,
+          });
+        }
+
+        const bytes = fromBase64(payload.payload);
+        if (bytes === null) {
+          return yield* new Invalid({ field: "payload", reason: "payload is not valid base64" });
+        }
+        const signers = yield* verifiedSigners(bytes, payload.signatures);
+
+        const event = yield* HubEvent.decode(bytes).pipe(
+          Effect.catchTag("Invalid", () =>
+            Effect.fail(
+              new Invalid({ field: "payload", reason: "the payload is not a pull-request event" }),
+            ),
+          ),
+        );
+        const qualified = HubEvent.qualify(payload.head);
+        if (event.type !== "pr.merged" || event.pr !== params.id) {
+          return yield* new Invalid({
+            field: "payload",
+            reason: "the signed record must be pr.merged for this pull request",
+          });
+        }
+        if (event.repo !== view.trust.repoId) {
+          return yield* new Invalid({
+            field: "repo",
+            reason: `the event was minted for repository '${event.repo}', not this one`,
+          });
+        }
+        // The base advances by fast-forward to the reviewed revision and to
+        // nothing else: a merge commit nobody reviewed does not enter a
+        // branch by this route, so the record must say exactly that.
+        if (event.head !== qualified || event.mergeCommit !== qualified) {
+          return yield* new Invalid({
+            field: "payload",
+            reason: "the signed record must name the approved head as both head and merge commit",
+          });
+        }
+        const denial = yield* signerAuthorized(view.trust, signers, HubEvent.capabilityFor(event));
+        if (denial !== null) {
+          return yield* new Invalid({ field: "signatures", reason: denial });
+        }
+
+        // Everything below re-reads, judges and applies as one attempt, and
+        // a lost race re-runs the whole of it: the projection, the target's
+        // compare-and-swap and the record's parent are all re-derived, so a
+        // retry cannot apply a stale verdict.
+        return yield* Effect.gen(function* () {
+          const pull = yield* projectPull(view.genesis, view.trust, params.id);
+          const baseNow = yield* repository.readRef(pull.base);
+
+          // Idempotent for the transition that already committed: asking for
+          // a merge the repository already shows is agreement, not an error.
+          if (pull.state === "merged") {
+            if (pull.mergeCommit === payload.head && baseNow === payload.head) {
+              const held = yield* repository.readRef(ref);
+              if (held === null) {
+                return yield* new Invalid({ field: "pr", reason: "the pull request vanished" });
+              }
+              return { pr: params.id, base: pull.base, commit: payload.head, event: held };
+            }
+            return yield* new Invalid({
+              field: "pr",
+              reason: `${params.id} is already merged`,
+            });
+          }
+          if (pull.state !== "open") {
+            return yield* new Invalid({
+              field: "pr",
+              reason: `${params.id} is ${pull.state}, not open`,
+            });
+          }
+          if (pull.head !== payload.head) {
+            return yield* new Invalid({
+              field: "head",
+              reason: "the proposed revision has changed since this merge was decided",
+            });
+          }
+
+          // The target either still stands where the caller decided, or —
+          // the retry after an interrupted attempt — already stands at the
+          // approved head, in which case only the record is missing.
+          const advanced = baseNow === payload.head;
+          if (!advanced && baseNow !== payload.expected) {
+            return yield* new RefConflict({
+              ref: pull.base,
+              expected: payload.expected,
+              actual: baseNow,
+            });
+          }
+          if (!advanced && baseNow !== null) {
+            const forward = yield* repository.isAncestor(baseNow, payload.head);
+            if (!forward) {
+              return yield* new Invalid({
+                field: "head",
+                reason: `${pull.base} holds commits the approved head does not contain; update the pull request first`,
+              });
+            }
+          }
+
+          const prHead = yield* repository.readRef(ref);
+          const record = yield* writeRecord({
+            name: HubEvent.RECORD,
+            payload: bytes,
+            signatures: payload.signatures,
+            parents: prHead === null ? [] : [prHead],
+            message: `${event.type} ${event.id}\n`,
+          });
+
+          // Both moves judged as one atomic batch, exactly as a push carrying
+          // the branch and its event together is: branch protection counts
+          // the approvals and checks, the append-only rules judge the record,
+          // and neither ref moves unless both may.
+          const updates: Array<RefUpdate> = [
+            ...(advanced ? [] : [{ name: pull.base, value: payload.head, expected: baseNow }]),
+            { name: ref, value: record, expected: prHead },
+          ];
+          const verdict = yield* Policy.gate(updates, true, false);
+          const refusal = verdict.refused[0];
+          if (refusal !== undefined) {
+            return yield* new Invalid({ field: "ref", reason: refusal.reason });
+          }
+          if (verdict.updates.length !== updates.length) {
+            return yield* new Invalid({ field: "ref", reason: "the gate allowed nothing" });
+          }
+
+          // The branch moves first, the record lands second. The projection
+          // counts a `pr.merged` the moment it names a proposed revision —
+          // it never consults the base ref — so record-first would show a
+          // merged pull request over a branch that had not moved, which is
+          // the lie this endpoint exists to end. Branch-first, the one
+          // reachable interruption is a base already at the approved head
+          // with the record still missing: the pull request stays honestly
+          // open, and a retry of this same request skips the move (see
+          // `advanced`) and lands only the record.
+          if (!advanced) {
+            yield* repository.setRef({ name: pull.base, to: payload.head, expected: baseNow });
+          }
+          yield* repository.setRef({ name: ref, to: record, expected: prHead });
+          return { pr: params.id, base: pull.base, commit: payload.head, event: record };
+        }).pipe(Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }));
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     ),
 );

@@ -171,50 +171,75 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
 export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] => {
   const prefix = `${repo}/pack/`;
 
+  /**
+   * The handles, remembered between lookups.
+   *
+   * `packed`'s `locate` consults the pack list once per object read, and
+   * a listing here costs a bucket list plus an index download per pack —
+   * per object, that turned one clone of a packed repository into
+   * thousands of listings of the same unchanged directory. The Durable
+   * Object is this repository's single writer, so the one store instance
+   * it holds sees every `write` and `delete` that could change the answer:
+   * invalidating on those is real invalidation, not hope. (The stateless
+   * read Worker builds a fresh store per request, so its memo is naturally
+   * request-scoped — packs listed once per clone, never staleable.)
+   */
+  let remembered: Promise<PackHandle[]> | null = null;
+
+  const listNow = async (): Promise<PackHandle[]> => {
+    const handles: PackHandle[] = [];
+    let cursor: string | undefined;
+
+    do {
+      const options: R2ListOptions = { prefix };
+      if (cursor !== undefined) options.cursor = cursor;
+      const page = await bucket.list(options);
+      for (const entry of page.objects) {
+        if (!entry.key.endsWith(".idx")) continue;
+        const name = entry.key.slice(prefix.length, -4);
+
+        const packKey = `${prefix}${name}.pack`;
+        const packHead = await bucket.head(packKey);
+        // An index whose pack is missing is a half-finished write; a
+        // reader that failed on it would break the whole repository.
+        if (packHead === null) continue;
+
+        const index = await bucket.get(entry.key);
+        if (index === null) continue;
+
+        handles.push({
+          name,
+          index: new Uint8Array(await index.arrayBuffer()),
+          source: {
+            size: packHead.size,
+            read: async (offset, length) => {
+              const ranged = await bucket.get(packKey, { range: { offset, length } });
+              if (ranged === null) return new Uint8Array(0);
+              return new Uint8Array(await ranged.arrayBuffer());
+            },
+          },
+        });
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor !== undefined);
+
+    return handles;
+  };
+
   return {
     // workerd carries `node:zlib` under `nodejs_compat`, which this Worker
     // already needs for `server/Protocol.ts`. Reading a pack object at a
     // bit at a time is not something to do on request time here either.
     inflate: nativeInflate,
     list: Effect.tryPromise({
-      try: async () => {
-        const handles: PackHandle[] = [];
-        let cursor: string | undefined;
-
-        do {
-          const options: R2ListOptions = { prefix };
-          if (cursor !== undefined) options.cursor = cursor;
-          const page = await bucket.list(options);
-          for (const entry of page.objects) {
-            if (!entry.key.endsWith(".idx")) continue;
-            const name = entry.key.slice(prefix.length, -4);
-
-            const packKey = `${prefix}${name}.pack`;
-            const packHead = await bucket.head(packKey);
-            // An index whose pack is missing is a half-finished write; a
-            // reader that failed on it would break the whole repository.
-            if (packHead === null) continue;
-
-            const index = await bucket.get(entry.key);
-            if (index === null) continue;
-
-            handles.push({
-              name,
-              index: new Uint8Array(await index.arrayBuffer()),
-              source: {
-                size: packHead.size,
-                read: async (offset, length) => {
-                  const ranged = await bucket.get(packKey, { range: { offset, length } });
-                  if (ranged === null) return new Uint8Array(0);
-                  return new Uint8Array(await ranged.arrayBuffer());
-                },
-              },
-            });
-          }
-          cursor = page.truncated ? page.cursor : undefined;
-        } while (cursor !== undefined);
-
-        return handles;
+      try: () => {
+        // A failed listing is not remembered: the promise is cleared so the
+        // next lookup asks the bucket again instead of replaying the fault.
+        remembered ??= listNow().catch((cause: unknown) => {
+          remembered = null;
+          throw cause;
+        });
+        return remembered;
       },
       catch: failure("packs.list", prefix),
     }),
@@ -226,6 +251,7 @@ export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] =>
           // bytes that are not there yet.
           await bucket.put(`${prefix}${name}.pack`, pack);
           await bucket.put(`${prefix}${name}.idx`, index);
+          remembered = null;
         },
         catch: failure("packs.write", prefix),
       }),
@@ -236,6 +262,7 @@ export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] =>
           // Index first: it is what makes the pack visible.
           await bucket.delete(`${prefix}${name}.idx`);
           await bucket.delete(`${prefix}${name}.pack`);
+          remembered = null;
         },
         catch: failure("packs.delete", prefix),
       }),

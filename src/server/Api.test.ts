@@ -1677,6 +1677,249 @@ describe("Api hub extensions", () => {
     ),
   );
 
+  it.live("charges task events hub.task and this repository's identity at the door", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        const root = yield* generate("root@example.com");
+        const worker = yield* generate("worker@example.com");
+        const commenter = yield* generate("commenter@example.com");
+        const stranger = yield* generate("stranger@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(worker.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.task"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(commenter.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.comment"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(worker.publicKey);
+        const asWorker = Effect.provideService(Auth.Requester, {
+          principal: projection.members.get(signer) ?? null,
+          signer,
+          capabilities: ["repo.read", "source.push", "hub.task"],
+          projection,
+          envelope: null,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+
+        const opened = (repo: string) => {
+          const task = HubTask.newId();
+          const payload = {
+            version: 1,
+            type: "task.opened",
+            repo,
+            task,
+            id: HubEvent.newId(),
+            issuedAt: new Date(1_700_000_002_000).toISOString(),
+            trustHead: null,
+            title: "judge my signer",
+            description: "",
+            refs: [],
+            pulls: [],
+          } as const;
+          return { task, bytes: HubTask.encode(payload) };
+        };
+        const submit = (bytes: Uint8Array, armored: string) =>
+          client.hub
+            .append({
+              params: { repo: "r" },
+              payload: {
+                payload: btoa(String.fromCharCode(...bytes)),
+                signatures: [armored],
+              },
+            })
+            .pipe(asWorker);
+
+        // A member holding another hub capability — but not `hub.task` — is
+        // refused: capabilities keep their boundaries even inside the family.
+        const mine = opened(genesis.repoId);
+        const underCapability = yield* submit(
+          mine.bytes,
+          yield* sign(commenter, mine.bytes, NAMESPACE),
+        ).pipe(Effect.flip);
+        assert.equal(underCapability._tag, "Invalid");
+        if (underCapability._tag === "Invalid") {
+          assert.match(underCapability.reason, /hub\.task/);
+        }
+
+        // A signature from a key this repository never trusted decides
+        // nothing, whoever carried it here.
+        const untrusted = yield* submit(
+          mine.bytes,
+          yield* sign(stranger, mine.bytes, NAMESPACE),
+        ).pipe(Effect.flip);
+        assert.equal(untrusted._tag, "Invalid");
+
+        // An event minted for another repository is refused before a ref moves.
+        const foreign = opened("some-other-repository");
+        const wrongRepo = yield* submit(
+          foreign.bytes,
+          yield* sign(worker, foreign.bytes, NAMESPACE),
+        ).pipe(Effect.flip);
+        assert.equal(wrongRepo._tag, "Invalid");
+        assert.equal(yield* git.resolve(HubTask.refOf(foreign.task)), null);
+
+        // The minimally different permitted case: the same bytes, signed by
+        // the member who holds exactly the capability the event charges.
+        const appended = yield* submit(mine.bytes, yield* sign(worker, mine.bytes, NAMESPACE));
+        assert.equal(appended.ref, HubTask.refOf(mine.task));
+        const listing = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        assert.equal(
+          listing.items.some((entry) => entry.task === mine.task),
+          true,
+        );
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("settles a pull request as one transition: base and pr.merged move together", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        const root = yield* generate("root@example.com");
+        const merger = yield* generate("merger@example.com");
+        const commenter = yield* generate("commenter@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(merger.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.create-pr", "hub.merge"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(commenter.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.comment"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        // A base with one commit and a topic exactly one ahead of it — the
+        // fast-forward shape the endpoint promises to preserve.
+        const base = yield* git.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "first",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+        const head = yield* git.commitTree({
+          tree: EMPTY_TREE_OID,
+          parents: [base],
+          message: "proposed",
+          author: { ...alice, at: new Date(1_700_000_001_000) },
+        });
+
+        const opened = yield* PullRequest.open({
+          repo: genesis.repoId,
+          title: "settle me atomically",
+          description: "",
+          base: "refs/heads/main",
+          head,
+          key: merger,
+        });
+
+        const merged = (by: typeof merger) =>
+          Effect.gen(function* () {
+            const payload = {
+              version: 1,
+              type: "pr.merged",
+              repo: genesis.repoId,
+              pr: opened.pr,
+              id: HubEvent.newId(),
+              issuedAt: new Date(1_700_000_002_000).toISOString(),
+              trustHead: yield* git.resolve(Log.LOG_REF),
+              head: HubEvent.qualify(head),
+              mergeCommit: HubEvent.qualify(head),
+            } as const;
+            const bytes = HubEvent.encode(payload);
+            return {
+              payload: btoa(String.fromCharCode(...bytes)),
+              signatures: [yield* sign(by, bytes, NAMESPACE)],
+            };
+          });
+
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(merger.publicKey);
+        const asMerger = Effect.provideService(Auth.Requester, {
+          principal: projection.members.get(signer) ?? null,
+          signer,
+          capabilities: ["repo.read", "source.push", "hub.create-pr", "hub.merge"],
+          projection,
+          envelope: null,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+
+        // A signer holding hub.comment cannot settle anything.
+        const signed = yield* merged(merger);
+        const underCapability = yield* client.hub
+          .merge({
+            params: { repo: "r", id: opened.pr },
+            payload: { head, expected: base, ...(yield* merged(commenter)) },
+          })
+          .pipe(asMerger, Effect.flip);
+        assert.equal(underCapability._tag, "Invalid");
+
+        // A stale compare-and-swap is a conflict, and nothing moves.
+        const stale = yield* client.hub
+          .merge({
+            params: { repo: "r", id: opened.pr },
+            payload: { head, expected: head, ...signed },
+          })
+          .pipe(asMerger, Effect.flip);
+        assert.equal(stale._tag, "RefConflict");
+        assert.equal(yield* git.resolve("refs/heads/main"), base);
+
+        // The permitted case: base advances to exactly the approved head and
+        // the projection — read fresh — says merged.
+        const settled = yield* client.hub
+          .merge({
+            params: { repo: "r", id: opened.pr },
+            payload: { head, expected: base, ...signed },
+          })
+          .pipe(asMerger);
+        assert.equal(settled.commit, head);
+        assert.equal(yield* git.resolve("refs/heads/main"), head);
+        const detail = yield* client.hub.pull({ params: { repo: "r", id: opened.pr } });
+        assert.equal(detail.state, "merged");
+        assert.equal(detail.mergeCommit, head);
+
+        // Asking again for the transition that already committed agrees.
+        const again = yield* client.hub
+          .merge({
+            params: { repo: "r", id: opened.pr },
+            payload: { head, expected: base, ...signed },
+          })
+          .pipe(asMerger);
+        assert.equal(again.commit, head);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
   it.live("answers the trust roster, and an empty one without a genesis", () =>
     dispatched(
       Effect.gen(function* () {

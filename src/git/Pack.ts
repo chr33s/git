@@ -25,9 +25,11 @@
 import { Effect, Result, Stream } from "effect";
 
 import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
-import { bytesToHex, concatBytes as concat } from "./Format.ts";
+import { bytesToHex, concatBytes as concat, hashObject } from "./Format.ts";
 import { type ByteSource, inflate as zlibInflate, InflateError } from "./Inflate.ts";
-import { crc32 } from "./PackIndex.ts";
+import { bufferSource, readAt } from "./PackFile.ts";
+import { buildPackIndex, crc32, type PackIndexEntry } from "./PackIndex.ts";
+import { PackStore } from "./Packed.ts";
 import { Sha1 } from "./Sha1.ts";
 import { ObjectStore, type ObjectType, type Oid, type RawObject } from "./Store.ts";
 
@@ -568,6 +570,205 @@ export const unpack = <E>(
     }
 
     yield* step(() => source.trailer());
+    return oids;
+  });
+
+/** The two thresholds `ingest` decides retention by; see its doc. */
+export interface IngestOptions {
+  /** Packs with fewer objects than this are exploded loose. Default 8. */
+  readonly retainAtLeast?: number;
+  /** Packs larger than this many bytes stream loose. Default 64 MiB. */
+  readonly retainUpTo?: number;
+}
+
+const RETAIN_AT_LEAST = 8;
+const RETAIN_UP_TO = 64 * 1024 * 1024;
+
+const asCorrupt = (cause: unknown): PackCorrupt =>
+  cause instanceof PackCorrupt ? cause : new PackCorrupt({ reason: String(cause) });
+
+/**
+ * Ingest a packfile, keeping it *as a pack* when that is the better shape.
+ *
+ * `unpack` above explodes every push into loose objects — one store write
+ * per object, forever, which on an object store priced and paced per PUT is
+ * the expensive half of a push. But the pack already is a storage format:
+ * verified, indexed and registered with `PackStore`, its cost is two writes
+ * however many objects it carries, and `Packed.ts` reads through it — thin
+ * ref-deltas included, resolved against the rest of the store.
+ *
+ * Retention is a judgment, not a rule, and every refusal falls back to
+ * `unpack` rather than failing the push:
+ *
+ *   - a pack below `retainAtLeast` objects goes loose — a one-commit push
+ *     is a handful of writes either way, and a pack per tiny push grows the
+ *     set every lookup consults;
+ *   - a pack above `retainUpTo` streams loose — retention must buffer the
+ *     bytes to index them, and a transfer must not be bounded by this
+ *     optimization's memory;
+ *   - a backend whose pack store cannot take the write (or has none) goes
+ *     loose, which is exactly what it did before this existed.
+ *
+ * The cost of keeping the pack is one extra decode: the boundary walk that
+ * indexes it must inflate every object (a zlib stream's end is only found
+ * by reading it), and each object is then resolved once more to learn its
+ * oid — with delta bases re-resolved along the chain rather than pinned,
+ * for the same memory reason `unpack` gives. CPU is bought once at push
+ * time; writes are saved forever after.
+ */
+export const ingest = <E>(
+  input: Stream.Stream<Uint8Array, E>,
+  options?: IngestOptions,
+): Effect.Effect<
+  ReadonlyArray<Oid>,
+  PackCorrupt | ObjectNotFound | StorageFailure,
+  ObjectStore | PackStore
+> =>
+  Effect.gen(function* () {
+    const atLeast = options?.retainAtLeast ?? RETAIN_AT_LEAST;
+    const upTo = options?.retainUpTo ?? RETAIN_UP_TO;
+
+    // Buffer up to the cap. The iterator is held so that a pack too large
+    // to retain continues, un-rewound, into the streaming path below.
+    const iterator = Stream.toAsyncIterable(input)[Symbol.asyncIterator]();
+    const buffered: Uint8Array[] = [];
+    let total = 0;
+    let ended = false;
+    yield* Effect.tryPromise({
+      try: async () => {
+        while (total <= upTo) {
+          const next = await iterator.next();
+          if (next.done === true) {
+            ended = true;
+            return;
+          }
+          buffered.push(next.value);
+          total += next.value.length;
+        }
+      },
+      catch: asCorrupt,
+    });
+
+    if (!ended) {
+      // Too large to hold: replay what was buffered, then the live tail.
+      const replay = async function* (): AsyncIterable<Uint8Array> {
+        yield* buffered;
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done === true) return;
+          yield next.value;
+        }
+      };
+      return yield* unpack(Stream.fromAsyncIterable(replay(), asCorrupt));
+    }
+
+    const bytes = concat(buffered);
+    // The object count sits in the header; a pack too small to say so is
+    // `unpack`'s to refuse with its own words.
+    const count = bytes.length >= 12 ? readU32(bytes, 8) : 0;
+    if (bytes.length < 32 || count < atLeast) {
+      return yield* unpack(Stream.make(bytes));
+    }
+
+    return yield* retain(bytes).pipe(
+      // The pack store said no — absent, full, or briefly unreachable. The
+      // push still lands the way every push always has; only the shape of
+      // the storage degrades.
+      Effect.catchTag("StorageFailure", () => unpack(Stream.make(bytes))),
+    );
+  });
+
+/**
+ * Keep one fully-buffered pack: verify it, index it, register it.
+ *
+ * Two passes over bytes already in memory. The first walks the boundaries —
+ * inflating each object to find where the next begins — and checks the
+ * trailing checksum against the running digest. The second resolves each
+ * entry back out of the pack (`readAt`, the same reader every later access
+ * uses) to learn its oid, reaching into the store for a thin delta's base
+ * exactly as the read path will. Only then does anything get written: a
+ * pack whose index this function built is a pack it has already proven it
+ * can read.
+ */
+const retain = (
+  bytes: Uint8Array,
+): Effect.Effect<
+  ReadonlyArray<Oid>,
+  PackCorrupt | ObjectNotFound | StorageFailure,
+  ObjectStore | PackStore
+> =>
+  Effect.gen(function* () {
+    const objects = yield* ObjectStore;
+    const packs = yield* PackStore;
+
+    const source = new Source(
+      (async function* () {
+        yield bytes;
+      })(),
+    );
+    const step = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: asCorrupt });
+
+    const declared = yield* step(() => source.header());
+    const starts: number[] = [];
+    for (let index = 0; index < declared; index++) {
+      const start = source.offset;
+      starts.push(start);
+      const header = yield* step(() => source.objectHeader());
+      const data = yield* step(() => source.inflate(header.size + 1));
+      if (data.length !== header.size) {
+        return yield* new PackCorrupt({
+          reason: `object ${index}: header says ${header.size} bytes, inflated to ${data.length}`,
+          offset: start,
+        });
+      }
+    }
+    yield* step(() => source.trailer());
+    const trailer = bytes.subarray(bytes.length - 20);
+
+    const context = yield* Effect.context<never>();
+    const pack = bufferSource(bytes);
+    /** Boundaries whose oid is known, for in-pack ref-delta bases. */
+    const known = new Map<Oid, number>();
+    const readEntry = (offset: number, depth: number): Promise<RawObject> =>
+      readAt(
+        pack,
+        offset,
+        async (base, at) => {
+          const inPack = known.get(base);
+          if (inPack !== undefined) return await readEntry(inPack, at);
+          // A thin delta: the base lives in the store — the same place the
+          // read path will find it once this pack is registered.
+          return await Effect.runPromiseWith(context)(
+            objects.read(base).pipe(
+              Effect.map((object): RawObject | null => object),
+              Effect.catchTag("ObjectNotFound", () => Effect.succeed<RawObject | null>(null)),
+            ),
+          );
+        },
+        depth,
+        packs.inflate,
+      );
+
+    const entries: Array<PackIndexEntry> = [];
+    const oids: Array<Oid> = [];
+    for (let index = 0; index < starts.length; index++) {
+      const start = starts[index]!;
+      const end = index + 1 < starts.length ? starts[index + 1]! : bytes.length - 20;
+      const object = yield* Effect.tryPromise({
+        try: () => readEntry(start, 0),
+        catch: asCorrupt,
+      });
+      const oid = yield* hashObject(object);
+      known.set(oid, start);
+      oids.push(oid);
+      entries.push({ oid, offset: start, crc32: crc32(bytes.subarray(start, end)) });
+    }
+
+    yield* packs.write({
+      name: `pack-${bytesToHex(trailer)}`,
+      pack: bytes,
+      index: buildPackIndex(entries, trailer),
+    });
     return oids;
   });
 
