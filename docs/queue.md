@@ -220,8 +220,10 @@ queue.candidate  pr id, step OID C_i, its parents, and the
                  candidate branch it is published on
 queue.left       pr id, reason: landed | failed | conflict |
                  stale | withdrawn
-queue.reset      the target moved outside the queue; chains
-                 behind the named OID are abandoned
+queue.reset      the chain on record was not built on what the
+                 target now holds; its candidates are stale
+queue.closed     this queue is finished — a fresh one takes
+                 over the branch, and entries do not migrate
 ```
 
 All events are SSH-signed, carry the `RepoID`, and cost the new
@@ -343,7 +345,26 @@ the notification is a hint.
 **The queue agent dies mid-batch.** Candidate branches linger (bounded
 by `queueDepth`), queue events record how far it got, and the next run —
 this agent's or any member's — re-derives and continues or resets.
-Nothing waits on a lease expiring, because nothing held a lock.
+Nothing waits on a lease expiring, because nothing held a lock. A pass
+that dies _while landing_ is the sharp case: between the swap and the
+records that follow it, the branch has the code and the queue does not
+know. The next pass settles that from the refs themselves — an entry
+whose revision the target already contains is finished, whatever put it
+there — and it asks that question after checking the head is still the
+one that was entered, so a pull request that pushed more work on top of
+what landed is not closed with that work outstanding.
+
+**The queue ref fills up.** This is the one bound a queue can reach just
+by doing its job. A pull request, a session and a task are each about one
+finite piece of work, so their refs stop growing on their own; a queue is
+about a _branch_, which does not, and every fold of it is bounded by the
+same ceiling every hub ref is. So a queue ends by saying so —
+`queue.closed`, `git+ queue close` — and a fresh one takes over the
+branch: entries do not migrate, because what a closed queue holds is
+history and whoever still wants to land re-enters. `queue run` warns well
+before the ceiling, because the difference between rotating a queue and
+losing one is knowing in time; past it the ref would be unreadable and,
+being append-only, unremovable at once.
 
 **A check fails on `C_j`.** `PR_j` is evicted; `C_1..C_{j-1}` remain
 valid and can land immediately; the suffix rebuilds without `PR_j`. The

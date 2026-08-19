@@ -46,6 +46,7 @@ import { TRUST_LOG } from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import { checkRefName, type Oid } from "../git/Store.ts";
 import * as Record from "../trust/Record.ts";
+import * as Secrets from "./Secrets.ts";
 import * as Event from "./Event.ts";
 
 export const refOf = (queue: string): string => `refs/hub/queue/${queue}`;
@@ -174,12 +175,36 @@ export const QueueReset = Schema.Struct({
 
 export type QueueLeft = (typeof QueueLeft)["Type"];
 
+/**
+ * This queue is finished; open another for the branch if it still needs one.
+ *
+ * A queue ref grows for as long as the branch it serves does — a few records
+ * per landing, for ever — and every fold of it is bounded by the same ceiling
+ * every hub ref is (`Event.ceilingOf`). A pull request, a session and a task
+ * are each about one finite piece of work, so their refs stop growing on their
+ * own; a queue is about a *branch*, which does not. Without a way to end one,
+ * a busy repository's queue would eventually pass the ceiling and become
+ * unreadable and unremovable at once, taking `queue run` on that branch with
+ * it — the exact failure this namespace's other rules exist to prevent.
+ *
+ * So a queue ends by saying so, and a fresh one takes over. Entries do not
+ * migrate: what a closed queue holds is history, and whoever still wants to
+ * land re-enters. Reopening is deliberately not offered — an ended queue is
+ * ended, and the way back is another queue.
+ */
+export const QueueClosed = Schema.Struct({
+  type: Schema.tag("queue.closed"),
+  ...envelope,
+  reason: Schema.String,
+});
+
 export const QueuePayload = Schema.Union([
   QueueOpened,
   QueueEntered,
   QueueCandidate,
   QueueLeft,
   QueueReset,
+  QueueClosed,
 ]);
 export type QueuePayload = (typeof QueuePayload)["Type"];
 
@@ -227,6 +252,10 @@ export const context = Effect.fn("hub.Queue.context")(function* (repo: string, q
 });
 
 /** The pull request a record is about, where it names one. */
+/** The one field of a queue record somebody types. */
+const prose = (payload: QueuePayload): string =>
+  payload.type === "queue.closed" ? payload.reason : "";
+
 const prOf = (payload: QueuePayload): string | null =>
   payload.type === "queue.entered" ||
   payload.type === "queue.candidate" ||
@@ -299,11 +328,21 @@ export const issue = Effect.fn("hub.Queue.issue")(function* (
     });
   }
 
-  // No secret scan, unlike a session or a task: there is nothing here somebody
-  // typed. Every field this record carries is an identifier, an object id, a
-  // ref name or one of five reasons, all high-entropy or enumerated by
-  // construction — the same argument `Task.ts` makes for not scanning its own
-  // envelope, applied to a record that is entirely envelope.
+  // Scanned over what somebody typed, and that is one field: a close's reason.
+  // Everything else this record carries is an identifier, an object id, a ref
+  // name or one of five enumerated words — high-entropy or fixed by
+  // construction, which is the same argument `Task.ts` makes for not scanning
+  // its own envelope.
+  const leaked = Secrets.scan(prose(payload));
+  if (leaked.length > 0) {
+    return yield* new Invalid({
+      field: "queue",
+      reason: `this record looks like it carries ${leaked
+        .map((finding) => `a ${finding.kind} (${finding.hint})`)
+        .join(", ")}`,
+    });
+  }
+
   const signature = yield* sign(key, bytes, NAMESPACE);
   return yield* Event.appendTo({
     ref: refOf(payload.queue),
@@ -374,6 +413,16 @@ export const leave = Effect.fn("hub.Queue.leave")(function* (input: {
     { ...base, type: "queue.left", pr: input.pr, reason: input.reason },
     input.key,
   );
+});
+
+export const close = Effect.fn("hub.Queue.close")(function* (input: {
+  readonly repo: string;
+  readonly queue: string;
+  readonly reason: string;
+  readonly key: PrivateKey;
+}) {
+  const base = yield* context(input.repo, input.queue);
+  return yield* issue({ ...base, type: "queue.closed", reason: input.reason }, input.key);
 });
 
 export const reset = Effect.fn("hub.Queue.reset")(function* (input: {
@@ -461,6 +510,16 @@ export interface Projection {
   readonly entries: ReadonlyArray<Entry>;
   readonly left: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
   readonly resets: number;
+  /** Why this queue was ended, or `null` while it is still running. */
+  readonly closed: string | null;
+  /**
+   * How many records this queue holds.
+   *
+   * Surfaced because it is the number that decides whether the ref is
+   * approaching the ceiling a fold will walk — the one bound a queue, unlike
+   * every other hub ref, can reach just by doing its job for long enough.
+   */
+  readonly records: number;
   readonly ignored: ReadonlyArray<Oid>;
   readonly unreadable: ReadonlyArray<Oid>;
 }
@@ -481,12 +540,13 @@ export interface Projection {
 export const project = Effect.fn("hub.Queue.project")(function* (queue: string) {
   const walked = yield* entries(queue);
 
-  let opened: { readonly target: string; readonly by: Fingerprint | null } | null = null;
+  let opened: { readonly target: string; readonly by: Fingerprint } | null = null;
   /** Insertion-ordered, which is what makes it the queue rather than a set. */
   const queued = new Map<string, Entry>();
   const left: Array<{ readonly pr: string; readonly reason: string }> = [];
   const ignored: Array<Oid> = [];
   let resets = 0;
+  let closed: string | null = null;
 
   for (const { commit, payload, signer } of walked.events) {
     if (signer === null) {
@@ -542,6 +602,15 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
         else ignored.push(commit);
         break;
 
+      case "queue.closed":
+        // The opener's to end, as a task is theirs to close: an ended queue
+        // cannot be reopened, and letting anybody holding the namespace's
+        // capability end somebody else's would be a way to stop a branch's
+        // queue rather than a way to coordinate with it.
+        if (opened === null || signer !== opened.by) ignored.push(commit);
+        else closed ??= payload.reason;
+        break;
+
       case "queue.reset":
         // The chain is stale; the intentions behind it are not.
         resets += 1;
@@ -557,6 +626,8 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
     entries: [...queued.values()],
     left,
     resets,
+    closed,
+    records: walked.events.length,
     // Said out loud rather than swallowed: a record that did not count is
     // exactly what somebody will be looking for.
     ignored,
@@ -592,7 +663,13 @@ export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: str
       unreadable.push(id);
       continue;
     }
-    if (found === null && state.exists && state.target === target) found = state;
+    // A closed queue is history, and stepping aside is the whole point of
+    // ending one: the next `queue open` for this branch has to be able to
+    // succeed, and every caller asking "which queue serves this branch?" has to
+    // get the live one.
+    if (found === null && state.exists && state.closed === null && state.target === target) {
+      found = state;
+    }
   }
   return { found, unreadable } as const;
 });

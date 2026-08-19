@@ -274,6 +274,48 @@ const leave = Command.make(
     }),
 );
 
+const close = Command.make(
+  "close",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    queue: Flag.string("queue").pipe(Flag.withDefault("")),
+    target: Flag.string("target").pipe(Flag.withDefault("")),
+    reason: Flag.string("reason").pipe(
+      Flag.withDefault("rotated"),
+      Flag.withDescription("Why this queue is being ended"),
+    ),
+    repo: repoArgument,
+  },
+  ({ key, queue, reason, repo, root, target }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          const genesis = yield* identityOf(repo);
+          const state = yield* resolve({ queue, target });
+          yield* Queue.close({
+            repo: genesis.repoId,
+            queue: state.queue,
+            reason,
+            key: signer,
+          });
+          // The branches it published go with it: nothing will name them again,
+          // and each pins its candidate out of reach of collection.
+          if (state.target !== null) {
+            const repository = yield* Repository;
+            for (const entry of state.entries) {
+              yield* repository.deleteRef(Queue.candidateBranch(state.target, entry.pr));
+            }
+          }
+        }),
+      );
+      yield* Console.log(`closed: ${reason}`);
+    }),
+);
+
 const list = Command.make("list", { root: rootFlag, repo: repoArgument }, ({ repo, root }) =>
   Effect.gen(function* () {
     const found = yield* withRepo(
@@ -416,8 +458,26 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   if (state.target === null) {
     return yield* new Invalid({ field: "queue", reason: `${state.queue} names no target branch` });
   }
+  if (state.closed !== null) {
+    return yield* new Invalid({
+      field: "queue",
+      reason: `${state.queue} was closed (${state.closed}); open a fresh queue for this branch`,
+    });
+  }
   const target = state.target;
   const rules = yield* Policy.rulesOf();
+
+  // Said long before it is fatal. A queue ref grows for as long as its branch
+  // does, and past the ceiling a fold will walk it is unreadable and — being
+  // append-only — unremovable, taking `queue run` on that branch with it. This
+  // is the one hub ref that can reach that bound just by doing its job, so the
+  // warning is the difference between rotating a queue and losing one.
+  const ceiling = yield* Event.ceilingOf();
+  if (state.records * 4 > ceiling * 3) {
+    yield* Console.error(
+      `warning: ${state.queue} holds ${String(state.records)} of ${String(ceiling)} records; close it and open a fresh queue for ${target ?? "this branch"} before it passes the ceiling`,
+    );
+  }
 
   // A candidate is a commit this runner makes, and `requireProvenance` is a
   // rule about *every* commit a push introduces — so a candidate would have to
@@ -584,12 +644,10 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       continue;
     }
 
-    // Whatever put it in the queue, what it proposes *now* is what can land.
-    // Separated from the read failure above deliberately: these are facts about
-    // the pull request, which is what a permanent `queue.left` may record. A
-    // pull request that is closed, merged or aimed somewhere else is not
-    // waiting on anything — it has stopped being a candidate for this branch.
-    if (pullRequest.state !== "open" || pullRequest.base !== target) {
+    // Aimed somewhere else: settled, and a permanent `queue.left` is what says
+    // so. Separated from the read failure above deliberately — that says what
+    // this replica could not do, and this says what the pull request did.
+    if (pullRequest.base !== target) {
       yield* drop(entry.pr, "stale");
       continue;
     }
@@ -637,17 +695,33 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     if (contained) {
       // The record of the merge, where the interrupted pass did not get to it.
       // `head` is a revision the pull request proposed, which is what hub.md
-      // §10 asks of a merge event; `mergeCommit` is what carried it in.
-      yield* record(
-        PullRequest.merged({
-          repo: genesis.repoId,
-          pr: entry.pr,
-          head: entry.head,
-          mergeCommit: from,
-          key: input.key,
-        }),
-      );
+      // §10 asks of a merge event; `mergeCommit` is what carried it in. Only
+      // where it is still open: a pass can die *between* this record and the
+      // `queue.left` beside it, and the second attempt must finish the job
+      // rather than say the same thing twice.
+      if (pullRequest.state === "open") {
+        yield* record(
+          PullRequest.merged({
+            repo: genesis.repoId,
+            pr: entry.pr,
+            head: entry.head,
+            mergeCommit: from,
+            key: input.key,
+          }),
+        );
+      }
       yield* drop(entry.pr, "landed");
+      continue;
+    }
+
+    // Closed or merged without reaching this branch: it has stopped being a
+    // candidate for it. Asked *after* containment, because a pass that wrote
+    // `pr.merged` and died before the `queue.left` beside it leaves a pull
+    // request that is merged *and* landed — and read in the other order, the
+    // recovery above became unreachable the moment it had written its first
+    // record, which is precisely the interruption it exists for.
+    if (pullRequest.state !== "open") {
+      yield* drop(entry.pr, "stale");
       continue;
     }
 
@@ -981,6 +1055,7 @@ export const queueCommand = Command.make("queue", {}, () =>
     enter.pipe(Command.withDescription("Offer a pull request for landing")),
     leave.pipe(Command.withDescription("Take a pull request back out")),
     run.pipe(Command.withDescription("Build candidates and land what the boundary allows")),
+    close.pipe(Command.withDescription("End a queue, so a fresh one can take over")),
     list.pipe(Command.withDescription("Every queue this repository holds")),
     show.pipe(Command.withDescription("What one queue amounts to now")),
   ]),

@@ -169,9 +169,9 @@ merging each approved head onto the last, testing that combination, and
 advancing the branch in one compare-and-swap:
 
 ```sh
-npx git+ queue open my-repo --key ~/.ssh/hub --target refs/heads/main
-npx git+ queue enter my-repo <pr> --key ~/.ssh/hub --target refs/heads/main
-npx git+ queue run my-repo --key ~/.ssh/hub --target refs/heads/main --dry-run
+npx git+ queue open my-repo --key ~/.ssh/hub --target main
+npx git+ queue enter my-repo <pr> --key ~/.ssh/hub --target main
+npx git+ queue run my-repo --key ~/.ssh/hub --target main --dry-run
 ```
 
 What makes that safe is that the boundary re-derives every merge rather than

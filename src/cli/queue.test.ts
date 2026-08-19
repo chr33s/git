@@ -22,7 +22,10 @@ import { Effect, Layer } from "effect";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import * as PullRequest from "../hub/PullRequest.ts";
 import * as Policy from "../server/Policy.ts";
+import { readGenesis } from "../trust/Genesis.ts";
+import { readPrivateKey } from "./shared.ts";
 import { enableHubUnder, grantMember, opensshPrivateKey } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
@@ -1266,6 +1269,103 @@ describe("cli queue", () => {
       "the rebuild is recorded, not skipped as unchanged",
     );
     assert.equal(state.entries[0].candidate.commit, rebuilt.built[0].commit);
+  });
+
+  it("ends a queue so a fresh one can take over the branch", async () => {
+    // A queue ref grows for as long as its branch does, and every fold of it is
+    // bounded by the same ceiling every hub ref is. A pull request, a session
+    // and a task are each about one finite piece of work; a queue is about a
+    // branch, which is not — so without a way to end one it would eventually
+    // pass the ceiling and be unreadable and unremovable at once.
+    await publish(protectedRules());
+    await enter(await propose("one"));
+    await run();
+
+    const closing = await cli([
+      "queue",
+      "close",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "--reason",
+      "rotated",
+      "project",
+    ]);
+    assert.match(closing, /closed: rotated/);
+
+    const ended = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(ended.closed, "rotated");
+
+    // The branch may have a queue again, and the closed one steps aside.
+    const fresh = (
+      await cli([
+        "queue",
+        "open",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--target",
+        "refs/heads/main",
+        "project",
+      ])
+    ).trim();
+    assert.notEqual(fresh, queue);
+
+    const byTarget = await failing([
+      "queue",
+      "run",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "project",
+    ]);
+    assert.match(byTarget, /was closed/, "and the ended one runs nothing");
+  });
+
+  it("finishes a landing an interrupted pass half recorded", async () => {
+    // A pass can die between `pr.merged` and the `queue.left` beside it. Read
+    // in the wrong order, the recovery became unreachable the moment it had
+    // written its first record — which is precisely the interruption it exists
+    // for — and the entry was settled as `stale` instead.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+
+    // Exactly that half-finished state: the revision is in the branch and the
+    // pull request says merged, while the queue still holds the entry.
+    await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.setRef({ name: "refs/heads/main", to: headOf("one") }),
+      ),
+    );
+    await inRepo(
+      Effect.gen(function* () {
+        const signer = yield* readPrivateKey(key);
+        const stored = yield* readGenesis();
+        if (stored === null) throw new Error("no genesis");
+        yield* PullRequest.merged({
+          repo: stored.genesis.repoId,
+          pr: first,
+          head: headOf("one"),
+          mergeCommit: headOf("one"),
+          key: signer,
+        });
+      }),
+    );
+
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { pr: string; reason: string }) => entry.reason),
+      ["landed"],
+      "the half-recorded landing is finished, not written off as stale",
+    );
   });
 
   it("refuses a second queue for a branch that already has one", async () => {
