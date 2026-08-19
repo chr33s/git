@@ -65,6 +65,18 @@ export const isQueueId = (id: string): boolean => {
 
 export const newId = Event.newId;
 
+/**
+ * Where a candidate for one pull request is published.
+ *
+ * Derivable from the target and the pull request, and deliberately so: a caller
+ * cleaning up after an entry cannot always read the record that named the
+ * branch — a `queue.reset` clears the candidate while the branch it published
+ * stays on disk — so a name that can only be looked up is one that leaks a ref
+ * whenever the lookup comes back empty.
+ */
+export const candidateBranch = (target: string, pr: string): string =>
+  `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/${pr}`;
+
 /** Every queue this repository holds, by id. */
 export const queues = Effect.fn("hub.Queue.queues")(function* () {
   const repository = yield* Repository;

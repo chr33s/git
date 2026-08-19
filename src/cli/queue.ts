@@ -230,8 +230,7 @@ const leave = Command.make(
           // Refused for the reason a mistyped queue id is: a record about
           // something that is not queued is one the projection ignores for
           // ever, on a ref nothing can shorten, reported as success.
-          const held = state.entries.find((entry) => entry.pr === pr);
-          if (held === undefined) {
+          if (!state.entries.some((entry) => entry.pr === pr)) {
             return yield* new Invalid({
               field: "pr",
               reason: `${pr} is not in ${state.queue}`,
@@ -248,9 +247,14 @@ const leave = Command.make(
           // branches of entries *it* settled, and no later pass can name this
           // one — so left here, the candidate commit is pinned out of reach of
           // collection for as long as the repository exists.
-          if (held.candidate !== null) {
+          //
+          // Derived rather than read off the record: a `queue.reset` clears an
+          // entry's candidate while the branch it published stays on disk, so
+          // reading the name from the projection leaked exactly the ref this is
+          // here to remove, in exactly the case a queue resets.
+          if (state.target !== null) {
             const repository = yield* Repository;
-            yield* repository.deleteRef(held.candidate.branch);
+            yield* repository.deleteRef(Queue.candidateBranch(state.target, pr));
           }
         }),
       );
@@ -527,7 +531,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
    * while the `queue.candidate` record for the first still named it — a branch
    * CI had been told to fetch, now holding somebody else's work.
    */
-  const branchOf = (pr: string) => `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/${pr}`;
+  const branchOf = (pr: string) => Queue.candidateBranch(target, pr);
 
   const chain: Array<{
     readonly pr: string;
@@ -568,44 +572,6 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       continue;
     }
 
-    // Already in the branch, whatever put it there. A pass that landed a batch
-    // and died before recording it left its entries queued, and the next pass
-    // then built a no-op merge for each — a candidate whose tree is the tip's
-    // own, which no check names and which therefore never lands, stalling the
-    // whole queue behind work that was already done. Settling it here is the
-    // recovery path, and it costs one ancestry question per entry.
-    const contained = yield* repository.isAncestor(entry.head, from).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        StorageFailure: () => Effect.succeed(null),
-      }),
-    );
-    if (contained === null) {
-      unbuilt.push({
-        pr: entry.pr,
-        reason: `could not tell whether ${entry.head} is in ${target}`,
-      });
-      continue;
-    }
-    if (contained) {
-      // The record of the merge, where the interrupted pass did not get to it.
-      // `head` is a revision the pull request proposed, which is what hub.md
-      // §10 asks of a merge event; `mergeCommit` is what carried it in.
-      if (pullRequest.state === "open") {
-        yield* record(
-          PullRequest.merged({
-            repo: genesis.repoId,
-            pr: entry.pr,
-            head: entry.head,
-            mergeCommit: from,
-            key: input.key,
-          }),
-        );
-      }
-      yield* drop(entry.pr, "landed");
-      continue;
-    }
-
     // Whatever put it in the queue, what it proposes *now* is what can land.
     // Separated from the read failure above deliberately: these are facts about
     // the pull request, which is what a permanent `queue.left` may record. A
@@ -628,6 +594,48 @@ const pass = Effect.fn("queue.pass")(function* (input: {
         pr: entry.pr,
         reason: `proposes ${pullRequest.head} now and was entered at ${entry.head}; enter it again`,
       });
+      continue;
+    }
+
+    // Already in the branch, whatever put it there. A pass that landed a batch
+    // and died before recording it left its entries queued, and the next pass
+    // then built a no-op merge for each — a candidate whose tree is the tip's
+    // own, which no check names and which therefore never lands, stalling the
+    // whole queue behind work that was already done. Settling it here is the
+    // recovery path, and it costs one ancestry question per entry.
+    //
+    // Asked *after* the head check, and that order is the whole of its safety:
+    // asked before, an entry whose entered revision had landed while its pull
+    // request went on to propose more was closed as merged with that new work
+    // unlanded. What the question has to be about is the revision the pull
+    // request proposes now, which is what the check above establishes this is.
+    const contained = yield* repository.isAncestor(entry.head, from).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+    if (contained === null) {
+      unbuilt.push({
+        pr: entry.pr,
+        reason: `could not tell whether ${entry.head} is in ${target}`,
+      });
+      continue;
+    }
+    if (contained) {
+      // The record of the merge, where the interrupted pass did not get to it.
+      // `head` is a revision the pull request proposed, which is what hub.md
+      // §10 asks of a merge event; `mergeCommit` is what carried it in.
+      yield* record(
+        PullRequest.merged({
+          repo: genesis.repoId,
+          pr: entry.pr,
+          head: entry.head,
+          mergeCommit: from,
+          key: input.key,
+        }),
+      );
+      yield* drop(entry.pr, "landed");
       continue;
     }
 

@@ -1179,6 +1179,41 @@ describe("cli queue", () => {
     assert.deepEqual(pass.landed.length, 1, "and the boundary takes it");
   });
 
+  it("does not close a pull request that has moved past what landed", async () => {
+    // The containment recovery asks whether the *entered* revision is in the
+    // branch. Asked before the head check, an entry whose entered revision had
+    // landed while its pull request went on to propose more was closed as
+    // merged with that new work unlanded.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+
+    const later = await inRepo(
+      Effect.gen(function* () {
+        const repository = yield* GitRepository.Repository;
+        // The entered revision reaches the branch …
+        yield* repository.setRef({ name: "refs/heads/main", to: headOf("one") });
+        // … and the pull request proposes more on top of it.
+        const tip = yield* write(
+          [
+            ["readme", "base"],
+            ["a.txt", "one"],
+            ["c.txt", "more"],
+          ],
+          [headOf("one")],
+        );
+        yield* repository.setRef({ name: "refs/heads/one", to: tip });
+        return tip;
+      }),
+    );
+    await cli(["pr", "update", "--root", root, "--key", key, "--head", later, "project", first]);
+
+    const pass = await run();
+    assert.deepEqual(pass.dropped, [], "nothing is settled about work still outstanding");
+    const state = JSON.parse(await cli(["pr", "show", "--root", root, "project", first]));
+    assert.equal(state.state, "open", "and the pull request stays open for it");
+  });
+
   it("refuses a second queue for a branch that already has one", async () => {
     // `refs/hub/queue/*` cannot be deleted, so a second queue for one branch is
     // a permanent split: entries divide invisibly across the two and two
