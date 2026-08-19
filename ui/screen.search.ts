@@ -14,7 +14,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, describe, type GitApi, type GrepMatch } from "./api.ts";
+import { ApiError, describe, type GrepMatch, type SearchApi } from "./api.ts";
 import { GitPlusElement, navigate } from "./base.ts";
 import { statusToken, type Task } from "./model.ts";
 import { kindChip } from "./screen.tasks.ts";
@@ -33,7 +33,7 @@ type CodeResults =
 @customElement("gp-search")
 export class GpSearch extends GitPlusElement {
   /** Injected by the shell so every screen shares one client. */
-  api: GitApi | null = null;
+  api: SearchApi | null = null;
 
   /** The rail's query, already debounced by `ui-search-field`. */
   @property({ type: String }) accessor query = "";

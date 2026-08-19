@@ -26,13 +26,14 @@ import type {
   HubCheck,
   HubPullDetail,
   HubPullSummary,
+  HubSessionSummary,
   HubTask,
   HubThread,
 } from "../src/server/ApiContract.ts";
 
 import { registry } from "./atoms.ts";
 import { GitPlusApi, repoFromDocument } from "./client.ts";
-import type { ChangeRequest, Comment, Status, Task } from "./model.ts";
+import type { ChangeRequest, Comment, SessionRow, Status, Task, Thread } from "./model.ts";
 import { ago, initials } from "./time.ts";
 import { store } from "./store.ts";
 
@@ -57,6 +58,7 @@ const mapTask = (task: HubTask): Task => ({
   milestone: task.closed?.outcome ?? "—",
   comments: [],
   updated: "in the hub",
+  hub: true,
 });
 
 const pullStatus = (pull: HubPullSummary): Status =>
@@ -70,7 +72,7 @@ const pullStatus = (pull: HubPullSummary): Status =>
           ? "In review"
           : "Open";
 
-const review = (pull: HubPullSummary): ChangeRequest["review"] => {
+const reviewCard = (pull: HubPullSummary): ChangeRequest["review"] => {
   if (pull.state === "merged") {
     return {
       headline: "Merged",
@@ -116,14 +118,28 @@ const mapPull = (pull: HubPullSummary): ChangeRequest => ({
   diffFile: "",
   commits: [],
   checks: [],
-  review: review(pull),
+  review: reviewCard(pull),
   diff: [],
+  hub: true,
+  reviewHead: pull.head ?? undefined,
 });
 
 const mapCheck = (check: HubCheck): ChangeRequest["checks"][number] => ({
   name: check.name,
   detail: `${check.provider} · ${check.status}`,
   ok: check.status === "success",
+});
+
+const mapThread = (thread: HubThread): Thread => ({
+  id: thread.id,
+  path: thread.path,
+  resolved: thread.resolved,
+  comments: thread.comments.map((comment) => ({
+    avatar: initials(shortAuthor(comment.author)),
+    author: shortAuthor(comment.author),
+    when: ago(new Date(comment.at)),
+    text: comment.body,
+  })),
 });
 
 const threadComments = (threads: readonly HubThread[]): readonly Comment[] =>
@@ -142,11 +158,27 @@ const fromHub = new Set<string>();
 const tasksAtom = GitPlusApi.query("hub", "tasks", { params: { repo }, query: {} });
 const pullsAtom = GitPlusApi.query("hub", "pulls", { params: { repo }, query: {} });
 
+const sessionsAtom = GitPlusApi.query("hub", "sessions", { params: { repo }, query: {} });
+
 /** Ask the hub again; every mounted subscription folds the answer back in. */
 export const refreshListings = (): void => {
   registry.refresh(tasksAtom);
   registry.refresh(pullsAtom);
+  registry.refresh(sessionsAtom);
 };
+
+const mapSession = (session: HubSessionSummary): SessionRow => ({
+  id: session.session,
+  agent:
+    session.agent === null
+      ? "unknown"
+      : `${session.agent.kind} · ${session.agent.model} · ${session.agent.harness}`,
+  refs: session.refs,
+  pulls: session.pulls,
+  commits: session.commits,
+  openDecisions: session.decisions.open,
+  tokens: session.usage.inputTokens + session.usage.outputTokens,
+});
 
 /**
  * Subscribe the store to the hub listings.
@@ -188,6 +220,15 @@ export const seed = (): void => {
     },
     { immediate: true },
   );
+  registry.subscribe(
+    sessionsAtom,
+    (result) => {
+      if (AsyncResult.isSuccess(result)) {
+        store.adoptSessions(result.value.items.map(mapSession));
+      }
+    },
+    { immediate: true },
+  );
 };
 
 const hydrating = new Set<string>();
@@ -210,6 +251,8 @@ export const hydrate = (id: string): void => {
           ...task,
           desc: detail.description,
           comments: threadComments(detail.threadList),
+          threads: detail.threadList.map(mapThread),
+          reviewHead: detail.head ?? undefined,
         };
         if (task.kind !== "CR") return hydrated;
         return {
@@ -269,6 +312,111 @@ export const commentOn = async (id: string, body: string): Promise<boolean> => {
     const { commentOnPull } = await import("./identity.ts");
     await commentOnPull({ pr: id, body });
     registry.refresh(GitPlusApi.query("hub", "pull", { params: { repo, id } }));
+    refreshListings();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const refreshPull = (id: string): void => {
+  registry.refresh(GitPlusApi.query("hub", "pull", { params: { repo, id } }));
+  refreshListings();
+};
+
+/** Open a Change Request for a revision the server holds. */
+export const openPull = async (input: {
+  readonly title: string;
+  readonly description: string;
+  readonly base: string;
+  readonly head: string;
+}): Promise<string | null> => {
+  try {
+    const identity = await import("./identity.ts");
+    const pr = await identity.openPull(input);
+    fromHub.add(pr);
+    refreshListings();
+    await settled(pr);
+    return pr;
+  } catch {
+    return null;
+  }
+};
+
+/** Approve or reject the revision a hub Change Request proposes. */
+export const review = async (id: string, decision: "approve" | "reject"): Promise<boolean> => {
+  const task = store.get(id);
+  if (!fromHub.has(id) || task?.reviewHead === undefined) return false;
+  try {
+    const identity = await import("./identity.ts");
+    await identity.reviewPull({ pr: id, head: task.reviewHead, decision });
+    refreshPull(id);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Reply in a thread on a hub Change Request. */
+export const reply = async (id: string, thread: string, body: string): Promise<boolean> => {
+  if (!fromHub.has(id)) return false;
+  try {
+    const identity = await import("./identity.ts");
+    await identity.replyInThread({ pr: id, thread, body });
+    refreshPull(id);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Resolve or reopen a thread on a hub Change Request. */
+export const resolveThread = async (
+  id: string,
+  thread: string,
+  resolved: boolean,
+): Promise<boolean> => {
+  if (!fromHub.has(id)) return false;
+  try {
+    const identity = await import("./identity.ts");
+    await identity.setThreadResolved({ pr: id, thread, resolved });
+    refreshPull(id);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Record a hub Change Request as merged, after its branch really moved. */
+export const recordMerged = async (id: string, mergeCommit: string): Promise<boolean> => {
+  const task = store.get(id);
+  if (!fromHub.has(id) || task?.reviewHead === undefined) return false;
+  try {
+    const identity = await import("./identity.ts");
+    await identity.recordMerged({ pr: id, head: task.reviewHead, mergeCommit });
+    refreshPull(id);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** A hub task's lease and lifecycle, from the detail screen's buttons. */
+export const taskAction = async (
+  id: string,
+  action: "claim" | "release" | "complete" | "abandon",
+): Promise<boolean> => {
+  if (!fromHub.has(id)) return false;
+  try {
+    const identity = await import("./identity.ts");
+    if (action === "claim") await identity.claimTask({ task: id });
+    else if (action === "release") await identity.releaseTask({ task: id });
+    else {
+      await identity.closeTask({
+        task: id,
+        outcome: action === "complete" ? "completed" : "abandoned",
+      });
+    }
     refreshListings();
     return true;
   } catch {

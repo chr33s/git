@@ -144,38 +144,59 @@ const repoIdOf = (): Promise<string | null> => {
 };
 
 /**
- * One append: POST the signed bytes; on a 401 challenge, sign the nonce
- * into an `auth.request` envelope and present it once. The failure modes a
- * caller can act on arrive as `ApiError`, tag and all.
+ * Retry one request under a signed `auth.request` envelope.
+ *
+ * The generic half of the native scheme: any JSON verb the server answered
+ * 401 with a nonce challenge can be re-presented once, signed by this
+ * browser's key. `ui/api.ts` routes every write through this, so a
+ * repository that requires authentication asks for it exactly once per
+ * request — and a key the repository has not granted simply gets the same
+ * refusal back, which is the honest answer.
+ */
+export const retryAuthorized = async (
+  url: string,
+  init: RequestInit,
+  denied: Response,
+): Promise<Response | null> => {
+  const nonce = /nonce="([^"]+)"/.exec(denied.headers.get("www-authenticate") ?? "")?.[1];
+  if (nonce === undefined) return null;
+  const repoId = await repoIdOf();
+  if (repoId === null) return null;
+  const key = await identity();
+  const absolute = new URL(url, location.origin);
+  const header = await Effect.runPromise(
+    signEnvelope(key, {
+      type: "auth.request",
+      version: 1,
+      repo: repoId,
+      operation: `${init.method ?? "GET"} ${absolute.pathname}`,
+      commands: [],
+      nonce,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+  );
+  const headers = new Headers(init.headers);
+  headers.set("authorization", header);
+  return await fetch(url, { ...init, headers });
+};
+
+/**
+ * One append: POST the signed bytes, retrying once under an envelope when
+ * challenged. The failure modes a caller can act on arrive as `ApiError`,
+ * tag and all.
  */
 const append = async (bytes: Uint8Array, key: PrivateKey): Promise<HubEventAppended> => {
   const armored = await Effect.runPromise(sign(key, bytes, NAMESPACE));
   const url = urlOf("/hub/events");
-  const body = JSON.stringify({ payload: toBase64(bytes), signatures: [armored] });
-  const post = (authorization?: string) => {
-    const headers = new Headers({ "content-type": "application/json" });
-    if (authorization !== undefined) headers.set("authorization", authorization);
-    return fetch(url, { method: "POST", headers, body });
+  const init: RequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ payload: toBase64(bytes), signatures: [armored] }),
   };
 
-  let response = await post();
+  let response = await fetch(url, init);
   if (response.status === 401) {
-    const nonce = /nonce="([^"]+)"/.exec(response.headers.get("www-authenticate") ?? "")?.[1];
-    const repoId = await repoIdOf();
-    if (nonce !== undefined && repoId !== null) {
-      const header = await Effect.runPromise(
-        signEnvelope(key, {
-          type: "auth.request",
-          version: 1,
-          repo: repoId,
-          operation: `POST ${new URL(url, location.origin).pathname}`,
-          commands: [],
-          nonce,
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        }),
-      );
-      response = await post(header);
-    }
+    response = (await retryAuthorized(url, init, response)) ?? response;
   }
 
   if (!response.ok) {
@@ -191,6 +212,21 @@ const append = async (bytes: Uint8Array, key: PrivateKey): Promise<HubEventAppen
   }
   return decodeAppended(await response.json());
 };
+
+/** The envelope fields every hub event shares, freshly stamped. */
+const stamp = async (): Promise<{
+  readonly version: 1;
+  readonly repo: string;
+  readonly id: string;
+  readonly issuedAt: string;
+  readonly trustHead: null;
+}> => ({
+  version: 1,
+  repo: (await repoIdOf()) ?? repo,
+  id: HubEvent.newId(),
+  issuedAt: new Date().toISOString(),
+  trustHead: null,
+});
 
 // -- the verbs ------------------------------------------------------------
 
@@ -248,4 +284,146 @@ export const commentOnPull = async (input: {
     contextHash: null,
   };
   await append(HubEvent.encode(payload), key);
+};
+
+/** Open a pull request for a revision that exists on the server. */
+export const openPull = async (input: {
+  readonly title: string;
+  readonly description: string;
+  readonly base: string;
+  /** The proposed revision's oid. */
+  readonly head: string;
+}): Promise<string> => {
+  const key = await identity();
+  const pr = HubEvent.newId();
+  const payload: HubEvent.HubPayload = {
+    type: "pr.opened",
+    ...(await stamp()),
+    pr,
+    title: input.title,
+    description: input.description,
+    base: input.base.startsWith("refs/") ? input.base : `refs/heads/${input.base}`,
+    head: `sha1:${input.head}`,
+    id: HubEvent.newId(),
+  };
+  await append(HubEvent.encode(payload), key);
+  return pr;
+};
+
+/** Approve, reject, or comment on the exact revision under review. */
+export const reviewPull = async (input: {
+  readonly pr: string;
+  readonly head: string;
+  readonly decision: "approve" | "reject" | "comment";
+  readonly body?: string;
+}): Promise<void> => {
+  const key = await identity();
+  const payload: HubEvent.HubPayload = {
+    type: "review.submitted",
+    ...(await stamp()),
+    pr: input.pr,
+    head: `sha1:${input.head}`,
+    decision: input.decision,
+    body: input.body ?? "",
+  };
+  await append(HubEvent.encode(payload), key);
+};
+
+/** Reply in an existing thread. */
+export const replyInThread = async (input: {
+  readonly pr: string;
+  readonly thread: string;
+  readonly body: string;
+}): Promise<void> => {
+  const key = await identity();
+  const payload: HubEvent.HubPayload = {
+    type: "comment.replied",
+    ...(await stamp()),
+    pr: input.pr,
+    thread: input.thread,
+    body: input.body,
+  };
+  await append(HubEvent.encode(payload), key);
+};
+
+/** Mark a thread resolved, or reopen it. */
+export const setThreadResolved = async (input: {
+  readonly pr: string;
+  readonly thread: string;
+  readonly resolved: boolean;
+}): Promise<void> => {
+  const key = await identity();
+  const payload: HubEvent.HubPayload = {
+    type: input.resolved ? "comment.resolved" : "comment.reopened",
+    ...(await stamp()),
+    pr: input.pr,
+    thread: input.thread,
+  };
+  await append(HubEvent.encode(payload), key);
+};
+
+/**
+ * Record that a pull request merged — after the branch moved, never before:
+ * the caller performs the merge through the JSON API and only then states
+ * what happened, naming what was merged and what it became.
+ */
+export const recordMerged = async (input: {
+  readonly pr: string;
+  readonly head: string;
+  readonly mergeCommit: string;
+}): Promise<void> => {
+  const key = await identity();
+  const payload: HubEvent.HubPayload = {
+    type: "pr.merged",
+    ...(await stamp()),
+    pr: input.pr,
+    head: `sha1:${input.head}`,
+    mergeCommit: `sha1:${input.mergeCommit}`,
+  };
+  await append(HubEvent.encode(payload), key);
+};
+
+/** Take a task's advisory lease, until `ttlSeconds` from now. */
+export const claimTask = async (input: {
+  readonly task: string;
+  readonly ttlSeconds?: number;
+}): Promise<void> => {
+  const key = await identity();
+  const base = await stamp();
+  const payload: HubTask.TaskPayload = {
+    type: "task.claimed",
+    ...base,
+    task: input.task,
+    expiresAt: new Date(Date.now() + (input.ttlSeconds ?? 3600) * 1000).toISOString(),
+  };
+  await append(HubTask.encode(payload), key);
+};
+
+/** Let a task's lease go, so somebody else can pick it up. */
+export const releaseTask = async (input: { readonly task: string }): Promise<void> => {
+  const key = await identity();
+  const payload: HubTask.TaskPayload = {
+    type: "task.released",
+    ...(await stamp()),
+    task: input.task,
+  };
+  await append(HubTask.encode(payload), key);
+};
+
+/** Close a task, saying how it ended. */
+export const closeTask = async (input: {
+  readonly task: string;
+  readonly outcome: "completed" | "abandoned" | "superseded";
+  readonly pulls?: readonly string[];
+}): Promise<void> => {
+  const key = await identity();
+  const payload: HubTask.TaskPayload = {
+    type: "task.closed",
+    ...(await stamp()),
+    task: input.task,
+    outcome: input.outcome,
+    pulls: [...(input.pulls ?? [])],
+    sessions: [],
+  };
+  await append(HubTask.encode(payload), key);
 };

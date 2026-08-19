@@ -222,10 +222,12 @@ export class GpApp extends GitPlusElement {
         ></gp-code>`;
       case "search":
         return html`<div class="gp-main">
-          <gp-search .api=${this.#api} .query=${this.query}></gp-search>
+          <gp-search .api=${this.localApi ?? this.#api} .query=${this.query}></gp-search>
         </div>`;
       case "activity":
-        return html`<div class="gp-main"><gp-activity .api=${this.#api}></gp-activity></div>`;
+        return html`<div class="gp-main">
+          <gp-activity .api=${this.localApi ?? this.#api}></gp-activity>
+        </div>`;
       case "tasks":
         return html`<div class="gp-main"><gp-tasks .viewer=${this.#viewer}></gp-tasks></div>`;
       case "detail":

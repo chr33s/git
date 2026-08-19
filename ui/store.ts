@@ -20,7 +20,7 @@
  * own copy.
  */
 import { tasks as seed } from "./fixtures.ts";
-import { type Comment, isChangeRequest, type Person, type Task } from "./model.ts";
+import { type Comment, isChangeRequest, type Person, type SessionRow, type Task } from "./model.ts";
 
 /** The Tasks-screen segments: everything, pure Tasks, or Change Requests. */
 export type Filter = "all" | "tasks" | "crs";
@@ -33,6 +33,18 @@ export interface Row {
 
 class TaskStore extends EventTarget {
   #tasks: Task[] = [...seed];
+  #sessions: readonly SessionRow[] = [];
+
+  /** The hub's sessions, for the Activity screen; empty until it answers. */
+  get sessions(): readonly SessionRow[] {
+    return this.#sessions;
+  }
+
+  /** Adopt the hub's session listing; see `adopt` for the tasks half. */
+  adoptSessions(sessions: readonly SessionRow[]): void {
+    this.#sessions = [...sessions];
+    this.#notify();
+  }
 
   /** Every task, in creation order — roots and children interleaved. */
   list(): readonly Task[] {
@@ -198,6 +210,48 @@ class TaskStore extends EventTarget {
   /** Comment on a hub pull request; `false` falls back to `comment`. */
   async commentRemote(id: string, body: string): Promise<boolean> {
     return await import("./hub.ts").then((hub) => hub.commentOn(id, body)).catch(() => false);
+  }
+
+  /** Open a Change Request in the hub for a pushed revision. */
+  async openPullRemote(input: {
+    readonly title: string;
+    readonly description: string;
+    readonly base: string;
+    readonly head: string;
+  }): Promise<string | null> {
+    return await import("./hub.ts").then((hub) => hub.openPull(input)).catch(() => null);
+  }
+
+  /** Approve or reject a hub Change Request's current revision. */
+  async reviewRemote(id: string, decision: "approve" | "reject"): Promise<boolean> {
+    return await import("./hub.ts").then((hub) => hub.review(id, decision)).catch(() => false);
+  }
+
+  /** Reply in one of a hub Change Request's threads. */
+  async replyRemote(id: string, thread: string, body: string): Promise<boolean> {
+    return await import("./hub.ts").then((hub) => hub.reply(id, thread, body)).catch(() => false);
+  }
+
+  /** Resolve or reopen one of a hub Change Request's threads. */
+  async resolveRemote(id: string, thread: string, resolved: boolean): Promise<boolean> {
+    return await import("./hub.ts")
+      .then((hub) => hub.resolveThread(id, thread, resolved))
+      .catch(() => false);
+  }
+
+  /** Record that a hub Change Request merged, once the branch moved. */
+  async mergedRemote(id: string, mergeCommit: string): Promise<boolean> {
+    return await import("./hub.ts")
+      .then((hub) => hub.recordMerged(id, mergeCommit))
+      .catch(() => false);
+  }
+
+  /** Claim, release, or close a hub task — its advisory lease and its end. */
+  async taskActionRemote(
+    id: string,
+    action: "claim" | "release" | "complete" | "abandon",
+  ): Promise<boolean> {
+    return await import("./hub.ts").then((hub) => hub.taskAction(id, action)).catch(() => false);
   }
 
   #replace(id: string, update: (task: Task) => Task): void {

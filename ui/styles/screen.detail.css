@@ -428,3 +428,43 @@
 .gp-parent-link:hover {
   text-decoration: underline;
 }
+
+/* Review threads on a hub Change Request. */
+.gp-thread {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.gp-thread[data-resolved] {
+  opacity: 0.75;
+}
+.gp-thread-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.gp-thread-path {
+  font-family: var(--gp-mono, monospace);
+  font-size: 12px;
+}
+.gp-thread-state {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--gp-text-dim, inherit);
+}
+.gp-thread-reply .gp-input {
+  width: 100%;
+}
+
+/* A hub task's lease controls. */
+.gp-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 12px 0;
+}
+.gp-task-actions .gp-field-label {
+  margin-right: auto;
+}

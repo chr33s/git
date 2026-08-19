@@ -34,6 +34,9 @@ import * as GitRepository from "../src/git/Repository.ts";
 import * as HubTask from "../src/hub/Task.ts";
 import { serve as serveHost } from "../src/host/Node.ts";
 import * as Contract from "../src/server/ApiContract.ts";
+import { enableHubUnder } from "../src/testing/Hub.ts";
+import * as Certificate from "../src/trust/Certificate.ts";
+import * as Log from "../src/trust/Log.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Output lives at the repository root alongside `dist/sea`, not under `ui/`. */
@@ -316,6 +319,22 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             trust: null,
             budget: null,
             branches: {},
+          });
+        }
+        if (path === "/core/policy") {
+          return json(Contract.PolicyAnswer, {
+            rules: {
+              protected: ["refs/heads/main"],
+              requiredApprovals: 0,
+              requiredChecks: [],
+              requireResolvedThreads: false,
+              requirePullRequest: false,
+              maxTrustAgeSeconds: 0,
+              requireProvenance: false,
+              maxUsageTokens: 0,
+              usageWindowSeconds: 0,
+            },
+            ref: null,
           });
         }
         if (path.startsWith("/core/object/")) {
@@ -910,22 +929,6 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   await page.waitForTimeout(500);
   check("a timeline card opens its task", (await hash()).startsWith("#/detail/"), await hash());
 
-  await page.goto(`${origin}/#/settings`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(600);
-  const state = (): Promise<string> =>
-    page.evaluate(
-      () => document.querySelectorAll("ui-switch")[2]?.getAttribute("data-state") ?? "",
-    );
-  const off = await state();
-  await page.evaluate(() =>
-    document.querySelectorAll("ui-switch")[2]?.querySelector("input")?.click(),
-  );
-  await page.waitForTimeout(300);
-  check(
-    "ui-switch mirrors the native checkbox it adopted",
-    off === "unchecked" && (await state()) === "checked",
-  );
-
   await page.goto(`${origin}/#/detail/CR-15`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(600);
   check(
@@ -1448,6 +1451,23 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     ),
   );
 
+  // The policy card's toggles are the ui-switch adoption in the flesh:
+  // clicking the native checkbox must flip the element's `data-state`.
+  const switchState = (): Promise<string> =>
+    page.evaluate(
+      () =>
+        document.querySelector('[data-card="policy"] ui-switch')?.getAttribute("data-state") ?? "",
+    );
+  const off = await switchState();
+  await page.evaluate(() =>
+    document.querySelector('[data-card="policy"] ui-switch')?.querySelector("input")?.click(),
+  );
+  await page.waitForTimeout(300);
+  check(
+    "ui-switch mirrors the native checkbox it adopted",
+    off === "unchecked" && (await switchState()) === "checked",
+  );
+
   // A tag, then its removal — the whole round trip through /tags.
   await page.fill('[data-card="tags"] input[name="name"]', "v0.4.0");
   await page.fill('[data-card="tags"] input[name="message"]', "identity milestone");
@@ -1607,16 +1627,28 @@ const localMode = async (browser: Browser): Promise<void> => {
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const body = Buffer.concat(chunks);
+      // Every header both ways except the hop-by-hop set: the native auth
+      // scheme lives in `www-authenticate` and `authorization`, and a proxy
+      // that drops either silently breaks the challenge.
+      const HOP = new Set(["host", "connection", "content-length", "transfer-encoding"]);
       const headers = new Headers();
-      const contentType = request.headers["content-type"];
-      if (contentType !== undefined) headers.set("content-type", contentType);
+      for (const [name, value] of Object.entries(request.headers)) {
+        // Node models repeated headers as arrays; none of the ones this
+        // proxy carries repeat, so the first value is the value.
+        const single = Array.isArray(value) ? value[0] : value;
+        if (HOP.has(name.toLowerCase()) || single === undefined) continue;
+        headers.set(name, single);
+      }
       const proxied = await fetch(`${upstream}${request.url ?? "/"}`, {
         method: request.method ?? "GET",
         headers,
         body: body.length === 0 ? undefined : new Uint8Array(body),
       });
-      const answerType = proxied.headers.get("content-type");
-      response.writeHead(proxied.status, answerType === null ? {} : { "content-type": answerType });
+      const out: Record<string, string> = {};
+      proxied.headers.forEach((value, name) => {
+        if (!HOP.has(name) && name !== "content-encoding") out[name] = value;
+      });
+      response.writeHead(proxied.status, out);
       response.end(Buffer.from(await proxied.arrayBuffer()));
     })().catch(() => {
       response.writeHead(502);
@@ -1627,6 +1659,7 @@ const localMode = async (browser: Browser): Promise<void> => {
   const origin = "http://localhost:8134";
 
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+
   try {
     await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
 
@@ -1715,6 +1748,111 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
     check("the list counts both hub tasks", (await page.locator(".gp-task-row").count()) === 2);
+    // --- enrolment: a genesis lands, and the browser's key is granted ------
+    // Stage the proposal's branch while writes are still open: a browser's
+    // git push has no envelope, so on a genesis'd repository the push comes
+    // first and the signed events after.
+    const hash = async (): Promise<string> => await page.evaluate(() => window.location.hash);
+
+    await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+    await page.waitForSelector(".gp-sync", { timeout: 30_000 });
+    await page.click(".gp-branch-trigger");
+    await page.waitForTimeout(400);
+    await page.click('.gp-menu-item[value="__new-branch"]');
+    await page.waitForTimeout(400);
+    await page.fill("#gp-new-branch-name", "topic");
+    await page.click(".gp-new-branch button[type='submit']");
+    await page.waitForTimeout(1500);
+    await page.click('.gp-file-card button[aria-label="Edit file"]');
+    await page.waitForTimeout(400);
+    await page.fill(".gp-editor", "# core\n\nProposed from the browser.\n");
+    await page.fill(".gp-editor-message", "propose from the browser");
+    await page.click(".gp-editor-bar .gp-btn-primary");
+    await page.waitForTimeout(1200);
+    await page.click(".gp-sync button:first-child");
+    await page.waitForTimeout(2000);
+
+    await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
+    await page.waitForSelector('input[aria-label="Browser public key"]', { timeout: 15_000 });
+    const browserKey = await page.inputValue('input[aria-label="Browser public key"]');
+    check("Settings shows the browser's public key", browserKey.startsWith("ssh-ed25519 "));
+
+    // Node-side, as an operator would: give the repository an identity and
+    // grant the key the page showed. Nobody is granted `repo.read`, so reads
+    // stay public and only writes start asking who is asking.
+    const fixture = await enableHubUnder(root, "core", ["source.push"]);
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: fixture.repoId,
+            publicKey: browserKey,
+            capabilities: [
+              "source.push",
+              "hub.create-pr",
+              "hub.approve",
+              "hub.comment",
+              "hub.merge",
+              "policy.write",
+            ],
+            id: Log.newId(),
+          }),
+          [fixture.root],
+        );
+      }).pipe(Effect.provide(repoLayer)),
+    );
+
+    // --- a Change Request, opened and reviewed under the granted key -------
+    await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector(".gp-sync", { timeout: 30_000 });
+    await page.click(".gp-branch-trigger");
+    await page.waitForTimeout(400);
+    await page.click('.gp-menu-item[value="topic"]');
+    await page.waitForTimeout(1500);
+    await page.waitForSelector("ui-dialog.gp-propose button[data-dialog-trigger]", {
+      timeout: 10_000,
+    });
+    await page.click("ui-dialog.gp-propose button[data-dialog-trigger]");
+    await page.waitForTimeout(400);
+    await page.fill("#gp-propose-title", "Proposed from the browser");
+    await page.click("ui-dialog.gp-propose form button[type='submit']");
+    await page.waitForTimeout(4000);
+    const detailHash = await hash();
+    check("proposing opens the new Change Request", detailHash.startsWith("#/detail/"));
+    const prId = detailHash.slice("#/detail/".length);
+
+    const pulls = await fetch(`${upstream}/core/hub/pulls`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.HubPullPage)(await response.json()),
+    );
+    check("the hub lists it, judged under the genesis", pulls.enabled === true);
+    check(
+      "and it names the browser's proposal",
+      pulls.items.some((entry) => entry.id === prId && entry.title === "Proposed from the browser"),
+    );
+
+    await page.waitForSelector(".gp-review .gp-btn-quiet", { timeout: 10_000 });
+    await page.click(".gp-review .gp-btn-quiet");
+    await page.waitForTimeout(2500);
+    const reviewed = await fetch(`${upstream}/core/hub/pulls/${prId}`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.HubPullDetail)(await response.json()),
+    );
+    check(
+      "the approval landed as a signed review event",
+      reviewed.reviews.length === 1 && reviewed.reviews[0]?.decision === "approve",
+    );
+
+    // --- branch rules, published from the Settings form --------------------
+    await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
+    await page.waitForSelector('[data-card="policy"] form', { timeout: 15_000 });
+    await page.fill("#gp-policy-approvals", "1");
+    await page.click('[data-card="policy"] button[type="submit"]');
+    await page.waitForTimeout(2000);
+    const policy = await fetch(`${upstream}/core/policy`).then(async (response) =>
+      Schema.decodeUnknownSync(Contract.PolicyAnswer)(await response.json()),
+    );
+    check("the published policy is what a push now meets", policy.rules.requiredApprovals === 1);
+
     await shot(page, "local-mode");
   } finally {
     await page.close();
@@ -1732,9 +1870,11 @@ const browser = await chromium.launch(
 );
 
 try {
-  await render(browser, "http://localhost:8131");
-  await interact(browser, "http://localhost:8131");
-  await live(browser, "http://localhost:8132");
+  if (process.env["GP_VERIFY_ONLY_LOCAL"] !== "1") {
+    await render(browser, "http://localhost:8131");
+    await interact(browser, "http://localhost:8131");
+    await live(browser, "http://localhost:8132");
+  }
   await localMode(browser);
 } finally {
   await browser.close();

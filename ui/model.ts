@@ -78,6 +78,25 @@ export interface DiffLine {
   readonly kind: "add" | "del" | "context";
 }
 
+/** One review thread on a hub Change Request, with its conversation. */
+export interface Thread {
+  readonly id: string;
+  readonly path: string | null;
+  readonly resolved: boolean;
+  readonly comments: readonly Comment[];
+}
+
+/** One agent session, as the hub projects it — provenance, not planning. */
+export interface SessionRow {
+  readonly id: string;
+  readonly agent: string;
+  readonly refs: readonly string[];
+  readonly pulls: readonly string[];
+  readonly commits: number;
+  readonly openDecisions: number;
+  readonly tokens: number;
+}
+
 export interface Task {
   readonly id: string;
   readonly kind: Kind;
@@ -92,6 +111,12 @@ export interface Task {
   readonly updated: string;
   readonly parent?: string;
   readonly children?: readonly string[];
+  /** Set when this row is the hub's projection rather than a fixture. */
+  readonly hub?: boolean;
+  /** Hub Change Requests carry their review threads once hydrated. */
+  readonly threads?: readonly Thread[];
+  /** The proposed revision a hub review approves — the head oid. */
+  readonly reviewHead?: string;
 }
 
 /**

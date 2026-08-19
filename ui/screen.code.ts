@@ -42,7 +42,8 @@ import {
   type Unavailable,
   type Whoami,
 } from "./api.ts";
-import { GitPlusElement } from "./base.ts";
+import { GitPlusElement, navigate } from "./base.ts";
+import { store } from "./store.ts";
 import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
 import { current as currentTheme, type Theme } from "./theme.ts";
@@ -181,6 +182,17 @@ export class GpCode extends GitPlusElement {
   @state() private accessor syncing = false;
   /** What the last sync attempt said, cleared by the next one. */
   @state() private accessor syncNotice: string | null = null;
+
+  /** Bisect marks, while the commits panel is being used to hunt a culprit. */
+  @state() private accessor bisect: {
+    readonly good: readonly string[];
+    readonly bad: string | null;
+    readonly answer: {
+      readonly kind: "test" | "found";
+      readonly commit: string;
+      readonly steps: number;
+    } | null;
+  } | null = null;
 
   /** The tip's full oid at last load — the `expected` for the next commit. */
   #tip: string | null = null;
@@ -433,6 +445,130 @@ export class GpCode extends GitPlusElement {
     }
   }
 
+  get #defaultBranch(): string {
+    return this.branches.includes("main") ? "main" : (this.branches[0] ?? "main");
+  }
+
+  /**
+   * Open a Change Request for the current branch.
+   *
+   * The order is the honest one: push first, so the revision the event names
+   * exists on the server, then sign and append `pr.opened`, then go look at
+   * it. A failure at any step says which step.
+   */
+  #propose = async (event: SubmitEvent): Promise<void> => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!(form instanceof HTMLFormElement)) return;
+    const titleField = form.elements.namedItem("title");
+    const descField = form.elements.namedItem("desc");
+    if (!(titleField instanceof HTMLInputElement)) return;
+    if (!(descField instanceof HTMLTextAreaElement)) return;
+    const title = titleField.value.trim();
+    if (title === "" || this.#tip === null) return;
+    const api = syncCapable(this.api);
+    this.syncing = true;
+    this.syncNotice = null;
+    try {
+      if (api !== null) {
+        const state = await api.sync(this.ref);
+        if (state.ahead > 0) {
+          const results = await api.push(this.ref);
+          const refused = results.find((result) => !result.ok);
+          if (refused !== undefined) {
+            this.syncNotice = `push refused: ${refused.reason ?? refused.ref}`;
+            return;
+          }
+        }
+      }
+      const pr = await store.openPullRemote({
+        title,
+        description: descField.value.trim(),
+        base: this.#defaultBranch,
+        head: this.#tip,
+      });
+      form.reset();
+      const dialog = this.querySelector("ui-dialog.gp-propose");
+      if (dialog instanceof UIDialog) dialog.hide();
+      if (pr === null) {
+        this.syncNotice = "the hub refused the Change Request — is this key a member?";
+        return;
+      }
+      navigate(this, { screen: "detail", id: pr });
+    } finally {
+      this.syncing = false;
+      void this.#refreshSync();
+    }
+  };
+
+  async #cherryPick(commit: string): Promise<void> {
+    const api = this.api;
+    if (api === null || this.syncing) return;
+    this.syncing = true;
+    this.syncNotice = null;
+    try {
+      const outcome = await api.cherryPick(commit, this.ref);
+      this.syncNotice =
+        outcome.kind === "conflicted"
+          ? `cherry-pick conflicted — resolve on a branch`
+          : outcome.kind === "up-to-date"
+            ? `${this.ref} already has ${commit.slice(0, 7)}`
+            : `picked ${commit.slice(0, 7)} onto ${this.ref}`;
+      if (outcome.kind === "replayed") await this.#reload(this.selected ?? undefined);
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.syncNotice = `cherry-pick failed — ${describe(error)}`;
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  async #rebaseOntoDefault(): Promise<void> {
+    const api = this.api;
+    const onto = this.#defaultBranch;
+    if (api === null || this.syncing || this.ref === onto) return;
+    this.syncing = true;
+    this.syncNotice = null;
+    try {
+      const outcome = await api.rebase(this.ref, onto);
+      this.syncNotice =
+        outcome.kind === "conflicted"
+          ? "rebase conflicted — resolve by hand"
+          : outcome.kind === "up-to-date"
+            ? `${this.ref} is already on ${onto}`
+            : `rebased ${this.ref} onto ${onto}`;
+      if (outcome.kind === "replayed") await this.#reload(this.selected ?? undefined);
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.syncNotice = `rebase failed — ${describe(error)}`;
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  #mark(commit: string, as: "good" | "bad"): void {
+    const current = this.bisect ?? { good: [], bad: null, answer: null };
+    const next =
+      as === "bad"
+        ? { ...current, bad: commit }
+        : { ...current, good: [...current.good.filter((oid) => oid !== commit), commit] };
+    this.bisect = next;
+    const bad = next.bad;
+    if (bad !== null && next.good.length > 0) void this.#step({ good: next.good, bad });
+  }
+
+  async #step(marks: { readonly good: readonly string[]; readonly bad: string }): Promise<void> {
+    const api = this.api;
+    if (api === null) return;
+    try {
+      const answer = await api.bisect(marks.good, marks.bad);
+      this.bisect = { good: marks.good, bad: marks.bad, answer };
+    } catch (error) {
+      if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      this.syncNotice = `bisect failed — ${describe(error)}`;
+    }
+  }
+
   /**
    * The sync controls: what there is to push, what there is to fetch, and
    * the buttons that do either. Rendered only in local mode — the header is
@@ -465,7 +601,61 @@ export class GpCode extends GitPlusElement {
         >
           Fetch${state.behind > 0 ? ` ↓${state.behind}` : ""}
         </button>
+        ${this.ref === this.#defaultBranch ? nothing : this.#proposeDialog()}
       </span>
+    `;
+  }
+
+  /**
+   * Open a Change Request for this branch: pushed first, signed with the
+   * browser's key, and read back from the projection. Only offered off the
+   * default branch — a Change Request proposing a branch onto itself is not
+   * a proposal.
+   */
+  #proposeDialog(): TemplateResult {
+    return html`
+      <ui-dialog class="gp-propose">
+        <button
+          class="gp-btn-primary"
+          data-dialog-trigger
+          type="button"
+          ?disabled=${this.syncing}
+          title="Push ${this.ref} and open a Change Request against ${this.#defaultBranch}"
+        >
+          Propose
+        </button>
+        <ui-dialog-popup class="gp-dialog">
+          <h2 class="gp-dialog-title" data-dialog-title>Propose ${this.ref}</h2>
+          <p class="gp-dialog-hint" data-dialog-description>
+            Pushes the branch, then opens a Change Request against ${this.#defaultBranch} — signed
+            with this browser's key.
+          </p>
+          <form @submit=${this.#propose}>
+            <label class="gp-field-label" for="gp-propose-title">Title</label>
+            <input
+              id="gp-propose-title"
+              class="gp-input"
+              name="title"
+              required
+              autocomplete="off"
+              placeholder="What this changes"
+            />
+            <label class="gp-field-label" for="gp-propose-desc">Description</label>
+            <textarea
+              id="gp-propose-desc"
+              class="gp-textarea"
+              name="desc"
+              rows="3"
+              placeholder="Why, and anything a reviewer should know…"
+            ></textarea>
+            <div class="gp-dialog-actions">
+              <button class="gp-btn-primary" type="submit" ?disabled=${this.syncing}>
+                Open Change Request
+              </button>
+            </div>
+          </form>
+        </ui-dialog-popup>
+      </ui-dialog>
     `;
   }
 
@@ -967,6 +1157,10 @@ export class GpCode extends GitPlusElement {
       this.#branchDialog()?.show();
       return;
     }
+    if (event.detail.value === "__rebase") {
+      void this.#rebaseOntoDefault();
+      return;
+    }
     void this.#switchTo(event.detail.value);
   };
 
@@ -1005,6 +1199,15 @@ export class GpCode extends GitPlusElement {
           <ui-menu-item class="gp-menu-item" data-action value="__new-branch">
             ${icons.plus(12)} New branch…
           </ui-menu-item>
+          ${
+            this.ref === this.#defaultBranch
+              ? nothing
+              : html`
+                  <ui-menu-item class="gp-menu-item" data-action value="__rebase">
+                    ${icons.branch(12)} Rebase onto ${this.#defaultBranch}
+                  </ui-menu-item>
+                `
+          }
         </ui-menu-popup>
       </ui-menu>
       <ui-dialog class="gp-new-branch">
@@ -1091,9 +1294,60 @@ export class GpCode extends GitPlusElement {
                         <span class="gp-sha">${commit.oid.slice(0, 7)}</span>
                         <span>${commit.subject}</span>
                         <span class="gp-when">${initials(commit.author)} · ${ago(commit.at)}</span>
+                        <span class="gp-row-actions">
+                          <button
+                            class="gp-link-btn"
+                            type="button"
+                            title="Replay this commit onto ${this.ref}"
+                            ?disabled=${this.syncing || this.offline}
+                            @click=${() => void this.#cherryPick(commit.oid)}
+                          >
+                            pick
+                          </button>
+                          <button
+                            class="gp-link-btn"
+                            type="button"
+                            title="Mark good for bisect"
+                            ?disabled=${this.offline}
+                            @click=${() => this.#mark(commit.oid, "good")}
+                          >
+                            good
+                          </button>
+                          <button
+                            class="gp-link-btn"
+                            type="button"
+                            title="Mark bad for bisect"
+                            ?disabled=${this.offline}
+                            @click=${() => this.#mark(commit.oid, "bad")}
+                          >
+                            bad
+                          </button>
+                        </span>
                       </div>
                     `,
                   )
+          }
+          ${
+            this.bisect === null || this.bisect.answer === null
+              ? nothing
+              : html`
+                  <p class="gp-notice">
+                    ${
+                      this.bisect.answer.kind === "found"
+                        ? `bisect: first bad commit is ${this.bisect.answer.commit.slice(0, 7)}`
+                        : `bisect: test ${this.bisect.answer.commit.slice(0, 7)} — about ${String(this.bisect.answer.steps)} step(s) left`
+                    }
+                    <button
+                      class="gp-link-btn"
+                      type="button"
+                      @click=${() => {
+                        this.bisect = null;
+                      }}
+                    >
+                      reset
+                    </button>
+                  </p>
+                `
           }
         </div>
       `;

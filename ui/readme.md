@@ -87,6 +87,21 @@ the screens show the repository's own state. A repository whose hub is empty,
 absent or unreachable keeps the design's fixtures (`fixtures.ts`) — the
 documented sample, never passed off as live.
 
+**The whole review loop runs in the page.** A branch edited and committed in
+OPFS is proposed from the Code screen's **Propose** dialog: the branch is
+pushed, a `pr.opened` event is signed and appended, and the new Change
+Request opens in Detail — where **Approve** / **Request changes** submit
+reviews of the exact revision, threads resolve and take replies, and a merge
+that lands also records `pr.merged`. Hub tasks carry their lease: claim,
+release, complete or abandon from the detail screen. The Activity screen
+lists the hub's **sessions** — what each agent was told and produced — and
+the commits panel picks up cherry-pick, bisect marks, and a rebase entry in
+the branch menu (all local in local mode, over the JSON API otherwise).
+Settings shows grant expiry, trust freshness and the usage budget beside the
+identity, badges remotes with their stored key and standing sync
+instruction, and the **Branch policy** card reads `GET /policy` and
+publishes edits back through `policy.write`'s own door.
+
 **The browser holds a signing key.** `identity.ts` generates an Ed25519 key
 on first use (WebCrypto, through the same `SshSignature` module every other
 author uses), keeps the seed in OPFS beside the clone, and signs hub events
@@ -95,10 +110,12 @@ with it: creating a Task opens a real `task.opened` event over
 `comment.created`, and both are read back from the server's projection —
 never shown optimistically. When the server answers a 401 nonce challenge,
 the request retries once under a signed `auth.request` envelope, the same
-native scheme the CLI presents. A fresh key is nobody: the Settings identity
-card shows its public half so an operator can `hub grant` it, and until a
-repository accepts the key (or is served `--open`), mutations fall back to
-tab-local state and the dialogs say which happened. The projection half of a
+native scheme the CLI presents — and every JSON write in `api.ts` retries a
+401 the same way, so a granted key authenticates merges, commits and policy
+edits transparently. A fresh key is nobody: the Settings identity card shows
+its public half so an operator can `hub grant` it, and until a repository
+accepts the key (or is served `--open`), mutations fall back to tab-local
+state and the dialogs say which happened. The projection half of a
 fixture merge remains tab-local, as before.
 
 When the API cannot be reached, Code and Diff fall back to the design's sample
