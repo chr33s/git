@@ -112,29 +112,30 @@ const open = Command.make(
           // sorted id, entries divide invisibly across the two, and two runners
           // delete each other's candidate branches.
           //
-          // And refused on silence too. A queue this replica cannot project —
-          // past the ceiling, missing an object after replication, a storage
-          // blip — read as "no queue here" and let this create the second one,
-          // which is the very thing that cannot be taken back. Fail closed: the
-          // cost is a command that has to be run where the repository is
-          // readable, against a mistake nothing can undo.
-          //
           // It catches the mistake and not the race: two `open` calls at once
           // both see nothing and both write. There is no compare-and-swap
           // across refs to have instead, and the same is true of a task claim
           // — saying so is better than implying a guarantee this cannot give.
           const existing = yield* Queue.forTarget(target);
-          if (existing.unreadable.length > 0) {
-            return yield* new Invalid({
-              field: "target",
-              reason: `cannot tell whether ${target} already has a queue: ${existing.unreadable.join(", ")} cannot be read here`,
-            });
-          }
           if (existing.found !== null) {
             return yield* new Invalid({
               field: "target",
               reason: `${target} already has a queue: ${existing.found.queue}`,
             });
+          }
+          // A queue this replica cannot project could be for this branch, and
+          // there is no way to find out from here. Said rather than refused:
+          // `refs/hub/queue/*` cannot be deleted, so refusing would let one
+          // unreadable queue — on any branch — block opening a queue for every
+          // other branch, for good, which is a worse permanent state than the
+          // one it guards against. And the duplicate it guards against is
+          // largely inert: `forTarget` picks the first match in sorted id order
+          // on every replica, so a second queue is a ref nobody consults unless
+          // they name its id.
+          if (existing.unreadable.length > 0) {
+            yield* Console.error(
+              `warning: ${existing.unreadable.join(", ")} cannot be read here, so this cannot tell whether one of them already serves ${target}`,
+            );
           }
           const opened = yield* Queue.open({
             repo: (yield* identityOf(repo)).repoId,
@@ -229,7 +230,8 @@ const leave = Command.make(
           // Refused for the reason a mistyped queue id is: a record about
           // something that is not queued is one the projection ignores for
           // ever, on a ref nothing can shorten, reported as success.
-          if (!state.entries.some((entry) => entry.pr === pr)) {
+          const held = state.entries.find((entry) => entry.pr === pr);
+          if (held === undefined) {
             return yield* new Invalid({
               field: "pr",
               reason: `${pr} is not in ${state.queue}`,
@@ -242,6 +244,14 @@ const leave = Command.make(
             reason: chosen,
             key: signer,
           });
+          // And the branch it published goes with it. A pass only deletes the
+          // branches of entries *it* settled, and no later pass can name this
+          // one — so left here, the candidate commit is pinned out of reach of
+          // collection for as long as the repository exists.
+          if (held.candidate !== null) {
+            const repository = yield* Repository;
+            yield* repository.deleteRef(held.candidate.branch);
+          }
         }),
       );
       yield* Console.log(`${pr} left: ${reason}`);
@@ -425,7 +435,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // the churn is unbounded on a ref that only grows. `queueCandidates` is off by
   // default, which makes this the shape a queue is most likely to be run in
   // before somebody turns the rule on.
-  if (Policy.isProtected(rules, target) && !rules.queueCandidates) {
+  if (Policy.isProtected(rules, target) && Policy.needsReview(rules) && !rules.queueCandidates) {
     return yield* new Invalid({
       field: "queue",
       reason:

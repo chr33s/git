@@ -488,6 +488,22 @@ export type Refusal = Extract<Decision, { readonly ok: false }>;
 const refused = (ref: string, reason: string): Refusal => ({ ok: false, ref, reason });
 
 /**
+ * Whether a protected branch asks anything of the *revision* arriving on it.
+ *
+ * A branch can be protected and still take a direct push: "no force-push, no
+ * deletion" is protection that asks nothing of what is being pushed, and
+ * `protectedBranch` returns early there. Exported because a caller deciding
+ * whether a queue has anything to do on a branch has to ask the same question
+ * — asked as "is it protected?" alone, a runner refused to build candidates
+ * for a branch whose pushes the boundary would simply have allowed.
+ */
+export const needsReview = (rules: Rules): boolean =>
+  rules.requirePullRequest ||
+  rules.requiredApprovals > 0 ||
+  rules.requiredChecks.length > 0 ||
+  rules.requireResolvedThreads;
+
+/**
  * Whether a rule covers this ref — or, for a caller naming a namespace,
  * anything in it.
  *
@@ -1639,13 +1655,7 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   readonly folds: FoldCache;
   readonly mentions: MentionCache;
 }) {
-  const { rules } = input;
-  const needsReview =
-    rules.requirePullRequest ||
-    rules.requiredApprovals > 0 ||
-    rules.requiredChecks.length > 0 ||
-    rules.requireResolvedThreads;
-  if (!needsReview) return null;
+  if (!needsReview(input.rules)) return null;
 
   const direct = yield* authorizes({ ...input, revision: input.to, checkAt: input.to });
   if (direct.satisfied) return null;

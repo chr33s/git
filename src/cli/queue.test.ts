@@ -1123,6 +1123,62 @@ describe("cli queue", () => {
     );
   });
 
+  it("takes the published branch with a pull request that leaves", async () => {
+    // A pass only deletes the branches of entries it settled, and no later pass
+    // can name this one — so left behind, the candidate commit is pinned out of
+    // reach of collection for as long as the repository exists.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    await enter(first);
+    const built = await run();
+    const branch = `refs/heads/queue/main/${first}`;
+    assert.notEqual(
+      await inRepo(
+        Effect.flatMap(GitRepository.Repository, (repository) => repository.resolve(branch)),
+      ),
+      null,
+    );
+    void built;
+
+    await cli([
+      "queue",
+      "leave",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "--reason",
+      "withdrawn",
+      "project",
+      first,
+    ]);
+    assert.equal(
+      await inRepo(
+        Effect.flatMap(GitRepository.Repository, (repository) => repository.resolve(branch)),
+      ),
+      null,
+      "and it goes with it",
+    );
+  });
+
+  it("builds for a branch protected only against force-push and deletion", async () => {
+    // Such a branch asks nothing of the revision arriving on it, so the
+    // boundary allows the push and the runner has no reason to refuse — asked
+    // as "is it protected?" alone, it refused work the boundary would take.
+    await publish({
+      ...Policy.OPEN,
+      protected: ["refs/heads/main"],
+      queueCandidates: false,
+    });
+    await enter(await propose("one"));
+
+    const pass = await run();
+    assert.equal(pass.built.length, 1, "it builds rather than hard-erroring");
+    assert.deepEqual(pass.landed.length, 1, "and the boundary takes it");
+  });
+
   it("refuses a second queue for a branch that already has one", async () => {
     // `refs/hub/queue/*` cannot be deleted, so a second queue for one branch is
     // a permanent split: entries divide invisibly across the two and two
