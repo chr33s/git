@@ -83,6 +83,17 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
         reason: `this repository holds no queue ${input.queue}; open one with \`git+ queue open\``,
       });
     }
+    // And a queue that has ended reads nothing further. Refused for the same
+    // reason a mistyped id is: `forTarget` hides a closed queue and `run`
+    // refuses one, so an append here is a permanent record nothing will ever
+    // act on — a pull request entered into it would simply never land, and the
+    // command would have said it was entered.
+    if (state.closed !== null) {
+      return yield* new Invalid({
+        field: "queue",
+        reason: `${input.queue} was closed (${state.closed}); open a fresh queue for its branch`,
+      });
+    }
     return state;
   }
   if (input.target === "") {
@@ -296,6 +307,19 @@ const close = Command.make(
         Effect.gen(function* () {
           const genesis = yield* identityOf(repo);
           const state = yield* resolve({ queue, target });
+          // A queue is its opener's to end, as a task is its opener's to close,
+          // and the fold says so by ignoring a close from anybody else. Asked
+          // here as well, and before anything is destroyed: written blind, this
+          // command deleted every candidate branch the queue had published and
+          // reported success, while `show`, `forTarget` and `run` all went on
+          // seeing the queue as live.
+          const mine = yield* fingerprint(signer.publicKey);
+          if (state.openedBy !== mine) {
+            return yield* new Invalid({
+              field: "queue",
+              reason: `${state.queue} is not this key's to close; a queue is ended by whoever opened it`,
+            });
+          }
           yield* Queue.close({
             repo: genesis.repoId,
             queue: state.queue,
@@ -457,12 +481,6 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   const state = yield* resolve({ queue: input.queue, target: input.target });
   if (state.target === null) {
     return yield* new Invalid({ field: "queue", reason: `${state.queue} names no target branch` });
-  }
-  if (state.closed !== null) {
-    return yield* new Invalid({
-      field: "queue",
-      reason: `${state.queue} was closed (${state.closed}); open a fresh queue for this branch`,
-    });
   }
   const target = state.target;
   const rules = yield* Policy.rulesOf();

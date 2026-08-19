@@ -513,6 +513,15 @@ export interface Projection {
   /** Why this queue was ended, or `null` while it is still running. */
   readonly closed: string | null;
   /**
+   * Who opened it, and so whose it is to end.
+   *
+   * Exposed because a caller about to *act* on a close — deleting the branches
+   * it published — has to be able to ask the same question the fold does before
+   * doing anything, rather than write the record and find out afterwards that
+   * nothing counted it.
+   */
+  readonly openedBy: Fingerprint | null;
+  /**
    * How many records this queue holds.
    *
    * Surfaced because it is the number that decides whether the ref is
@@ -627,6 +636,7 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
     left,
     resets,
     closed,
+    openedBy: opened?.by ?? null,
     records: walked.events.length,
     // Said out loud rather than swallowed: a record that did not count is
     // exactly what somebody will be looking for.

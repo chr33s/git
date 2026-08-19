@@ -11,7 +11,7 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { generate, type PrivateKey } from "../crypto/SshSignature.ts";
+import { fingerprint, generate, type PrivateKey } from "../crypto/SshSignature.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -242,6 +242,54 @@ describe("hub Queue", () => {
     );
     assert.equal(failure._tag, "Invalid");
     assert.match(failure.reason, /one ref path component/);
+  });
+
+  it("ends a queue only for the key that opened it", async () => {
+    // A queue is its opener's to end, as a task is its opener's to close:
+    // ending is not undoable, so leaving it to anybody holding the namespace's
+    // capability would be a way to stop a branch's queue rather than a way to
+    // coordinate with it.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const world = yield* opened();
+        const stranger = yield* generate("stranger@example.com");
+        const base = yield* Queue.context(REPO, world.queue);
+        yield* Queue.issue({ ...base, type: "queue.closed", reason: "not yours" }, stranger);
+        const ignored = yield* Queue.project(world.queue);
+
+        yield* Queue.close({ repo: REPO, queue: world.queue, reason: "rotated", key: world.key });
+        return { ignored, ended: yield* Queue.project(world.queue) };
+      }),
+    );
+    assert.equal(state.ignored.closed, null, "a stranger's close counts for nothing");
+    assert.equal(state.ignored.ignored.length, 1, "and is said out loud");
+    assert.equal(state.ended.closed, "rotated");
+  });
+
+  it("names who opened a queue, so a caller can ask before acting", async () => {
+    const state = await scenario(
+      Effect.gen(function* () {
+        const world = yield* opened();
+        return {
+          projected: yield* Queue.project(world.queue),
+          key: yield* fingerprint(world.key.publicKey),
+        };
+      }),
+    );
+    assert.equal(state.projected.openedBy, state.key);
+  });
+
+  it("steps a closed queue aside from the branch it served", async () => {
+    const found = await scenario(
+      Effect.gen(function* () {
+        const world = yield* opened("refs/heads/release");
+        const live = yield* Queue.forTarget("refs/heads/release");
+        yield* Queue.close({ repo: REPO, queue: world.queue, reason: "rotated", key: world.key });
+        return { live, after: yield* Queue.forTarget("refs/heads/release") };
+      }),
+    );
+    assert.notEqual(found.live.found, null);
+    assert.equal(found.after.found, null, "so a fresh queue can take the branch over");
   });
 
   it("finds a queue by the branch it serves", async () => {

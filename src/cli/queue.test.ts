@@ -1327,6 +1327,51 @@ describe("cli queue", () => {
       "project",
     ]);
     assert.match(byTarget, /was closed/, "and the ended one runs nothing");
+
+    // Nor does anything else append to it: a record on a queue nothing reads
+    // is a permanent entry the projection ignores, reported as success.
+    const entering = await failing([
+      "queue",
+      "enter",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "project",
+      await propose("two"),
+    ]);
+    assert.match(entering, /was closed/);
+  });
+
+  it("ends a queue only for the key that opened it", async () => {
+    // Written blind, `close` deleted every candidate branch the queue had
+    // published and reported success, while `show`, `forTarget` and `run` all
+    // went on seeing the queue as live — the fold ignores a close from anybody
+    // but the opener.
+    // A required check nothing has reported keeps the entry queued with a
+    // candidate published, which is what a blind close would have destroyed.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    await enter(await propose("one"));
+    await run();
+
+    const refused = await failing([
+      "queue",
+      "close",
+      "--root",
+      root,
+      "--key",
+      reviewer,
+      "--queue",
+      queue,
+      "project",
+    ]);
+    assert.match(refused, /not this key's to close/);
+
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(state.closed, null, "and the queue is untouched");
+    assert.notEqual(state.entries[0].candidate, null, "branches included");
   });
 
   it("finishes a landing an interrupted pass half recorded", async () => {
