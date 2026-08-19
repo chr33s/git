@@ -2528,6 +2528,41 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
         const states = yield* Effect.forEach(paged.items, (id) => HubTask.project(id), {
           concurrency: 4,
         });
+        // A loop cannot be refused where the edges are written: they live on
+        // separate refs, `POST /hub/events` appends signed bytes without
+        // asking `hub/Task.ts`, and two members can close one concurrently
+        // without either ref being unsound. This listing is the first place
+        // that holds every edge at once, so it is where a loop stops being
+        // one: a task whose chain reaches itself reports no parent, which
+        // severs the cycle and leaves every chain finite. Readers are then
+        // owed no cycle guard of their own.
+        const above = new Map(states.map((state) => [state.task, state.parent]));
+        const circular = new Set<string>();
+        for (const state of states) {
+          const seen = new Set<string>([state.task]);
+          let at = state.parent;
+          while (at !== null && !seen.has(at)) {
+            seen.add(at);
+            at = above.get(at) ?? null;
+          }
+          // Reached itself: in the loop, rather than merely hanging below one.
+          if (at === state.task) circular.add(state.task);
+        }
+        const parentOf = (task: string, parent: string | null): string | null =>
+          circular.has(task) ? null : parent;
+
+        // Grouped from the children's own edges, which is the only place they
+        // are recorded. A parent this repository does not hold simply never
+        // gets read back out, so a dangling edge costs a lookup and nothing
+        // more — the child still reports the parent it named.
+        const children = new Map<string, Array<string>>();
+        for (const state of states) {
+          const parent = parentOf(state.task, state.parent);
+          if (parent === null) continue;
+          const held = children.get(parent);
+          if (held === undefined) children.set(parent, [state.task]);
+          else held.push(state.task);
+        }
         return {
           ...paged,
           items: states.map((state) => ({
@@ -2536,6 +2571,8 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
             title: state.title,
             description: state.description,
             refs: state.refs,
+            parent: parentOf(state.task, state.parent),
+            children: children.get(state.task) ?? [],
             available: state.available,
             claim: state.claim,
             closed: state.closed,

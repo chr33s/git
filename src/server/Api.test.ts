@@ -1317,6 +1317,109 @@ describe("Api hub", () => {
     ),
   );
 
+  it.live("groups tasks under the parent its children name", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("worker@example.com");
+        const milestone = yield* HubTask.open({ repo: "r", title: "v0.4 — Identity", key });
+        const first = yield* HubTask.open({
+          repo: "r",
+          title: "sign events with the browser key",
+          parent: milestone.task,
+          key,
+        });
+        // Filed after the fact, which is the case a field on `task.opened`
+        // could never answer: work moves between releases.
+        const second = yield* HubTask.open({ repo: "r", title: "verify signatures", key });
+        yield* HubTask.reparent({
+          repo: "r",
+          task: second.task,
+          parent: milestone.task,
+          key,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
+
+        assert.deepEqual(
+          [...(byId.get(milestone.task)?.children ?? [])].sort(),
+          [first.task, second.task].sort(),
+        );
+        assert.equal(byId.get(milestone.task)?.parent, null);
+        assert.equal(byId.get(first.task)?.parent, milestone.task);
+        assert.equal(byId.get(second.task)?.parent, milestone.task);
+        // The edge lives on the children; the parent's own ref never hears of
+        // it, so it carries no children of its own to report.
+        assert.deepEqual(byId.get(first.task)?.children, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("lets a member re-file work somebody else opened, but not close it", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const opener = yield* generate("opener@example.com");
+        const other = yield* generate("other@example.com");
+        const milestone = yield* HubTask.open({ repo: "r", title: "v0.4 — Identity", key: opener });
+        const work = yield* HubTask.open({ repo: "r", title: "sign events", key: opener });
+
+        // Triage, and undone by another `task.reparented`: the boundary has
+        // already asked for a `hub.*` capability to append here at all.
+        yield* HubTask.reparent({
+          repo: "r",
+          task: work.task,
+          parent: milestone.task,
+          key: other,
+        });
+        // Closing is not triage and does not come back, so it stays the
+        // opener's — the two rules differ on purpose.
+        yield* HubTask.close({ repo: "r", task: work.task, key: other });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
+        assert.equal(byId.get(work.task)?.parent, milestone.task);
+        assert.deepEqual(byId.get(milestone.task)?.children, [work.task]);
+        assert.equal(byId.get(work.task)?.closed, null);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("severs a loop the refs closed behind its back", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("worker@example.com");
+        const a = yield* HubTask.open({ repo: "r", title: "A", key });
+        const b = yield* HubTask.open({ repo: "r", title: "B", parent: a.task, key });
+
+        // The edge `hub/Task.ts` refuses, written the way `POST /hub/events`
+        // writes: signed bytes appended straight to the ref, never asking the
+        // module that would have said no. Two members racing on two refs get
+        // here honestly; this is the same end state, reached on purpose.
+        const base = yield* HubTask.context("r", a.task);
+        const payload = { ...base, type: "task.reparented" as const, parent: b.task };
+        const bytes = HubTask.encode(payload);
+        yield* HubEvent.appendTo({
+          ref: HubTask.refOf(a.task),
+          message: `task.reparented ${payload.id}\n`,
+          payload: bytes,
+          signatures: [yield* sign(key, bytes, NAMESPACE)],
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
+        // Both ends of the loop report no parent, so every chain a reader can
+        // walk is finite — which is what lets the walkers not guard.
+        assert.equal(byId.get(a.task)?.parent, null);
+        assert.equal(byId.get(b.task)?.parent, null);
+        assert.deepEqual(byId.get(a.task)?.children, []);
+        assert.deepEqual(byId.get(b.task)?.children, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
   it.live("answers an empty, disabled hub for a repository with no genesis", () =>
     dispatched(
       Effect.gen(function* () {

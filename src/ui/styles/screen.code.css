@@ -1,0 +1,269 @@
+/* -------------------------------------------------------------- code screen */
+
+.gp-explorer {
+  width: 280px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--gp-border);
+  padding: 16px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.gp-explorer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 12px;
+}
+
+.gp-explorer-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.gp-explorer-actions {
+  display: flex;
+  gap: 6px;
+  color: var(--gp-fg-muted);
+}
+
+/* `@pierre/trees` renders into a shadow root, so it is themed through the
+   `--trees-*-override` custom properties it reads from the host. */
+.gp-explorer-tree {
+  /* `@pierre/trees` virtualizes its rows, so it measures the host rather than
+     growing to fit. `min-height: 0` lets the flex item actually shrink, and
+     without both the tree computes a zero-height window and renders no rows. */
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  --trees-bg-override: transparent;
+  --trees-bg-muted-override: var(--gp-surface-raised);
+  --trees-fg-override: var(--gp-fg-secondary);
+  --trees-fg-muted-override: var(--gp-fg-faint);
+  --trees-accent-override: var(--gp-accent);
+  --trees-border-color-override: var(--gp-border);
+  --trees-border-radius-override: var(--gp-radius);
+  --trees-selected-bg-override: var(--gp-surface-selected);
+  --trees-selected-fg-override: var(--gp-fg);
+  --trees-selected-focused-border-color-override: var(--gp-border-strong);
+  --trees-focus-ring-color-override: var(--gp-accent);
+  --trees-font-family-override: var(--gp-font);
+  --trees-font-size-override: 13px;
+  --trees-input-bg-override: var(--gp-surface-input);
+  --trees-search-bg-override: var(--gp-surface-input);
+  --trees-search-fg-override: var(--gp-fg-secondary);
+  --trees-scrollbar-thumb-override: var(--gp-scroll-thumb);
+  --trees-indent-guide-bg-override: var(--gp-border);
+  --trees-item-padding-x-override: 10px;
+  --trees-level-gap-override: 16px;
+  /* The tree's scroll container insets its rows by 16px of its own, on top of
+     the 12px `.gp-explorer` already pads by. Zeroed here so rows run to the
+     panel's inset and line up with the header above them. */
+  --trees-padding-inline-override: 0px;
+  /* Status hues follow the design's explorer badges: M amber, A green. */
+  --trees-git-added-color-override: var(--gp-accent);
+  --trees-git-modified-color-override: var(--gp-amber);
+  --trees-git-deleted-color-override: var(--gp-red);
+  --trees-git-renamed-color-override: var(--gp-blue);
+  --trees-git-untracked-color-override: var(--gp-blue);
+  --trees-git-ignored-color-override: var(--gp-fg-dim);
+  --trees-status-added-override: var(--gp-accent);
+  --trees-status-modified-override: var(--gp-amber);
+  --trees-status-deleted-override: var(--gp-red);
+  --trees-status-renamed-override: var(--gp-blue);
+  --trees-status-untracked-override: var(--gp-blue);
+  --trees-status-ignored-override: var(--gp-fg-dim);
+}
+
+/* A button, so it can open the history it summarises — sized like the bar the
+   design drew, not like a button. */
+.gp-commit-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 18px;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--gp-fg-muted);
+  background: var(--gp-surface-raised);
+  border: 1px solid var(--gp-border);
+  border-radius: var(--gp-radius-lg);
+  padding: 12px 16px;
+  cursor: pointer;
+}
+
+.gp-commit-bar:hover:not(:disabled) {
+  border-color: var(--gp-border-hover);
+}
+
+.gp-commit-bar .gp-avatar {
+  width: 22px;
+  height: 22px;
+  background: var(--gp-avatar-alt-bg);
+}
+
+.gp-commit-author {
+  color: var(--gp-fg-secondary);
+  font-weight: 500;
+}
+
+/* The subject takes the slack so a long message truncates rather than pushing
+   the oid and age off the end of the bar. */
+.gp-commit-subject {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gp-commit-sha {
+  font-family: var(--gp-mono);
+  font-size: 12px;
+}
+
+.gp-file-card {
+  margin-top: 20px;
+}
+
+/* ------------------------------------------------------------- file editor */
+
+/* The explorer's "+" reuses the icon-button treatment without its push-right
+   margin — the actions row is already right-aligned by the header. */
+.gp-explorer-actions .gp-icon-btn {
+  margin-left: 0;
+}
+
+.gp-editor {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 340px;
+  padding: 14px 16px;
+  border: 0;
+  outline: none;
+  resize: vertical;
+  background: var(--gp-surface);
+  color: var(--gp-fg);
+  font-family: var(--gp-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.gp-editor-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--gp-border);
+  background: var(--gp-surface-raised);
+}
+
+.gp-editor-bar .gp-editor-message {
+  flex: 1;
+  width: auto;
+  font-size: 12.5px;
+}
+
+.gp-card-head .gp-editor-path {
+  flex: 1;
+  width: auto;
+  padding: 4px 8px;
+  font-family: var(--gp-mono);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+/* The commit error, inside the card between editor and bar. */
+.gp-file-card .gp-notice[data-error] {
+  margin: 0 12px 10px;
+}
+
+/* ------------------------------------------------- history panels and clone */
+
+.gp-commit-bar:disabled {
+  cursor: default;
+}
+
+.gp-history-panel {
+  margin-top: -8px;
+  margin-bottom: 18px;
+}
+
+.gp-filelog-row {
+  width: 100%;
+  box-sizing: border-box;
+  background: none;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.gp-filelog-row:hover {
+  background: var(--gp-row-hover);
+}
+
+.gp-filelog-row[data-current] {
+  background: var(--gp-surface-selected);
+}
+
+.gp-clone-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.gp-clone-url {
+  font-family: var(--gp-mono);
+  font-size: 12px;
+}
+
+.gp-link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--gp-accent);
+  cursor: pointer;
+}
+
+.gp-file-card .gp-notice[data-history] {
+  margin: 10px 12px 0;
+}
+
+.gp-card-head .gp-icon-btn[data-tight] {
+  margin-left: 4px;
+}
+
+.gp-card-head .gp-icon-btn[data-active] {
+  background: var(--gp-surface-selected);
+  color: var(--gp-fg);
+}
+
+.gp-menu-item[data-action] {
+  border-top: 1px solid var(--gp-divider);
+  color: var(--gp-fg-muted);
+}
+
+/* The local-mode sync controls beside the branch menu. */
+.gp-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Per-commit actions in the history panel. */
+.gp-row-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: auto;
+}

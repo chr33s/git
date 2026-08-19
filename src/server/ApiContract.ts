@@ -357,6 +357,16 @@ export const HubTask = Schema.Struct({
   title: Schema.String,
   description: Schema.String,
   refs: Schema.Array(Schema.String),
+  /** The task this one belongs to — a release, an epic, a parent story. */
+  parent: Schema.NullOr(Schema.String),
+  /**
+   * The tasks that name this one as their parent.
+   *
+   * Derived by the listing rather than recorded: the edge lives on the child,
+   * so the parent's own ref never learns of it, and a repository that answers
+   * for every task can group them in one pass.
+   */
+  children: Schema.Array(Schema.String),
   /** Open, unclaimed, unexpired — the question an idle agent asks. */
   available: Schema.Boolean,
   claim: Schema.NullOr(HubClaim),

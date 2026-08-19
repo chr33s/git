@@ -44,6 +44,7 @@ import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import * as Redaction from "../hub/Redaction.ts";
 import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
+import * as Static from "../server/Static.ts";
 import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { hubCommand } from "./hub.ts";
@@ -380,6 +381,13 @@ const credentialHelper = Command.make(
     }),
 );
 
+/**
+ * Where `build:ui` puts the bundle, found from this file rather than from the
+ * working directory — `serve` is run from wherever the repositories are, not
+ * from the checkout.
+ */
+const defaultUiDir = path.join(import.meta.dirname, "..", "..", "dist", "ui");
+
 const serveCommand = Command.make(
   "serve",
   {
@@ -394,18 +402,46 @@ const serveCommand = Command.make(
       Flag.withDefault(false),
       Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
     ),
+    ui: Flag.boolean("ui").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Serve the built browser UI from this origin as well"),
+    ),
+    uiDir: Flag.string("ui-dir").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("Where the built UI is, if not the one built beside this install"),
+    ),
   },
-  ({ hostname, open, port, root, wake }) =>
+  ({ hostname, open, port, root, ui, uiDir, wake }) =>
     Effect.gen(function* () {
+      // One origin, because a browser gives no choice: the page fetches
+      // `/{repo}/...` with no host of its own, and a page served from
+      // somewhere else has every one of those requests blocked. Serving the
+      // bundle here is what the deployed Worker does and what `dev:ui` fakes
+      // with a proxy — see `server/Static.ts`.
+      const assets = ui ? (uiDir === "" ? defaultUiDir : uiDir) : undefined;
+      if (assets !== undefined && !(yield* Effect.promise(() => Static.built(assets)))) {
+        return yield* new Invalid({
+          field: "ui",
+          reason: `${assets} holds no built UI; run \`npm run build:ui\` first, or point --ui-dir at one`,
+        });
+      }
       // There is no `--secret` any more: a repository with a genesis is
       // guarded by its own membership, and no server secret enters into it.
       // `--open` survives for the one case the repository cannot speak to —
       // it has no membership at all — where the choice really is the host's,
       // and the safe answer is the one you have to ask for.
       const server = yield* Effect.promise(() =>
-        serve({ root, port, hostname, allowAnonymousWrites: open, wake }),
+        serve({ root, port, hostname, allowAnonymousWrites: open, wake, ui: assets }),
       );
       yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
+      if (assets !== undefined) {
+        // Which repository the page is about is baked into its `index.html`
+        // as `<meta name="gp-repo">`, defaulting to `core`; the UI cannot
+        // guess it from a URL that has to stay the API's.
+        yield* Console.log(
+          `browser UI on ${server.url} from ${assets}, showing the repository its index.html names`,
+        );
+      }
       // Said out loud, because it is the one switch that makes this process
       // start other processes.
       if (wake) {
