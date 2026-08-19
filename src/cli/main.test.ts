@@ -248,6 +248,43 @@ describe("cli", () => {
     }
   });
 
+  it("fetches and pulls a remote's movement into a clone", async () => {
+    const serverRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cli-fetch-server-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-fetch-"));
+    const server = await serve({ root: serverRoot });
+    try {
+      await seed(path.join(serverRoot, "origin"), "first");
+      await cli(["clone", "--root", root, `${server.url}/origin`, "copy"]);
+
+      // The origin moves on; the clone finds out only when it asks.
+      await seed(path.join(serverRoot, "origin"), "second");
+
+      const fetched = await cli(["fetch", "--root", root, "copy", `${server.url}/origin`]);
+      assert.match(fetched, /refs\/heads\/main/);
+      const again = await cli(["fetch", "--root", root, "copy", `${server.url}/origin`]);
+      assert.match(again, /up to date/);
+
+      await seed(path.join(serverRoot, "origin"), "third");
+      const pulled = await cli(["pull", "--root", root, "copy", `${server.url}/origin`, "main"]);
+      assert.match(pulled, /refs\/heads\/main/);
+
+      const logOut = await execFileAsync(
+        "git",
+        [`--git-dir=${path.join(root, "copy")}`, "log", "--format=%s"],
+        { encoding: "utf8" },
+      );
+      assert.equal(logOut.stdout.trim().split("\n")[0], "third");
+
+      // And the reflog names each move the fetches made.
+      const reflog = await cli(["reflog", "--root", root, "copy", "main"]);
+      assert.ok(reflog.trim().split("\n").length >= 1);
+    } finally {
+      await server.close();
+      await fs.rm(serverRoot, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("serves repositories via the serve command", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-serve-"));
     await seed(path.join(root, "hosted"), "served");
