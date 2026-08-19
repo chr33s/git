@@ -1,32 +1,98 @@
-import { GitError } from "./git.error.ts";
+/**
+ * The Worker: a router that resolves `/:repo` to a DO stub and forwards.
+ * Same job as `git/Durable.ts`'s default export, with one difference —
+ * `repos` is a typed stub derived from the DO class, so a renamed method is
+ * a compile error rather than a 500 at the edge.
+ *
+ * Its own module because the bundler requires this file's *default export*
+ * to be the worker layer, and `alchemy.run.ts`'s default export must be the
+ * stack. The class stays importable on its own; consumers that bind it do
+ * not pull in `.make()` — the bundler tree-shakes it.
+ */
+import * as Alchemy from "alchemy/Cloudflare";
+import { Config, Effect, Redacted } from "effect";
+import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
-export default {
-  fetch(request, env) {
-    try {
-      request.signal?.throwIfAborted();
+import Repos from "./host/Cloudflare.ts";
+import { Repo } from "./host/Cloudflare.ts";
+import * as Auth from "./server/Auth.ts";
+import { normalize, routeOf } from "./server/Route.ts";
 
-      const repo = new URL(request.url).pathname
-        .match(/^\/([a-z0-9-_.]+?)(?:\.git)?(?:\/|$)/)
-        ?.at(1);
-      if (!repo) throw new Error("No repository name provided in URL");
+/** The Worker's public contract: it serves HTTP, nothing more. */
+export type GitBindings = {
+  readonly fetch: Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    never,
+    HttpServerRequest.HttpServerRequest
+  >;
+};
 
-      const gitRepository = env.GIT_SERVER.getByName(repo);
-      return gitRepository.fetch(request);
-    } catch (error: any) {
-      if (error.name === "AbortError") {
-        console.info("Request aborted:", error.message);
-        return new Response(null, { status: 499 });
-      }
+/** `Repo` in the third slot: this Worker hosts the DO, so it is contract. */
+export class Git extends Alchemy.Worker<Git, GitBindings, Repo>()("git") {}
 
-      console.error("index.fetch:", error);
+/**
+ * Pinned here and asserted against `wrangler.test.json` in
+ * `alchemy.run.test.ts`: the runtime the integration suite proves must be
+ * the runtime this Worker deploys.
+ */
+export const compatibility = { date: "2025-12-10", flags: ["nodejs_compat"] };
 
-      const code = error instanceof GitError ? error.code : "internal_error";
-      return Response.json(
-        { error: error.message ?? "Internal Server Error", code },
-        { status: error.status ?? 500 },
-      );
-    }
+export default Git.make(
+  {
+    main: import.meta.url,
+    compatibility,
   },
-} satisfies ExportedHandler<Env>;
+  Effect.gen(function* () {
+    const repos = yield* Repo;
 
-export { Server as GitServer } from "./server.ts";
+    // Read at init, so the deploy-time interceptor registers it as a
+    // `secret_text` binding: a deploy without `GIT_AUTH_SECRET` in the
+    // environment fails naming the variable, rather than shipping open.
+    const secret = yield* Config.redacted("GIT_AUTH_SECRET");
+
+    return {
+      fetch: Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const route = routeOf(new URL(request.url, "http://x").pathname);
+        if (route === null) {
+          return HttpServerResponse.text("No repository in URL", { status: 400 });
+        }
+
+        // SAFETY: the effect wrapper was built from the platform request
+        // (`HttpServerRequest.fromWeb`), so `source` is that same `Request`,
+        // headers and body intact — not a reconstruction. Normalised so the
+        // DO sees one spelling of the path whichever the client used.
+        const raw = normalize(request.source as Request, route);
+
+        // Auth lives at the edge: the DO trusts its callers, because the
+        // only ways in are this guard and another Worker's binding.
+        const denied = yield* Auth.guard(raw, (credential) =>
+          Auth.hmacVerify(Redacted.value(secret), route.repo, credential),
+        );
+        if (denied !== null) return HttpServerResponse.raw(denied);
+
+        // A client that hangs up mid-clone is not a server error. 499 is
+        // nginx's code for it, and it keeps aborted fetches out of the 5xx
+        // rate that pages someone.
+        // The stub's `fetch` speaks the effect request and response, which is
+        // what the Durable Object bridge on the other side hands its handler;
+        // passing the platform `Request` here would leave the DO rebuilding a
+        // request it cannot read a body from.
+        return yield* repos
+          .getByName(route.repo)
+          .fetch(HttpServerRequest.fromWeb(raw))
+          .pipe(
+            Effect.catchCause((cause) =>
+              raw.signal.aborted
+                ? Effect.succeed(HttpServerResponse.empty({ status: 499 }))
+                : // The contract says this Worker does not fail: a fault
+                  // inside the DO is a 500 at the edge, not a rejected effect.
+                  Effect.as(Effect.logError(cause), HttpServerResponse.empty({ status: 500 })),
+            ),
+          );
+      }),
+    };
+    // The host Worker's layer also provides its DO's live implementation —
+    // that is what makes `yield* Repo` above resolve.
+  }).pipe(Effect.provide(Repos)),
+);

@@ -6,327 +6,240 @@
 
 # @chr33s/git
 
-Implements the native Git Server, Client, Cli smart-HTTP protocol for fetch and push with modern TypeScript, Web Streams, and modern Web APIs.
+Universal Git smart-HTTP protocol server, browser client & unix CLI — built on
+[Effect](https://effect.website) v4 with modern TypeScript and Web APIs.
 
-## Prerequisites
+One implementation of git's core runs everywhere: in a Cloudflare Durable
+Object, on plain node, in a browser tab, and in a terminal. Stock `git` clones
+from it and pushes to it, and reads the index and history its own commands
+write.
 
-- Node.js 24+ and npm 11+
+- [Install](#install)
+- [Run a server](#run-a-server)
+- [Use the CLI](#use-the-cli)
+- [Single binary](#single-binary)
+- [Benchmarks](#benchmarks)
+- [Architecture](#architecture)
+- [Development](#development)
+
+## Install
+
+Node.js 24+ and npm 11+.
+
+```sh
+npm install     # postinstall applies patches/ and regenerates worker types
+```
+
+Both `effect` and `alchemy` are pinned betas installed behind `patch-package`
+patches; the repo sets `save-exact=true` deliberately. Details in
+[docs/internals.md](docs/internals.md#pinned-dependencies).
+
+## Run a server
+
+The node host serves a directory of bare repositories over git's smart-HTTP
+protocol:
+
+```sh
+GIT_ROOT=repos node src/host/Node.ts
+git clone http://127.0.0.1:8080/my-repo
+```
+
+`npx wrangler dev` runs the same handlers as a Cloudflare Worker — one Durable
+Object per repository, refs and history in DO SQLite, blobs in R2 — and
+`npx wrangler deploy` ships it.
+
+Both hosts speak:
+
+- **smart-HTTP** — protocol v0 and v2; clone, incremental and shallow fetch,
+  push with side-band progress; `…/repo.git` and `…/repo` are the same
+  repository
+- **Git LFS** — batch API and transfer, objects streamed to storage
+- **a JSON API** — one `HttpApi` declaration per repository covering content,
+  history, refs, merge / cherry-pick / rebase, grep, remotes, maintenance and
+  webhooks; the browser client in `src/client/Client.ts` is derived from the
+  same declaration
+- **webhooks** — signed push events, delivered with retries
+
+The deployed Worker always enforces scoped read/write tokens (it fails to
+deploy without `GIT_AUTH_SECRET`); the node host wants `--secret` too, and
+refuses to start without it unless you pass `--open` to say you meant an
+unauthenticated server. `git` presents a token as `http://<token>@host/repo`.
+
+## Use the CLI
+
+The CLI drives the same code the server runs — one `Repository`, one host, one
+client, one auth path:
+
+```sh
+npx chr33s-git init my-repo && npx chr33s-git serve --secret s3cret &
+npx chr33s-git token my-repo --secret s3cret --scope write
+npx chr33s-git clone --token <token> http://127.0.0.1:8080/my-repo my-copy
+```
+
+Working-tree commands take `--work`, a checkout whose repository is `.git`
+inside it, rather than the bare repositories under `--root`:
+
+```sh
+npx chr33s-git add --work . . && npx chr33s-git status --work .
+npx chr33s-git commit --work . --message "first"
+npx chr33s-git switch --work . --create topic
+```
+
+29 commands in all: repositories (`init`, `clone`, `serve`, `token`), the
+working tree (`add`, `rm`, `mv`, `restore`, `status`, `switch`, `commit`),
+history (`log`, `history`, `show`, `diff`, `grep`, `bisect`, `files`), refs
+(`branch`, `tag`, `refs`, `reset`), rewriting (`merge`, `cherry-pick`,
+`rebase`), transport (`push`, `archive`), and maintenance (`fsck`, `gc`).
+`npx chr33s-git --help` lists them; every command takes `--help`.
+
+## Single binary
+
+`npm run build:sea` (node 26+) compiles the CLI into one self-contained
+executable — no `node`, no `node_modules` on the machine it runs on:
+
+```sh
+npm run build:sea
+./dist/sea/chr33s-git --help
+```
+
+esbuild folds the CLI and its dependencies into a single module, and node's
+`--build-sea` embeds it into a copy of the node binary, for the platform the
+script runs on.
+
+## Benchmarks
+
+The single binary against `git` 2.43 on the same machine (Linux x86_64
+container, node 26.7.0). Mean of 9 runs after a warmup; peak RSS is the
+child's own `ru_maxrss` via `wait4`. Work-tree and history actions run in a
+200-commit, 200-file repository, repacked — `git repack -ad`, the state `gc`
+leaves a repository in, and the one that makes both tools read objects out of
+a pack rather than off the loose object path. Clone is a bare clone over local
+smart-HTTP from `chr33s-git serve`, so both clients answer to the same host.
+
+Two things have moved since these were taken. A build-time rewrite of
+`effect/Schema` that deferred node's `fetch` initialization was dropped — it
+made the binary a different program from the one the tests run — so the current
+binary is about 19 ms and 7 MiB heavier on every row; `src/cli/sea.build.ts`
+records why. And reading objects out of a pack now goes through the platform's
+own zlib rather than the portable decoder, which took roughly 60% off the clone
+row for both clients, since both clone from the same host.
+
+| action            | `git`   | `chr33s-git` | `git` peak RSS | `chr33s-git` peak RSS |
+| ----------------- | ------- | ------------ | -------------- | --------------------- |
+| `--version`       | 2 ms    | 97 ms        | 12 MiB         | 64 MiB                |
+| `init`            | 3 ms    | 104 ms       | 12 MiB         | 65 MiB                |
+| `status`          | 3 ms    | 276 ms       | 12 MiB         | 81 MiB                |
+| `add` (one file)  | 3 ms    | 122 ms       | 12 MiB         | 69 MiB                |
+| `commit`          | 94 ms   | 123 ms       | 27 MiB         | 69 MiB                |
+| `log -n 20`       | 2 ms    | 149 ms       | 12 MiB         | 78 MiB                |
+| `clone` over HTTP | 6684 ms | 6628 ms      | 12 MiB         | 161 MiB               |
+
+`git` wins every local row, and the shape of the loss is fixed cost, not
+algorithm: ~97 ms of every run is the runtime coming up — 23 ms of that is
+node itself (a hello-world SEA binary's floor here), the rest is module
+initialization, with parse/compile already paid for by the V8 code cache the
+build embeds. Peak RSS says more about the runtime the binary carries than about the
+CLI: a hello-world SEA measures 76 MiB on the same machine, more than `--version`
+here and within a few MiB of every row but `clone`, so read that column as
+node's allocator with a workload on top rather than as the cost of the work.
+The work on top of that floor is 7–180 ms per action (commit adds ~26 ms
+against git's 94 ms total). The binary itself is 143 MiB against git's ~4 MiB,
+for the same reason.
+
+Clone is the row where the comparison stops being about the client. Both
+clients clone from `chr33s-git serve`, and against a packed repository the
+host — reading every object out of the pack, resolving deltas, building the
+response — costs more than either client does, which is why the two land
+within 1% of each other. Read that row as a measurement of the host, not of
+`git` against `chr33s-git`.
+
+The obvious next knob does not work: `useSnapshot`, which serializes the heap
+after module initialization instead of only the compile cache, cannot build
+this CLI on node 26.7.0 at all — and where it does build, it starts slower
+than the code cache does. `src/cli/sea.build.ts` records why.
+
+What the binary buys instead of speed: one file with zero dependencies, and
+the same TypeScript the Worker, the node host and the browser client run — a
+protocol or storage fix lands on all four surfaces at once.
 
 ## Architecture
 
-Native `GitServer` smart-HTTP protocol deployed at the edge, in‑browser `GitClient` and `GitCli`. Cloudflare Worker entrypoint that routes requests to a per‑repo Durable Object. Refs/trees/commits are kept in DO SQLite; large blobs live in R2; LFS objects stored in R2. Server-side hooks and webhooks for push event notifications. In the browser using standard Web APIs.
+`Repository` — commits, trees, refs, log — is one service written against two
+storage ports, `ObjectStore` and `RefStore`. Every environment is a layer swap
+underneath it.
 
 ```mermaid
-flowchart LR
-	subgraph Clients
-		GC[GitClient]
-		CLI[GitCli]
+flowchart TB
+	subgraph ports["ports · src/git/Store.ts"]
+		OS[ObjectStore]
+		RS[RefStore]
 	end
 
-	subgraph GitServer
-		W[Worker]
-		S[Durable Object]
-		DB[(DO SQLite)]
-		R2[(R2 Bucket)]
-		LFS[LFS Objects]
-		HK[Hooks]
-		WH[Webhooks]
+	subgraph domain["domain · src/git"]
+		REPO[Repository]
+		PACK[Pack streams]
+		FMT[Format · pure]
 	end
 
-	GC --> W
-	CLI --> W
-	W --> S
-	S --> GC
-	S --> DB
-	S --> R2
-	S --> LFS
-	S --> HK
-	HK --> WH
-	WH -->|push events| GC
+	subgraph edges["edges"]
+		PROTO[smart-HTTP]
+		API[HttpApi · JSON]
+		CLI[effect/unstable/cli]
+		CLIENT[HttpApiClient · derived]
+	end
 
-	%% Browser Web APIs used by GitClient
-	Streams[Web Streams]
-	Crypto[Web Crypto]
-	OPFS[(OPFS)]
-	GC --- Streams
-	GC --- Crypto
-	GC --- OPFS
+	subgraph layers["layers — swapped per environment"]
+		CF[DO SQLite + R2]
+		OPFS[OPFS]
+		NODE[node fs]
+		MEM[in-memory · tests]
+	end
+
+	PROTO --> REPO
+	API --> REPO
+	CLI --> REPO
+	CLIENT -.derived from.-> API
+	REPO --> OS & RS
+	REPO --> FMT
+	PACK --> OS
+	CF & OPFS & NODE & MEM -.provide.-> ports
 ```
 
-## GitServer: Git over HTTP
+The dotted lines are the point: `Repository` and both HTTP edges name only the
+ports, so the same program runs in the Durable Object, on node, in a tab, in
+the CLI and in a test. One Durable Object maps to one repository because the
+DO's input gate provides the serialization `RefStore.apply`'s compare-and-swap
+demands — the filesystem backend buys the same guarantee with `rename(2)`, the
+node host with a per-repository mutex. Below `Repository`, `Format.ts` is a
+pure seam: byte work with no I/O (framing, codecs, hashing, deltas) stays
+synchronous, and everything streams — nothing reads a request body whole,
+nothing collects an object walk before the first byte goes out.
 
-### Stack
-
-- Cloudflare Workers runtime
-- Durable Objects with built‑in SQLite for refs, commits, trees, and tags
-- Cloudflare R2 for Git object blobs (file contents) and LFS objects
-
-### HTTP API
-
-- Service discovery: `GET /:repo/info/refs?service=git-{upload,receive}-pack`
-- Upload‑pack (fetch): `POST /:repo/git-upload-pack`
-- Receive‑pack (push): `POST /:repo/git-receive-pack`
-
-See `src/worker.ts` for routing and `src/server.ts` for bindings.
-
-### JSON API
-
-RESTful endpoints for repository operations. All POST endpoints accept JSON body. List endpoints support cursor-based pagination with `cursor`, `limit` params and return `next_cursor`, `has_more` in responses.
-
-Base URL: `/api/:repo{.git}?/`
-
-#### Repository Management
-
-| Method | Endpoint | Description                     |
-| ------ | -------- | ------------------------------- |
-| POST   | `/`      | Create a new repository         |
-| DELETE | `/`      | Permanently delete a repository |
-
-#### Repository Info
-
-| Method | Endpoint         | Description                              |
-| ------ | ---------------- | ---------------------------------------- |
-| GET    | `/status`        | Get working tree status                  |
-| GET    | `/refs`          | List all refs                            |
-| GET    | `/reflog/:ref`   | Read reflog for a ref                    |
-| POST   | `/log`           | Get commit history                       |
-| POST   | `/show`          | Show object by ref                       |
-| POST   | `/tree`          | Get tree entries                         |
-| POST   | `/diff`          | Diff between commits                     |
-| POST   | `/branches/diff` | Diff between branch and base (three-dot) |
-| POST   | `/commits/diff`  | Diff for a specific commit               |
-| POST   | `/object`        | Read raw object by OID                   |
-| POST   | `/grep`          | Search content with regex patterns       |
-
-#### Staging & Files
-
-| Method | Endpoint   | Description                    |
-| ------ | ---------- | ------------------------------ |
-| POST   | `/add`     | Stage a file                   |
-| POST   | `/rm`      | Remove files from index        |
-| POST   | `/mv`      | Move/rename a file             |
-| POST   | `/restore` | Restore file from index/commit |
-| POST   | `/read`    | Read file content              |
-| POST   | `/write`   | Write file content             |
-| POST   | `/file`    | Stream file content            |
-| POST   | `/files`   | List all files at ref          |
-
-#### Commits & Branches
-
-| Method | Endpoint           | Description                         |
-| ------ | ------------------ | ----------------------------------- |
-| POST   | `/commit`          | Create a commit                     |
-| POST   | `/commit-pack`     | Create commit via NDJSON stream     |
-| POST   | `/restore-commit`  | Roll back branch to specific commit |
-| POST   | `/branch`          | List/create/delete branch           |
-| POST   | `/branches`        | List branches with pagination       |
-| POST   | `/branches/create` | Create branch from base             |
-| POST   | `/commits`         | List commits with pagination        |
-| POST   | `/checkout`        | Checkout a ref                      |
-| POST   | `/switch`          | Switch branches                     |
-| POST   | `/merge`           | Merge branches                      |
-| POST   | `/rebase`          | Rebase onto another branch          |
-| POST   | `/reset`           | Reset HEAD to ref                   |
-| POST   | `/tag`             | Create/delete tags                  |
-
-#### Remote Operations
-
-| Method | Endpoint  | Description           |
-| ------ | --------- | --------------------- |
-| POST   | `/fetch`  | Fetch from remote     |
-| POST   | `/pull`   | Pull (fetch + merge)  |
-| POST   | `/push`   | Push to remote        |
-| POST   | `/remote` | Manage remote configs |
-
-#### Maintenance
-
-| Method | Endpoint | Description                                        |
-| ------ | -------- | -------------------------------------------------- |
-| POST   | `/fsck`  | Validate objects (optional `oid`)                  |
-| POST   | `/gc`    | Garbage collection (optional `gracePeriodMinutes`) |
-
-#### Archive Downloads
-
-| Method | Endpoint         | Description                          |
-| ------ | ---------------- | ------------------------------------ |
-| GET    | `/archive/:file` | Download repo as `.tar.gz` or `.zip` |
-
-The filename becomes the ref/branch name. Supports optional `path` query param for subdirectory exports.
-
-#### Webhooks
-
-| Method | Endpoint        | Description        |
-| ------ | --------------- | ------------------ |
-| POST   | `/webhooks`     | Register a webhook |
-| GET    | `/webhooks`     | List webhooks      |
-| DELETE | `/webhooks/:id` | Remove a webhook   |
-
-Webhooks deliver signed `push` events to HTTPS endpoints with HMAC-SHA256 signatures (`X-Signature-256` header) and automatic retries.
-
-#### Streaming Commits
-
-The `/commit-pack` endpoint accepts newline-delimited JSON (NDJSON) for efficient large file uploads:
-
-1. Send metadata first with `target_branch`, `commit_message`, `author`, and `files` array
-2. Stream blob chunks with `content_id`, base64-encoded `data` (≤4 MiB), and `eof` marker
-3. Supports async generators and ReadableStreams for memory-efficient uploads
-
-### Git LFS
-
-Server-side [Git LFS](https://git-lfs.com) support with objects stored in R2.
-
-| Method | Endpoint                            | Description                   |
-| ------ | ----------------------------------- | ----------------------------- |
-| POST   | `/:repo.git/info/lfs/objects/batch` | Batch download/upload request |
-| PUT    | `/:repo.git/info/lfs/objects/:oid`  | Upload LFS object             |
-| GET    | `/:repo.git/info/lfs/objects/:oid`  | Download LFS object           |
-
-### Hooks
-
-Server-side hook system for receive-pack operations.
-
-| Hook           | Timing             | Per-ref | Can reject |
-| -------------- | ------------------ | ------- | ---------- |
-| `pre-receive`  | Before any updates | No      | All        |
-| `update`       | Per-ref update     | Yes     | Per ref    |
-| `post-receive` | After all updates  | No      | No         |
-
-## GitClient: Git in the browser
-
-`GitClient` provides Git protocol functionality using only Web standards:
-
-- `fetch()` for HTTP
-- Web Streams for efficient data processing
-- Web Crypto API for SHA‑1 hashing
-- TextEncoder/TextDecoder for string/binary conversion
-- OPFS (Origin Private File System) for file checkout
-
-### Features
-
-- Repository operations: info/refs, clone/fetch, create Git objects (blob, tree, commit)
-- Full pack‑file handling for upload‑pack and receive‑pack
-- Browser‑first: uses Web APIs end‑to‑end
-- OPFS integration: automatic checkout to the browser’s private filesystem with repo‑based directory caching
-
-### API
-
-```ts
-import { Client } from "@chr33s/git/client";
-
-const client = new Client({ name: "my-repo" });
-```
-
-#### Repository
-
-| Method                       | Description                                 |
-| ---------------------------- | ------------------------------------------- |
-| `init()`                     | Initialize a new repository                 |
-| `clone(url)`                 | Clone a remote repository                   |
-| `remote(action, name, url?)` | Manage remotes (`add`, `remove`, `set-url`) |
-| `getAllRemotes()`            | List all configured remotes                 |
-| `getRemote(name)`            | Get URL for a specific remote               |
-
-#### Staging & Commits
-
-| Method                 | Description                              |
-| ---------------------- | ---------------------------------------- |
-| `add(path)`            | Stage a file                             |
-| `rm(paths, opts?)`     | Remove files (`--cached`, `--recursive`) |
-| `mv(old, new)`         | Move/rename a staged file                |
-| `restore(path)`        | Restore file from HEAD                   |
-| `commit(msg, author?)` | Create a commit                          |
-| `status()`             | Get staged, modified, untracked files    |
-
-#### History & Inspection
-
-| Method      | Description               |
-| ----------- | ------------------------- |
-| `log()`     | List commit history       |
-| `show(ref)` | Show object by ref or OID |
-
-#### Branching & Merging
-
-| Method             | Description                    |
-| ------------------ | ------------------------------ |
-| `branch(name?)`    | Create branch or list branches |
-| `checkout(ref)`    | Check out a ref/commit         |
-| `switch(name)`     | Switch to an existing branch   |
-| `merge(ref)`       | Merge a branch into current    |
-| `rebase(onto)`     | Rebase current branch onto ref |
-| `reset(hard, ref)` | Reset to a commit              |
-| `tag(name)`        | Create a lightweight tag       |
-
-#### Remote Sync
-
-| Method                           | Description                         |
-| -------------------------------- | ----------------------------------- |
-| `fetch(remote?)`                 | Fetch from remote (default: origin) |
-| `pull(remote?, branch?)`         | Fetch and merge                     |
-| `push(remote?, branch?, force?)` | Push to remote                      |
-| `pushDelete(remote?, branch)`    | Delete remote branch                |
-
-### Browser compatibility
-
-- Chrome/Edge: 86+
-- Firefox: 111+
-- Safari: 15.2+
-
-## GitCli: Git in the terminal
-
-`GitCli` provides a command-line interface that mirrors native Git commands, built on top of `GitClient`.
-
-### Usage
-
-```sh
-npx @chr33s/git <command> [options]
-```
-
-### Commands
-
-| Command    | Description                                      |
-| ---------- | ------------------------------------------------ |
-| `init`     | Initialize a new repository                      |
-| `clone`    | Clone a repository from URL                      |
-| `add`      | Add file contents to the index                   |
-| `rm`       | Remove files from the working tree and index     |
-| `mv`       | Move or rename a file                            |
-| `restore`  | Restore working tree files                       |
-| `commit`   | Record changes to the repository                 |
-| `status`   | Show the working tree status                     |
-| `log`      | Show commit logs                                 |
-| `show`     | Show various types of objects                    |
-| `branch`   | List, create, or delete branches                 |
-| `checkout` | Switch branches or restore working tree files    |
-| `switch`   | Switch to a branch                               |
-| `merge`    | Join two or more development histories together  |
-| `rebase`   | Reapply commits on top of another base tip       |
-| `reset`    | Reset current HEAD to the specified state        |
-| `tag`      | Create, list, or delete tags                     |
-| `fetch`    | Download objects and refs from a remote          |
-| `pull`     | Fetch from and integrate with a remote           |
-| `push`     | Update remote refs along with associated objects |
-| `remote`   | Manage set of tracked repositories               |
+The design is a ground-up rewrite answering four structural problems in its
+predecessor: a push could OOM the isolate (everything buffered; now everything
+streams), errors were strings by the time they mattered (now every failure is
+a typed, tagged value carrying its own HTTP status), cancellation stopped at
+the door (now interruption reaches the object walk), and storage backends
+disagreed about ref safety (now `RefStore.apply` is compare-and-swap on every
+backend, proven by one contract suite run against all four). The full
+reasoning, module map, conventions and testing philosophy live in
+[docs/internals.md](docs/internals.md).
 
 ## Development
 
 ```sh
-# dev
-npm install
-npm run check   # run lint/format checks (use: npm run fix)
-npm test        # run unit tests
-npm run dev
-
-# prod
-npm run build
-npm run deploy
+npm run check             # format, lint, and typecheck (tsc -b --noEmit)
+npm run fix               # auto-fix both
+npm test                  # unit + integration (workerd) projects
+npm run build:sea         # dist/sea/chr33s-git — self-contained CLI binary (node 26+)
+npx wrangler dev          # run the Worker locally on port 8080
+npx wrangler deploy       # deploy (the tested path)
 ```
 
-### Testing
+`npm run check` must be green before a commit. The interop tests verify
+against the real `git` binary and need it on `PATH`; the real-browser test
+needs Chromium via Playwright. Both skip when missing.
 
-Unit tests use Node.js built-in test runner and cover individual functions and components:
-
-```sh
-npm test
-```
-
-The E2E tests automatically start the development server and test the Git smart-HTTP protocol endpoints.
+Before contributing, read [docs/internals.md](docs/internals.md) — the module
+map, code conventions and testing philosophy explain constraints the code
+cannot show you.

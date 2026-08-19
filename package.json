@@ -5,35 +5,53 @@
   "description": "Universal Git smart-HTTP protocol server, browser client & nix cli",
   "license": "MIT",
   "bin": {
-    ".git": "./src/cli.ts"
+    "chr33s-git": "./src/cli/bin.ts"
   },
   "files": [
     "src",
     "tsconfig.json",
-    "!src/*.test.ts"
+    "!src/**/*.test.ts",
+    "!src/**/*.integration.ts",
+    "!src/**/*.contract.ts",
+    "!src/**/*.build.ts"
   ],
   "type": "module",
-  "exports": {
-    "./client": "./src/client.ts",
-    "./server": "./src/server.ts"
-  },
   "scripts": {
-    "check": "oxfmt --check && oxlint --type-aware --type-check",
-    "fix": "oxlint --type-aware --fix && oxfmt --write",
-    "postinstall": "npx wrangler types && npm run fix",
-    "test": "node --test --test-concurrency=1 --test-global-setup=src/test.helpers.ts"
+    "build:sea": "node src/cli/sea.build.ts",
+    "check": "oxfmt --check && oxlint && tsc -b --noEmit",
+    "fix": "oxlint --fix && oxfmt --write",
+    "postinstall": "patch-package && npx wrangler types -c wrangler.test.json && npm run fix",
+    "prepare": "effect-tsgo patch",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "effect": "4.0.0-beta.107"
   },
   "devDependencies": {
-    "@types/node": "25.6.0",
-    "esbuild": "0.28.0",
-    "oxfmt": "0.47.0",
-    "oxlint": "1.62.0",
-    "oxlint-tsgolint": "0.22.1",
-    "playwright": "1.59.1",
-    "typescript": "6.0.3",
-    "wrangler": "4.86.0"
+    "@effect/platform-bun": "4.0.0-beta.107",
+    "@effect/platform-node": "4.0.0-beta.107",
+    "@effect/tsgo": "0.36.4",
+    "@effect/vitest": "4.0.0-beta.107",
+    "@oxlint/plugins": "1.78.0",
+    "@types/node": "26.2.0",
+    "alchemy": "2.0.0-beta.72",
+    "esbuild": "0.28.2",
+    "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "patch-package": "8.0.1",
+    "playwright": "1.62.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.121.0"
   },
   "engines": {
     "node": ">=24.12.0"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "fsevents": true,
+    "workerd": true,
+    "sharp": true
   }
 }

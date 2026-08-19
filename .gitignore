@@ -1,4 +1,8 @@
+.alchemy/
+.env
+!.env.example
 .tmp/
+*.tsbuildinfo
 .wrangler/
 dist/
 node_modules/

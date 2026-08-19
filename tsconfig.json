@@ -11,6 +11,12 @@
     "moduleResolution": "bundler",
     "noEmit": true,
     "noUncheckedIndexedAccess": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "allowedDuplicatedPackages": ["@distilled.cloud/core"]
+      }
+    ],
     "skipLibCheck": true,
     "strict": true,
     "target": "es2024"
