@@ -23,7 +23,7 @@ import {
 } from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
-import { type GitError, statusOf } from "../git/Error.ts";
+import { type GitError, statusOf, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
@@ -35,6 +35,7 @@ import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as LfsCore from "../server/Lfs.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Protocol from "../server/Protocol.ts";
+import * as Snapshot from "../server/Snapshot.ts";
 import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
 import * as Sending from "../server/Sending.ts";
@@ -236,6 +237,43 @@ export default Repo.make(
       const nonces = Auth.noncesInMemory();
 
       /**
+       * The last refs snapshot each repository published; see `Snapshot.ts`.
+       *
+       * Republished synchronously after every request that can move refs and
+       * *before* its response is acknowledged, so the front Worker's
+       * stateless read path — which serves anonymous clones from R2 alone —
+       * is never behind an acknowledged write. When the snapshot cannot be
+       * written, it is removed instead: readers then fall back to this
+       * Durable Object, which is always right. Degraded, but never wrong.
+       */
+      const snapshots = new Map<string, Snapshot.Published>();
+      const republish = (repo: string): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const previous = snapshots.get(repo);
+          const captured = yield* Snapshot.capture(previous);
+          if (previous !== undefined && Snapshot.same(previous, captured)) return;
+          yield* Effect.tryPromise({
+            try: () => r2.put(Snapshot.keyOf(repo), Snapshot.encode(captured)),
+            catch: (cause) =>
+              new StorageFailure({ operation: "snapshot", path: Snapshot.keyOf(repo), cause }),
+          });
+          snapshots.set(repo, captured);
+        }).pipe(
+          Effect.provide(live(repo)),
+          Effect.catch(() =>
+            Effect.gen(function* () {
+              snapshots.delete(repo);
+              yield* Effect.tryPromise({
+                try: () => r2.delete(Snapshot.keyOf(repo)),
+                catch: (cause) =>
+                  new StorageFailure({ operation: "snapshot", path: Snapshot.keyOf(repo), cause }),
+              }).pipe(Effect.ignore);
+            }),
+          ),
+          Effect.ignoreCause,
+        );
+
+      /**
        * Whether writes to repositories with no genesis are served.
        *
        * Off unless the binding says so, like `serve --open`: such a repository
@@ -270,7 +308,14 @@ export default Repo.make(
             })),
           );
           if (guarded.denied !== null) return guarded.denied;
-          return yield* route_(request, repo, route, matched, guarded.authenticated);
+          const response = yield* route_(request, repo, route, matched, guarded.authenticated);
+          // Reads never move refs; anything else may have, and the snapshot
+          // the stateless read path serves from must be current before this
+          // response acknowledges the change.
+          if (request.method !== "GET" && request.method !== "HEAD") {
+            yield* republish(repo);
+          }
+          return response;
         });
 
       const route_ = (
