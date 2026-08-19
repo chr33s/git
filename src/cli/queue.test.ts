@@ -409,12 +409,16 @@ describe("cli queue", () => {
     );
   });
 
-  it("drops an entry whose merge conflicts, and keeps the rest", async () => {
+  it("defers an entry that conflicts with the batch, rather than dropping it", async () => {
+    // A conflict with the chain tip is a conflict with entries that have not
+    // landed and may never land. Recording a permanent `queue.left` for that
+    // takes a pull request out of the queue over a disagreement with something
+    // provisional — and the entry it clashed with might be dropped next pass.
     await publish(protectedRules());
-    // A third branch that rewrites the same file `two` does.
     await inRepo(
       Effect.gen(function* () {
         const repository = yield* GitRepository.Repository;
+        // Rewrites the same file `two` does, but merges onto `main` cleanly.
         const tip = yield* write(
           [
             ["readme", "base"],
@@ -434,10 +438,57 @@ describe("cli queue", () => {
 
     const pass = await run();
     assert.deepEqual(pass.landed, [second]);
+    assert.deepEqual(pass.dropped, [], "nothing permanent is recorded about the loser");
+    assert.deepEqual(
+      pass.unbuilt.map((entry: { pr: string }) => entry.pr),
+      [third],
+    );
+
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.deepEqual(
+      state.entries.map((held: { pr: string }) => held.pr),
+      [third],
+      "it is still queued, for a pass this batch does not stand in the way of",
+    );
+  });
+
+  it("drops an entry that conflicts with the branch itself", async () => {
+    await publish(protectedRules());
+    const third = await inRepo(
+      Effect.gen(function* () {
+        const repository = yield* GitRepository.Repository;
+        // The branch moves to something that rewrites `b.txt` …
+        const moved = yield* write(
+          [
+            ["readme", "base"],
+            ["b.txt", "landed elsewhere"],
+          ],
+          [base],
+        );
+        yield* repository.setRef({ name: "refs/heads/main", to: moved });
+        // … and a pull request cut from before it rewrites the same line.
+        const tip = yield* write(
+          [
+            ["readme", "base"],
+            ["b.txt", "conflicting"],
+          ],
+          [base],
+        );
+        heads["three"] = tip;
+        yield* repository.setRef({ name: "refs/heads/three", to: tip });
+        return tip;
+      }),
+    );
+    void third;
+
+    await enter(await propose("three"));
+
+    const pass = await run();
+    assert.deepEqual(pass.landed, []);
     assert.deepEqual(
       pass.dropped.map((entry: { pr: string; reason: string }) => entry.reason),
       ["conflict"],
-      "the conflict is predicted rather than discovered by a failing test run",
+      "predicted rather than discovered by a failing test run",
     );
   });
 

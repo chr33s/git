@@ -1872,16 +1872,25 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         yield* gateWrite(Policy.RULES_REF);
         const repository = yield* Repository;
         const current = yield* repository.resolve(Policy.RULES_REF);
-        // Filled here rather than required of the caller; see
-        // `PolicyRulesWrite`. A field the client did not send is one it did
-        // not know about, and the default is what the rules file means by its
-        // absence too.
+        // A field the client did not send is one it did not know about, so it
+        // keeps whatever the repository already had — never the default. This
+        // is a `PUT` of the whole document, and reading an absent field as the
+        // default let a client built before the field existed silently turn off
+        // a merge queue somebody had enabled, and be told 200 for it.
+        const held = yield* Policy.rulesOf().pipe(
+          // Unreadable rules are what `policy.write` is for repairing, and
+          // there is nothing to preserve from a document nobody can parse.
+          Effect.catchTags({
+            Invalid: () => Effect.succeed(Policy.OPEN),
+            ObjectNotFound: () => Effect.succeed(Policy.OPEN),
+          }),
+        );
         const rules: Policy.Rules = {
           ...payload,
-          queueCandidates: payload.queueCandidates ?? Policy.OPEN.queueCandidates,
+          queueCandidates: payload.queueCandidates ?? held.queueCandidates,
           // Clamped by the same rule that reads the file back, so what this
           // answers with is what the repository will enforce.
-          queueDepth: Policy.clampDepth(payload.queueDepth),
+          queueDepth: Policy.clampDepth(payload.queueDepth ?? held.queueDepth),
         };
         const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
         const tree = yield* repository.writeTree([

@@ -536,11 +536,25 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
   };
 });
 
-/** The queue for a target branch, where the repository holds one. */
+/**
+ * The queue for a target branch, where the repository holds one.
+ *
+ * One queue this replica cannot walk is one candidate missing, not a failure of
+ * the lookup — the same reading the policy boundary gives an oversized pull
+ * request. A history that arrived by replication was never held to this host's
+ * ceiling, so failing here would let whoever grew one queue break `queue run`
+ * and `queue list` for every other target on the replica that copied it.
+ */
 export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: string) {
   for (const id of yield* queues()) {
-    const state = yield* project(id);
-    if (state.exists && state.target === target) return state;
+    const state = yield* project(id).pipe(
+      Effect.catchTags({
+        Invalid: () => Effect.succeed(null),
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+    if (state !== null && state.exists && state.target === target) return state;
   }
   return null;
 });

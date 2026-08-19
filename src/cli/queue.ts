@@ -399,9 +399,16 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     );
   }
 
-  /** The branch a candidate is published on; ordinary, deletable, collectable. */
-  const branchOf = (position: number) =>
-    `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/${String(position)}`;
+  /**
+   * The branch a candidate is published on; ordinary, deletable, collectable.
+   *
+   * Named for the pull request rather than for its place in the chain. A
+   * position moves when an entry ahead of it is skipped, so a positional name
+   * force-moved one pull request's published branch to another's candidate
+   * while the `queue.candidate` record for the first still named it — a branch
+   * CI had been told to fetch, now holding somebody else's work.
+   */
+  const branchOf = (pr: string) => `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/${pr}`;
 
   const chain: Array<{
     readonly pr: string;
@@ -473,13 +480,43 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     }
     // Predicted, not discovered: the same merge the boundary will recompute,
     // asked before anything is built rather than after a test run fails.
+    //
+    // But *what* it conflicts with decides whether the entry is at fault. This
+    // merge is onto the chain tip, which carries every entry ahead of it — so a
+    // conflict here may be with the batch rather than with the branch, and the
+    // batch is provisional: the entry it clashed with may never land. Dropping
+    // on that was a permanent `queue.left` for a disagreement that might never
+    // have existed. Only a conflict with the branch itself — what this entry
+    // actually proposes to merge into — is the entry's own problem.
     if (merged.conflicts.length > 0) {
+      const withBranch =
+        tip === from
+          ? merged
+          : yield* repository.mergeTree({ ours: from, theirs: entry.head }).pipe(
+              Effect.catchTags({
+                Invalid: (error) => Effect.succeed(error),
+                ObjectNotFound: (error) => Effect.succeed(error),
+                StorageFailure: (error) => Effect.succeed(error),
+              }),
+            );
+      if (!("_tag" in withBranch) && withBranch.conflicts.length === 0) {
+        // Clean against the branch, so it waits for a pass this batch does not
+        // stand in the way of. Nothing recorded: the queue has said nothing
+        // about it, because there is nothing settled to say.
+        unbuilt.push({
+          pr: entry.pr,
+          reason: `conflicts with the batch ahead of it in ${merged.conflicts
+            .map((conflict) => conflict.path)
+            .join(", ")}`,
+        });
+        continue;
+      }
       yield* drop(entry.pr, "conflict");
       continue;
     }
 
     position += 1;
-    const branch = branchOf(position);
+    const branch = branchOf(entry.pr);
     const candidate = yield* repository.commitTree({
       tree: merged.tree,
       parents: [tip, entry.head],
@@ -527,26 +564,39 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // than re-derived here, so a runner can never believe something is landable
   // that a push of the same commit would be refused — and so the rule stays in
   // one place when it changes.
+  //
+  // Front to back, and it stops at the first refusal. A step is judged on
+  // itself and everything before it and on nothing after, so the steps the
+  // boundary accepts are a prefix — which means walking forwards finds the same
+  // answer as walking backwards while paying for it very differently. Backwards
+  // asked about the whole chain first, and each ask re-derives every merge
+  // beneath it, so the ordinary case — a batch waiting on checks, nothing green
+  // yet — was also the most expensive, on a path a wake fires repeatedly.
+  //
+  // The caches are shared across the asks for the same reason: a pull request
+  // folded for one prefix is the same pull request in the next.
+  const folds: Policy.FoldCache = new Map();
+  const mentions: Policy.MentionCache = new Map();
   let landedAt = -1;
-  for (let at = chain.length - 1; at >= 0; at--) {
-    const step = chain[at]!;
+  for (const [at, step] of chain.entries()) {
     const decision = yield* Policy.evaluate({
       update: { name: target, value: step.commit },
       principal,
       genesis,
       trust,
       rules,
+      folds,
+      mentions,
     });
-    if (decision.ok) {
-      landedAt = at;
+    if (!decision.ok) {
+      // Kept, not discarded. A pass that refused every candidate used to report
+      // an empty `landed` and nothing else, which reads exactly like a pass
+      // with nothing to do — and the two want very different responses. This is
+      // where an operator reads that a branch requires a check nothing has run.
+      refused.push({ pr: step.pr, reason: decision.reason });
       break;
     }
-    // Kept, not discarded. A pass that refused every candidate used to report
-    // an empty `landed` and nothing else, which reads exactly like a pass with
-    // nothing to do — and the two want very different responses. This is where
-    // an operator reads that a branch requires a check nothing has run, or
-    // requires provenance a candidate does not carry.
-    refused.push({ pr: step.pr, reason: decision.reason });
+    landedAt = at;
   }
 
   const landed: Array<string> = [];
