@@ -101,7 +101,7 @@ import {
   HubTaskPage,
   LogResponse,
   PolicyAnswer,
-  PolicyRules,
+  PolicyRulesWrite,
   PolicyWritten,
   ReplayResult,
   MergeResult,
@@ -918,7 +918,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.put("policyWrite", "/policy", {
       params: RepoParam,
-      payload: PolicyRules,
+      payload: PolicyRulesWrite,
       success: PolicyWritten,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
@@ -1872,7 +1872,16 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         yield* gateWrite(Policy.RULES_REF);
         const repository = yield* Repository;
         const current = yield* repository.resolve(Policy.RULES_REF);
-        const blob = yield* repository.writeBlob(Policy.encodeRules(payload));
+        // Filled here rather than required of the caller; see
+        // `PolicyRulesWrite`. A field the client did not send is one it did
+        // not know about, and the default is what the rules file means by its
+        // absence too.
+        const rules: Policy.Rules = {
+          ...payload,
+          queueCandidates: payload.queueCandidates ?? Policy.OPEN.queueCandidates,
+          queueDepth: payload.queueDepth ?? Policy.OPEN.queueDepth,
+        };
+        const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
         const tree = yield* repository.writeTree([
           { mode: "100644", name: Policy.RULES_PATH, oid: blob },
         ]);
@@ -1883,7 +1892,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           author: signatureFrom(undefined),
         });
         yield* repository.setRef({ name: Policy.RULES_REF, to: commit, expected: current });
-        return { rules: payload, commit };
+        return { rules, commit };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
     .handle("archive", ({ query }) =>

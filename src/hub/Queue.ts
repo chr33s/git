@@ -484,7 +484,12 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
         // Re-entering is how an entry's head moves, so the later record wins —
         // and it drops the candidate with it, because a candidate built from
         // the revision before it is exactly what a moved head invalidates.
-        queued.delete(payload.pr);
+        //
+        // In place, keeping the position it already had. `Map.set` on a key it
+        // already holds does not reorder, and deleting first would: a pull
+        // request that pushed a fix while queued went to the back, which is not
+        // what re-entering means and not what this function says it does.
+        // Leaving and entering again is how something moves to the back.
         queued.set(payload.pr, { pr: payload.pr, head, by: signer, candidate: null });
         break;
       }

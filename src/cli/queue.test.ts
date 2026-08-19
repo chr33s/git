@@ -33,6 +33,13 @@ const cli = async (args: ReadonlyArray<string>): Promise<string> => {
   return `${result.stdout}${result.stderr}`;
 };
 
+/** The same call, for the paths that are supposed to fail. */
+const failing = (args: ReadonlyArray<string>): Promise<string> =>
+  cli(args).then(
+    () => "",
+    (error: { stdout?: string; stderr?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
+  );
+
 const author = {
   name: "Alice",
   email: "alice@example.com",
@@ -546,6 +553,106 @@ describe("cli queue", () => {
     assert.deepEqual(pass.landed, [second]);
     const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
     assert.deepEqual(state.entries, []);
+  });
+
+  it("says why nothing landed, rather than reporting an empty pass", async () => {
+    // A pass that refused every candidate and one with nothing to do both
+    // reported `landed: []`, and they want very different responses.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    await enter(first);
+
+    const pass = await run();
+    assert.deepEqual(pass.landed, []);
+    assert.equal(pass.refused.length, 1);
+    assert.match(pass.refused[0].reason, /test/);
+  });
+
+  it("refuses a target whose rules require provenance, once and by name", async () => {
+    // A candidate is a commit the runner makes and it carries no session
+    // trailer, so the boundary would refuse every one — while the runner went
+    // on building, publishing and recording them on an append-only ref at every
+    // wake. Said once instead.
+    await publish(protectedRules({ requireProvenance: true }));
+    await enter(await propose("one"));
+
+    const refused = await failing([
+      "queue",
+      "run",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "project",
+    ]);
+    assert.match(refused, /requires provenance/);
+
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(state.entries[0].candidate, null, "and nothing was built or recorded");
+  });
+
+  it("refuses a queue id nobody opened, rather than creating one", async () => {
+    // `refs/hub/queue/*` cannot be deleted, so a mistyped id must cost an error
+    // message and not a permanent entry in every ref listing this repository
+    // ever serves — holding records the projection ignores for ever.
+    const mistyped = "01920000-0000-7000-8000-00000000dead";
+    const refused = await failing([
+      "queue",
+      "enter",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      mistyped,
+      "project",
+      await propose("one"),
+    ]);
+    assert.match(refused, /holds no queue/);
+
+    const listed = JSON.parse(await cli(["queue", "list", "--root", root, "project"]));
+    assert.deepEqual(
+      listed.map((held: { queue: string }) => held.queue),
+      [queue],
+      "the typo left no ref behind",
+    );
+  });
+
+  it("keeps a re-entered pull request where it was in the queue", async () => {
+    // Re-entering is how an entry's head moves. Sending it to the back would
+    // reorder a batch because somebody pushed a fix, which is not what
+    // re-entering means; leaving and entering again is how something moves.
+    await publish(protectedRules());
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+
+    const moved = await inRepo(
+      Effect.gen(function* () {
+        const repository = yield* GitRepository.Repository;
+        const tip = yield* write(
+          [
+            ["readme", "base"],
+            ["a.txt", "revised"],
+          ],
+          [base],
+        );
+        yield* repository.setRef({ name: "refs/heads/one", to: tip });
+        return tip;
+      }),
+    );
+    await cli(["pr", "update", "--root", root, "--key", key, "--head", moved, "project", first]);
+    await enter(first);
+
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.deepEqual(
+      state.entries.map((held: { pr: string }) => held.pr),
+      [first, second],
+    );
+    assert.equal(state.entries[0].head, moved, "at its new revision, in its old place");
   });
 
   it("refuses an entry for a pull request aimed somewhere else", async () => {

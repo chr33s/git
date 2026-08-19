@@ -58,7 +58,21 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
   readonly queue: string;
   readonly target: string;
 }) {
-  if (input.queue !== "") return yield* Queue.project(input.queue);
+  if (input.queue !== "") {
+    const state = yield* Queue.project(input.queue);
+    // A queue nobody opened is a queue nothing reads. Refused here because
+    // appending anyway would *create* `refs/hub/queue/<typo>` — on a namespace
+    // that cannot be deleted, holding records the projection ignores for ever,
+    // and reported as success. A mistyped id must cost an error message rather
+    // than a permanent entry in every ref listing this repository ever serves.
+    if (!state.exists) {
+      return yield* new Invalid({
+        field: "queue",
+        reason: `this repository holds no queue ${input.queue}; open one with \`git+ queue open\``,
+      });
+    }
+    return state;
+  }
   if (input.target === "") {
     return yield* new Invalid({
       field: "queue",
@@ -256,8 +270,27 @@ interface Pass {
   readonly landed: ReadonlyArray<string>;
   readonly built: ReadonlyArray<{ readonly pr: string; readonly commit: Oid }>;
   readonly dropped: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
+  /**
+   * Entries this runner could not build, and why.
+   *
+   * Distinct from `dropped`, and deliberately: what these say is that *this
+   * replica* could not read something, which is a fact about the runner rather
+   * than about the entry. Recording a `queue.left` for one would put a claim
+   * about somebody else's work on an append-only ref on the strength of a local
+   * object being missing, so nothing is written — the entry stays queued and
+   * another runner, or this one after a fetch, builds it.
+   */
+  readonly unbuilt: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
   /** Still queued and waiting on something — usually a check that has not run. */
   readonly waiting: ReadonlyArray<string>;
+  /**
+   * Why the chain did not land, where it did not.
+   *
+   * The boundary's own words. Without them a pass that refused every candidate
+   * reported `landed: []` and nothing else, which reads exactly like a pass
+   * with nothing to do — and the two need very different responses.
+   */
+  readonly refused: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
   readonly reset: boolean;
   readonly dryRun: boolean;
 }
@@ -284,6 +317,31 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   }
   const target = state.target;
   const rules = yield* Policy.rulesOf();
+
+  // A candidate is a commit this runner makes, and `requireProvenance` is a
+  // rule about *every* commit a push introduces — so a candidate would have to
+  // carry a `Session:` trailer naming a session that says it produced it. It
+  // does not, and cannot yet: a session id is chosen when the session opens,
+  // and a candidate's object id has to be a pure function of what it merges
+  // (see `candidateSignature`), so an id that varied per pass would move the
+  // candidate out from under the checks recorded against it — which is the one
+  // failure that makes a queue unable to land anything at all.
+  //
+  // Refused here rather than left to the boundary, which would refuse each
+  // candidate individually and correctly. The difference is what a pass costs
+  // while the combination stands: building, publishing and recording a
+  // `queue.candidate` every wake, for ever, on a ref that only grows. Said once
+  // is better than churned indefinitely.
+  if (rules.requireProvenance) {
+    return yield* new Invalid({
+      field: "queue",
+      reason:
+        `${target} requires provenance, and a queue candidate carries none: ` +
+        "the two cannot be used together yet (docs/queue.md). Turn off " +
+        "requireProvenance for this repository, or land pull requests directly.",
+    });
+  }
+
   const from = yield* repository.resolve(target);
 
   const trust = yield* projectTrust(genesis);
@@ -295,6 +353,8 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   };
 
   const dropped: Array<{ readonly pr: string; readonly reason: string }> = [];
+  const unbuilt: Array<{ readonly pr: string; readonly reason: string }> = [];
+  const refused: Array<{ readonly pr: string; readonly reason: string }> = [];
   const built: Array<{ readonly pr: string; readonly commit: Oid }> = [];
   const record = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     input.dryRun ? Effect.void : Effect.asVoid(effect);
@@ -318,7 +378,9 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       landed: [],
       built,
       dropped,
+      unbuilt,
       waiting: state.entries.map((entry) => entry.pr),
+      refused: [{ pr: "", reason: `${target} does not exist, so nothing can be merged onto it` }],
       reset: false,
       dryRun: input.dryRun,
     } satisfies Pass;
@@ -360,12 +422,27 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       continue;
     }
 
-    const merged = yield* repository
-      .mergeTree({ ours: tip, theirs: entry.head })
-      .pipe(Effect.catchTag("Invalid", () => Effect.succeed(null)));
+    // Every way a read can fail, not only `Invalid`. A replica that does not
+    // hold one entry's objects is a runner that cannot build *that* entry, and
+    // letting the failure escape stopped the whole pass — so one unfetched head
+    // blocked every other pull request in the queue, on every later run, with
+    // nothing in the output naming the cause.
+    const merged = yield* repository.mergeTree({ ours: tip, theirs: entry.head }).pipe(
+      Effect.catchTags({
+        Invalid: (error) => Effect.succeed(error),
+        ObjectNotFound: (error) => Effect.succeed(error),
+        StorageFailure: (error) => Effect.succeed(error),
+      }),
+    );
+    if ("_tag" in merged) {
+      // A fact about this replica rather than about the entry, so nothing is
+      // written: it stays queued, and whoever holds the objects builds it.
+      unbuilt.push({ pr: entry.pr, reason: `${entry.head} could not be merged: ${merged._tag}` });
+      continue;
+    }
     // Predicted, not discovered: the same merge the boundary will recompute,
     // asked before anything is built rather than after a test run fails.
-    if (merged === null || merged.conflicts.length > 0) {
+    if (merged.conflicts.length > 0) {
       yield* drop(entry.pr, "conflict");
       continue;
     }
@@ -401,8 +478,9 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // one place when it changes.
   let landedAt = -1;
   for (let at = chain.length - 1; at >= 0; at--) {
+    const step = chain[at]!;
     const decision = yield* Policy.evaluate({
-      update: { name: target, value: chain[at]!.commit },
+      update: { name: target, value: step.commit },
       principal,
       genesis,
       trust,
@@ -412,6 +490,12 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       landedAt = at;
       break;
     }
+    // Kept, not discarded. A pass that refused every candidate used to report
+    // an empty `landed` and nothing else, which reads exactly like a pass with
+    // nothing to do — and the two want very different responses. This is where
+    // an operator reads that a branch requires a check nothing has run, or
+    // requires provenance a candidate does not carry.
+    refused.push({ pr: step.pr, reason: decision.reason });
   }
 
   const landed: Array<string> = [];
@@ -467,7 +551,9 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     landed,
     built,
     dropped,
+    unbuilt,
     waiting: chain.slice(landed.length).map((step) => step.pr),
+    refused,
     reset,
     dryRun: input.dryRun,
   } satisfies Pass;

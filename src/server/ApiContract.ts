@@ -619,6 +619,23 @@ export const PolicyRules = Schema.Struct({
 });
 export type PolicyRules = (typeof PolicyRules)["Type"];
 
+/**
+ * The same rules as a caller may *write* them, newer fields optional.
+ *
+ * A repository always answers with every field, because what it enforces is
+ * never partly unknown. What a client sends is a different question: a client
+ * built before a field existed does not know to send it, and requiring it turns
+ * every such client's next policy write into a rejection — for a field it would
+ * have left at the default anyway. Absent means the default, which is exactly
+ * what the rules file on disk already means (`Policy.rulesOf`).
+ */
+export const PolicyRulesWrite = Schema.Struct({
+  ...PolicyRules.fields,
+  queueCandidates: Schema.optional(Schema.Boolean),
+  queueDepth: Schema.optional(Schema.Int),
+});
+export type PolicyRulesWrite = (typeof PolicyRulesWrite)["Type"];
+
 /** What the repository enforces now; `ref` is `null` on unpublished defaults. */
 export const PolicyAnswer = Schema.Struct({
   rules: PolicyRules,

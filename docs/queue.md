@@ -144,13 +144,26 @@ Candidates are merge commits, not rebases, and that is a decision rather
 than a default: a rebase re-authors every commit, which breaks the
 commit signatures Part I of agents.md establishes and orphans the
 `Session` trailers that `requireProvenance` verifies. A merge candidate
-carries the signed originals intact. The one new commit per step is the
-queue agent's own, made in the queue agent's own session — so where
-`requireProvenance` is on, integration itself arrives with provenance,
-which is exactly what an audit of "who combined these" wants. Operators
-who want linear history are choosing rewritten authorship; that trade is
-theirs, and a rebase-candidate mode is deferred until someone wants it
-enough to argue the signature loss.
+carries the signed originals intact. Operators who want linear history
+are choosing rewritten authorship; that trade is theirs, and a
+rebase-candidate mode is deferred until someone wants it enough to argue
+the signature loss.
+
+A candidate is also a commit **the runner makes**, and that puts it at
+odds with `requireProvenance`, which is a rule about every commit a push
+introduces. An earlier draft of this proposal said integration would
+arrive with provenance of its own, the candidate being made inside the
+runner's session. Building it showed why that is not free: a candidate's
+object id must be a pure function of what it merges, or a check recorded
+against one pass's candidate names nothing the next pass holds and the
+queue can never land at all — so the trailer cannot carry a session id
+chosen per run, and a stable one means either a session ref per batch or
+one session growing without bound. Both are ceilings, not details. So the
+two are **not usable together** for now: `queue run` refuses a target
+whose rules require provenance, naming the reason, rather than building
+candidates every wake that the boundary will always refuse. Landing pull
+requests directly still works there, which is what such a repository was
+doing anyway.
 
 ### Cost and its ceiling
 
