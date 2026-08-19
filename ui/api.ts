@@ -144,6 +144,8 @@ export interface RawObject {
  * identity when there is one and says nothing rather than inventing one.
  */
 export type Whoami = Contract.WhoamiAnswer;
+export type PolicyAnswer = Contract.PolicyAnswer;
+export type PolicyRules = Contract.PolicyRules;
 
 /** A tagged error body, as `git/Error.ts` puts it on the wire. */
 const ErrorBody = Schema.Struct({
@@ -258,7 +260,17 @@ export class GitApi {
     schema: S,
     init?: RequestInit,
   ): Promise<S["Type"]> {
-    const response = await fetch(url, init);
+    let response = await fetch(url, init);
+    if (response.status === 401) {
+      // A repository that requires authentication challenges with a nonce;
+      // the browser's signing key (`identity.ts`, loaded lazily so anonymous
+      // pages never pay for it) answers once with a signed envelope. A key
+      // the repository has not granted gets the same refusal back.
+      const retried = await import("./identity.ts")
+        .then((identity) => identity.retryAuthorized(url, init ?? {}, response))
+        .catch((): Response | null => null);
+      if (retried !== null) response = retried;
+    }
     if (!response.ok) {
       const decoded = Schema.decodeUnknownOption(ErrorBody)(
         await response.json().catch((): undefined => undefined),
@@ -565,6 +577,48 @@ export class GitApi {
     );
     return body.items;
   }
+
+  /** The branch rules in force, and the commit publishing them. */
+  async policy(): Promise<Contract.PolicyAnswer> {
+    return await this.#json(this.#url("/policy"), Contract.PolicyAnswer);
+  }
+
+  /** Publish new branch rules — `policy.write`'s door, over JSON. */
+  async policyWrite(rules: Contract.PolicyRules): Promise<Contract.PolicyWritten> {
+    return await this.#json(this.#url("/policy"), Contract.PolicyWritten, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rules),
+    });
+  }
+
+  /** Replay one commit onto a branch, moving it on success. */
+  async cherryPick(commit: string, onto: string): Promise<Contract.ReplayResult> {
+    return await this.#post(
+      "/cherry-pick",
+      { commit, onto: qualify(onto), into: qualify(onto) },
+      Contract.ReplayResult,
+    );
+  }
+
+  /** Replay a branch onto another, moving it on success. */
+  async rebase(branch: string, onto: string): Promise<Contract.ReplayResult> {
+    return await this.#post(
+      "/rebase",
+      { branch: qualify(branch), onto: qualify(onto), into: qualify(branch) },
+      Contract.ReplayResult,
+    );
+  }
+
+  /** The next revision to test, between known-good marks and a known-bad one. */
+  async bisect(good: readonly string[], bad: string): Promise<Contract.BisectAnswer> {
+    return await this.#post("/bisect", { good, bad }, Contract.BisectAnswer);
+  }
+
+  /** Where a revision's archive can be fetched — for a download link. */
+  archiveUrl(ref: string, format: "tar" | "tar.gz" | "zip" = "tar.gz"): string {
+    return this.#url("/archive", new URLSearchParams({ ref: qualify(ref), format }));
+  }
 }
 
 /**
@@ -596,6 +650,16 @@ export interface CodeApi {
   commitDetail(oid: string): Promise<CommitDetail>;
   recentCommits(oid: string, limit?: number): Promise<readonly CommitDetail[]>;
   history(oid: string, path: string, limit?: string): Promise<readonly CommitSummary[]>;
+  cherryPick(commit: string, onto: string): Promise<Contract.ReplayResult>;
+  rebase(branch: string, onto: string): Promise<Contract.ReplayResult>;
+  bisect(good: readonly string[], bad: string): Promise<Contract.BisectAnswer>;
+}
+
+/** What the Search screen needs — the HTTP client and the local one both fit. */
+export interface SearchApi {
+  readonly repo: string;
+  refs(): Promise<readonly Ref[]>;
+  grep(pattern: string, ref: string, maxMatches?: number): Promise<GrepResponse>;
 }
 
 /** Where a branch stands against origin's copy of it; see `ui/local.ts`. */

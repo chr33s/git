@@ -61,6 +61,9 @@ export class GpDetail extends GitPlusElement {
   /** Why the last merge attempt refused, shown beside the review card. */
   @state() private accessor mergeNotice: string | null = null;
 
+  /** A signed hub write is in flight; the action buttons disable meanwhile. */
+  @state() private accessor acting = false;
+
   #renderers = new Map<string, FileDiff>();
   #diffGeneration = 0;
   #unsubscribe: (() => void) | null = null;
@@ -112,6 +115,7 @@ export class GpDetail extends GitPlusElement {
   async #merge(cr: ChangeRequest): Promise<void> {
     const api = this.api;
     this.mergeNotice = null;
+    let landed: string | null = null;
     if (api !== null) {
       try {
         const result = await api.merge({
@@ -125,6 +129,7 @@ export class GpDetail extends GitPlusElement {
           this.mergeNotice = `merge conflicted on ${paths} — resolve on the branch first`;
           return;
         }
+        landed = result.commit;
       } catch (error) {
         if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
         // Refs this repository does not have — the fixture case — fall through
@@ -142,7 +147,48 @@ export class GpDetail extends GitPlusElement {
         }
       }
     }
+    // A hub Change Request's merge is recorded where every replica reads it:
+    // the pr.merged event, signed by this browser, appended once the branch
+    // really moved. The fixtures keep their tab-local projection.
+    if (cr.hub === true && landed !== null) {
+      const recorded = await store.mergedRemote(cr.id, landed);
+      if (!recorded) this.mergeNotice = "merged, but the hub refused the pr.merged record";
+      return;
+    }
     store.merge(cr.id);
+  }
+
+  async #submitReview(decision: "approve" | "reject"): Promise<void> {
+    this.acting = true;
+    try {
+      const sent = await store.reviewRemote(this.taskId, decision);
+      if (!sent) this.mergeNotice = "the hub refused the review — is this key a member?";
+    } finally {
+      this.acting = false;
+    }
+  }
+
+  async #thread(thread: string, action: "resolve" | "reopen" | "reply", body = ""): Promise<void> {
+    this.acting = true;
+    try {
+      const sent =
+        action === "reply"
+          ? await store.replyRemote(this.taskId, thread, body)
+          : await store.resolveRemote(this.taskId, thread, action === "resolve");
+      if (!sent) this.mergeNotice = "the hub refused the thread update";
+    } finally {
+      this.acting = false;
+    }
+  }
+
+  async #taskAction(action: "claim" | "release" | "complete" | "abandon"): Promise<void> {
+    this.acting = true;
+    try {
+      const sent = await store.taskActionRemote(this.taskId, action);
+      if (!sent) this.mergeNotice = "the hub refused the task update";
+    } finally {
+      this.acting = false;
+    }
   }
 
   /**
@@ -279,22 +325,27 @@ export class GpDetail extends GitPlusElement {
             <p class="gp-detail-desc">${task.desc}</p>
 
             ${cr === null ? nothing : this.#changeRequest(cr)} ${this.#subtasks(task)}
+            ${this.#lifecycle(task)}
 
             <h2 class="gp-section-label">Discussion</h2>
-            ${task.comments.map(
-              (comment) => html`
-                <div class="gp-comment">
-                  <span class="gp-avatar" data-size="lg">${comment.avatar}</span>
-                  <div>
-                    <div class="gp-comment-head">
-                      <span class="gp-comment-author">${comment.author}</span>
-                      <span class="gp-comment-when">${comment.when}</span>
-                    </div>
-                    <div class="gp-comment-body">${comment.text}</div>
-                  </div>
-                </div>
-              `,
-            )}
+            ${
+              task.threads !== undefined && task.threads.length > 0
+                ? task.threads.map((thread) => this.#thread_(task, thread))
+                : task.comments.map(
+                    (comment) => html`
+                      <div class="gp-comment">
+                        <span class="gp-avatar" data-size="lg">${comment.avatar}</span>
+                        <div>
+                          <div class="gp-comment-head">
+                            <span class="gp-comment-author">${comment.author}</span>
+                            <span class="gp-comment-when">${comment.when}</span>
+                          </div>
+                          <div class="gp-comment-body">${comment.text}</div>
+                        </div>
+                      </div>
+                    `,
+                  )
+            }
             <form class="gp-comment-form" @submit=${this.#comment}>
               <textarea
                 class="gp-textarea"
@@ -445,6 +496,30 @@ export class GpDetail extends GitPlusElement {
           <div class="gp-review-headline">${cr.review.headline}</div>
           <div class="gp-review-detail">${cr.review.detail}</div>
         </div>
+        ${
+          cr.hub === true && cr.review.merged !== true
+            ? html`
+                <button
+                  class="gp-btn-quiet"
+                  type="button"
+                  title="Approve the proposed revision, signed with this browser's key"
+                  ?disabled=${this.acting}
+                  @click=${() => void this.#submitReview("approve")}
+                >
+                  Approve
+                </button>
+                <button
+                  class="gp-btn-quiet"
+                  type="button"
+                  title="Request changes to the proposed revision"
+                  ?disabled=${this.acting}
+                  @click=${() => void this.#submitReview("reject")}
+                >
+                  Request changes
+                </button>
+              `
+            : nothing
+        }
         <button
           class="gp-merge-btn"
           type="button"
@@ -485,6 +560,104 @@ export class GpDetail extends GitPlusElement {
             </button>
           `,
         )}
+      </div>
+    `;
+  }
+
+  /**
+   * One review thread: its conversation, its state, and the two verbs a
+   * reader has — answer it, or settle it. Hub Change Requests only; the
+   * fixtures keep the flat discussion they were designed with.
+   */
+  #thread_(task: Task, thread: NonNullable<Task["threads"]>[number]): TemplateResult {
+    return html`
+      <div class="gp-panel-card gp-thread" ?data-resolved=${thread.resolved}>
+        <div class="gp-thread-head">
+          <span class="gp-thread-path">${thread.path ?? "conversation"}</span>
+          <span class="gp-thread-state">${thread.resolved ? "resolved" : "open"}</span>
+          <button
+            class="gp-btn-quiet"
+            type="button"
+            ?disabled=${this.acting}
+            @click=${() => void this.#thread(thread.id, thread.resolved ? "reopen" : "resolve")}
+          >
+            ${thread.resolved ? "Reopen" : "Resolve"}
+          </button>
+        </div>
+        ${thread.comments.map(
+          (comment) => html`
+            <div class="gp-comment">
+              <span class="gp-avatar" data-size="lg">${comment.avatar}</span>
+              <div>
+                <div class="gp-comment-head">
+                  <span class="gp-comment-author">${comment.author}</span>
+                  <span class="gp-comment-when">${comment.when}</span>
+                </div>
+                <div class="gp-comment-body">${comment.text}</div>
+              </div>
+            </div>
+          `,
+        )}
+        <form
+          class="gp-thread-reply"
+          @submit=${(event: SubmitEvent) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            if (!(form instanceof HTMLFormElement)) return;
+            const field = form.elements.namedItem("reply");
+            if (!(field instanceof HTMLInputElement)) return;
+            const body = field.value.trim();
+            if (body === "") return;
+            void this.#thread(thread.id, "reply", body).then(() => form.reset());
+          }}
+        >
+          <input
+            class="gp-input"
+            name="reply"
+            placeholder="Reply in this thread…"
+            autocomplete="off"
+          />
+        </form>
+      </div>
+    `;
+  }
+
+  /**
+   * A hub task's lease, and its end: claim it, let it go, close it. The
+   * fixture tasks have no lease to speak of, so they show nothing here.
+   */
+  #lifecycle(task: Task): TemplateResult | typeof nothing {
+    if (task.hub !== true || task.kind !== "Task") return nothing;
+    const open = task.status !== "Done";
+    if (!open) return nothing;
+    const claimed = task.status === "In progress";
+    return html`
+      <div class="gp-panel-card gp-task-actions">
+        <span class="gp-field-label">${claimed ? "Claimed" : "Available"}</span>
+        <button
+          class="gp-btn-quiet"
+          type="button"
+          ?disabled=${this.acting}
+          @click=${() => void this.#taskAction(claimed ? "release" : "claim")}
+        >
+          ${claimed ? "Release" : "Claim"}
+        </button>
+        <button
+          class="gp-btn-quiet"
+          type="button"
+          ?disabled=${this.acting}
+          @click=${() => void this.#taskAction("complete")}
+        >
+          Complete
+        </button>
+        <button
+          class="gp-btn-quiet"
+          type="button"
+          ?disabled=${this.acting}
+          @click=${() => void this.#taskAction("abandon")}
+        >
+          Abandon
+        </button>
       </div>
     `;
   }

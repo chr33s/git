@@ -571,3 +571,38 @@ export const PolicyWritten = Schema.Struct({
   commit: OidString,
 });
 export type PolicyWritten = (typeof PolicyWritten)["Type"];
+
+/**
+ * What a replay produced, for both `cherry-pick` and `rebase`.
+ *
+ * `commits` lists every commit considered, not just the ones that produced
+ * something: a `replayed` of `null` is a commit `onto` already had, or one
+ * that conflicted, and dropping those would leave the caller unable to tell
+ * an empty pick from a skipped one.
+ */
+export const ReplayResult = Schema.Struct({
+  kind: Schema.Literals(["replayed", "up-to-date", "conflicted"]),
+  head: Schema.NullOr(OidString),
+  commits: Schema.Array(
+    Schema.Struct({
+      original: OidString,
+      replayed: Schema.NullOr(OidString),
+      conflicts: Schema.Array(
+        Schema.Struct({
+          path: Schema.String,
+          reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
+        }),
+      ),
+    }),
+  ),
+});
+export type ReplayResult = (typeof ReplayResult)["Type"];
+
+/** One bisection step: the next revision to test, or the culprit found. */
+export const BisectAnswer = Schema.Struct({
+  kind: Schema.Literals(["test", "found"]),
+  commit: OidString,
+  remaining: Schema.Finite,
+  steps: Schema.Finite,
+});
+export type BisectAnswer = (typeof BisectAnswer)["Type"];

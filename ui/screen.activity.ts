@@ -24,7 +24,8 @@ import { customElement, state } from "lit/decorators.js";
 
 import { UIToggleGroup } from "@chr33s/base-wc/src/toggle";
 
-import { ApiError, type CommitDetail, describe, type GitApi } from "./api.ts";
+import { ApiError, type CodeApi, type CommitDetail, describe } from "./api.ts";
+import { store } from "./store.ts";
 import { GitPlusElement, navigate } from "./base.ts";
 import { byId, timeline } from "./fixtures.ts";
 import { statusToken, type Task } from "./model.ts";
@@ -57,8 +58,13 @@ const FIXTURE_DAYS: readonly Day[] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
 
 @customElement("gp-activity")
 export class GpActivity extends GitPlusElement {
-  /** Injected by the shell so every screen shares one client. */
-  api: GitApi | null = null;
+  /**
+   * Injected by the shell so every screen shares one client — the local
+   * OPFS repository once its clone lands, which turns this screen's
+   * hundred-commit read into local object reads instead of an N+1 of
+   * requests.
+   */
+  api: CodeApi | null = null;
 
   @state() private accessor commits: readonly CommitDetail[] | null = null;
   @state() private accessor offline = false;
@@ -69,9 +75,18 @@ export class GpActivity extends GitPlusElement {
   /** How many days back the window's last column sits; 0 means it ends today. */
   @state() private accessor offset = 0;
 
+  #unsubscribe: (() => void) | null = null;
+
   override connectedCallback(): void {
     super.connectedCallback();
+    this.#unsubscribe = store.subscribe(() => this.requestUpdate());
     void this.#load();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.#unsubscribe?.();
+    this.#unsubscribe = null;
   }
 
   async #load(): Promise<void> {
@@ -157,6 +172,35 @@ export class GpActivity extends GitPlusElement {
     return `${String(first)} – ${String(last)}${suffix}`;
   }
 
+  /**
+   * The hub's sessions: what each agent was told and what came of it, from
+   * `GET /hub/sessions`. Absent entirely until the hub answers — provenance
+   * is not something to fake with fixtures.
+   */
+  #sessions(): TemplateResult | typeof nothing {
+    const sessions = store.sessions;
+    if (sessions.length === 0) return nothing;
+    return html`
+      <h2 class="gp-section-label">Sessions</h2>
+      <div class="gp-panel-card gp-sessions">
+        ${sessions.map(
+          (session) => html`
+            <div class="gp-list-row">
+              <span class="gp-sha">${session.id.slice(0, 8)}</span>
+              <span>${session.agent}</span>
+              <span class="gp-when">
+                ${session.commits} commit${session.commits === 1 ? "" : "s"}
+                ${session.pulls.length > 0 ? ` · ${session.pulls.length} PR(s)` : ""}
+                ${session.openDecisions > 0 ? ` · ${session.openDecisions} open question(s)` : ""}
+                ${session.tokens > 0 ? ` · ${String(session.tokens)} tokens` : ""}
+              </span>
+            </div>
+          `,
+        )}
+      </div>
+    `;
+  }
+
   protected override render(): TemplateResult {
     const days = this.#days();
     const live = this.commits !== null;
@@ -207,6 +251,7 @@ export class GpActivity extends GitPlusElement {
             ? html`<p class="gp-notice">Showing the design's sample timeline — ${this.reason}.</p>`
             : nothing
         }
+        ${this.#sessions()}
 
         <div class="gp-cal-head">
           <div class="gp-cal-month">${this.#month()}</div>

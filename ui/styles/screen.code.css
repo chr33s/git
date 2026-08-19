@@ -256,3 +256,10 @@
   align-items: center;
   gap: 6px;
 }
+
+/* Per-commit actions in the history panel. */
+.gp-row-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: auto;
+}

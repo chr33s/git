@@ -26,7 +26,10 @@ import * as Opfs from "../src/adapters/Opfs.ts";
 import * as Client from "../src/client/Client.ts";
 import { fetchRepository } from "../src/client/Fetch.ts";
 import { push as pushBranches, type PushResult } from "../src/client/Push.ts";
+import { isBinary, unified } from "../src/git/Diff.ts";
 import { isGitlink, isTree, type Signature } from "../src/git/Format.ts";
+import { cherryPick as replayCommit, rebase as replayBranch } from "../src/git/Rebase.ts";
+import { next as bisectNext } from "../src/git/Bisect.ts";
 import { forPath as pathHistory } from "../src/git/History.ts";
 import { Repository, treeAt } from "../src/git/Repository.ts";
 import { ObjectStore, RefStore, type Oid } from "../src/git/Store.ts";
@@ -38,9 +41,12 @@ import {
   qualify,
   type CommitCreated,
   type CommitSummary,
+  type DiffFile,
   type FileEntry,
+  type GrepResponse,
   type Ref,
 } from "./api.ts";
+import type { BisectAnswer, ReplayResult } from "../src/server/ApiContract.ts";
 
 import type { SyncState } from "./api.ts";
 
@@ -137,6 +143,10 @@ export class LocalGitApi {
       const scope = await origin.getDirectoryHandle("git-plus", { create: true });
       const root = await scope.getDirectoryHandle(options.repo, { create: true });
       const local = new LocalGitApi({ ...options, root });
+      // Ask the browser to keep this origin's storage out of eviction's
+      // reach: an evicted un-pushed commit is real data loss. Advisory — a
+      // refusal changes nothing about how the page behaves.
+      void navigator.storage.persist?.().catch(() => false);
 
       const cloned = (await local.refs()).some((ref) => ref.name.startsWith(HEADS));
       if (!cloned) {
@@ -172,6 +182,20 @@ export class LocalGitApi {
   get #layer() {
     const stores = Opfs.stores(this.#root);
     return Layer.mergeAll(Client.local(stores), stores);
+  }
+
+  /**
+   * One writer at a time, across tabs.
+   *
+   * OPFS writes are atomic per file, but a ref update is a read-check-write
+   * — two tabs committing at once can race it. The Web Locks API serializes
+   * the mutating operations under one origin-wide name; a browser without
+   * it falls through to the direct call, which is no worse than before.
+   */
+  async #locked<A>(work: () => Promise<A>): Promise<A> {
+    const locks = globalThis.navigator?.locks;
+    if (locks === undefined) return await work();
+    return await locks.request(`git-plus:${this.repo}`, work);
   }
 
   async #run<A, E extends TaggedFailure>(
@@ -288,6 +312,13 @@ export class LocalGitApi {
 
   async commitFiles(options: Readonly<CommitFilesRequest>): Promise<CommitCreated> {
     const author = this.author;
+    return await this.#locked(async () => await this.#commitFiles(options, author));
+  }
+
+  async #commitFiles(
+    options: Readonly<CommitFilesRequest>,
+    author: { name: string; email: string },
+  ): Promise<CommitCreated> {
     return await this.#run(
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -330,12 +361,15 @@ export class LocalGitApi {
   }
 
   async branchCreate(name: string, base: string): Promise<Ref> {
-    return await this.#run(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const oid = yield* repository.branch({ name, base: qualify(base) });
-        return { name: `${HEADS}${name}`, oid };
-      }),
+    return await this.#locked(
+      async () =>
+        await this.#run(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const oid = yield* repository.branch({ name, base: qualify(base) });
+            return { name: `${HEADS}${name}`, oid };
+          }),
+        ),
     );
   }
 
@@ -429,6 +463,10 @@ export class LocalGitApi {
 
   /** Push one branch to origin — the manual sync the commit bar offers. */
   async push(branch: string): Promise<readonly PushResult[]> {
+    return await this.#locked(async () => await this.#push(branch));
+  }
+
+  async #push(branch: string): Promise<readonly PushResult[]> {
     const url = this.cloneUrl;
     const results = await this.#run(
       pushBranches({
@@ -456,6 +494,10 @@ export class LocalGitApi {
    * honestly rather than not at all.
    */
   async fetchOrigin(): Promise<{ readonly updated: number; readonly rejected: number }> {
+    return await this.#locked(async () => await this.#fetchOrigin());
+  }
+
+  async #fetchOrigin(): Promise<{ readonly updated: number; readonly rejected: number }> {
     const url = this.cloneUrl;
     const fetched = await this.#run(
       Effect.gen(function* () {
@@ -477,5 +519,115 @@ export class LocalGitApi {
       updated: fetched.refs.length,
       rejected: fetched.rejected.length + mirrored.rejected.length,
     };
+  }
+
+  // -- the local halves of the remaining read surface -----------------------
+
+  /**
+   * Search blob contents at a ref — literal and case-insensitive, exactly
+   * the promise the server's `/grep` makes to the same search box.
+   */
+  async grep(pattern: string, ref: string, maxMatches = 50): Promise<GrepResponse> {
+    const needle = pattern.toLowerCase();
+    return await this.#run(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const start = yield* repository.resolve(qualify(ref));
+        if (start === null) return { matches: [], truncated: false, skipped: [] };
+        const tree = yield* treeAt(repository, start);
+
+        const matches: Array<{ path: string; line: number; text: string }> = [];
+        const skipped: Array<string> = [];
+        let truncated = false;
+
+        const walk: Array<{ readonly oid: Oid; readonly prefix: string }> = [
+          { oid: tree, prefix: "" },
+        ];
+        while (walk.length > 0 && !truncated) {
+          const at = walk.pop();
+          if (at === undefined) break;
+          for (const entry of yield* repository.readTree(at.oid)) {
+            if (truncated) break;
+            if (isGitlink(entry.mode)) continue;
+            const path = `${at.prefix}${entry.name}`;
+            if (isTree(entry.mode)) {
+              walk.push({ oid: entry.oid, prefix: `${path}/` });
+              continue;
+            }
+            const bytes = yield* repository.readBlob(entry.oid);
+            // The same bound the server applies, for the same reason: a
+            // 200 MB log decoded to a string is the tab's memory, not an
+            // answer.
+            if (bytes.length > 4 * 1024 * 1024) {
+              skipped.push(path);
+              continue;
+            }
+            if (isBinary(bytes)) continue;
+            const lines = decoder.decode(bytes).split("\n");
+            for (let index = 0; index < lines.length; index += 1) {
+              const text = lines[index] ?? "";
+              if (!text.toLowerCase().includes(needle)) continue;
+              matches.push({ path, line: index + 1, text });
+              if (matches.length >= maxMatches) {
+                truncated = true;
+                break;
+              }
+            }
+          }
+        }
+        return { matches, truncated, skipped };
+      }),
+    );
+  }
+
+  /**
+   * The patch set between two revisions, computed here: both trees are in
+   * OPFS, and `git/Diff.ts` is the same unified-patch writer the server
+   * answers with.
+   */
+  async diff(from: string, to: string): Promise<readonly DiffFile[]> {
+    const filesAt = (ref: string) => this.files(ref);
+    const readText = (ref: string, path: string) => this.file(ref, path);
+    const before = new Map((await filesAt(from)).map((entry) => [entry.path, entry]));
+    const after = new Map((await filesAt(to)).map((entry) => [entry.path, entry]));
+
+    const out: Array<DiffFile> = [];
+    const paths = new Set([...before.keys(), ...after.keys()]);
+    for (const path of [...paths].sort()) {
+      const was = before.get(path);
+      const is = after.get(path);
+      if (was !== undefined && is !== undefined && was.oid === is.oid) continue;
+      const status = was === undefined ? "added" : is === undefined ? "removed" : "modified";
+      const oldText = was === undefined ? "" : await readText(from, path);
+      const newText = is === undefined ? "" : await readText(to, path);
+      out.push({ path, status, binary: false, patch: unified(oldText, newText) });
+    }
+    return out;
+  }
+
+  /** Replay one commit onto a branch, locally, moving the branch. */
+  async cherryPick(commit: string, onto: string): Promise<ReplayResult> {
+    return await this.#locked(
+      async () =>
+        await this.#run(
+          replayCommit({ commit: qualify(commit), onto: qualify(onto), into: qualify(onto) }),
+        ),
+    );
+  }
+
+  /** The next revision to test between marks — the same walk `/bisect` runs. */
+  async bisect(good: readonly string[], bad: string): Promise<BisectAnswer> {
+    // SAFETY: the marks came from this store's own commit listings.
+    return await this.#run(bisectNext({ bad: bad as Oid, good: good as readonly Oid[] }));
+  }
+
+  /** Replay a branch onto another, locally, moving the branch. */
+  async rebase(branch: string, onto: string): Promise<ReplayResult> {
+    return await this.#locked(
+      async () =>
+        await this.#run(
+          replayBranch({ branch: qualify(branch), onto: qualify(onto), into: qualify(branch) }),
+        ),
+    );
   }
 }

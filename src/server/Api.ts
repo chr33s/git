@@ -78,6 +78,7 @@ import {
   GcRequest as GcRequestWire,
   GrepRequest,
   GrepResponse,
+  BisectAnswer,
   HistoryPage,
   HubEventAppended,
   HubEventRequest,
@@ -93,6 +94,7 @@ import {
   PolicyAnswer,
   PolicyRules,
   PolicyWritten,
+  ReplayResult,
   MergeResult,
   OidString,
   Page,
@@ -140,30 +142,8 @@ const signatureFrom = (author: (typeof SignatureWire)["Type"] | undefined): Sign
 
 const RepoParam = { repo: Schema.String };
 
-/**
- * What a replay produced, for both `cherry-pick` and `rebase`.
- *
- * `commits` lists every commit considered, not just the ones that produced
- * something: a `replayed` of `null` is a commit `onto` already had, or one
- * that conflicted, and dropping those would leave the caller unable to tell
- * an empty pick from a skipped one.
- */
-const ReplayOutcomeWire = Schema.Struct({
-  kind: Schema.Literals(["replayed", "up-to-date", "conflicted"]),
-  head: Schema.NullOr(OidString),
-  commits: Schema.Array(
-    Schema.Struct({
-      original: OidString,
-      replayed: Schema.NullOr(OidString),
-      conflicts: Schema.Array(
-        Schema.Struct({
-          path: Schema.String,
-          reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
-        }),
-      ),
-    }),
-  ),
-});
+/** The replay wire, shared with the browser; see `ApiContract.ReplayResult`. */
+const ReplayOutcomeWire = ReplayResult;
 
 const Cursor = {
   cursor: Schema.optional(Schema.String),
@@ -1032,12 +1012,7 @@ const repo = HttpApiGroup.make("repo")
         bad: OidString,
         good: Schema.Array(OidString),
       }),
-      success: Schema.Struct({
-        kind: Schema.Literals(["test", "found"]),
-        commit: OidString,
-        remaining: Schema.Finite,
-        steps: Schema.Finite,
-      }),
+      success: BisectAnswer,
       error: [ObjectNotFound, Invalid],
     }),
   )

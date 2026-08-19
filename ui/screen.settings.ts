@@ -29,21 +29,9 @@ import {
   type RemoteWire,
   type WebhookWire,
   type Whoami,
+  type PolicyAnswer,
 } from "./api.ts";
 import { GitPlusElement } from "./base.ts";
-
-interface Policy {
-  readonly name: string;
-  readonly label: string;
-  readonly on: boolean;
-}
-
-const POLICIES: readonly Policy[] = [
-  { name: "merge-commits", label: "Allow merge commits", on: true },
-  { name: "squash", label: "Allow squash merging", on: true },
-  { name: "rebase", label: "Allow rebase merging", on: false },
-  { name: "require-checks", label: "Require passing checks before merge", on: true },
-];
 
 const HEADS = "refs/heads/";
 const TAGS = "refs/tags/";
@@ -79,6 +67,9 @@ export class GpSettings extends GitPlusElement {
     readonly publicKey: string;
   } | null = null;
 
+  /** The branch rules in force, from `GET /policy`; `null` while unanswered. */
+  @state() private accessor rules: PolicyAnswer | null = null;
+
   /** The `/whoami` answer, resolved once by the shell. */
   @property({ attribute: false }) accessor who: Whoami | null = null;
 
@@ -109,17 +100,22 @@ export class GpSettings extends GitPlusElement {
       return;
     }
     try {
-      const [branches, tags, remotes, webhooks] = await Promise.all([
-        api.branches(),
-        api.tags(),
-        api.remotes(),
-        api.webhooks(),
+      // The canary: a branch list every readable repository answers. The
+      // rest settle one by one, because the administrative registries can
+      // refuse a reader (`repo.admin`) whose branches and policy are still
+      // theirs to see — one refused card must not blank the other five.
+      this.branches = (await api.branches()).filter((ref) => ref.name.startsWith(HEADS));
+      this.offline = false;
+      const [tags, remotes, webhooks, rules] = await Promise.all([
+        api.tags().catch((): readonly Ref[] => []),
+        api.remotes().catch((): readonly RemoteWire[] => []),
+        api.webhooks().catch((): readonly WebhookWire[] => []),
+        api.policy().catch((): PolicyAnswer | null => null),
       ]);
-      this.branches = branches.filter((ref) => ref.name.startsWith(HEADS));
       this.tags = tags;
       this.remotes = remotes;
       this.webhooks = webhooks;
-      this.offline = false;
+      this.rules = rules;
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
       this.offline = true;
@@ -206,6 +202,37 @@ export class GpSettings extends GitPlusElement {
         <div class="gp-field-value">
           ${who === null || who.capabilities.length === 0 ? "none" : who.capabilities.join(", ")}
         </div>
+        ${
+          who?.expiresAt == null
+            ? nothing
+            : html`
+                <div class="gp-field-label">Grant expires</div>
+                <div class="gp-field-value">${who.expiresAt}</div>
+              `
+        }
+        ${
+          who?.trust == null
+            ? nothing
+            : html`
+                <div class="gp-field-label">Trust freshness</div>
+                <div class="gp-field-value">
+                  ${who.trust.fresh ? "fresh" : (who.trust.reason ?? "stale")} — bounded to
+                  ${String(who.trust.maxTrustAgeSeconds)}s
+                </div>
+              `
+        }
+        ${
+          who?.budget == null
+            ? nothing
+            : html`
+                <div class="gp-field-label">Usage budget</div>
+                <div class="gp-field-value">
+                  ${String(who.budget.usedTokens)} of ${String(who.budget.maxUsageTokens)} tokens
+                  used in ${String(who.budget.windowSeconds)}s —
+                  ${String(who.budget.remainingTokens)} left
+                </div>
+              `
+        }
         <div class="gp-field-label">Browser signing key</div>
         ${
           this.browserKey === null
@@ -423,7 +450,15 @@ export class GpSettings extends GitPlusElement {
             <div class="gp-admin-row" data-wide>
               <span class="gp-admin-name">${remote.name}</span>
               <span class="gp-admin-url" title=${remote.url}>${remote.url}</span>
-              ${remote.has_credential ? html`<span class="gp-field-note">key</span>` : nothing}
+              ${remote.has_credential ? html`<span class="gp-field-note">credential</span>` : nothing}
+              ${remote.has_key ? html`<span class="gp-field-note">key</span>` : nothing}
+              ${
+                remote.sync === null
+                  ? nothing
+                  : html`<span class="gp-field-note" title="Standing sync instruction"
+                      >${remote.sync.mode}</span
+                    >`
+              }
               <span class="gp-admin-actions">
                 <button
                   class="gp-btn-quiet"
@@ -713,29 +748,137 @@ export class GpSettings extends GitPlusElement {
     `;
   }
 
+  /**
+   * The branch rules the repository actually enforces, from `GET /policy` —
+   * and a form that publishes new ones through `policy.write`'s own door.
+   * Local toggles are gone: what this card shows is what a push meets.
+   */
   #policy(): TemplateResult {
+    const rules = this.rules;
     return html`
-      <section class="gp-setting-card">
-        <h2 class="gp-setting-title" data-with-hint>Merge policy</h2>
+      <section class="gp-setting-card" data-card="policy">
+        <h2 class="gp-setting-title" data-with-hint>Branch policy</h2>
         <p class="gp-setting-hint">
-          Which actions are allowed when a Change Request is mergeable. Local to this browser — the
-          API has no settings surface yet, so these do not persist.
+          What the repository enforces on protected branches — read from
+          <code>refs/meta/policy</code>, written back through it. Saving needs
+          <code>policy.write</code>.
         </p>
-        <div class="gp-switch-list">
-          ${POLICIES.map(
-            (policy) => html`
-              <label class="gp-switch-row">
-                <ui-switch class="gp-switch">
-                  <input type="checkbox" name=${policy.name} .defaultChecked=${policy.on} />
-                  <span class="gp-switch-thumb"></span>
-                </ui-switch>
-                ${policy.label}
-              </label>
-            `,
-          )}
-        </div>
+        ${
+          rules === null
+            ? html`<div class="gp-field-value">
+                ${this.offline ? "— the git+ API is not reachable." : "— the policy could not be read."}
+              </div>`
+            : html`
+                <form
+                  @submit=${(event: SubmitEvent) => {
+                    event.preventDefault();
+                    void this.#savePolicy(event);
+                  }}
+                >
+                  <label class="gp-field-label" for="gp-policy-protected">Protected refs</label>
+                  <input
+                    id="gp-policy-protected"
+                    class="gp-input"
+                    name="protected"
+                    autocomplete="off"
+                    placeholder="refs/heads/main, refs/tags/*"
+                    .value=${rules.rules.protected.join(", ")}
+                  />
+                  <label class="gp-field-label" for="gp-policy-approvals">Required approvals</label>
+                  <input
+                    id="gp-policy-approvals"
+                    class="gp-input"
+                    name="approvals"
+                    type="number"
+                    min="0"
+                    .value=${String(rules.rules.requiredApprovals)}
+                  />
+                  <label class="gp-field-label" for="gp-policy-checks">Required checks</label>
+                  <input
+                    id="gp-policy-checks"
+                    class="gp-input"
+                    name="checks"
+                    autocomplete="off"
+                    placeholder="test, lint"
+                    .value=${rules.rules.requiredChecks.join(", ")}
+                  />
+                  <label class="gp-switch-row">
+                    <ui-switch class="gp-switch">
+                      <input
+                        type="checkbox"
+                        name="requirePullRequest"
+                        .checked=${rules.rules.requirePullRequest}
+                      />
+                      <span class="gp-switch-thumb"></span>
+                    </ui-switch>
+                    Require a pull request on protected branches
+                  </label>
+                  <label class="gp-switch-row">
+                    <ui-switch class="gp-switch">
+                      <input
+                        type="checkbox"
+                        name="requireResolvedThreads"
+                        .checked=${rules.rules.requireResolvedThreads}
+                      />
+                      <span class="gp-switch-thumb"></span>
+                    </ui-switch>
+                    Require review threads resolved before merge
+                  </label>
+                  <div class="gp-dialog-actions">
+                    <button
+                      class="gp-btn-quiet"
+                      type="submit"
+                      ?disabled=${this.busy || this.offline}
+                    >
+                      Publish policy
+                    </button>
+                  </div>
+                </form>
+                <div class="gp-field-value" data-note="policy">
+                  ${
+                    rules.ref === null
+                      ? "Defaults — nothing published yet."
+                      : `Published at ${rules.ref.slice(0, 7)}.`
+                  }
+                </div>
+              `
+        }
+        ${this.#outcome("policy")}
       </section>
     `;
+  }
+
+  async #savePolicy(event: SubmitEvent): Promise<void> {
+    const api = this.api;
+    const current = this.rules;
+    const form = event.currentTarget;
+    if (api === null || current === null || !(form instanceof HTMLFormElement)) return;
+    const text = (name: string): string => {
+      const field = form.elements.namedItem(name);
+      return field instanceof HTMLInputElement ? field.value : "";
+    };
+    const on = (name: string): boolean => {
+      const field = form.elements.namedItem(name);
+      return field instanceof HTMLInputElement && field.checked;
+    };
+    const list = (value: string): string[] =>
+      value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry !== "");
+
+    await this.#run("policy", async () => {
+      const written = await api.policyWrite({
+        ...current.rules,
+        protected: list(text("protected")),
+        requiredApprovals: Math.max(0, Number.parseInt(text("approvals"), 10) || 0),
+        requiredChecks: list(text("checks")),
+        requirePullRequest: on("requirePullRequest"),
+        requireResolvedThreads: on("requireResolvedThreads"),
+      });
+      this.rules = { rules: written.rules, ref: written.commit };
+      return `policy published at ${written.commit.slice(0, 7)}`;
+    });
   }
 
   #danger(): TemplateResult {
