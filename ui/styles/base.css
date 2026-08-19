@@ -1,0 +1,111 @@
+/**
+ * git+ application styles.
+ *
+ * Every rule here is a transcription of an inline style from the Claude Design
+ * prototypes. Where the prototype computed a style in JS (`navStyle(active)`,
+ * `statusStyle(s)`, `fRow(...)`), the branches became modifier classes or
+ * `data-*` attributes so the markup stays declarative.
+ *
+ * Components render into the *light DOM* (see `base.ts`), so these
+ * ownership-based files remain global CSS and esbuild combines them into one
+ * asset. That is also the contract `@chr33s/base-wc` requires.
+ */
+
+/* ---------------------------------------------------------------- document */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--gp-bg);
+}
+
+body {
+  font-family: var(--gp-font);
+  color: var(--gp-fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--gp-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--gp-accent-hover);
+  text-decoration: underline;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--gp-scroll-thumb);
+  border-radius: var(--gp-radius-sm);
+  border: 2px solid var(--gp-scroll-track);
+}
+
+/*
+ * The element hosts take themselves out of the box tree.
+ *
+ * Rendering into the light DOM (see `base.ts`) means each component's markup
+ * arrives wrapped in its own custom element — and a `<gp-sidebar>` sitting
+ * between `.gp-shell` and `.gp-sidebar` would be the flex item, leaving the
+ * rail unable to stretch to the viewport and the explorer column unable to sit
+ * beside the content. `display: contents` promotes each component's own
+ * children to be the flex items, which is what the design's layout assumes.
+ *
+ * `gp-app` keeps a box: it is the root, and `.gp-shell` inside it is what sets
+ * the 100vh height.
+ */
+gp-app {
+  display: block;
+}
+
+gp-sidebar,
+gp-activity,
+gp-code,
+gp-tasks,
+gp-detail,
+gp-settings {
+  display: contents;
+}
+
+/* ------------------------------------------------------------------- shell */
+
+.gp-shell {
+  display: flex;
+  height: 100vh;
+  background: var(--gp-bg);
+  overflow: hidden;
+}
+
+.gp-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gp-screen {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+
+.gp-screen--code {
+  min-width: 0;
+  padding: 8px 32px 24px;
+}
+
+.gp-screen--flush {
+  padding: 0;
+}
+
+.gp-heading {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}

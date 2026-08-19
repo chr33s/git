@@ -80,12 +80,91 @@ describe("cli task", () => {
     const task = await openTask("something abandoned");
     // A sandbox that dies holding a claim is the case this is for: nothing
     // releases it, and the work has to become available again anyway.
-    await cli(["task", "claim", "--root", root, "--key", key, "--ttl", "1", "project", task]);
+    //
+    // Five seconds, not one: reading the list back spawns a second CLI, and a
+    // lease short enough for that to outrun it made this assert that an
+    // expired claim still holds — which is the opposite of what it checks.
+    const ttl = 5;
+    await cli([
+      "task",
+      "claim",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--ttl",
+      String(ttl),
+      "project",
+      task,
+    ]);
+    // Measured after the claim landed, so it is never earlier than the expiry
+    // the CLI wrote; waiting past it therefore always waits long enough.
+    const claimed = Date.now();
     assert.deepEqual(JSON.parse(await cli(["task", "list", "--root", root, "project"])), []);
 
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const expiry = claimed + ttl * 1000 + 200;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiry - Date.now())));
     const after = JSON.parse(await cli(["task", "list", "--root", root, "project"]));
     assert.equal(after.length, 1, "an expired lease frees the work by doing nothing");
+  });
+
+  it("files work under a release, and moves it when the release slips", async () => {
+    const v4 = await openTask("v0.4 — Identity");
+    const v5 = await openTask("v0.5 — Scale");
+    const work = (
+      await cli([
+        "task",
+        "open",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--title",
+        "sign events with the browser key",
+        "--parent",
+        v4,
+        "project",
+      ])
+    ).trim();
+
+    const filed = JSON.parse(await cli(["task", "show", "--root", root, "project", work]));
+    assert.equal(filed.parent, v4);
+    // A release is a task like any other, so it has no parent of its own and
+    // shows up in the same listing.
+    const milestone = JSON.parse(await cli(["task", "show", "--root", root, "project", v4]));
+    assert.equal(milestone.parent, null);
+
+    // The whole reason this is an event and not a field on `task.opened`:
+    // the ref cannot be rewound, and work slips between releases anyway.
+    await cli(["task", "reparent", "--root", root, "--key", key, "--parent", v5, "project", work]);
+    const slipped = JSON.parse(await cli(["task", "show", "--root", root, "project", work]));
+    assert.equal(slipped.parent, v5);
+
+    // And out from under anything at all.
+    await cli(["task", "reparent", "--root", root, "--key", key, "project", work]);
+    const loose = JSON.parse(await cli(["task", "show", "--root", root, "project", work]));
+    assert.equal(loose.parent, null);
+
+    // An edge no reader could follow is refused where it is written.
+    const reparent = (task: string, parent: string) =>
+      failing([
+        "task",
+        "reparent",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--parent",
+        parent,
+        "project",
+        task,
+      ]);
+    assert.match(await reparent(work, work), /cannot belong to itself/);
+
+    // And a longer way round, which one record cannot see on its own: v0.4 is
+    // above `work` only because `work` was filed under it a moment ago.
+    await cli(["task", "reparent", "--root", root, "--key", key, "--parent", v4, "project", work]);
+    assert.match(await reparent(v4, work), /would close a loop/);
   });
 
   it("closes by saying so, and names what resolved it", async () => {

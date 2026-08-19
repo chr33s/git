@@ -15,7 +15,11 @@ import { Effect, FileSystem, Layer, Path } from "effect";
 import { Etag, HttpPlatform, HttpRouter } from "effect/unstable/http";
 import { HttpApiTest } from "effect/unstable/httpapi";
 
-import { fingerprint, formatPublicKey, generate } from "../crypto/SshSignature.ts";
+import { fingerprint, formatPublicKey, generate, NAMESPACE, sign } from "../crypto/SshSignature.ts";
+import * as HubEvent from "../hub/Event.ts";
+import * as PullRequest from "../hub/PullRequest.ts";
+import * as HubTask from "../hub/Task.ts";
+import * as HubSession from "../hub/Session.ts";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -35,6 +39,7 @@ const repository = GitRepository.layer.pipe(
 
 const live = Layer.mergeAll(
   Api.handlers,
+  Api.hubHandlers,
   HttpPlatform.layer.pipe(Layer.provide(FileSystem.layerNoop({}))),
   Etag.layerWeak,
   FileSystem.layerNoop({}),
@@ -1280,6 +1285,484 @@ describe("Api", () => {
 
         const empty = yield* client.repo.webhookList({ params: { repo: "r" } });
         assert.deepEqual(empty.webhooks, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+});
+
+describe("Api hub", () => {
+  it.live("lists tasks without needing a genesis", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("worker@example.com");
+        const opened = yield* HubTask.open({
+          repo: "r",
+          title: "wire the hub over HTTP",
+          description: "so a browser can read what the fleet is doing",
+          refs: ["refs/heads/main"],
+          key,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+
+        assert.equal(answer.items.length, 1);
+        const task = answer.items[0]!;
+        assert.equal(task.task, opened.task);
+        assert.equal(task.title, "wire the hub over HTTP");
+        assert.equal(task.available, true);
+        assert.equal(task.claim, null);
+        assert.equal(task.closed, null);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("groups tasks under the parent its children name", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("worker@example.com");
+        const milestone = yield* HubTask.open({ repo: "r", title: "v0.4 — Identity", key });
+        const first = yield* HubTask.open({
+          repo: "r",
+          title: "sign events with the browser key",
+          parent: milestone.task,
+          key,
+        });
+        // Filed after the fact, which is the case a field on `task.opened`
+        // could never answer: work moves between releases.
+        const second = yield* HubTask.open({ repo: "r", title: "verify signatures", key });
+        yield* HubTask.reparent({
+          repo: "r",
+          task: second.task,
+          parent: milestone.task,
+          key,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
+
+        assert.deepEqual(
+          [...(byId.get(milestone.task)?.children ?? [])].sort(),
+          [first.task, second.task].sort(),
+        );
+        assert.equal(byId.get(milestone.task)?.parent, null);
+        assert.equal(byId.get(first.task)?.parent, milestone.task);
+        assert.equal(byId.get(second.task)?.parent, milestone.task);
+        // The edge lives on the children; the parent's own ref never hears of
+        // it, so it carries no children of its own to report.
+        assert.deepEqual(byId.get(first.task)?.children, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("lets a member re-file work somebody else opened, but not close it", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const opener = yield* generate("opener@example.com");
+        const other = yield* generate("other@example.com");
+        const milestone = yield* HubTask.open({ repo: "r", title: "v0.4 — Identity", key: opener });
+        const work = yield* HubTask.open({ repo: "r", title: "sign events", key: opener });
+
+        // Triage, and undone by another `task.reparented`: the boundary has
+        // already asked for a `hub.*` capability to append here at all.
+        yield* HubTask.reparent({
+          repo: "r",
+          task: work.task,
+          parent: milestone.task,
+          key: other,
+        });
+        // Closing is not triage and does not come back, so it stays the
+        // opener's — the two rules differ on purpose.
+        yield* HubTask.close({ repo: "r", task: work.task, key: other });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
+        assert.equal(byId.get(work.task)?.parent, milestone.task);
+        assert.deepEqual(byId.get(milestone.task)?.children, [work.task]);
+        assert.equal(byId.get(work.task)?.closed, null);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("severs a loop the refs closed behind its back", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("worker@example.com");
+        const a = yield* HubTask.open({ repo: "r", title: "A", key });
+        const b = yield* HubTask.open({ repo: "r", title: "B", parent: a.task, key });
+
+        // The edge `hub/Task.ts` refuses, written the way `POST /hub/events`
+        // writes: signed bytes appended straight to the ref, never asking the
+        // module that would have said no. Two members racing on two refs get
+        // here honestly; this is the same end state, reached on purpose.
+        const base = yield* HubTask.context("r", a.task);
+        const payload = { ...base, type: "task.reparented" as const, parent: b.task };
+        const bytes = HubTask.encode(payload);
+        yield* HubEvent.appendTo({
+          ref: HubTask.refOf(a.task),
+          message: `task.reparented ${payload.id}\n`,
+          payload: bytes,
+          signatures: [yield* sign(key, bytes, NAMESPACE)],
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
+        // Both ends of the loop report no parent, so every chain a reader can
+        // walk is finite — which is what lets the walkers not guard.
+        assert.equal(byId.get(a.task)?.parent, null);
+        assert.equal(byId.get(b.task)?.parent, null);
+        assert.deepEqual(byId.get(a.task)?.children, []);
+        assert.deepEqual(byId.get(b.task)?.children, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("answers an empty, disabled hub for a repository with no genesis", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.pulls({ params: { repo: "r" }, query: {} });
+        assert.equal(answer.enabled, false);
+        assert.match(answer.reason ?? "", /no genesis/);
+        assert.deepEqual(answer.items, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("projects a member's pull request into the listing and the detail", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.create-pr", "hub.comment"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const head = yield* git.commit({
+          branch: "refs/heads/topic",
+          tree: EMPTY_TREE_OID,
+          message: "proposed",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+
+        const opened = yield* PullRequest.open({
+          repo: genesis.repoId,
+          title: "teach the hub HTTP",
+          description: "reads for every screen",
+          base: "refs/heads/main",
+          head,
+          key: member,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+
+        const listing = yield* client.hub.pulls({ params: { repo: "r" }, query: {} });
+        assert.equal(listing.enabled, true);
+        assert.equal(listing.items.length, 1);
+        const summary = listing.items[0]!;
+        assert.equal(summary.id, opened.pr);
+        assert.equal(summary.title, "teach the hub HTTP");
+        assert.equal(summary.state, "open");
+        assert.equal(summary.head, head);
+        assert.equal(summary.approvals, 0);
+
+        const detail = yield* client.hub.pull({ params: { repo: "r", id: opened.pr } });
+        assert.equal(detail.description, "reads for every screen");
+        assert.equal(detail.author, yield* fingerprint(member.publicKey));
+        assert.deepEqual(detail.reviews, []);
+        assert.deepEqual(detail.checkList, []);
+
+        const missing = yield* client.hub
+          .pull({ params: { repo: "r", id: "nope" } })
+          .pipe(Effect.flip);
+        assert.equal(missing._tag, "Invalid");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("appends a pre-signed event and refuses bytes nobody signed", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["repo.read", "source.push", "hub.create-pr"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const head = yield* git.commit({
+          branch: "refs/heads/topic",
+          tree: EMPTY_TREE_OID,
+          message: "proposed",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+
+        // The exact bytes `PullRequest.open` would sign, signed elsewhere —
+        // which is the whole point of the endpoint: the key never travels.
+        const pr = HubEvent.newId();
+        const payload = {
+          version: 1,
+          type: "pr.opened",
+          repo: genesis.repoId,
+          pr,
+          id: HubEvent.newId(),
+          issuedAt: new Date(1_700_000_001_000).toISOString(),
+          trustHead: yield* git.resolve(Log.LOG_REF),
+          title: "opened over JSON",
+          description: "",
+          base: "refs/heads/main",
+          head: HubEvent.qualify(head),
+        } as const;
+        const bytes = HubEvent.encode(payload);
+        const armored = yield* sign(member, bytes, NAMESPACE);
+        const base64 = btoa(String.fromCharCode(...bytes));
+
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(member.publicKey);
+        const asMember = Effect.provideService(Auth.Requester, {
+          principal: projection.members.get(signer) ?? null,
+          signer,
+          capabilities: ["repo.read", "source.push", "hub.create-pr"],
+          projection,
+          envelope: null,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const appended = yield* client.hub
+          .append({
+            params: { repo: "r" },
+            payload: { payload: base64, signatures: [armored] },
+          })
+          .pipe(asMember);
+        assert.equal(appended.ref, HubEvent.refOf(pr));
+
+        const listing = yield* client.hub.pulls({ params: { repo: "r" }, query: {} });
+        assert.equal(
+          listing.items.some((entry) => entry.id === pr),
+          true,
+        );
+
+        // Tampered bytes: the signature no longer covers them, so nothing is
+        // appended — whatever the projection would later have said.
+        const tampered = btoa(String.fromCharCode(...HubEvent.encode({ ...payload, title: "x" })));
+        const refused = yield* client.hub
+          .append({ params: { repo: "r" }, payload: { payload: tampered, signatures: [armored] } })
+          .pipe(asMember, Effect.flip);
+        assert.equal(refused._tag, "Invalid");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+});
+
+describe("Api hub extensions", () => {
+  it.live("pages the task listing like every other listing", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("worker@example.com");
+        for (let index = 0; index < 3; index += 1) {
+          yield* HubTask.open({ repo: "r", title: `task ${String(index)}`, key });
+        }
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const first = yield* client.hub.tasks({ params: { repo: "r" }, query: { limit: "2" } });
+        assert.equal(first.items.length, 2);
+        assert.equal(first.has_more, true);
+        assert.notEqual(first.next_cursor, null);
+        const rest = yield* client.hub.tasks({
+          params: { repo: "r" },
+          query: { limit: "2", cursor: first.next_cursor ?? "0" },
+        });
+        assert.equal(rest.items.length, 1);
+        assert.equal(rest.has_more, false);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("projects sessions: the listing's summaries and the whole account", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("agent@example.com");
+        const opened = yield* HubSession.open({
+          repo: "r",
+          agent: { kind: "coding", model: "m", harness: "h" },
+          prompt: "wire the sessions over HTTP",
+          key,
+        });
+        yield* HubSession.ask({
+          repo: "r",
+          session: opened.session,
+          question: "merge strategy?",
+          options: ["merge", "rebase"],
+          refs: [],
+          key,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const listing = yield* client.hub.sessions({ params: { repo: "r" }, query: {} });
+        assert.equal(listing.items.length, 1);
+        const summary = listing.items[0]!;
+        assert.equal(summary.session, opened.session);
+        assert.equal(summary.agent?.model, "m");
+        assert.equal(summary.decisions.open, 1);
+
+        const detail = yield* client.hub.session({
+          params: { repo: "r", id: opened.session },
+        });
+        assert.equal(detail.prompts[0]?.prompt, "wire the sessions over HTTP");
+        assert.equal(detail.decisions[0]?.question, "merge strategy?");
+        assert.equal(detail.decisions[0]?.chose, null);
+
+        const missing = yield* client.hub
+          .session({ params: { repo: "r", id: "nope" } })
+          .pipe(Effect.flip);
+        assert.equal(missing._tag, "Invalid");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("appends a pre-signed session event beside the task and pull kinds", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("agent@example.com");
+        const session = HubSession.newId();
+        const payload = {
+          version: 1,
+          type: "session.opened",
+          repo: "r",
+          session,
+          id: HubSession.newId(),
+          issuedAt: new Date(1_700_000_000_000).toISOString(),
+          trustHead: null,
+          agent: { kind: "coding", model: "m", harness: "h" },
+          prompt: "opened over JSON",
+          role: "user",
+          context: null,
+        } as const;
+        const bytes = HubSession.encode(payload);
+        const armored = yield* sign(key, bytes, NAMESPACE);
+        const base64 = btoa(String.fromCharCode(...bytes));
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const appended = yield* client.hub.append({
+          params: { repo: "r" },
+          payload: { payload: base64, signatures: [armored] },
+        });
+        assert.equal(appended.ref, HubSession.refOf(session));
+
+        const detail = yield* client.hub.session({ params: { repo: "r", id: session } });
+        assert.equal(detail.prompts[0]?.prompt, "opened over JSON");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("answers the trust roster, and an empty one without a genesis", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const empty = yield* client.hub.members({ params: { repo: "r" } });
+        assert.equal(empty.enabled, false);
+        assert.deepEqual(empty.members, []);
+
+        const root = yield* generate("root@example.com");
+        const member = yield* generate("member@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(member.publicKey),
+            capabilities: ["repo.read", "source.push"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const roster = yield* client.hub.members({ params: { repo: "r" } });
+        assert.equal(roster.enabled, true);
+        const signer = yield* fingerprint(member.publicKey);
+        const found = roster.members.find((entry) => entry.fingerprint === signer);
+        assert.notEqual(found, undefined);
+        assert.deepEqual(found?.capabilities, ["repo.read", "source.push"]);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+});
+
+describe("Api policy and archive", () => {
+  it.live("answers the defaults, accepts new rules, and reads them back", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const defaults = yield* client.repo.policy({ params: { repo: "r" } });
+        assert.equal(defaults.ref, null);
+        assert.equal(defaults.rules.requiredApprovals, 0);
+
+        const written = yield* client.repo.policyWrite({
+          params: { repo: "r" },
+          payload: {
+            ...defaults.rules,
+            protected: ["refs/heads/main"],
+            requiredApprovals: 2,
+            requiredChecks: ["test"],
+          },
+        });
+        assert.equal(written.rules.requiredApprovals, 2);
+
+        const after = yield* client.repo.policy({ params: { repo: "r" } });
+        assert.equal(after.ref, written.commit);
+        assert.deepEqual(after.rules.protected, ["refs/heads/main"]);
+        assert.equal(after.rules.requiredChecks[0], "test");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("streams a revision as an archive a reader can take away", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+        const blob = yield* git.writeBlob(new TextEncoder().encode("archived\n"));
+        const tree = yield* git.writeTree([{ mode: "100644", name: "a.txt", oid: blob }]);
+        yield* git.commit({
+          branch: "refs/heads/main",
+          tree,
+          message: "first",
+          author: { ...alice, at: new Date(1_700_000_000_000) },
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+        const bytes = yield* client.repo.archive({
+          params: { repo: "r" },
+          query: { ref: "refs/heads/main", format: "tar" },
+        });
+        // A tar of one small file: header block plus content plus the
+        // end-of-archive blocks, and the path visible in the header.
+        assert.equal(bytes.length % 512, 0);
+        const text = new TextDecoder().decode(bytes);
+        assert.match(text, /a\.txt/);
+        assert.match(text, /archived/);
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );

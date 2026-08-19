@@ -1,0 +1,280 @@
+/* ---------------------------------------------------------- settings screen */
+
+.gp-settings {
+  max-width: 640px;
+}
+
+.gp-settings .gp-heading {
+  margin-bottom: 20px;
+}
+
+.gp-setting-card {
+  border: 1px solid var(--gp-border);
+  border-radius: var(--gp-radius-lg);
+  padding: 20px 22px;
+  margin-bottom: 16px;
+}
+
+.gp-setting-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+.gp-setting-title[data-with-hint] {
+  margin-bottom: 6px;
+}
+
+.gp-setting-hint {
+  font-size: 13px;
+  color: var(--gp-fg-muted);
+  margin-bottom: 14px;
+}
+
+.gp-field-label {
+  font-size: 12.5px;
+  color: var(--gp-fg-faint);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.gp-field-note {
+  font-weight: 400;
+  color: var(--gp-fg-faint);
+}
+
+.gp-field-value {
+  background: var(--gp-surface-input);
+  border: 1px solid var(--gp-border-strong);
+  border-radius: var(--gp-radius);
+  padding: 9px 13px;
+  font-size: 13.5px;
+  font-family: var(--gp-mono);
+  color: var(--gp-fg);
+  margin-bottom: 14px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.gp-field-value:last-child {
+  margin-bottom: 0;
+}
+
+.gp-switch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13.5px;
+}
+
+.gp-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+/* base-wc's native-first switch: the real checkbox stays the form value and is
+   overlaid on the visual, so the control still submits with JS off. */
+ui-switch.gp-switch {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 19px;
+  flex-shrink: 0;
+  border-radius: var(--gp-radius-pill);
+  background: var(--gp-border-strong);
+  transition: background 0.15s ease;
+}
+
+ui-switch.gp-switch > input[type="checkbox"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+
+ui-switch.gp-switch > .gp-switch-thumb {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: var(--gp-radius-pill);
+  background: var(--gp-fg-faint);
+  transition:
+    left 0.15s ease,
+    background 0.15s ease;
+}
+
+ui-switch.gp-switch[data-state="checked"] {
+  background: var(--gp-accent);
+}
+
+ui-switch.gp-switch[data-state="checked"] > .gp-switch-thumb {
+  left: 17px;
+  background: var(--gp-accent-fg);
+}
+
+ui-switch.gp-switch > input:focus-visible ~ .gp-switch-thumb {
+  outline: 2px solid var(--gp-accent);
+  outline-offset: 2px;
+}
+
+.gp-danger {
+  border: 1px solid var(--gp-danger-border);
+  border-radius: var(--gp-radius-lg);
+  padding: 20px 22px;
+}
+
+.gp-danger-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--gp-red);
+  margin-bottom: 6px;
+}
+
+.gp-danger-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13.5px;
+  margin-top: 12px;
+}
+
+.gp-danger-row + .gp-danger-row {
+  margin-top: 14px;
+}
+
+.gp-danger-row-title {
+  font-weight: 600;
+}
+
+.gp-danger-row-hint {
+  color: var(--gp-fg-muted);
+  font-size: 12.5px;
+}
+
+.gp-danger-btn {
+  border: 1px solid var(--gp-danger-border);
+  color: var(--gp-red);
+  border-radius: var(--gp-radius);
+  padding: 6px 13px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  background: none;
+  font-family: inherit;
+}
+
+.gp-danger-btn:hover {
+  background: var(--gp-danger-hover-bg);
+}
+
+/* ------------------------------------------------------ administration rows */
+
+.gp-admin-list {
+  border: 1px solid var(--gp-border);
+  border-radius: var(--gp-radius);
+  overflow: hidden;
+  margin: 10px 0 4px;
+}
+
+.gp-admin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--gp-divider);
+  font-size: 13px;
+}
+
+.gp-admin-row:first-child {
+  border-top: 0;
+}
+
+.gp-admin-name {
+  font-family: var(--gp-mono);
+  font-size: 12.5px;
+  color: var(--gp-fg);
+}
+
+.gp-admin-url {
+  font-family: var(--gp-mono);
+  font-size: 12px;
+  color: var(--gp-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.gp-admin-row > .gp-btn-quiet,
+.gp-admin-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.gp-admin-row[data-wide] > .gp-btn-quiet {
+  margin-left: 0;
+}
+
+.gp-admin-row .gp-btn-quiet {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.gp-admin-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.gp-admin-form .gp-input {
+  flex: 1;
+  min-width: 140px;
+  width: auto;
+  font-size: 12.5px;
+}
+
+.gp-admin-form .gp-admin-select {
+  flex: 0 1 180px;
+}
+
+.gp-admin-form .gp-btn-quiet {
+  flex-shrink: 0;
+}
+
+.gp-admin-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--gp-fg-muted);
+  border-left: 2px solid var(--gp-accent);
+  padding-left: 10px;
+}
+
+.gp-setting-card code {
+  font-family: var(--gp-mono);
+  font-size: 12px;
+}
+
+/* The browser-key line: the public key beside its copy button. */
+.gp-field-value--row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gp-field-value--row .gp-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--gp-mono, monospace);
+  font-size: 12px;
+}

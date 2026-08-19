@@ -35,6 +35,7 @@ import { file as remotesFile } from "../server/Remotes.node.ts";
 import * as Remotes from "../server/Remotes.ts";
 import { collects, routeOf, settledWithin } from "../server/Route.ts";
 import * as Sending from "../server/Sending.ts";
+import { assetResponse } from "../server/Static.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Wake from "../server/Wake.node.ts";
@@ -54,6 +55,14 @@ export interface ServeOptions {
    * where saying so out loud is the point.
    */
   readonly allowAnonymousWrites?: boolean;
+  /**
+   * Directory of a built UI to serve from this origin, if any.
+   *
+   * The page and the API have to share an origin for the browser to let them
+   * talk; see `server/Static.ts`. Unset serves the git API alone, which is
+   * what a host with no interest in the browser half wants.
+   */
+  readonly ui?: string;
   /**
    * Run each repository's `wake.json` rules when a push moves its hub refs.
    *
@@ -366,6 +375,23 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // build one that works from the authority the client actually used.
       const authority = incoming.headers.host ?? fallbackAuthority;
       const url = new URL(incoming.url ?? "/", `http://${authority}`);
+
+      // The built UI first, and only where it actually has the file. A miss
+      // falls through to the repository routing below, so the API keeps every
+      // path it owns and no list of them has to be maintained here. A
+      // repository whose name collides with a built asset is shadowed by it —
+      // the assets are hashed bundle names and `index.html`, so that is a
+      // repository called `index.html`.
+      const asset =
+        options.ui === undefined
+          ? null
+          : await assetResponse(options.ui, new Request(url, { method: incoming.method ?? "GET" }));
+      if (asset !== null) {
+        outgoing.writeHead(asset.status, Object.fromEntries(asset.headers));
+        outgoing.end(Buffer.from(await asset.arrayBuffer()));
+        return;
+      }
+
       const matched = routeOf(url.pathname);
       if (matched === null) {
         outgoing.writeHead(400);

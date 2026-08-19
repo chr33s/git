@@ -19,8 +19,14 @@
  * algorithms in `git/`.
  */
 import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
-import { Etag, HttpPlatform } from "effect/unstable/http";
-import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
+import { Etag, HttpPlatform, HttpServerResponse } from "effect/unstable/http";
+import {
+  HttpApi,
+  HttpApiBuilder,
+  HttpApiEndpoint,
+  HttpApiGroup,
+  HttpApiSchema,
+} from "effect/unstable/httpapi";
 
 import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
@@ -31,6 +37,21 @@ import { forPath as pathHistory } from "../git/History.ts";
 import { type Strategy as MergeStrategy } from "../git/Merge.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
 import * as Redaction from "../hub/Redaction.ts";
+import * as HubEvent from "../hub/Event.ts";
+import {
+  approvals as pullApprovals,
+  project as projectPull,
+  type PullRequest as ProjectedPull,
+} from "../hub/Projection.ts";
+import * as HubTask from "../hub/Task.ts";
+import * as HubSession from "../hub/Session.ts";
+import { archive as archiveTree, type Format as ArchiveFormat } from "./Archive.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
+import {
+  NAMESPACE as SIGNING_NAMESPACE,
+  verify as verifySignature,
+} from "../crypto/SshSignature.ts";
+import { write as writeRecord } from "../trust/Record.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import * as Policy from "./Policy.ts";
 import * as Auth from "./Auth.ts";
@@ -39,6 +60,59 @@ import { permits } from "../trust/Certificate.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
+import {
+  BranchCreateRequest,
+  Commit as CommitResponse,
+  CommitCreated,
+  CommitPage,
+  Deleted,
+  DiffRequest,
+  DiffResponse,
+  Encoding,
+  FetchResult,
+  FileContent,
+  FilesResponse,
+  FileWrite,
+  FsckReport,
+  GcReport,
+  GcRequest as GcRequestWire,
+  GrepRequest,
+  GrepResponse,
+  BisectAnswer,
+  HistoryPage,
+  HubEventAppended,
+  HubEventRequest,
+  HubMembersResponse,
+  HubPullDetail,
+  HubPullPage,
+  HubPullSummary,
+  HubSessionDetail,
+  HubSessionPage,
+  HubSessionSummary,
+  HubTaskPage,
+  LogResponse,
+  PolicyAnswer,
+  PolicyRules,
+  PolicyWritten,
+  ReplayResult,
+  MergeResult,
+  OidString,
+  Page,
+  PullResult,
+  PushResult,
+  RawObject as RawObjectResponse,
+  Ref,
+  ReflogResponse,
+  RefsResponse,
+  RemoteList,
+  RemoteWire,
+  ResetRequest,
+  ResetResult,
+  TagCreated,
+  TagRead,
+  WebhookList,
+  WebhookWire,
+} from "./ApiContract.ts";
 
 /** `NewRemote` under construction: built field by field, handed over as one. */
 interface RemoteRequest {
@@ -50,14 +124,6 @@ interface RemoteRequest {
 }
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 import { fetchFrom, pull, remoteFor } from "./Sync.ts";
-
-/**
- * An oid on the wire, decoded to the domain's branded `Oid` outright: the
- * refinement carries `isOid`'s type predicate, so a validated payload needs
- * no `as Oid` at the use sites — the schema is the one place the brand is
- * earned.
- */
-const OidString = Schema.String.pipe(Schema.refine(isOid));
 
 /** JSON has no `Date`: `at` crosses as an ISO string, `offset` in minutes. */
 const SignatureWire = Schema.Struct({
@@ -76,45 +142,13 @@ const signatureFrom = (author: (typeof SignatureWire)["Type"] | undefined): Sign
 
 const RepoParam = { repo: Schema.String };
 
-/**
- * What a replay produced, for both `cherry-pick` and `rebase`.
- *
- * `commits` lists every commit considered, not just the ones that produced
- * something: a `replayed` of `null` is a commit `onto` already had, or one
- * that conflicted, and dropping those would leave the caller unable to tell
- * an empty pick from a skipped one.
- */
-const ReplayOutcomeWire = Schema.Struct({
-  kind: Schema.Literals(["replayed", "up-to-date", "conflicted"]),
-  head: Schema.NullOr(OidString),
-  commits: Schema.Array(
-    Schema.Struct({
-      original: OidString,
-      replayed: Schema.NullOr(OidString),
-      conflicts: Schema.Array(
-        Schema.Struct({
-          path: Schema.String,
-          reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
-        }),
-      ),
-    }),
-  ),
-});
-
-/** Written once; every list endpoint reuses it instead of re-deriving it. */
-const Page = <A extends Schema.Top>(item: A) =>
-  Schema.Struct({
-    items: Schema.Array(item),
-    next_cursor: Schema.NullOr(Schema.String),
-    has_more: Schema.Boolean,
-  });
+/** The replay wire, shared with the browser; see `ApiContract.ReplayResult`. */
+const ReplayOutcomeWire = ReplayResult;
 
 const Cursor = {
   cursor: Schema.optional(Schema.String),
   limit: Schema.optional(Schema.String),
 };
-
-const Ref = Schema.Struct({ name: Schema.String, oid: OidString });
 
 /**
  * Blob content crosses as text by default and base64 when asked, because a
@@ -122,8 +156,6 @@ const Ref = Schema.Struct({ name: Schema.String, oid: OidString });
  * carry a PNG is incomplete. Reads always answer base64: the server cannot
  * know a blob is text, and guessing would corrupt the bytes that are not.
  */
-const Encoding = Schema.Literals(["utf8", "base64"]);
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -141,25 +173,10 @@ const toBase64 = (bytes: Uint8Array): string => {
   return btoa(binary);
 };
 
-/** A registered webhook as a client may see it: no secret, ever. */
-const WebhookWire = Schema.Struct({
-  id: Schema.String,
-  url: Schema.String,
-  created_at: Schema.String,
-});
-
 const TreeEntryWire = Schema.Struct({
   mode: Schema.String,
   name: Schema.String,
   oid: OidString,
-});
-
-/** A path to write, or — with `content: null` — to remove. */
-const FileWire = Schema.Struct({
-  path: Schema.String,
-  content: Schema.NullOr(Schema.String),
-  encoding: Schema.optional(Encoding),
-  mode: Schema.optional(Schema.String),
 });
 
 /**
@@ -391,7 +408,7 @@ const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
   return judged.updates.at(0) ?? update;
 });
 
-const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArray<FileChange> =>
+const changesOf = (files: ReadonlyArray<(typeof FileWrite)["Type"]>): ReadonlyArray<FileChange> =>
   files.map((file) => {
     const content = file.content === null ? null : decodeContent(file.content, file.encoding);
     return file.mode === undefined
@@ -403,7 +420,7 @@ const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArr
 const writeFilesOf = (
   repository: Repository["Service"],
   base: Oid | undefined,
-  files: ReadonlyArray<(typeof FileWire)["Type"]>,
+  files: ReadonlyArray<(typeof FileWrite)["Type"]>,
 ) => {
   const changes = changesOf(files);
   return base === undefined
@@ -498,7 +515,7 @@ const treeFor = (
   branch: string,
   payload: {
     readonly tree?: Oid | undefined;
-    readonly files?: ReadonlyArray<(typeof FileWire)["Type"]> | undefined;
+    readonly files?: ReadonlyArray<(typeof FileWrite)["Type"]> | undefined;
   },
 ) =>
   Effect.gen(function* () {
@@ -520,6 +537,12 @@ const treeFor = (
   });
 
 /** The tree a ref names, defaulting to HEAD — what "at this revision" means. */
+const ARCHIVE_TYPES = {
+  tar: "application/x-tar",
+  "tar.gz": "application/gzip",
+  zip: "application/zip",
+} as const satisfies Record<ArchiveFormat, string>;
+
 const treeOfRef = (repository: Repository["Service"], ref: string | undefined) =>
   Effect.gen(function* () {
     const name = ref === undefined || ref === "" ? "HEAD" : ref;
@@ -597,17 +620,6 @@ const matcher = (payload: {
     }
   });
 
-/** A registered remote as a client may see it: no credential, ever. */
-const RemoteWire = Schema.Struct({
-  name: Schema.String,
-  url: Schema.String,
-  has_credential: Schema.Boolean,
-  has_key: Schema.Boolean,
-  /** The standing instruction, or `null` for a remote nothing happens to. */
-  sync: Schema.NullOr(Schema.Struct({ mode: Schema.String, refs: Schema.Array(Schema.String) })),
-  created_at: Schema.String,
-});
-
 /**
  * Which remote an operation acts on: a stored `name`, or a `url` outright.
  * Exactly one — a request that gives both has not said which credential it
@@ -617,13 +629,6 @@ const RemoteTarget = {
   name: Schema.optional(Schema.String),
   url: Schema.optional(Schema.String),
 };
-
-/** A ref after a fetch moved it, and where it was before. */
-const FetchedRef = Schema.Struct({
-  name: Schema.String,
-  oid: OidString,
-  from: Schema.NullOr(OidString),
-});
 
 const repo = HttpApiGroup.make("repo")
   .add(
@@ -657,9 +662,9 @@ const repo = HttpApiGroup.make("repo")
          * the branch's current tree, or neither for an empty commit.
          */
         tree: Schema.optional(OidString),
-        files: Schema.optional(Schema.Array(FileWire)),
+        files: Schema.optional(Schema.Array(FileWrite)),
       }),
-      success: Schema.Struct({ oid: OidString, tree: OidString }),
+      success: CommitCreated,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -693,7 +698,7 @@ const repo = HttpApiGroup.make("repo")
       payload: Schema.Struct({
         /** Entries as they are, or `files` to build them from paths. */
         entries: Schema.optional(Schema.Array(TreeEntryWire)),
-        files: Schema.optional(Schema.Array(FileWire)),
+        files: Schema.optional(Schema.Array(FileWrite)),
         base: Schema.optional(OidString),
       }),
       success: Schema.Struct({ oid: OidString }),
@@ -710,27 +715,21 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("read", "/commit/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        message: Schema.String,
-        parents: Schema.Array(OidString),
-        tree: OidString,
-      }),
+      success: CommitResponse,
       error: ObjectNotFound,
     }),
   )
   .add(
     HttpApiEndpoint.get("log", "/log/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        commits: Schema.Array(Schema.Struct({ message: Schema.String, oid: OidString })),
-      }),
+      success: LogResponse,
       error: ObjectNotFound,
     }),
   )
   .add(
     HttpApiEndpoint.get("refs", "/refs", {
       params: RepoParam,
-      success: Schema.Struct({ refs: Schema.Array(Ref) }),
+      success: RefsResponse,
     }),
   )
   .add(
@@ -745,7 +744,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.post("branch", "/branches/create", {
       params: RepoParam,
-      payload: Schema.Struct({ name: Schema.String, base: Schema.String }),
+      payload: BranchCreateRequest,
       success: Ref,
       error: [RefConflict, Invalid],
     }),
@@ -762,7 +761,7 @@ const repo = HttpApiGroup.make("repo")
         tagger: Schema.optional(SignatureWire),
         force: Schema.optional(Schema.Boolean),
       }),
-      success: Schema.Struct({ ref: Schema.String, oid: OidString, target: OidString }),
+      success: TagCreated,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -776,19 +775,14 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("tagRead", "/tag/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        object: OidString,
-        type: Schema.Literals(["blob", "tree", "commit", "tag"]),
-        tag: Schema.String,
-        message: Schema.String,
-      }),
+      success: TagRead,
       error: ObjectNotFound,
     }),
   )
   .add(
     HttpApiEndpoint.delete("tagRemove", "/tags/:name", {
       params: { ...RepoParam, name: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       error: Invalid,
     }),
   )
@@ -798,12 +792,7 @@ const repo = HttpApiGroup.make("repo")
     // object.
     HttpApiEndpoint.post("fsck", "/fsck", {
       params: RepoParam,
-      success: Schema.Struct({
-        checked: Schema.Finite,
-        ok: Schema.Boolean,
-        problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
-        dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
-      }),
+      success: FsckReport,
       // `Invalid` when the caller may not ask: a whole-store scan is charged
       // like the other maintenance verbs.
       error: [Invalid],
@@ -812,7 +801,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.delete("branchRemove", "/branches/:name", {
       params: { ...RepoParam, name: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       error: Invalid,
     }),
   )
@@ -825,17 +814,8 @@ const repo = HttpApiGroup.make("repo")
      */
     HttpApiEndpoint.post("reset", "/reset", {
       params: RepoParam,
-      payload: Schema.Struct({
-        ref: Schema.String,
-        to: Schema.String,
-        /** Absent moves whatever it is now; stating it makes this a CAS. */
-        expected: Schema.optional(Schema.NullOr(OidString)),
-      }),
-      success: Schema.Struct({
-        ref: Schema.String,
-        oid: OidString,
-        previous: Schema.NullOr(OidString),
-      }),
+      payload: ResetRequest,
+      success: ResetResult,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -852,18 +832,7 @@ const repo = HttpApiGroup.make("repo")
         into: Schema.optional(Schema.String),
         no_fast_forward: Schema.optional(Schema.Boolean),
       }),
-      success: Schema.Struct({
-        kind: Schema.Literals(["up-to-date", "fast-forward", "merged", "conflicted"]),
-        commit: Schema.NullOr(OidString),
-        tree: Schema.NullOr(OidString),
-        base: Schema.NullOr(OidString),
-        conflicts: Schema.Array(
-          Schema.Struct({
-            path: Schema.String,
-            reason: Schema.Literals(["content", "add/add", "modify/delete", "binary"]),
-          }),
-        ),
-      }),
+      success: MergeResult,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
   )
@@ -896,23 +865,8 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.post("diff", "/diff", {
       params: RepoParam,
-      payload: Schema.Struct({
-        /** Refs, oids or trees. */
-        from: Schema.String,
-        to: Schema.String,
-        path: Schema.optional(Schema.String),
-        context: Schema.optional(Schema.Finite),
-      }),
-      success: Schema.Struct({
-        files: Schema.Array(
-          Schema.Struct({
-            path: Schema.String,
-            status: Schema.Literals(["added", "removed", "modified"]),
-            binary: Schema.Boolean,
-            patch: Schema.String,
-          }),
-        ),
-      }),
+      payload: DiffRequest,
+      success: DiffResponse,
       error: [ObjectNotFound, Invalid],
     }),
   )
@@ -920,11 +874,7 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("files", "/files", {
       params: RepoParam,
       query: { ref: Schema.optional(Schema.String), path: Schema.optional(Schema.String) },
-      success: Schema.Struct({
-        files: Schema.Array(
-          Schema.Struct({ path: Schema.String, mode: Schema.String, oid: OidString }),
-        ),
-      }),
+      success: FilesResponse,
       error: [ObjectNotFound, Invalid],
     }),
   )
@@ -932,27 +882,14 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("file", "/file", {
       params: RepoParam,
       query: { ref: Schema.optional(Schema.String), path: Schema.String },
-      success: Schema.Struct({
-        path: Schema.String,
-        mode: Schema.String,
-        oid: OidString,
-        content: Schema.String,
-        encoding: Schema.Literals(["base64"]),
-        size: Schema.Finite,
-      }),
+      success: FileContent,
       error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.get("object", "/object/:oid", {
       params: { ...RepoParam, oid: OidString },
-      success: Schema.Struct({
-        oid: OidString,
-        type: Schema.Literals(["blob", "tree", "commit", "tag"]),
-        size: Schema.Finite,
-        content: Schema.String,
-        encoding: Schema.Literals(["base64"]),
-      }),
+      success: RawObjectResponse,
       error: ObjectNotFound,
     }),
   )
@@ -960,75 +897,58 @@ const repo = HttpApiGroup.make("repo")
     // The ref name has slashes, so it is a query parameter rather than a
     // path segment — `refs/heads/main` in a path would need escaping every
     // caller would get wrong.
+    HttpApiEndpoint.get("policy", "/policy", {
+      params: RepoParam,
+      success: PolicyAnswer,
+      // Unreadable rules refuse the read for the reason `Policy.rulesOf`
+      // gives: a parse failure is the repository's stated protection still in
+      // force, not an empty rule set.
+      error: Invalid,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.put("policyWrite", "/policy", {
+      params: RepoParam,
+      payload: PolicyRules,
+      success: PolicyWritten,
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("archive", "/archive", {
+      params: RepoParam,
+      query: {
+        ref: Schema.optional(Schema.String),
+        /** `tar`, `zip`, or the default `tar.gz`. */
+        format: Schema.optional(Schema.String),
+        prefix: Schema.optional(Schema.String),
+      },
+      success: Schema.Uint8Array.pipe(
+        HttpApiSchema.asUint8Array({ contentType: "application/octet-stream" }),
+      ),
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
     HttpApiEndpoint.get("reflog", "/reflog", {
       params: RepoParam,
       query: { ref: Schema.String },
-      success: Schema.Struct({
-        entries: Schema.Array(
-          Schema.Struct({
-            from: Schema.NullOr(OidString),
-            to: Schema.NullOr(OidString),
-            at: Schema.String,
-            message: Schema.String,
-          }),
-        ),
-      }),
+      success: ReflogResponse,
     }),
   )
   .add(
     HttpApiEndpoint.post("grep", "/grep", {
       params: RepoParam,
-      payload: Schema.Struct({
-        pattern: Schema.String,
-        ref: Schema.optional(Schema.String),
-        path: Schema.optional(Schema.String),
-        ignore_case: Schema.optional(Schema.Boolean),
-        fixed: Schema.optional(Schema.Boolean),
-        /** Bounded by default: a grep over a big tree is a lot of lines. */
-        max_matches: Schema.optional(Schema.Finite),
-      }),
-      success: Schema.Struct({
-        matches: Schema.Array(
-          Schema.Struct({
-            path: Schema.String,
-            line: Schema.Finite,
-            text: Schema.String,
-          }),
-        ),
-        truncated: Schema.Boolean,
-        /** Files too large to scan, named so the answer is not silently partial. */
-        skipped: Schema.Array(Schema.String),
-      }),
+      payload: GrepRequest,
+      success: GrepResponse,
       error: [ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.post("gc", "/gc", {
       params: RepoParam,
-      payload: Schema.Struct({
-        dry_run: Schema.optional(Schema.Boolean),
-        /** Also write what survives into one pack and drop the loose copies. */
-        repack: Schema.optional(Schema.Boolean),
-        /**
-         * How long an object only the reflog still names is protected, in
-         * milliseconds; `0` collects those too. Defaults to git's 90 days.
-         */
-        reflog_grace_ms: Schema.optional(Schema.Finite),
-      }),
-      success: Schema.Struct({
-        scanned: Schema.Finite,
-        reachable: Schema.Finite,
-        removed: Schema.Array(OidString),
-        /** Unreachable, but inside a pack: `repack` is what collects these. */
-        retained: Schema.Array(OidString),
-        packed: Schema.NullOr(Schema.Struct({ name: Schema.String, objects: Schema.Finite })),
-        /**
-         * Why a requested repack did not happen, when it did not. Without it a
-         * fork that borrows through alternates gets `packed: null` and no way
-         * to tell a refusal from a repository that had nothing to pack.
-         */
-        repack_skipped: Schema.NullOr(Schema.String),
-      }),
+      payload: GcRequestWire,
+      success: GcReport,
       // `Invalid` when the repository lends its objects to a fork: refusing is
       // an answer the caller acts on, not a fault.
       error: [ObjectNotFound, Invalid],
@@ -1047,7 +967,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("webhookList", "/webhooks", {
       params: RepoParam,
-      success: Schema.Struct({ webhooks: Schema.Array(WebhookWire) }),
+      success: WebhookList,
       // `Invalid` when the caller may not ask: where a repository sends its
       // pushes is administrative, not public.
       error: Invalid,
@@ -1056,7 +976,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.delete("webhookRemove", "/webhooks/:id", {
       params: { ...RepoParam, id: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       // Where this repository sends what it holds is administrative, and
       // "you may not" is an answer this has to be able to give.
       error: Invalid,
@@ -1066,7 +986,7 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("commits", "/commits/:oid", {
       params: { ...RepoParam, oid: OidString },
       query: Cursor,
-      success: Page(Schema.Struct({ message: Schema.String, oid: OidString })),
+      success: CommitPage,
       // `Invalid` because a cursor or a limit that is not a whole number is
       // the client's mistake, and answering an empty page would hide it.
       error: [ObjectNotFound, Invalid],
@@ -1077,14 +997,7 @@ const repo = HttpApiGroup.make("repo")
       params: { ...RepoParam, oid: OidString },
       /** `path` is the point of the endpoint, so it is not optional. */
       query: { ...Cursor, path: Schema.String },
-      success: Page(
-        Schema.Struct({
-          oid: OidString,
-          message: Schema.String,
-          /** The path's blob here; `null` where the commit deleted it. */
-          blob: Schema.NullOr(OidString),
-        }),
-      ),
+      success: HistoryPage,
       error: [ObjectNotFound, Invalid],
     }),
   )
@@ -1099,12 +1012,7 @@ const repo = HttpApiGroup.make("repo")
         bad: OidString,
         good: Schema.Array(OidString),
       }),
-      success: Schema.Struct({
-        kind: Schema.Literals(["test", "found"]),
-        commit: OidString,
-        remaining: Schema.Finite,
-        steps: Schema.Finite,
-      }),
+      success: BisectAnswer,
       error: [ObjectNotFound, Invalid],
     }),
   )
@@ -1134,7 +1042,7 @@ const remotes = HttpApiGroup.make("remotes")
   .add(
     HttpApiEndpoint.get("remoteList", "/remotes", {
       params: RepoParam,
-      success: Schema.Struct({ remotes: Schema.Array(RemoteWire) }),
+      success: RemoteList,
       // As `webhookList`: administrative, not public.
       error: Invalid,
     }),
@@ -1142,7 +1050,7 @@ const remotes = HttpApiGroup.make("remotes")
   .add(
     HttpApiEndpoint.delete("remoteRemove", "/remotes/:name", {
       params: { ...RepoParam, name: Schema.String },
-      success: Schema.Struct({ deleted: Schema.Boolean }),
+      success: Deleted,
       error: Invalid,
     }),
   )
@@ -1155,12 +1063,7 @@ const remotes = HttpApiGroup.make("remotes")
         refs: Schema.optional(Schema.Array(Schema.String)),
         depth: Schema.optional(Schema.Finite),
       }),
-      success: Schema.Struct({
-        /** The namespace the branches landed in: `refs/remotes/<remote>/…`. */
-        remote: Schema.String,
-        refs: Schema.Array(FetchedRef),
-        objects: Schema.Finite,
-      }),
+      success: FetchResult,
       error: [RefConflict, PackCorrupt, ObjectNotFound, Invalid],
     }),
   )
@@ -1185,15 +1088,7 @@ const remotes = HttpApiGroup.make("remotes")
        * Every requested ref gets a line, and a rejection is a value: a push
        * of five branches where one lost a race is four successes.
        */
-      success: Schema.Struct({
-        refs: Schema.Array(
-          Schema.Struct({
-            ref: Schema.String,
-            ok: Schema.Boolean,
-            reason: Schema.NullOr(Schema.String),
-          }),
-        ),
-      }),
+      success: PushResult,
       error: [PackCorrupt, ObjectNotFound, Invalid],
     }),
   )
@@ -1211,22 +1106,82 @@ const remotes = HttpApiGroup.make("remotes")
        * report: the tracking ref moved, the branch did not, and which of a
        * merge or a rebase was wanted is not something a pull can guess.
        */
-      success: Schema.Struct({
-        kind: Schema.Literals(["up-to-date", "created", "fast-forward", "non-fast-forward"]),
-        branch: Schema.String,
-        tracking: Schema.String,
-        /** Where the branch was; `null` when it did not exist. */
-        from: Schema.NullOr(OidString),
-        /** What the remote had — where the branch is now, unless it diverged. */
-        to: OidString,
-        objects: Schema.Finite,
-      }),
+      success: PullResult,
       error: [RefConflict, PackCorrupt, ObjectNotFound, Invalid],
     }),
   )
   .prefix("/:repo");
 
-export const api = HttpApi.make("git").add(repo).add(remotes);
+/**
+ * The hub over HTTP: what `refs/hub/*` holds, projected, plus one write.
+ *
+ * Reads answer from the same projections the CLI and the policy boundary
+ * fold, so a browser and a replica describe one state. The single write
+ * accepts a *pre-signed* event: the server holds no member's key and so
+ * cannot author on anyone's behalf — signing happens wherever the key lives,
+ * and this endpoint is the transport for the result, exactly as a git push
+ * of the event ref would be.
+ */
+const hub = HttpApiGroup.make("hub")
+  .add(
+    HttpApiEndpoint.get("tasks", "/hub/tasks", {
+      params: RepoParam,
+      query: Cursor,
+      success: HubTaskPage,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("pulls", "/hub/pulls", {
+      params: RepoParam,
+      query: Cursor,
+      success: HubPullPage,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("sessions", "/hub/sessions", {
+      params: RepoParam,
+      query: Cursor,
+      success: HubSessionPage,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("session", "/hub/sessions/:id", {
+      params: { ...RepoParam, id: Schema.String },
+      success: HubSessionDetail,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    // The trust projection's public half: who this repository answers to.
+    // A read, not an enrolment door — grants and revocations stay signed
+    // records on the log, exactly as `hub grant` writes them.
+    HttpApiEndpoint.get("members", "/hub/members", {
+      params: RepoParam,
+      success: HubMembersResponse,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("pull", "/hub/pulls/:id", {
+      params: { ...RepoParam, id: Schema.String },
+      success: HubPullDetail,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("append", "/hub/events", {
+      params: RepoParam,
+      payload: HubEventRequest,
+      success: HubEventAppended,
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .prefix("/:repo");
+
+export const api = HttpApi.make("git").add(repo).add(remotes).add(hub);
 
 /**
  * Wire payloads mark an omitted option with `undefined`, while the domain
@@ -1872,6 +1827,61 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         };
       }),
     )
+    .handle("policy", () =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const rules = yield* Policy.rulesOf().pipe(
+          Effect.catchTag("ObjectNotFound", () =>
+            Effect.fail(
+              new Invalid({
+                field: "policy",
+                reason: "the repository's branch rules could not be read",
+              }),
+            ),
+          ),
+        );
+        const ref = yield* repository.resolve(Policy.RULES_REF);
+        return { rules, ref };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("policyWrite", ({ payload }) =>
+      Effect.gen(function* () {
+        // `policy.write`'s door, exactly as a push of `refs/meta/policy`
+        // meets it: `source.push` holders may not rewrite the protection
+        // they are subject to.
+        yield* gateWrite(Policy.RULES_REF);
+        const repository = yield* Repository;
+        const current = yield* repository.resolve(Policy.RULES_REF);
+        const blob = yield* repository.writeBlob(Policy.encodeRules(payload));
+        const tree = yield* repository.writeTree([
+          { mode: "100644", name: Policy.RULES_PATH, oid: blob },
+        ]);
+        const commit = yield* repository.commitTree({
+          tree,
+          parents: current === null ? [] : [current],
+          message: "policy\n",
+          author: signatureFrom(undefined),
+        });
+        yield* repository.setRef({ name: Policy.RULES_REF, to: commit, expected: current });
+        return { rules: payload, commit };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("archive", ({ query }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const tree = yield* treeOfRef(repository, query.ref);
+        const format: ArchiveFormat =
+          query.format === "tar" || query.format === "zip" ? query.format : "tar.gz";
+        const stream = yield* (
+          query.prefix === undefined
+            ? archiveTree({ tree, format })
+            : archiveTree({ tree, format, prefix: query.prefix })
+        ).pipe(Effect.catchTag("StorageFailure", Effect.die));
+        // Streamed, not buffered: the declaration promises bytes, and this is
+        // how a repository-sized answer keeps that promise.
+        return HttpServerResponse.stream(stream, { contentType: ARCHIVE_TYPES[format] });
+      }),
+    )
     .handle("reflog", ({ query }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -2226,6 +2236,420 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
 );
 
 /**
+ * One pull request as the listing carries it.
+ *
+ * `checks.passed` is about the *current* head — a green run of a superseded
+ * revision says nothing about what would merge — and is vacuously true when
+ * nothing has reported, because "no checks configured" and "checks failing"
+ * must not read the same. Which checks a merge actually requires is policy
+ * (`requiredChecks`), answered by `/whoami`; this is the observation, not the
+ * rule.
+ */
+const pullSummary = (pull: ProjectedPull): HubPullSummary => {
+  const onHead = pull.checks.filter((check) => check.head === pull.head);
+  return {
+    id: pull.id,
+    title: pull.title,
+    base: pull.base,
+    head: pull.head,
+    state: pull.state,
+    author: pull.author,
+    approvals: pullApprovals(pull).length,
+    checks: {
+      total: pull.checks.length,
+      passed: onHead.every((check) => check.status === "success"),
+    },
+    threads: {
+      total: pull.threads.length,
+      unresolved: pull.threads.filter((thread) => !thread.resolved).length,
+    },
+    at: pull.at.toISOString(),
+  };
+};
+
+const pullDetail = (pull: ProjectedPull): HubPullDetail => ({
+  ...pullSummary(pull),
+  description: pull.description,
+  mergeCommit: pull.mergeCommit,
+  reviews: pull.reviews.map((review) => ({
+    id: review.id,
+    author: review.author,
+    head: review.head,
+    base: review.base,
+    commit: review.commit,
+    decision: review.decision,
+    body: review.body,
+    at: review.at.toISOString(),
+    dismissed: review.dismissed,
+    stale: review.stale,
+  })),
+  threadList: pull.threads.map((thread) => ({
+    id: thread.id,
+    commit: thread.commit,
+    path: thread.path,
+    side: thread.side,
+    line: thread.line,
+    head: thread.head,
+    resolved: thread.resolved,
+    comments: thread.comments.map((comment) => ({
+      id: comment.id,
+      author: comment.author,
+      body: comment.body,
+      at: comment.at.toISOString(),
+    })),
+  })),
+  checkList: pull.checks.map((check) => ({
+    name: check.name,
+    provider: check.provider,
+    head: check.head,
+    status: check.status,
+    url: check.url,
+    at: check.at.toISOString(),
+    author: check.author,
+  })),
+  rejected: pull.rejected.map((entry) => ({ commit: entry.commit, reason: entry.reason })),
+});
+
+/**
+ * The genesis and trust view a pull-request read folds against, or the reason
+ * there is none. A repository without a genesis has an empty hub, not an
+ * erroring one: events may even be present, but nothing can judge their
+ * signers, so reporting them as state would promote unjudged claims.
+ */
+const hubView = Effect.fn("Api.hubView")(function* () {
+  const stored = yield* readGenesis().pipe(
+    Effect.mapError(
+      () => new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+    ),
+  );
+  if (stored === null) {
+    return {
+      enabled: false,
+      reason: "this repository has no genesis, so hub events have nothing to be judged against",
+    } as const;
+  }
+  const trust = yield* projectTrust(stored.genesis).pipe(
+    Effect.catchTag("StorageFailure", Effect.die),
+  );
+  return { enabled: true, genesis: stored.genesis, trust } as const;
+});
+
+/** base64 → bytes, the inverse of this file's `toBase64`. */
+const fromBase64 = (content: string): Uint8Array | null => {
+  try {
+    const binary = atob(content);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch {
+    return null;
+  }
+};
+
+export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
+  group
+    .handle("tasks", ({ query }) =>
+      Effect.gen(function* () {
+        const ids = yield* HubTask.tasks();
+        // Page the ids before projecting: each projection is a ref walk, and
+        // a listing should cost what its page shows, not what the namespace
+        // holds.
+        const paged = page(ids, query);
+        const states = yield* Effect.forEach(paged.items, (id) => HubTask.project(id), {
+          concurrency: 4,
+        });
+        // A loop cannot be refused where the edges are written: they live on
+        // separate refs, `POST /hub/events` appends signed bytes without
+        // asking `hub/Task.ts`, and two members can close one concurrently
+        // without either ref being unsound. This listing is the first place
+        // that holds every edge at once, so it is where a loop stops being
+        // one: a task whose chain reaches itself reports no parent, which
+        // severs the cycle and leaves every chain finite. Readers are then
+        // owed no cycle guard of their own.
+        const above = new Map(states.map((state) => [state.task, state.parent]));
+        const circular = new Set<string>();
+        for (const state of states) {
+          const seen = new Set<string>([state.task]);
+          let at = state.parent;
+          while (at !== null && !seen.has(at)) {
+            seen.add(at);
+            at = above.get(at) ?? null;
+          }
+          // Reached itself: in the loop, rather than merely hanging below one.
+          if (at === state.task) circular.add(state.task);
+        }
+        const parentOf = (task: string, parent: string | null): string | null =>
+          circular.has(task) ? null : parent;
+
+        // Grouped from the children's own edges, which is the only place they
+        // are recorded. A parent this repository does not hold simply never
+        // gets read back out, so a dangling edge costs a lookup and nothing
+        // more — the child still reports the parent it named.
+        const children = new Map<string, Array<string>>();
+        for (const state of states) {
+          const parent = parentOf(state.task, state.parent);
+          if (parent === null) continue;
+          const held = children.get(parent);
+          if (held === undefined) children.set(parent, [state.task]);
+          else held.push(state.task);
+        }
+        return {
+          ...paged,
+          items: states.map((state) => ({
+            task: state.task,
+            exists: state.exists,
+            title: state.title,
+            description: state.description,
+            refs: state.refs,
+            parent: parentOf(state.task, state.parent),
+            children: children.get(state.task) ?? [],
+            available: state.available,
+            claim: state.claim,
+            closed: state.closed,
+            sessions: state.sessions,
+          })),
+        };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("pulls", ({ query }) =>
+      Effect.gen(function* () {
+        const view = yield* hubView();
+        if (!view.enabled) {
+          return {
+            enabled: false,
+            reason: view.reason,
+            items: [],
+            next_cursor: null,
+            has_more: false,
+          };
+        }
+
+        const repository = yield* Repository;
+        const ids: Array<string> = [];
+        for (const [name] of yield* repository.refs) {
+          const id = HubEvent.prOf(name);
+          if (id !== null) ids.push(id);
+        }
+        const paged = page(ids.sort(), query);
+        const pulls = yield* Effect.forEach(
+          paged.items,
+          (id) => projectPull(view.genesis, view.trust, id),
+          { concurrency: 4 },
+        );
+        return { enabled: true, reason: null, ...paged, items: pulls.map(pullSummary) };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("pull", ({ params }) =>
+      Effect.gen(function* () {
+        const view = yield* hubView();
+        if (!view.enabled) {
+          return yield* new Invalid({ field: "pr", reason: view.reason });
+        }
+        const repository = yield* Repository;
+        if (
+          !HubEvent.isPullRequestId(params.id) ||
+          (yield* repository.readRef(HubEvent.refOf(params.id))) === null
+        ) {
+          return yield* new Invalid({
+            field: "pr",
+            reason: `this repository holds no pull request '${params.id}'`,
+          });
+        }
+        const pull = yield* projectPull(view.genesis, view.trust, params.id);
+        return pullDetail(pull);
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("sessions", ({ query }) =>
+      Effect.gen(function* () {
+        const ids = yield* HubSession.sessions();
+        const paged = page(ids, query);
+        const states = yield* Effect.forEach(paged.items, (id) => HubSession.project(id), {
+          concurrency: 4,
+        });
+        const items: Array<HubSessionSummary> = states.map((state) => ({
+          session: state.session,
+          agent: state.agent,
+          refs: state.refs,
+          pulls: state.pulls,
+          commits: state.commits.length,
+          decisions: {
+            total: state.decisions.length,
+            open: state.decisions.filter((decision) => decision.chose === null).length,
+          },
+          usage: state.usage,
+        }));
+        return { ...paged, items };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("session", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        if (
+          !HubSession.isSessionId(params.id) ||
+          (yield* repository.readRef(HubSession.refOf(params.id))) === null
+        ) {
+          return yield* new Invalid({
+            field: "session",
+            reason: `this repository holds no session '${params.id}'`,
+          });
+        }
+        const state = yield* HubSession.project(params.id);
+        return {
+          session: state.session,
+          exists: state.exists,
+          agent: state.agent,
+          instructions: state.instructions,
+          prompts: state.prompts,
+          commits: state.commits,
+          refs: state.refs,
+          pulls: state.pulls,
+          notes: state.notes,
+          decisions: state.decisions,
+          redacted: state.redacted,
+          usage: state.usage,
+        };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("members", () =>
+      Effect.gen(function* () {
+        const view = yield* hubView();
+        if (!view.enabled) return { enabled: false, reason: view.reason, members: [] };
+        return {
+          enabled: true,
+          reason: null,
+          members: [...view.trust.members.values()].map((member) => ({
+            fingerprint: member.fingerprint,
+            publicKey: member.publicKey,
+            capabilities: member.capabilities,
+            grantedAt: member.grantedAt.toISOString(),
+            expiresAt: member.expiresAt === null ? null : member.expiresAt.toISOString(),
+          })),
+        };
+      }),
+    )
+    .handle("append", ({ payload }) =>
+      Effect.gen(function* () {
+        const bytes = fromBase64(payload.payload);
+        if (bytes === null) {
+          return yield* new Invalid({ field: "payload", reason: "payload is not valid base64" });
+        }
+        if (payload.signatures.length === 0) {
+          return yield* new Invalid({
+            field: "signatures",
+            reason:
+              "an event needs at least one signature; the projection judges unsigned bytes as noise",
+          });
+        }
+        // Every offered signature must verify over these exact bytes. The
+        // projection is still the judge of *authority* — membership and
+        // capability — but bytes nobody signed can never count, and appending
+        // them would only grow a ref every replica then has to carry.
+        for (const armored of payload.signatures) {
+          const key = yield* verifySignature(armored, bytes, SIGNING_NAMESPACE);
+          if (key === null) {
+            return yield* new Invalid({
+              field: "signatures",
+              reason: "a signature does not verify over the payload bytes",
+            });
+          }
+        }
+
+        // The payload's own shape names its ref: a pull-request event carries
+        // `pr`, a task event `task`. Decoded from the exact signed bytes, so
+        // what is appended is what was signed.
+        const target = yield* HubEvent.decode(bytes).pipe(
+          Effect.map((event) => ({
+            ref: HubEvent.refOf(event.pr),
+            message: `${event.type} ${event.id}\n`,
+            valid: HubEvent.isPullRequestId(event.pr),
+            field: "pr",
+          })),
+          Effect.catchTag("Invalid", () =>
+            HubTask.decode(bytes).pipe(
+              Effect.map((event) => ({
+                ref: HubTask.refOf(event.task),
+                message: `${event.type} ${event.id}\n`,
+                valid: HubTask.isTaskId(event.task),
+                field: "task",
+              })),
+              Effect.catchTag("Invalid", () =>
+                HubSession.decode(bytes).pipe(
+                  Effect.map((event) => ({
+                    ref: HubSession.refOf(event.session),
+                    message: `${event.type} ${event.id}\n`,
+                    valid: HubSession.isSessionId(event.session),
+                    field: "session",
+                  })),
+                  Effect.catchTag("Invalid", () =>
+                    Effect.fail(
+                      new Invalid({
+                        field: "payload",
+                        reason: "the payload is not a pull-request, task or session event",
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        if (!target.valid) {
+          return yield* new Invalid({
+            field: target.field,
+            reason: "the event names an id that cannot name a ref",
+          });
+        }
+
+        // The same judge a push of this ref meets, on the same shape: write
+        // the record commit (an object write — nothing reachable changes),
+        // ask `Policy.gate` about the ref update it implies, and apply under
+        // the compare-and-swap the verdict was reached on. `gateWrite` is the
+        // wrong door here on purpose — it refuses the append-only namespaces
+        // wholesale because the JSON verbs move refs arbitrarily, and this
+        // endpoint is the hub's own append, which is what the push-side gate
+        // knows how to judge (containment, ceilings, population, capability).
+        const commit = yield* Effect.gen(function* () {
+          const repository = yield* Repository;
+          const head = yield* repository.readRef(target.ref);
+          const record = yield* writeRecord({
+            name: HubEvent.RECORD,
+            payload: bytes,
+            signatures: payload.signatures,
+            parents: head === null ? [] : [head],
+            message: target.message,
+          });
+          const verdict = yield* Policy.gate(
+            [{ name: target.ref, value: record, expected: head }],
+            false,
+            // No envelope claim is made about a JSON append; see `gate`.
+            false,
+          );
+          const refusal = verdict.refused[0];
+          if (refusal !== undefined) {
+            return yield* new Invalid({ field: "ref", reason: refusal.reason });
+          }
+          const allowed = verdict.updates[0];
+          if (allowed === undefined || allowed.value === null) {
+            return yield* new Invalid({ field: "ref", reason: "the gate allowed nothing" });
+          }
+          yield* repository.setRef({
+            name: target.ref,
+            to: allowed.value,
+            expected: allowed.expected,
+          });
+          return record;
+        }).pipe(
+          // The same retry discipline `Event.appendTo` applies: a lost race
+          // re-reads the head and re-judges, because adding an event does not
+          // change what it says.
+          Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }),
+        );
+        return { ref: target.ref, commit };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    ),
+);
+
+/**
  * The API as one layer: routes registered, handlers wired, response plumbing
  * (etag, platform) satisfied from core with no filesystem underneath — a
  * Worker has none, and nothing here serves files.
@@ -2240,6 +2664,7 @@ export const layer = (registry: Layer.Layer<Remotes>) =>
   HttpApiBuilder.layer(api).pipe(
     Layer.provide(handlers),
     Layer.provide(remoteHandlers),
+    Layer.provide(hubHandlers),
     Layer.provide(HttpPlatform.layer),
     Layer.provide(Etag.layerWeak),
     Layer.provide(FileSystem.layerNoop({})),

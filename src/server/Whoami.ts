@@ -12,7 +12,7 @@
  * host, and those must not drift: an answer that disagreed with the
  * enforcement would be worse than no answer, since a caller would act on it.
  */
-import { Effect, Schema } from "effect";
+import { Effect } from "effect";
 
 import type { Fingerprint } from "../crypto/SshSignature.ts";
 import type { RepoId } from "../trust/Genesis.ts";
@@ -21,12 +21,10 @@ import { permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Session from "../hub/Session.ts";
 import * as Policy from "./Policy.ts";
+import { WhoamiAnswer, WhoamiVerdict } from "./ApiContract.ts";
 
 /** Whether a push to one ref would get through, and what it answers to. */
-export const Verdict = Schema.Struct({
-  push: Schema.Literals(["allowed", "refused"]),
-  why: Schema.Array(Schema.String),
-});
+export const Verdict = WhoamiVerdict;
 
 /**
  * Every field is present on every answer, `null` where it does not apply.
@@ -34,35 +32,7 @@ export const Verdict = Schema.Struct({
  * The reader is a program deciding what to do next, and a field that vanishes
  * is one it has to guess the meaning of.
  */
-export const Answer = Schema.Struct({
-  /** `null` for a repository with no genesis, which has no identity to name. */
-  repo: Schema.NullOr(Schema.String),
-  /** `null` when the request proved possession of no key at all. */
-  subject: Schema.NullOr(Schema.String),
-  member: Schema.Boolean,
-  /** The one thing standing between this key and a write, or `null`. */
-  why: Schema.NullOr(Schema.String),
-  capabilities: Schema.Array(Schema.String),
-  expiresAt: Schema.NullOr(Schema.String),
-  /** Only where the repository bounds how stale a membership view may be. */
-  trust: Schema.NullOr(
-    Schema.Struct({
-      maxTrustAgeSeconds: Schema.Int,
-      fresh: Schema.Boolean,
-      reason: Schema.NullOr(Schema.String),
-    }),
-  ),
-  /** Only where the repository bounds what it accepts being told it cost. */
-  budget: Schema.NullOr(
-    Schema.Struct({
-      maxUsageTokens: Schema.Int,
-      windowSeconds: Schema.Int,
-      usedTokens: Schema.Int,
-      remainingTokens: Schema.Int,
-    }),
-  ),
-  branches: Schema.Record(Schema.String, Verdict),
-});
+export const Answer = WhoamiAnswer;
 
 export type Answer = (typeof Answer)["Type"];
 export type Verdict = (typeof Verdict)["Type"];

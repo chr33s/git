@@ -1,0 +1,22 @@
+{
+  /**
+   * The UI is a separate program from the server.
+   *
+   * `../tsconfig.json` compiles `src/` with `lib: ["ES2024", "WebWorker", "DOM"]`
+   * — right for a Worker, wrong here. DOM and WebWorker declare overlapping
+   * globals, and having both in one program mis-resolves DOM members: it is why
+   * `input.after(button)` resolved against a `Response`-shaped overload and why
+   * `lib.dom.d.ts` itself reports duplicate index signatures. The browser half
+   * therefore gets its own project with `DOM` and no `WebWorker`, which is also
+   * simply the truth about where this code runs.
+   *
+   * `@types/node` stays available because `build.ts` and `verify.ts` are node
+   * scripts that live beside the browser modules they build and drive.
+   */
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["**/*.ts", "globals.d.ts"]
+}

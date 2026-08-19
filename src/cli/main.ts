@@ -30,6 +30,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Console, Effect, Predicate, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
+import * as Client from "../client/Client.ts";
 import { fetchRepository } from "../client/Fetch.ts";
 import { push } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
@@ -43,6 +44,7 @@ import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import * as Redaction from "../hub/Redaction.ts";
 import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
+import * as Static from "../server/Static.ts";
 import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { hubCommand } from "./hub.ts";
@@ -59,6 +61,7 @@ import {
 } from "./shared.ts";
 import { sessionCommand } from "./session.ts";
 import { taskCommand } from "./task.ts";
+import { prCommand } from "./pr.ts";
 import { wakeCommand } from "./wake.ts";
 import * as work from "./work.ts";
 
@@ -378,6 +381,13 @@ const credentialHelper = Command.make(
     }),
 );
 
+/**
+ * Where `build:ui` puts the bundle, found from this file rather than from the
+ * working directory — `serve` is run from wherever the repositories are, not
+ * from the checkout.
+ */
+const defaultUiDir = path.join(import.meta.dirname, "..", "..", "dist", "ui");
+
 const serveCommand = Command.make(
   "serve",
   {
@@ -392,18 +402,46 @@ const serveCommand = Command.make(
       Flag.withDefault(false),
       Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
     ),
+    ui: Flag.boolean("ui").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Serve the built browser UI from this origin as well"),
+    ),
+    uiDir: Flag.string("ui-dir").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("Where the built UI is, if not the one built beside this install"),
+    ),
   },
-  ({ hostname, open, port, root, wake }) =>
+  ({ hostname, open, port, root, ui, uiDir, wake }) =>
     Effect.gen(function* () {
+      // One origin, because a browser gives no choice: the page fetches
+      // `/{repo}/...` with no host of its own, and a page served from
+      // somewhere else has every one of those requests blocked. Serving the
+      // bundle here is what the deployed Worker does and what `dev:ui` fakes
+      // with a proxy — see `server/Static.ts`.
+      const assets = ui ? (uiDir === "" ? defaultUiDir : uiDir) : undefined;
+      if (assets !== undefined && !(yield* Effect.promise(() => Static.built(assets)))) {
+        return yield* new Invalid({
+          field: "ui",
+          reason: `${assets} holds no built UI; run \`npm run build:ui\` first, or point --ui-dir at one`,
+        });
+      }
       // There is no `--secret` any more: a repository with a genesis is
       // guarded by its own membership, and no server secret enters into it.
       // `--open` survives for the one case the repository cannot speak to —
       // it has no membership at all — where the choice really is the host's,
       // and the safe answer is the one you have to ask for.
       const server = yield* Effect.promise(() =>
-        serve({ root, port, hostname, allowAnonymousWrites: open, wake }),
+        serve({ root, port, hostname, allowAnonymousWrites: open, wake, ui: assets }),
       );
       yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
+      if (assets !== undefined) {
+        // Which repository the page is about is baked into its `index.html`
+        // as `<meta name="gp-repo">`, defaulting to `core`; the UI cannot
+        // guess it from a URL that has to stay the API's.
+        yield* Console.log(
+          `browser UI on ${server.url} from ${assets}, showing the repository its index.html names`,
+        );
+      }
       // Said out loud, because it is the one switch that makes this process
       // start other processes.
       if (wake) {
@@ -906,6 +944,223 @@ const reset = Command.make(
     ),
 );
 
+/**
+ * Bring a remote's movement into a cloned repository.
+ *
+ * The same client `clone` uses, re-entered: branches fast-forward where they
+ * can and are refused where they diverged — refusing is `fetch` telling the
+ * truth, since choosing merge or rebase is not its call. Tags come along;
+ * a work tree, where one exists, is `work switch`'s to refresh.
+ */
+const fetchCommand = Command.make(
+  "fetch",
+  {
+    root: rootFlag,
+    token: Flag.string("token").pipe(Flag.withDefault("")),
+    branch: Flag.string("branch").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("Fetch one branch instead of everything advertised"),
+    ),
+    repo: repoArgument,
+    url: Argument.string("url"),
+  },
+  ({ branch, repo, root, token: accessToken, url }) =>
+    Effect.gen(function* () {
+      const target = { objects: yield* ObjectStore, refs: yield* RefStore };
+      // The fetch reports every ref it considered; what a reader wants is
+      // what *moved*, so the before-state is the thing to diff against.
+      const before = new Map(yield* target.refs.list());
+      const request =
+        accessToken === "" ? { url, stores: target } : { url, stores: target, token: accessToken };
+      const result = yield* branch === ""
+        ? fetchRepository(request)
+        : fetchRepository({ ...request, branch });
+      const moved = result.refs.filter((update) => before.get(update.name) !== update.value);
+      for (const update of moved) {
+        yield* Console.log(`${update.value ?? "0".repeat(40)} ${update.name}`);
+      }
+      for (const rejected of result.rejected) {
+        yield* Console.error(`refused ${rejected.name}: not a fast-forward`);
+      }
+      if (moved.length === 0 && result.rejected.length === 0) {
+        yield* Console.log("up to date");
+      }
+    }).pipe(Effect.provide(stores(path.join(root, repo)))),
+);
+
+/** `fetch --branch`, under the name fingers expect. */
+const pullCommand = Command.make(
+  "pull",
+  {
+    root: rootFlag,
+    token: Flag.string("token").pipe(Flag.withDefault("")),
+    repo: repoArgument,
+    url: Argument.string("url"),
+    branch: Argument.string("branch"),
+  },
+  ({ branch, repo, root, token: accessToken, url }) =>
+    Effect.gen(function* () {
+      const target = { objects: yield* ObjectStore, refs: yield* RefStore };
+      const request =
+        accessToken === ""
+          ? { url, stores: target, branch }
+          : { url, stores: target, branch, token: accessToken };
+      const name = `refs/heads/${branch}`;
+      const before = yield* target.refs.read(name);
+      const result = yield* fetchRepository(request);
+      if (result.rejected.some((entry) => entry.name === name)) {
+        return yield* new Invalid({
+          field: "branch",
+          reason: `${name} diverged — merge or rebase, a pull cannot guess which`,
+        });
+      }
+      const moved = result.refs.find((update) => update.name === name && update.value !== before);
+      if (moved !== undefined) {
+        yield* Console.log(`${moved.value ?? ""} ${name}`);
+        return;
+      }
+      yield* Console.log("up to date");
+    }).pipe(Effect.provide(stores(path.join(root, repo)))),
+);
+
+const reflogCommand = Command.make(
+  "reflog",
+  { root: rootFlag, repo: repoArgument, ref: Argument.string("ref") },
+  ({ ref, repo, root }) =>
+    withRepo(
+      root,
+      repo,
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const entries = yield* repository.reflog(
+          ref.startsWith("refs/") || ref === "HEAD" ? ref : `refs/heads/${ref}`,
+        );
+        for (const entry of entries) {
+          yield* Console.log(
+            `${entry.from ?? "0".repeat(40)} ${entry.to ?? "0".repeat(40)} ${entry.at.toISOString()} ${entry.message}`,
+          );
+        }
+      }),
+    ),
+);
+
+/** A server flag pair every registry verb shares. */
+const serverFlags = {
+  server: Flag.string("server").pipe(
+    Flag.withDescription("The git+ server's base URL, e.g. https://git.example.com"),
+  ),
+  token: Flag.string("token").pipe(Flag.withDefault("")),
+};
+
+const clientFor = (server: string, token: string) =>
+  token === "" ? Client.remote(server) : Client.remote(server, { token });
+
+/**
+ * The server's remote registry, administered from here.
+ *
+ * These verbs manage state that lives on the *server* — stored remotes, their
+ * credentials and standing sync instructions — so they speak the JSON API
+ * through the client derived from its declaration, exactly as the browser
+ * does. Nothing here touches a local repository.
+ */
+const remoteAdd = Command.make(
+  "add",
+  {
+    ...serverFlags,
+    credential: Flag.string("credential").pipe(Flag.withDefault("")),
+    repo: repoArgument,
+    name: Argument.string("name"),
+    url: Argument.string("url"),
+  },
+  ({ credential, name, repo, server, token, url }) =>
+    Effect.gen(function* () {
+      const client = yield* clientFor(server, token);
+      const added = yield* client.remotes.remoteAdd({
+        params: { repo },
+        payload: credential === "" ? { name, url } : { name, url, credential },
+      });
+      yield* Console.log(JSON.stringify(added, null, 2));
+    }).pipe(Effect.scoped),
+);
+
+const remoteList = Command.make(
+  "list",
+  { ...serverFlags, repo: repoArgument },
+  ({ repo, server, token }) =>
+    Effect.gen(function* () {
+      const client = yield* clientFor(server, token);
+      const found = yield* client.remotes.remoteList({ params: { repo } });
+      yield* Console.log(JSON.stringify(found.remotes, null, 2));
+    }).pipe(Effect.scoped),
+);
+
+const remoteRemove = Command.make(
+  "rm",
+  { ...serverFlags, repo: repoArgument, name: Argument.string("name") },
+  ({ name, repo, server, token }) =>
+    Effect.gen(function* () {
+      const client = yield* clientFor(server, token);
+      yield* client.remotes.remoteRemove({ params: { repo, name } });
+    }).pipe(Effect.scoped),
+);
+
+const remoteCommand = Command.make("remote", {}, () =>
+  Console.log("chr33s-git remote <add|list|rm> --server <url> — see --help"),
+).pipe(
+  Command.withSubcommands([
+    remoteAdd.pipe(Command.withDescription("Register a remote on the server")),
+    remoteList.pipe(Command.withDescription("The server's stored remotes, secrets redacted")),
+    remoteRemove.pipe(Command.withDescription("Forget a stored remote")),
+  ]),
+);
+
+const webhookAdd = Command.make(
+  "add",
+  {
+    ...serverFlags,
+    secret: Flag.string("secret").pipe(Flag.withDescription("Signs each delivery")),
+    repo: repoArgument,
+    url: Argument.string("url"),
+  },
+  ({ repo, secret, server, token, url }) =>
+    Effect.gen(function* () {
+      const client = yield* clientFor(server, token);
+      const added = yield* client.repo.webhookAdd({ params: { repo }, payload: { url, secret } });
+      yield* Console.log(JSON.stringify(added, null, 2));
+    }).pipe(Effect.scoped),
+);
+
+const webhookList = Command.make(
+  "list",
+  { ...serverFlags, repo: repoArgument },
+  ({ repo, server, token }) =>
+    Effect.gen(function* () {
+      const client = yield* clientFor(server, token);
+      const found = yield* client.repo.webhookList({ params: { repo } });
+      yield* Console.log(JSON.stringify(found.webhooks, null, 2));
+    }).pipe(Effect.scoped),
+);
+
+const webhookRemove = Command.make(
+  "rm",
+  { ...serverFlags, repo: repoArgument, id: Argument.string("id") },
+  ({ id, repo, server, token }) =>
+    Effect.gen(function* () {
+      const client = yield* clientFor(server, token);
+      yield* client.repo.webhookRemove({ params: { repo, id } });
+    }).pipe(Effect.scoped),
+);
+
+const webhookCommand = Command.make("webhook", {}, () =>
+  Console.log("chr33s-git webhook <add|list|rm> --server <url> — see --help"),
+).pipe(
+  Command.withSubcommands([
+    webhookAdd.pipe(Command.withDescription("Register a webhook; the secret never comes back")),
+    webhookList.pipe(Command.withDescription("The server's webhooks, secrets redacted")),
+    webhookRemove.pipe(Command.withDescription("Remove a webhook")),
+  ]),
+);
+
 const git = Command.make("chr33s-git").pipe(
   // Descriptions live here rather than beside each definition so `--help`
   // can be read as one list and checked for gaps in one place.
@@ -921,6 +1176,9 @@ const git = Command.make("chr33s-git").pipe(
     work.commitCommand.pipe(Command.withDescription("Commit what is staged")),
     diff.pipe(Command.withDescription("Unified diff between two revisions")),
     files.pipe(Command.withDescription("List the files a revision's tree holds")),
+    fetchCommand.pipe(
+      Command.withDescription("Fetch a remote's branches and tags into a cloned repository"),
+    ),
     fsck.pipe(Command.withDescription("Check every object and ref for damage")),
     gc.pipe(Command.withDescription("Drop unreachable objects, optionally repacking")),
     grep.pipe(Command.withDescription("Search a revision's file contents")),
@@ -930,9 +1188,15 @@ const git = Command.make("chr33s-git").pipe(
     log.pipe(Command.withDescription("Commit history, newest first")),
     merge.pipe(Command.withDescription("Three-way merge two revisions")),
     work.mv.pipe(Command.withDescription("Move a tracked path, staging both halves")),
+    prCommand.pipe(Command.withDescription("Pull requests: open, review, discuss, check, merge")),
+    pullCommand.pipe(Command.withDescription("Fast-forward one branch from a remote")),
     pushCommand.pipe(Command.withDescription("Push refs to a remote over smart HTTP")),
     replay.rebaseCommand.pipe(Command.withDescription("Replay a branch's commits onto another")),
+    reflogCommand.pipe(Command.withDescription("Where a ref has been: every move, newest first")),
     refs.pipe(Command.withDescription("Every ref and the object it points at")),
+    remoteCommand.pipe(
+      Command.withDescription("Administer a server's stored remotes over its JSON API"),
+    ),
     reset.pipe(Command.withDescription("Move a ref, optionally compare-and-swap")),
     work.restore.pipe(Command.withDescription("Restore a path from the index or a commit")),
     work.rm.pipe(Command.withDescription("Unstage a path, and delete it unless --cached")),
@@ -952,6 +1216,9 @@ const git = Command.make("chr33s-git").pipe(
     tag.pipe(Command.withDescription("List, create or delete tags")),
     taskCommand.pipe(Command.withDescription("What needs doing, and who is on it")),
     wakeCommand,
+    webhookCommand.pipe(
+      Command.withDescription("Administer a server's webhooks over its JSON API"),
+    ),
     credential.pipe(Command.withDescription("Mint a short-lived credential stock git can present")),
     credentialHelper.pipe(Command.withDescription("Answer git's credential helper protocol")),
   ]),
