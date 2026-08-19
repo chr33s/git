@@ -13,8 +13,10 @@ import {
   encodeTree,
   hashObject,
   hexToBytes,
+  encodeTag,
   parseCommit,
   parseReflogLine,
+  parseTag,
   parseTree,
   type Signature,
   type TreeEntry,
@@ -196,5 +198,149 @@ describe("Format", () => {
 
   it("round-trips hex", () => {
     assert.equal(bytesToHex(hexToBytes(blob)), blob);
+  });
+});
+
+describe("commit objects are bytes", () => {
+  // Every case here is a real object git writes and this codec used to
+  // rewrite: it decoded to a string, dropped what it had no field for, and
+  // encoded the remains. What came back was a different object under a
+  // different id — silently, in the middle of a rebase.
+  const roundTrips = (label: string, data: Uint8Array) => {
+    const parsed = expectSuccess(parseCommit(data));
+    assert.deepEqual(
+      [...encodeCommit(parsed)],
+      [...data],
+      `${label}: encode(parse(bytes)) must be the bytes`,
+    );
+    return parsed;
+  };
+
+  const utf8 = new TextEncoder();
+  /** An object's bytes, written the way it is stored: ASCII lines and raw bytes. */
+  const bytes = (...parts: ReadonlyArray<string | Uint8Array>): Uint8Array => {
+    const chunks = parts.map((part) => (part instanceof Uint8Array ? part : utf8.encode(part)));
+    const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+    let at = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, at);
+      at += chunk.length;
+    }
+    return out;
+  };
+
+  it("round-trips an ordinary commit", () => {
+    roundTrips(
+      "plain",
+      bytes(
+        `tree ${EMPTY_TREE_OID}\n`,
+        `parent ${blob}\n`,
+        "author Alice <alice@example.com> 1700000000 +0100\n",
+        "committer Alice <alice@example.com> 1700000000 +0100\n",
+        "\n",
+        "a message\n",
+      ),
+    );
+  });
+
+  it("keeps a message whose bytes are not UTF-8", () => {
+    // `café` in Latin-1: one byte, 0xe9, which is not a UTF-8 sequence. A
+    // decode turns it into U+FFFD and an encode writes three bytes back, so
+    // the message a replay copied was not the message its author wrote.
+    const latin1 = Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+    const parsed = roundTrips(
+      "latin-1 message",
+      bytes(
+        `tree ${EMPTY_TREE_OID}\n`,
+        "author Alice <alice@example.com> 1700000000 +0000\n",
+        "committer Alice <alice@example.com> 1700000000 +0000\n",
+        "\n",
+        latin1,
+      ),
+    );
+    assert.notEqual(parsed.raw, undefined, "the stored bytes have to ride along");
+    assert.deepEqual([...(parsed.raw ?? [])], [...latin1]);
+  });
+
+  it("keeps an author line whose bytes are not UTF-8", () => {
+    const line = bytes(
+      "author ",
+      Uint8Array.from([0x4a, 0xf8, 0x72, 0x6e]),
+      " <j@example.com> 1700000000 +0000\n",
+    );
+    const parsed = roundTrips(
+      "latin-1 author",
+      bytes(
+        `tree ${EMPTY_TREE_OID}\n`,
+        line,
+        "committer Alice <alice@example.com> 1700000000 +0000\n",
+        "\n",
+        "fine\n",
+      ),
+    );
+    assert.notEqual(parsed.author.raw, undefined);
+    // The committer decoded cleanly, so it carries nothing extra.
+    assert.equal(parsed.committer.raw, undefined);
+  });
+
+  it("keeps the headers it does not understand, signature included", () => {
+    // A signed commit's `gpgsig` is one header spanning many lines, each
+    // continuation beginning with a space. Dropped on re-encode, a rebase
+    // stripped every signature it touched and said nothing.
+    const parsed = roundTrips(
+      "signed",
+      bytes(
+        `tree ${EMPTY_TREE_OID}\n`,
+        "author Alice <alice@example.com> 1700000000 +0000\n",
+        "committer Alice <alice@example.com> 1700000000 +0000\n",
+        "encoding ISO-8859-1\n",
+        "gpgsig -----BEGIN PGP SIGNATURE-----\n",
+        " \n",
+        " iQEcBAABCgAGBQJb...\n",
+        " -----END PGP SIGNATURE-----\n",
+        "\n",
+        "signed work\n",
+      ),
+    );
+
+    assert.deepEqual(
+      (parsed.headers ?? []).map((header) => header.name),
+      ["encoding", "gpgsig"],
+    );
+    // And it is the *whole* header: the continuation lines are part of it.
+    const signature = new TextDecoder().decode((parsed.headers ?? [])[1]?.raw);
+    assert.match(signature, /BEGIN PGP SIGNATURE/);
+    assert.match(signature, /END PGP SIGNATURE/);
+  });
+
+  it("round-trips a commit with no message at all", () => {
+    roundTrips(
+      "empty message",
+      bytes(
+        `tree ${EMPTY_TREE_OID}\n`,
+        "author Alice <alice@example.com> 1700000000 +0000\n",
+        "committer Alice <alice@example.com> 1700000000 +0000\n",
+        "\n",
+      ),
+    );
+  });
+
+  it("round-trips an annotated tag, whose signature lives in its message", () => {
+    const data = bytes(
+      `object ${blob}\n`,
+      "type commit\n",
+      "tag v1.0\n",
+      "tagger Alice <alice@example.com> 1700000000 +0000\n",
+      "\n",
+      // A Latin-1 byte in the notes, and an armoured signature under it: what
+      // a decode ruins and what a maintainer would never notice until the tag
+      // stopped verifying.
+      Uint8Array.from([0x72, 0x65, 0x6c, 0x65, 0x61, 0x73, 0x65, 0x20, 0xe9, 0x0a]),
+      "-----BEGIN PGP SIGNATURE-----\n",
+      "iQEcBAABCgAGBQJb...\n",
+      "-----END PGP SIGNATURE-----\n",
+    );
+    const parsed = expectSuccess(parseTag(data));
+    assert.deepEqual([...encodeTag(parsed)], [...data]);
   });
 });
