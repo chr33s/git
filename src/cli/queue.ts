@@ -79,7 +79,7 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
       reason: "name a queue with --queue <id> or the branch it serves with --target <ref>",
     });
   }
-  const found = yield* Queue.forTarget(input.target);
+  const { found } = yield* Queue.forTarget(input.target);
   if (found === null) {
     return yield* new Invalid({
       field: "target",
@@ -111,11 +111,29 @@ const open = Command.make(
           // branch is a permanent split — `forTarget` picks between them by
           // sorted id, entries divide invisibly across the two, and two runners
           // delete each other's candidate branches.
+          //
+          // And refused on silence too. A queue this replica cannot project —
+          // past the ceiling, missing an object after replication, a storage
+          // blip — read as "no queue here" and let this create the second one,
+          // which is the very thing that cannot be taken back. Fail closed: the
+          // cost is a command that has to be run where the repository is
+          // readable, against a mistake nothing can undo.
+          //
+          // It catches the mistake and not the race: two `open` calls at once
+          // both see nothing and both write. There is no compare-and-swap
+          // across refs to have instead, and the same is true of a task claim
+          // — saying so is better than implying a guarantee this cannot give.
           const existing = yield* Queue.forTarget(target);
-          if (existing !== null) {
+          if (existing.unreadable.length > 0) {
             return yield* new Invalid({
               field: "target",
-              reason: `${target} already has a queue: ${existing.queue}`,
+              reason: `cannot tell whether ${target} already has a queue: ${existing.unreadable.join(", ")} cannot be read here`,
+            });
+          }
+          if (existing.found !== null) {
+            return yield* new Invalid({
+              field: "target",
+              reason: `${target} already has a queue: ${existing.found.queue}`,
             });
           }
           const opened = yield* Queue.open({
@@ -838,7 +856,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // fault, permanently, on a ref nothing can shorten. The same distinction the
   // conflict path makes between the batch and the branch, arrived at from the
   // other side: the steps behind a failure are victims of it, not causes.
-  for (const step of chain.slice(landed.length)) {
+  for (const step of chain.slice(landed.length + wouldLand.length)) {
     if (failing(step) !== null) {
       yield* drop(step.pr, "failed");
       break;

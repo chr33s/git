@@ -553,15 +553,21 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
 });
 
 /**
- * The queue for a target branch, where the repository holds one.
+ * The queue for a target branch, and the queues this replica could not read.
  *
- * One queue this replica cannot walk is one candidate missing, not a failure of
- * the lookup — the same reading the policy boundary gives an oversized pull
- * request. A history that arrived by replication was never held to this host's
- * ceiling, so failing here would let whoever grew one queue break `queue run`
- * and `queue list` for every other target on the replica that copied it.
+ * Both, because the two callers need opposite things from the same walk. Asking
+ * "which queue do I run for this branch?", one queue this replica cannot walk
+ * is one candidate missing — a history that arrived by replication was never
+ * held to this host's ceiling, so failing would let whoever grew one queue
+ * break every other target on the replica that copied it. Asking "may I open a
+ * queue here?", the same silence is the wrong answer: opening a second queue
+ * for one branch is permanent on a namespace nothing can delete, so a caller
+ * about to do that has to be able to tell "there is none" from "I could not
+ * tell", and fail closed on the second.
  */
 export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: string) {
+  const unreadable: Array<string> = [];
+  let found: Projection | null = null;
   for (const id of yield* queues()) {
     const state = yield* project(id).pipe(
       Effect.catchTags({
@@ -570,7 +576,11 @@ export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: str
         StorageFailure: () => Effect.succeed(null),
       }),
     );
-    if (state !== null && state.exists && state.target === target) return state;
+    if (state === null) {
+      unreadable.push(id);
+      continue;
+    }
+    if (found === null && state.exists && state.target === target) found = state;
   }
-  return null;
+  return { found, unreadable } as const;
 });

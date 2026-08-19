@@ -255,8 +255,9 @@ describe("hub Queue", () => {
         };
       }),
     );
-    assert.equal(found.matching?.queue, found.queue);
-    assert.equal(found.other, null);
+    assert.equal(found.matching.found?.queue, found.queue);
+    assert.equal(found.other.found, null);
+    assert.deepEqual(found.other.unreadable, [], "and nothing it could not read");
   });
 
   it("names the ref a queue lives on, and reads it back", () => {
