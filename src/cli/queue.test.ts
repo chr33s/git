@@ -941,6 +941,72 @@ describe("cli queue", () => {
     );
   });
 
+  it("does not blame a failure it cannot attribute", async () => {
+    // A candidate contains every step under it, so a red one under a *pending*
+    // one says nothing about which of them broke. Evicting the red one there
+    // took out a pull request for a change that had not been tested yet.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+
+    const built = await run();
+    // Nothing reported for the first candidate; the second is red, and it
+    // contains the first's change.
+    await cli([
+      "pr",
+      "check",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--name",
+      "test",
+      "--status",
+      "failure",
+      "--head",
+      built.built[1].commit,
+      "project",
+      second,
+    ]);
+
+    const pass = await run();
+    assert.deepEqual(pass.dropped, [], "the evidence does not say whose fault it is");
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(state.entries.length, 2, "both wait for the first candidate to report");
+  });
+
+  it("settles an entry a lost pass already landed", async () => {
+    // A pass that landed a batch and died before recording it left its entries
+    // queued. The next pass then built a no-op merge — a candidate whose tree
+    // is the tip's own, which no check ever names — and the queue stalled
+    // behind work that was already done.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+
+    // The revision reaches the branch without the queue recording anything,
+    // which is exactly the state an interrupted pass leaves behind.
+    await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.setRef({ name: "refs/heads/main", to: headOf("one") }),
+      ),
+    );
+
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { pr: string; reason: string }) => entry.reason),
+      ["landed"],
+    );
+    assert.deepEqual(pass.built, [], "and no no-op candidate is built for it");
+
+    const merged = JSON.parse(await cli(["pr", "show", "--root", root, "project", first]));
+    assert.equal(merged.state, "merged", "the record the interrupted pass did not get to");
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.deepEqual(state.entries, []);
+  });
+
   it("refuses a protected branch that does not admit candidates", async () => {
     // Every pass would publish a branch and append a record the boundary will
     // always refuse — and a candidate is a pure function of what it merges, so

@@ -531,6 +531,44 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       continue;
     }
 
+    // Already in the branch, whatever put it there. A pass that landed a batch
+    // and died before recording it left its entries queued, and the next pass
+    // then built a no-op merge for each — a candidate whose tree is the tip's
+    // own, which no check names and which therefore never lands, stalling the
+    // whole queue behind work that was already done. Settling it here is the
+    // recovery path, and it costs one ancestry question per entry.
+    const contained = yield* repository.isAncestor(entry.head, from).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+    if (contained === null) {
+      unbuilt.push({
+        pr: entry.pr,
+        reason: `could not tell whether ${entry.head} is in ${target}`,
+      });
+      continue;
+    }
+    if (contained) {
+      // The record of the merge, where the interrupted pass did not get to it.
+      // `head` is a revision the pull request proposed, which is what hub.md
+      // §10 asks of a merge event; `mergeCommit` is what carried it in.
+      if (pullRequest.state === "open") {
+        yield* record(
+          PullRequest.merged({
+            repo: genesis.repoId,
+            pr: entry.pr,
+            head: entry.head,
+            mergeCommit: from,
+            key: input.key,
+          }),
+        );
+      }
+      yield* drop(entry.pr, "landed");
+      continue;
+    }
+
     // Whatever put it in the queue, what it proposes *now* is what can land.
     // Separated from the read failure above deliberately: these are facts about
     // the pull request, which is what a permanent `queue.left` may record. A
@@ -768,6 +806,16 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     }
     return null;
   };
+  /** Whether every required check has come back successful against this step. */
+  const green = (step: (typeof chain)[number]): boolean =>
+    rules.requiredChecks.every((name) =>
+      step.checks.some(
+        (candidate) =>
+          candidate.name === name &&
+          candidate.head === step.commit &&
+          candidate.status === "success",
+      ),
+    );
   //
   // And only the *first* of them. A candidate contains every step beneath it,
   // so one broken pull request fails the checks on every candidate above it as
@@ -776,9 +824,15 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // conflict path makes between the batch and the branch, arrived at from the
   // other side: the steps behind a failure are victims of it, not causes.
   for (const step of chain.slice(landed.length)) {
-    if (failing(step) === null) continue;
-    yield* drop(step.pr, "failed");
-    break;
+    if (failing(step) !== null) {
+      yield* drop(step.pr, "failed");
+      break;
+    }
+    // And only where everything beneath it has actually reported. A candidate
+    // contains every step under it, so a red one under a *pending* one says
+    // nothing about which of them broke — blaming the red one there evicted a
+    // pull request for a change that had not been tested yet, permanently.
+    if (!green(step)) break;
   }
 
   const waiting = chain
