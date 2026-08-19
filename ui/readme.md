@@ -75,20 +75,42 @@ to the tip the editor opened at — a commit that lands mid-edit answers
 editor disables: the sample repository is read-only because there is nothing
 to write to.
 
-**Tasks and Change Requests are still fixtures.** The git-native hub
-(`src/hub/PullRequest.ts`, `src/hub/Projection.ts`) already models pull
-requests, reviews, comments and checks as signed events in `refs/hub/*`, but it
-has no HTTP surface yet — `Api.ts` exposes git itself and nothing else. Until it
-does, `fixtures.ts` carries the design's own data behind the types in
-`model.ts`, and `store.ts` makes that data mutable: creating a Task, filtering
-and searching the list, commenting, and merging a mergeable Change Request all
-work — in this browser tab. Nothing is persisted, deliberately: faking
-durability in `localStorage` would misrepresent a system that has nowhere to
-write yet. When the hub API lands, `store.ts` is the one module that changes.
+**Tasks and Change Requests read the hub.** The git-native hub
+(`src/hub/PullRequest.ts`, `src/hub/Projection.ts`, `src/hub/Task.ts`) models
+pull requests, reviews, checks and tasks as signed events in `refs/hub/*`, and
+`Api.ts` now projects them over HTTP: `GET /hub/tasks`, `GET /hub/pulls`,
+`GET /hub/pulls/:id`, and one write — `POST /hub/events`, which appends a
+*pre-signed* event (the server holds nobody's key, so authorship stays where
+the key lives). `hub.ts` queries those endpoints through the derived atom
+client and folds the answers into `store.ts`; while the hub holds anything,
+the screens show the repository's own state. A repository whose hub is empty,
+absent or unreachable keeps the design's fixtures (`fixtures.ts`) — the
+documented sample, never passed off as live. Mutations (creating a Task,
+commenting, the projection half of merging) remain tab-local, because signing
+an event needs a key this browser does not hold, and the dialogs say so.
 
 When the API cannot be reached, Code and Diff fall back to the design's sample
 repository and **say so** in an inline note, rather than passing fixtures off as
 live data. That keeps the UI reviewable without a running Worker.
+
+**Code goes local when the browser allows it.** After first paint the shell
+opens the repository in OPFS (`local.ts`): on first load it clones over smart
+HTTP with `src/client/Fetch.ts`, and from then on the Code screen's reads and
+commits run against the same `Repository` service the server uses — over
+`src/adapters/Opfs.ts` — with the server demoted to a remote named `origin`.
+The header grows a sync control: **Push ↑n** sends the branch with
+`src/client/Push.ts`, **Fetch ↓n** brings origin's movement in, and nothing
+moves without being asked. A browser without OPFS (or with origin unreachable
+on first load) simply keeps the HTTP client; nothing about the page changes.
+
+**The client is derived, not written.** `client.ts` derives an atom-backed
+client from `src/server/Api.ts`'s own `HttpApi` declaration
+(`AtomHttpApi.Service` from `effect/unstable/reactivity`), so paths, payloads
+and error unions cannot drift from the server — the compiler owns that now.
+It loads lazily (like Shiki) so the entry bundle does not carry the Effect
+runtime; `atoms.ts` bridges atom subscriptions into Lit's reactive-controller
+lifecycle. The hand-written `api.ts` remains for the screens that predate the
+derivation and migrates piecemeal.
 
 ### Pointing it at a repository
 
@@ -140,15 +162,18 @@ GIT_API=http://elsewhere:9000 npm run ui:dev
 Deployed, no proxy is involved: the Worker serves both the page and the API, and
 `gp-api-base` stays empty.
 
-`verify.ts` runs three suites in Chromium: every screen mounts in both palettes
+`verify.ts` runs four suites in Chromium: every screen mounts in both palettes
 with nothing thrown; the behaviours from the design conversation still work
 (nav collapse, tab switching, hierarchy navigation, theme toggle, deep links,
 the kind filter, task creation, commenting, merging, ⌘K search, and the
 disabled states of what has no endpoint); and the live surface really does
 read and write the API — editing, branch creation, history, grep and the whole
-Settings administration surface — that last suite serves the shapes
+Settings administration surface — the third suite serves the shapes
 from `src/server/Api.ts`, so it fails loudly if this UI and that declaration
-drift apart.
+drift apart. The fourth drives the whole local loop against a *real* node
+host: the page clones into OPFS over smart HTTP, commits locally, pushes back
+to origin, and adopts a hub task served by `GET /hub/tasks` — the deployed
+shape, end to end.
 
 ## Files
 
@@ -159,6 +184,10 @@ drift apart.
 | `base.ts`          | Light-DOM Lit base, navigation event |
 | `elements.ts`      | base-wc element registration         |
 | `api.ts`           | Typed client for the JSON API        |
+| `client.ts`        | Atom client derived from `Api.ts`    |
+| `atoms.ts`         | Atom ↔ Lit reactive-controller bridge |
+| `hub.ts`           | Hub queries folded into the store    |
+| `local.ts`         | OPFS repository; clone, commit, push |
 | `model.ts`         | Task / Change Request domain         |
 | `fixtures.ts`      | The design's Task data               |
 | `store.ts`         | The mutable, observable Task store   |

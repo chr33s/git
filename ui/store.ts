@@ -155,6 +155,34 @@ class TaskStore extends EventTarget {
     return () => this.removeEventListener("change", listener);
   }
 
+  /**
+   * Replace the contents with what the hub projected.
+   *
+   * Called by `hub.ts` when `GET /hub/tasks` / `GET /hub/pulls` answer with
+   * anything: from then on the store is a view of the repository's own state
+   * rather than the design's sample, and every screen follows without
+   * knowing which it is showing.
+   */
+  adopt(tasks: readonly Task[]): void {
+    this.#tasks = [...tasks];
+    this.#notify();
+  }
+
+  /** Apply one update to one task — the seam `hub.ts` hydrates details through. */
+  patch(id: string, update: (task: Task) => Task): void {
+    this.#replace(id, update);
+  }
+
+  /**
+   * Fill a hub-sourced task's detail (discussion, checks) on demand.
+   *
+   * Routed through the lazy hub module so the detail screen needs no import
+   * of the derived client; for a fixture id this resolves to a no-op there.
+   */
+  hydrate(id: string): void {
+    void import("./hub.ts").then((hub) => hub.hydrate(id)).catch(() => {});
+  }
+
   #replace(id: string, update: (task: Task) => Task): void {
     const at = this.#tasks.findIndex((task) => task.id === id);
     const before = this.#tasks[at];
@@ -172,3 +200,14 @@ class TaskStore extends EventTarget {
 
 /** The one store every screen shares. */
 export const store = new TaskStore();
+
+/**
+ * Ask the hub what this repository actually holds, off the boot path.
+ *
+ * The import is dynamic for the same reason Shiki's is: the derived client
+ * carries the `HttpApi` declaration and the Effect runtime, and first paint
+ * should not wait on either. When the hub is unreachable or empty the
+ * promise resolves into nothing and the fixtures above remain — which is the
+ * documented offline behaviour, not a failure.
+ */
+void import("./hub.ts").then((hub) => hub.seed()).catch(() => {});

@@ -15,7 +15,8 @@ import { customElement, state } from "lit/decorators.js";
 
 import { UISearchField } from "@chr33s/base-wc/src/search-field";
 
-import { ApiError, clientFromDocument, type GitApi, type Whoami } from "./api.ts";
+import { ApiError, clientFromDocument, type CodeApi, type GitApi, type Whoami } from "./api.ts";
+import type { LocalGitApi } from "./local.ts";
 import { GitPlusElement, NAVIGATE, NavigateEvent, type Screen } from "./base.ts";
 import { store } from "./store.ts";
 import { current as currentTheme, THEME_CHANGE, ThemeChangeEvent, type Theme } from "./theme.ts";
@@ -59,6 +60,18 @@ export class GpApp extends GitPlusElement {
   /** Which file the Code screen should open, when navigation named one. */
   @state() private accessor codePath: string | null = null;
 
+  /**
+   * The OPFS-backed local repository, once its first-load clone lands.
+   *
+   * `null` until then — and forever, in a browser without OPFS or with the
+   * remote unreachable on first load — in which case the Code screen keeps
+   * the HTTP client and nothing about the page changes.
+   */
+  @state() private accessor localApi: CodeApi | null = null;
+
+  /** The same object as `localApi`, in the type that carries `author`. */
+  #local: LocalGitApi | null = null;
+
   get #viewer(): string | null {
     return this.who?.subject ?? null;
   }
@@ -78,6 +91,7 @@ export class GpApp extends GitPlusElement {
     this.#fromHash();
     globalThis.addEventListener("hashchange", this.#onHashChange);
     void this.#identify();
+    void this.#openLocal();
   }
 
   override disconnectedCallback(): void {
@@ -93,8 +107,39 @@ export class GpApp extends GitPlusElement {
   async #identify(): Promise<void> {
     try {
       this.who = await this.#api.whoami();
+      this.#signCommitsAs();
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+    }
+  }
+
+  /**
+   * Open — and on first load, clone — the repository in OPFS, off the boot
+   * path: the import is dynamic so the pack machinery and the Effect runtime
+   * load after first paint, and a browser that cannot hold a local
+   * repository simply never swaps.
+   */
+  async #openLocal(): Promise<void> {
+    try {
+      const { LocalGitApi } = await import("./local.ts");
+      const local = await LocalGitApi.open({
+        repo: this.#api.repo,
+        cloneUrl: this.#api.cloneUrl,
+      });
+      if (local === null) return;
+      this.#local = local;
+      this.#signCommitsAs();
+      this.localApi = local;
+    } catch {
+      // Stay on the HTTP client; the page behaves exactly as before.
+    }
+  }
+
+  /** Local commits are authored as whoever `/whoami` said is asking. */
+  #signCommitsAs(): void {
+    const subject = this.#viewer;
+    if (this.#local !== null && subject !== null) {
+      this.#local.author = { name: subject, email: `${subject}@git-plus.local` };
     }
   }
 
@@ -170,7 +215,7 @@ export class GpApp extends GitPlusElement {
         // the explorer is a sibling of the content in the design's layout, not
         // a child of it.
         return html`<gp-code
-          .api=${this.#api}
+          .api=${this.localApi ?? this.#api}
           .theme=${this.theme}
           .who=${this.who}
           .wanted=${this.codePath}

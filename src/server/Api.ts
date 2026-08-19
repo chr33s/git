@@ -31,6 +31,19 @@ import { forPath as pathHistory } from "../git/History.ts";
 import { type Strategy as MergeStrategy } from "../git/Merge.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
 import * as Redaction from "../hub/Redaction.ts";
+import * as HubEvent from "../hub/Event.ts";
+import {
+  approvals as pullApprovals,
+  project as projectPull,
+  type PullRequest as ProjectedPull,
+} from "../hub/Projection.ts";
+import * as HubTask from "../hub/Task.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
+import {
+  NAMESPACE as SIGNING_NAMESPACE,
+  verify as verifySignature,
+} from "../crypto/SshSignature.ts";
+import { write as writeRecord } from "../trust/Record.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
 import * as Policy from "./Policy.ts";
 import * as Auth from "./Auth.ts";
@@ -58,6 +71,12 @@ import {
   GrepRequest,
   GrepResponse,
   HistoryPage,
+  HubEventAppended,
+  HubEventRequest,
+  HubPullDetail,
+  HubPullsResponse,
+  HubPullSummary,
+  HubTasksResponse,
   LogResponse,
   MergeResult,
   OidString,
@@ -1064,7 +1083,49 @@ const remotes = HttpApiGroup.make("remotes")
   )
   .prefix("/:repo");
 
-export const api = HttpApi.make("git").add(repo).add(remotes);
+/**
+ * The hub over HTTP: what `refs/hub/*` holds, projected, plus one write.
+ *
+ * Reads answer from the same projections the CLI and the policy boundary
+ * fold, so a browser and a replica describe one state. The single write
+ * accepts a *pre-signed* event: the server holds no member's key and so
+ * cannot author on anyone's behalf — signing happens wherever the key lives,
+ * and this endpoint is the transport for the result, exactly as a git push
+ * of the event ref would be.
+ */
+const hub = HttpApiGroup.make("hub")
+  .add(
+    HttpApiEndpoint.get("tasks", "/hub/tasks", {
+      params: RepoParam,
+      success: HubTasksResponse,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("pulls", "/hub/pulls", {
+      params: RepoParam,
+      success: HubPullsResponse,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("pull", "/hub/pulls/:id", {
+      params: { ...RepoParam, id: Schema.String },
+      success: HubPullDetail,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("append", "/hub/events", {
+      params: RepoParam,
+      payload: HubEventRequest,
+      success: HubEventAppended,
+      error: [RefConflict, ObjectNotFound, Invalid],
+    }),
+  )
+  .prefix("/:repo");
+
+export const api = HttpApi.make("git").add(repo).add(remotes).add(hub);
 
 /**
  * Wire payloads mark an omitted option with `undefined`, while the domain
@@ -2064,6 +2125,291 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
 );
 
 /**
+ * One pull request as the listing carries it.
+ *
+ * `checks.passed` is about the *current* head — a green run of a superseded
+ * revision says nothing about what would merge — and is vacuously true when
+ * nothing has reported, because "no checks configured" and "checks failing"
+ * must not read the same. Which checks a merge actually requires is policy
+ * (`requiredChecks`), answered by `/whoami`; this is the observation, not the
+ * rule.
+ */
+const pullSummary = (pull: ProjectedPull): HubPullSummary => {
+  const onHead = pull.checks.filter((check) => check.head === pull.head);
+  return {
+    id: pull.id,
+    title: pull.title,
+    base: pull.base,
+    head: pull.head,
+    state: pull.state,
+    author: pull.author,
+    approvals: pullApprovals(pull).length,
+    checks: {
+      total: pull.checks.length,
+      passed: onHead.every((check) => check.status === "success"),
+    },
+    threads: {
+      total: pull.threads.length,
+      unresolved: pull.threads.filter((thread) => !thread.resolved).length,
+    },
+    at: pull.at.toISOString(),
+  };
+};
+
+const pullDetail = (pull: ProjectedPull): HubPullDetail => ({
+  ...pullSummary(pull),
+  description: pull.description,
+  mergeCommit: pull.mergeCommit,
+  reviews: pull.reviews.map((review) => ({
+    id: review.id,
+    author: review.author,
+    head: review.head,
+    base: review.base,
+    commit: review.commit,
+    decision: review.decision,
+    body: review.body,
+    at: review.at.toISOString(),
+    dismissed: review.dismissed,
+    stale: review.stale,
+  })),
+  threadList: pull.threads.map((thread) => ({
+    id: thread.id,
+    commit: thread.commit,
+    path: thread.path,
+    side: thread.side,
+    line: thread.line,
+    head: thread.head,
+    resolved: thread.resolved,
+    comments: thread.comments.map((comment) => ({
+      id: comment.id,
+      author: comment.author,
+      body: comment.body,
+      at: comment.at.toISOString(),
+    })),
+  })),
+  checkList: pull.checks.map((check) => ({
+    name: check.name,
+    provider: check.provider,
+    head: check.head,
+    status: check.status,
+    url: check.url,
+    at: check.at.toISOString(),
+    author: check.author,
+  })),
+  rejected: pull.rejected.map((entry) => ({ commit: entry.commit, reason: entry.reason })),
+});
+
+/**
+ * The genesis and trust view a pull-request read folds against, or the reason
+ * there is none. A repository without a genesis has an empty hub, not an
+ * erroring one: events may even be present, but nothing can judge their
+ * signers, so reporting them as state would promote unjudged claims.
+ */
+const hubView = Effect.fn("Api.hubView")(function* () {
+  const stored = yield* readGenesis().pipe(
+    Effect.mapError(
+      () => new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+    ),
+  );
+  if (stored === null) {
+    return {
+      enabled: false,
+      reason: "this repository has no genesis, so hub events have nothing to be judged against",
+    } as const;
+  }
+  const trust = yield* projectTrust(stored.genesis).pipe(
+    Effect.catchTag("StorageFailure", Effect.die),
+  );
+  return { enabled: true, genesis: stored.genesis, trust } as const;
+});
+
+/** base64 → bytes, the inverse of this file's `toBase64`. */
+const fromBase64 = (content: string): Uint8Array | null => {
+  try {
+    const binary = atob(content);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch {
+    return null;
+  }
+};
+
+export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
+  group
+    .handle("tasks", () =>
+      Effect.gen(function* () {
+        const ids = yield* HubTask.tasks();
+        const states = yield* Effect.forEach(ids, (id) => HubTask.project(id), {
+          concurrency: 4,
+        });
+        return {
+          tasks: states.map((state) => ({
+            task: state.task,
+            exists: state.exists,
+            title: state.title,
+            description: state.description,
+            refs: state.refs,
+            available: state.available,
+            claim: state.claim,
+            closed: state.closed,
+            sessions: state.sessions,
+          })),
+        };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("pulls", () =>
+      Effect.gen(function* () {
+        const view = yield* hubView();
+        if (!view.enabled) return { enabled: false, reason: view.reason, pulls: [] };
+
+        const repository = yield* Repository;
+        const ids: Array<string> = [];
+        for (const [name] of yield* repository.refs) {
+          const id = HubEvent.prOf(name);
+          if (id !== null) ids.push(id);
+        }
+        const pulls = yield* Effect.forEach(
+          ids.sort(),
+          (id) => projectPull(view.genesis, view.trust, id),
+          { concurrency: 4 },
+        );
+        return { enabled: true, reason: null, pulls: pulls.map(pullSummary) };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("pull", ({ params }) =>
+      Effect.gen(function* () {
+        const view = yield* hubView();
+        if (!view.enabled) {
+          return yield* new Invalid({ field: "pr", reason: view.reason });
+        }
+        const repository = yield* Repository;
+        if (
+          !HubEvent.isPullRequestId(params.id) ||
+          (yield* repository.readRef(HubEvent.refOf(params.id))) === null
+        ) {
+          return yield* new Invalid({
+            field: "pr",
+            reason: `this repository holds no pull request '${params.id}'`,
+          });
+        }
+        const pull = yield* projectPull(view.genesis, view.trust, params.id);
+        return pullDetail(pull);
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("append", ({ payload }) =>
+      Effect.gen(function* () {
+        const bytes = fromBase64(payload.payload);
+        if (bytes === null) {
+          return yield* new Invalid({ field: "payload", reason: "payload is not valid base64" });
+        }
+        if (payload.signatures.length === 0) {
+          return yield* new Invalid({
+            field: "signatures",
+            reason:
+              "an event needs at least one signature; the projection judges unsigned bytes as noise",
+          });
+        }
+        // Every offered signature must verify over these exact bytes. The
+        // projection is still the judge of *authority* — membership and
+        // capability — but bytes nobody signed can never count, and appending
+        // them would only grow a ref every replica then has to carry.
+        for (const armored of payload.signatures) {
+          const key = yield* verifySignature(armored, bytes, SIGNING_NAMESPACE);
+          if (key === null) {
+            return yield* new Invalid({
+              field: "signatures",
+              reason: "a signature does not verify over the payload bytes",
+            });
+          }
+        }
+
+        // The payload's own shape names its ref: a pull-request event carries
+        // `pr`, a task event `task`. Decoded from the exact signed bytes, so
+        // what is appended is what was signed.
+        const target = yield* HubEvent.decode(bytes).pipe(
+          Effect.map((event) => ({
+            ref: HubEvent.refOf(event.pr),
+            message: `${event.type} ${event.id}\n`,
+            valid: HubEvent.isPullRequestId(event.pr),
+            field: "pr",
+          })),
+          Effect.catchTag("Invalid", () =>
+            HubTask.decode(bytes).pipe(
+              Effect.map((event) => ({
+                ref: HubTask.refOf(event.task),
+                message: `${event.type} ${event.id}\n`,
+                valid: HubTask.isTaskId(event.task),
+                field: "task",
+              })),
+              Effect.catchTag("Invalid", () =>
+                Effect.fail(
+                  new Invalid({
+                    field: "payload",
+                    reason: "the payload is neither a pull-request event nor a task event",
+                  }),
+                ),
+              ),
+            ),
+          ),
+        );
+        if (!target.valid) {
+          return yield* new Invalid({
+            field: target.field,
+            reason: "the event names an id that cannot name a ref",
+          });
+        }
+
+        // The same judge a push of this ref meets, on the same shape: write
+        // the record commit (an object write — nothing reachable changes),
+        // ask `Policy.gate` about the ref update it implies, and apply under
+        // the compare-and-swap the verdict was reached on. `gateWrite` is the
+        // wrong door here on purpose — it refuses the append-only namespaces
+        // wholesale because the JSON verbs move refs arbitrarily, and this
+        // endpoint is the hub's own append, which is what the push-side gate
+        // knows how to judge (containment, ceilings, population, capability).
+        const commit = yield* Effect.gen(function* () {
+          const repository = yield* Repository;
+          const head = yield* repository.readRef(target.ref);
+          const record = yield* writeRecord({
+            name: HubEvent.RECORD,
+            payload: bytes,
+            signatures: payload.signatures,
+            parents: head === null ? [] : [head],
+            message: target.message,
+          });
+          const verdict = yield* Policy.gate(
+            [{ name: target.ref, value: record, expected: head }],
+            false,
+            // No envelope claim is made about a JSON append; see `gate`.
+            false,
+          );
+          const refusal = verdict.refused[0];
+          if (refusal !== undefined) {
+            return yield* new Invalid({ field: "ref", reason: refusal.reason });
+          }
+          const allowed = verdict.updates[0];
+          if (allowed === undefined || allowed.value === null) {
+            return yield* new Invalid({ field: "ref", reason: "the gate allowed nothing" });
+          }
+          yield* repository.setRef({
+            name: target.ref,
+            to: allowed.value,
+            expected: allowed.expected,
+          });
+          return record;
+        }).pipe(
+          // The same retry discipline `Event.appendTo` applies: a lost race
+          // re-reads the head and re-judges, because adding an event does not
+          // change what it says.
+          Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }),
+        );
+        return { ref: target.ref, commit };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    ),
+);
+
+/**
  * The API as one layer: routes registered, handlers wired, response plumbing
  * (etag, platform) satisfied from core with no filesystem underneath — a
  * Worker has none, and nothing here serves files.
@@ -2078,6 +2424,7 @@ export const layer = (registry: Layer.Layer<Remotes>) =>
   HttpApiBuilder.layer(api).pipe(
     Layer.provide(handlers),
     Layer.provide(remoteHandlers),
+    Layer.provide(hubHandlers),
     Layer.provide(HttpPlatform.layer),
     Layer.provide(Etag.layerWeak),
     Layer.provide(FileSystem.layerNoop({})),

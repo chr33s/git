@@ -337,3 +337,140 @@ export const WhoamiAnswer = Schema.Struct({
   branches: Schema.Record(Schema.String, WhoamiVerdict),
 });
 export type WhoamiAnswer = (typeof WhoamiAnswer)["Type"];
+
+// -- hub ----------------------------------------------------------------------
+
+/**
+ * A live claim on a task: who holds the lease (by event commit) and until
+ * when. Advisory by design — see `hub/Task.ts`.
+ */
+export const HubClaim = Schema.Struct({
+  by: OidString,
+  expiresAt: Schema.String,
+});
+
+/** One task, as `hub/Task.ts` projects it from `refs/hub/task/<id>`. */
+export const HubTask = Schema.Struct({
+  task: Schema.String,
+  exists: Schema.Boolean,
+  title: Schema.String,
+  description: Schema.String,
+  refs: Schema.Array(Schema.String),
+  /** Open, unclaimed, unexpired — the question an idle agent asks. */
+  available: Schema.Boolean,
+  claim: Schema.NullOr(HubClaim),
+  closed: Schema.NullOr(
+    Schema.Struct({ outcome: Schema.String, pulls: Schema.Array(Schema.String) }),
+  ),
+  sessions: Schema.Array(Schema.String),
+});
+export type HubTask = (typeof HubTask)["Type"];
+
+export const HubTasksResponse = Schema.Struct({ tasks: Schema.Array(HubTask) });
+export type HubTasksResponse = (typeof HubTasksResponse)["Type"];
+
+export const HubReview = Schema.Struct({
+  id: Schema.String,
+  author: Schema.String,
+  head: OidString,
+  base: Schema.String,
+  commit: OidString,
+  decision: Schema.Literals(["approve", "reject", "comment"]),
+  body: Schema.String,
+  at: Schema.String,
+  dismissed: Schema.Boolean,
+  stale: Schema.Boolean,
+});
+export type HubReview = (typeof HubReview)["Type"];
+
+export const HubComment = Schema.Struct({
+  id: Schema.String,
+  author: Schema.String,
+  body: Schema.String,
+  at: Schema.String,
+});
+export type HubComment = (typeof HubComment)["Type"];
+
+export const HubThread = Schema.Struct({
+  id: Schema.String,
+  commit: OidString,
+  path: Schema.NullOr(Schema.String),
+  side: Schema.NullOr(Schema.Literals(["old", "new"])),
+  line: Schema.NullOr(Schema.Finite),
+  head: Schema.NullOr(OidString),
+  resolved: Schema.Boolean,
+  comments: Schema.Array(HubComment),
+});
+export type HubThread = (typeof HubThread)["Type"];
+
+export const HubCheck = Schema.Struct({
+  name: Schema.String,
+  provider: Schema.String,
+  head: OidString,
+  status: Schema.Literals(["started", "success", "failure", "neutral"]),
+  url: Schema.NullOr(Schema.String),
+  at: Schema.String,
+  author: Schema.String,
+});
+export type HubCheck = (typeof HubCheck)["Type"];
+
+/** One pull request in a listing: the projection, minus its heavy members. */
+export const HubPullSummary = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  base: Schema.String,
+  head: Schema.NullOr(OidString),
+  state: Schema.Literals(["open", "closed", "merged"]),
+  author: Schema.NullOr(Schema.String),
+  /** Fresh, undismissed approvals of the current head, for the current base. */
+  approvals: Schema.Int,
+  checks: Schema.Struct({ total: Schema.Int, passed: Schema.Boolean }),
+  threads: Schema.Struct({ total: Schema.Int, unresolved: Schema.Int }),
+  at: Schema.String,
+});
+export type HubPullSummary = (typeof HubPullSummary)["Type"];
+
+/**
+ * The listing carries its own availability: pull requests need a genesis to
+ * judge signatures against, and a repository without one has an empty hub
+ * rather than an erroring one.
+ */
+export const HubPullsResponse = Schema.Struct({
+  enabled: Schema.Boolean,
+  reason: Schema.NullOr(Schema.String),
+  pulls: Schema.Array(HubPullSummary),
+});
+export type HubPullsResponse = (typeof HubPullsResponse)["Type"];
+
+export const HubPullDetail = Schema.Struct({
+  ...HubPullSummary.fields,
+  description: Schema.String,
+  mergeCommit: Schema.NullOr(OidString),
+  reviews: Schema.Array(HubReview),
+  threadList: Schema.Array(HubThread),
+  checkList: Schema.Array(HubCheck),
+  /** Events that were present but did not count, with the fold's reason. */
+  rejected: Schema.Array(Schema.Struct({ commit: OidString, reason: Schema.String })),
+});
+export type HubPullDetail = (typeof HubPullDetail)["Type"];
+
+/**
+ * A pre-signed hub event, exactly as `Event.issue` would have written it.
+ *
+ * The server never holds a member's key, so it cannot author events over
+ * HTTP — but it can append one authored elsewhere: `payload` is the exact
+ * signed bytes (base64), `signatures` the armored SSH signatures over them.
+ * The projection remains the judge of authority; this endpoint only refuses
+ * what could never count — bytes no offered signature covers.
+ */
+export const HubEventRequest = Schema.Struct({
+  payload: Schema.String,
+  signatures: Schema.Array(Schema.String),
+});
+export type HubEventRequest = (typeof HubEventRequest)["Type"];
+
+export const HubEventAppended = Schema.Struct({
+  ref: Schema.String,
+  commit: OidString,
+});
+export type HubEventAppended = (typeof HubEventAppended)["Type"];
