@@ -175,6 +175,54 @@ const close = Command.make(
     }),
 );
 
+const reopen = Command.make(
+  "reopen",
+  { root: rootFlag, key: keyFlag, repo: repoArgument, task: taskArgument },
+  ({ key, repo, root, task }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          yield* Task.reopen({ repo: yield* identityOf(repo), task, key: signer });
+        }),
+      );
+      yield* Console.log(`Reopened ${task}`);
+    }),
+);
+
+/** As `session redact`, on the namespace that shares its one way back. */
+const redact = Command.make(
+  "redact",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    target: Flag.string("target").pipe(Flag.withDescription("The record's event id")),
+    reason: Flag.string("reason").pipe(Flag.withDescription("Why it is being removed")),
+    repo: repoArgument,
+    task: taskArgument,
+  },
+  ({ key, reason, repo, root, target, task }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          yield* Task.redact({
+            repo: yield* identityOf(repo),
+            task,
+            target,
+            reason,
+            key: signer,
+          });
+        }),
+      );
+      yield* Console.log(`Redacted ${target}; the payload goes at the next gc`);
+    }),
+);
+
 const list = Command.make(
   "list",
   {
@@ -212,13 +260,15 @@ const show = Command.make(
 );
 
 export const taskCommand = Command.make("task", {}, () =>
-  Console.log("chr33s-git task <open|claim|release|close|list|show> — see --help"),
+  Console.log("chr33s-git task <open|claim|release|close|reopen|redact|list|show> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record what needs doing")),
     claim.pipe(Command.withDescription("Take a task, on a lease that frees itself")),
     release.pipe(Command.withDescription("Let go of a task before its lease ends")),
     close.pipe(Command.withDescription("Record how a task was resolved")),
+    reopen.pipe(Command.withDescription("Undo a close, which a ref cannot be rewound to do")),
+    redact.pipe(Command.withDescription("Remove one record's content, needing hub.redact")),
     list.pipe(Command.withDescription("Tasks nobody currently holds")),
     show.pipe(Command.withDescription("What one task amounts to now")),
   ]),

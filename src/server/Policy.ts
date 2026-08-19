@@ -40,6 +40,7 @@ import {
   type Projection as TrustProjection,
 } from "../trust/Projection.ts";
 import * as Event from "../hub/Event.ts";
+import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
 import * as Task from "../hub/Task.ts";
 import {
@@ -457,18 +458,56 @@ const provenanceOf = Effect.fn("Policy.provenanceOf")(function* (input: {
   const to = input.update.value;
   if (to === null) return null;
 
-  const introduced = yield* Dag.reachable(to, input.current, undefined, MAX_PROVENANCE).pipe(
-    Effect.catchTag("Invalid", () => Effect.succeed(null)),
+  // Bounded by everything this repository already reaches, not by the ref's
+  // own previous value alone. A create has no previous value, so a walk
+  // bounded that way went to the root and demanded a trailer on every commit
+  // the branch was cut from — `git push origin HEAD:refs/heads/feature` was
+  // refused on the first commit predating the rule, which is not what the rule
+  // says (agents.md §9: what the push *introduces*).
+  //
+  // Every ref's tip is a boundary, which covers what a branch is actually cut
+  // from: `main`, another topic, a tag. A commit reachable from an existing
+  // ref without being a tip is still re-judged, and that residual is why this
+  // is a bound and not a connectivity check — the alternative is walking every
+  // ref's whole history on every push.
+  const stop = new Set<Oid>();
+  for (const [, value] of yield* repository.refs) stop.add(value);
+  stop.delete(to);
+
+  const introduced = yield* Dag.reachable(
+    to,
+    input.current,
+    (commit) => Effect.succeed(!stop.has(commit)),
+    MAX_PROVENANCE,
+  ).pipe(
+    // Every failure here is a refusal, not an error. Receive-pack checks only
+    // that the tip object exists, so a commit naming a parent that never
+    // arrived is a push this cannot judge — and every other walk in this file
+    // catches the same thing rather than letting it out, because escaping
+    // turns a refusable push into a 404 anybody holding `source.push` can ask
+    // for on demand.
+    Effect.catchTags({
+      Invalid: () => Effect.succeed(null),
+      ObjectNotFound: () => Effect.succeed(null),
+      StorageFailure: () => Effect.succeed(null),
+    }),
   );
   if (introduced === null) {
-    return `${input.update.name} introduces more than ${MAX_PROVENANCE} commits, which is more than a provenance check will walk`;
+    return `${input.update.name} could not be walked for provenance; it introduces more than ${MAX_PROVENANCE} commits, or names an object this repository does not hold`;
   }
 
   // Walked once per session named, not once per commit: a push of fifty
   // commits from one session reads that session's events once.
   const produced = new Map<string, ReadonlySet<string>>();
   for (const commit of introduced.keys()) {
-    const info = yield* repository.readCommit(commit);
+    const info = yield* repository.readCommit(commit).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+    if (info === null) return `${commit} cannot be read, so its provenance cannot be judged`;
+
     const named = Session.trailerOf(info.message);
     if (!("session" in named)) {
       return `${commit} has ${named.reason}; this branch requires one`;
@@ -1043,7 +1082,12 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // judge the tombstone by what its signer held at the head it declares,
     // which is the fold's question — and the fold's question is exactly what
     // the decoy attack above is built to answer wrongly.
-    if (payload?.type !== "event.redacted") continue;
+    // Asked of the bytes rather than of the decoded pull-request payload: a
+    // session and a task write the same tombstone inside their own envelopes,
+    // which `Event.decode` reads as nothing at all — so this gate covered
+    // `refs/hub/pr/*` and left the two namespaces whose records are prompts,
+    // the ones most likely to need removing, ungated.
+    if (!(yield* Tombstone.claims(record.payload))) continue;
     // Expiry as well as the capability. A permanent verdict does not consult
     // expiry — it cannot, or the answer would move on a wall clock and the
     // host that acted on it would fold a history no replica agrees with — so
@@ -1483,6 +1527,17 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   );
   if (rules === null) return "the repository's policy could not be evaluated";
 
+  // A verb that makes the commit cannot also carry the record that names it:
+  // the session has to say it produced a commit that does not exist until
+  // this call creates it. So where a repository requires provenance, these
+  // verbs do not move a branch at all — refused rather than exempt, because
+  // an exemption is the way around the rule. Left only on receive-pack, the
+  // two doors disagreed: `git push` was refused for a missing trailer while
+  // `POST /commit` wrote the same change to the same branch.
+  if (rules.requireProvenance && ref.startsWith("refs/heads/")) {
+    return `${ref} requires provenance, which this route cannot supply; push the commit with the session record that names it`;
+  }
+
   // The same staleness bound `gate` applies. Left only on receive-pack, a
   // repository that had asked for one still accepted `commit`, `branch`,
   // `tagCreate`, `merge`, `rebase`, `cherry-pick`, `pull` and commit-pack
@@ -1661,28 +1716,32 @@ export const gate = Effect.fn("Policy.gate")(function* (
       const id = Session.sessionOf(name);
       if (id !== null) sessions.set(id, value);
     }
-    // The push's own session commands, over what is on disk. A branch and the
-    // record of what produced it travel together, so the record has to count
-    // before the branch is judged against it.
-    for (const update of updates) {
-      const id = Session.sessionOf(update.name);
-      if (id === null) continue;
-      if (update.value === null) sessions.delete(id);
-      else sessions.set(id, update.value);
-    }
   }
+
+  // Session commands are judged first, and what they vouch for is added only
+  // once they have passed. Seeded from the batch's *unjudged* commands, a
+  // member holding `source.push` and no hub capability could send a session
+  // ref this boundary refuses beside a branch whose commits name it: the
+  // session was thrown away and the branch landed with a trailer pointing at
+  // a record the repository does not hold.
+  const order = [...updates.keys()].sort((left, right) => {
+    const first = Session.sessionOf(updates[left]!.name) === null ? 1 : 0;
+    const second = Session.sessionOf(updates[right]!.name) === null ? 1 : 0;
+    return first - second || left - right;
+  });
 
   const decisions: Decision[] = [];
   const folds: FoldCache = new Map();
   const mentions: MentionCache = new Map();
   const opening: Openings = new Set();
-  for (const update of updates) {
+  for (const at of order) {
+    const update = updates[at]!;
     // A native client signed an envelope naming the refs it was moving and
     // where to. Checking it here rather than in the guard is not a weakening:
     // the guard runs before the push body exists, so this is the first moment
     // the commands are knowable at all — and the last before they are applied.
     if (withheld.has(update.name) && stale !== null && !stale.ok) {
-      decisions.push({ ok: false, ref: update.name, reason: stale.reason });
+      decisions[at] = { ok: false, ref: update.name, reason: stale.reason };
       continue;
     }
 
@@ -1690,7 +1749,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
       ? coveredByEnvelope(who.envelope, update)
       : ({ ok: true } as const);
     if (!covered.ok) {
-      decisions.push(covered);
+      decisions[at] = covered;
       continue;
     }
     const decision = yield* evaluate({
@@ -1709,7 +1768,15 @@ export const gate = Effect.fn("Policy.gate")(function* (
     // this batch does not actually get would otherwise spend a population slot
     // the create beside it was entitled to.
     if (!decision.ok) opening.delete(update.name);
-    decisions.push(decision);
+
+    // Only now, and only if it passed: a session ref this batch is refusing
+    // vouches for nothing.
+    const id = rules.requireProvenance ? Session.sessionOf(update.name) : null;
+    if (id !== null && decision.ok) {
+      if (update.value === null) sessions.delete(id);
+      else sessions.set(id, update.value);
+    }
+    decisions[at] = decision;
   }
 
   const refusals = decisions.flatMap((decision) => (decision.ok ? [] : [decision]));

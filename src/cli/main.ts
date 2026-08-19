@@ -276,6 +276,14 @@ const readStdin = Effect.promise(
  * The repository comes from `--repo` when given and otherwise from the
  * `path` git supplies, which is the last segment of the URL being pushed to:
  * one helper line then serves every repository on a host.
+ *
+ * The `host` git supplies is bound into the credential. git asks whichever
+ * helper matches for whatever URL it is about to fetch from or push to, so
+ * without that a redirect, a stale remote or a typo'd hostname was enough to
+ * have this hand a live credential for the local repository to somebody
+ * else's server — one that authenticates at the real host, since a repository
+ * and its replicas share a `RepoID`. Bound, it is spendable only where git
+ * said it was going.
  */
 const credentialHelper = Command.make(
   "credential-helper",
@@ -329,6 +337,18 @@ const credentialHelper = Command.make(
         });
       }
 
+      // What git is about to talk to, and therefore the only host this
+      // credential may be spent at. git supplies the port here only when it is
+      // not the scheme's default, which is the same rule `new URL().host`
+      // follows on the server side, so the two spellings agree.
+      const audience = fields.get("host")?.toLowerCase() ?? "";
+      if (audience === "") {
+        return yield* new Invalid({
+          field: "host",
+          reason: "git named no host to bind the credential to",
+        });
+      }
+
       const signer = yield* readPrivateKey(key);
       const minted = yield* withRepo(
         root,
@@ -345,6 +365,7 @@ const credentialHelper = Command.make(
             key: signer,
             repo: stored.genesis.repoId,
             capabilities: capability.split(",").map((value) => value.trim()),
+            audience,
             ttlSeconds: ttl,
           });
         }),

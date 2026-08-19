@@ -23,9 +23,13 @@
  */
 import { Effect } from "effect";
 
+import type { Fingerprint } from "../crypto/SshSignature.ts";
+import * as Dag from "../git/Dag.ts";
 import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import { type Oid, storageOf } from "../git/Store.ts";
+import * as Record from "../trust/Record.ts";
+import * as Verify from "../trust/Verify.ts";
 import { GENESIS_REF, type Genesis, readGenesis } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import {
@@ -34,6 +38,9 @@ import {
 } from "../trust/Projection.ts";
 import * as Event from "./Event.ts";
 import { project } from "./Projection.ts";
+import * as Session from "./Session.ts";
+import * as Task from "./Task.ts";
+import * as Tombstone from "./Tombstone.ts";
 
 /**
  * Every payload blob a valid tombstone covers, across every pull request.
@@ -86,6 +93,127 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
   return found;
 });
 
+// -- sessions and tasks ------------------------------------------------------------
+//
+// The same tombstone on a namespace with no fold. A pull request's redaction
+// is judged by `Projection.ts`, which a pull request needs anyway; a session's
+// projection reads what is there and authorizes nothing, so the two questions
+// a tombstone raises — may this key write one, does a written one count — are
+// asked directly against the trust graph. See `Tombstone.ts`.
+
+/** Every session and task ref on this repository. */
+const recordRefs = Effect.fn("hub.Redaction.recordRefs")(function* () {
+  return [
+    ...(yield* Session.sessions()).map(Session.refOf),
+    ...(yield* Task.tasks()).map(Task.refOf),
+  ];
+});
+
+/**
+ * The tombstones on one session or task ref: what each names, and who signed.
+ *
+ * Signers come out with the target because whether the tombstone counts is a
+ * question about them, and re-reading the record to ask it later would mean
+ * verifying every signature twice on a path `gc` takes for every repository.
+ *
+ * A ref this host will not walk — above the ceiling, or missing an object a
+ * replica never received — contributes nothing, the same reading `tombstoned`
+ * gives a pull request. Failing instead would take `gc` out for the whole host
+ * over one ref that arrived by replication without passing the boundary.
+ */
+const tombstonesOn = Effect.fn("hub.Redaction.tombstonesOn")(function* (ref: string) {
+  const repository = yield* Repository;
+  const found: Array<{ readonly target: Oid; readonly signers: ReadonlyArray<Fingerprint> }> = [];
+
+  const head = yield* repository.resolve(ref);
+  if (head === null) return found;
+
+  const session = Session.sessionOf(ref) !== null;
+  const parents = yield* Dag.reachable(
+    head,
+    null,
+    Event.isHubCommit,
+    yield* Event.ceilingOf(),
+  ).pipe(
+    Effect.catchTags({
+      Invalid: () => Effect.succeed(null),
+      ObjectNotFound: () => Effect.succeed(null),
+    }),
+  );
+  if (parents === null) return found;
+
+  for (const commit of parents.keys()) {
+    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
+    const record = yield* Record.read(commit, Event.RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    if (record === null) continue;
+
+    // Decoded as what the ref *is*: the two unions share this member and
+    // nothing else, and a task record read as a session decodes as nothing.
+    //
+    // Two branches rather than one decoder chosen by a conditional, and it is
+    // not a style preference: an `Effect` whose success type is the union of
+    // both payload unions was more than inference would follow, and it gave up
+    // by widening — `excluded` came out with `unknown` for its errors and its
+    // context, and every caller of it downstream inherited that. Each branch
+    // yields a `string | null` and the shapes never meet.
+    let named: string | null = null;
+    if (session) {
+      const payload = yield* Session.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+      if (payload?.type === "event.redacted") named = payload.targetCommit;
+    } else {
+      const payload = yield* Task.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+      if (payload?.type === "event.redacted") named = payload.targetCommit;
+    }
+    if (named === null) continue;
+    const target = Event.unqualify(named);
+    if (target === null) continue;
+    found.push({ target, signers: yield* Verify.signers(record.payload, record.signatures) });
+  }
+  return found;
+});
+
+/**
+ * The payload blob one record commit carries, if this host still holds it.
+ *
+ * A tombstone whose target has already been collected finds nothing, which is
+ * the state it was asking for; a target whose tree never arrived is a replica
+ * that applied a ref without a connectivity check, and neither is a reason to
+ * stop collecting the repository.
+ */
+const payloadOf = Effect.fn("hub.Redaction.payloadOf")(function* (commit: Oid) {
+  const repository = yield* Repository;
+  const info = yield* repository
+    .readCommit(commit)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  if (info === null) return null;
+
+  const path = yield* repository
+    .findPath(info.tree, `${Event.RECORD}.json`)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  return path?.oid ?? null;
+});
+
+/**
+ * Every tombstone across every session and task, in one walk.
+ *
+ * Flat rather than per-ref because both callers want it that way, and walked
+ * once because both of the questions asked of it — what a tombstone names, and
+ * whether it counts — are answered from the same two fields. Whether the trust
+ * graph is folded at all is then decided by whether this came back empty,
+ * which is what keeps a repository with no redactions in it from paying for a
+ * fold on every `gc`.
+ */
+const marks = Effect.fn("hub.Redaction.marks")(function* () {
+  const found: Array<{ readonly target: Oid; readonly signers: ReadonlyArray<Fingerprint> }> = [];
+  for (const ref of yield* recordRefs()) found.push(...(yield* tombstonesOn(ref)));
+  return found;
+});
+
 /**
  * The same set, read from the repository, for a caller that has no trust state
  * in hand.
@@ -104,6 +232,7 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   // ref store already has, and the answer is a pure function of them, so a
   // moved ref changes the key and a stale answer is not possible.
   const refs = yield* Event.pullRequests();
+  const written = yield* recordRefs();
   // The storage as well as the genesis: an origin and its mirror under one
   // host share the genesis oid, and right after a replication the hub ref oids
   // too — while what they can read need not agree, since refs are applied
@@ -128,6 +257,12 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
     ...(yield* Effect.forEach(refs, (pr) =>
       repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
     )),
+    // The session and task refs too: a tombstone on one of those removes a
+    // payload exactly as a pull request's does, and a key that did not name
+    // them served a stale answer to every `gc` after the first.
+    ...(yield* Effect.forEach(written, (ref) =>
+      repository.resolve(ref).pipe(Effect.map((oid) => `${ref} ${oid}`)),
+    )),
   ].join("\u0000");
 
   const known = memo.get(identity);
@@ -145,11 +280,22 @@ export const excluded = Effect.fn("hub.Redaction.excluded")(function* () {
   // single verification. The filter can produce a false positive, which costs
   // one fold; it cannot produce a false negative, which is what would matter.
   const candidates = yield* tombstoned(refs);
-  const stored = candidates.length === 0 ? null : yield* readGenesis();
-  const found =
-    stored === null
-      ? new Set<Oid>()
-      : yield* blobs(stored.genesis, yield* projectTrust(stored.genesis), candidates);
+  const removals = yield* marks();
+  const stored = candidates.length === 0 && removals.length === 0 ? null : yield* readGenesis();
+  const found = new Set<Oid>();
+  if (stored !== null) {
+    const trust = yield* projectTrust(stored.genesis);
+    for (const oid of yield* blobs(stored.genesis, trust, candidates)) found.add(oid);
+    // Valid by `Tombstone.counts`: a signer the trust graph knows who ever
+    // held `hub.redact`. Without that, anybody who may append to a session —
+    // which is anybody holding `hub.session` — could name another agent's
+    // prompt and have `gc` destroy it.
+    for (const removal of removals) {
+      if (!Tombstone.counts(trust, removal.signers)) continue;
+      const blob = yield* payloadOf(removal.target);
+      if (blob !== null) found.add(blob);
+    }
+  }
 
   memo.delete(identity);
   memo.set(identity, { state, found });
@@ -189,6 +335,7 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
   // set asks only what a tombstone *names*, so no trust state and no clock
   // enters it, and a moved ref changes the key.
   const refs = yield* Event.pullRequests();
+  const written = yield* recordRefs();
   // The storage as well as the genesis: an origin and its mirror under one
   // host share the genesis oid, and right after a replication the hub ref oids
   // too — while what they can read need not agree, since refs are applied
@@ -199,6 +346,9 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
     `ceiling ${yield* Event.ceilingOf()}`,
     ...(yield* Effect.forEach(refs, (pr) =>
       repository.resolve(Event.refOf(pr)).pipe(Effect.map((oid) => `${Event.refOf(pr)} ${oid}`)),
+    )),
+    ...(yield* Effect.forEach(written, (ref) =>
+      repository.resolve(ref).pipe(Effect.map((oid) => `${ref} ${oid}`)),
     )),
   ].join("\u0000");
 
@@ -242,6 +392,16 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
         .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
       if (path !== null) found.add(path.oid);
     }
+  }
+
+  // And what a session's or a task's tombstone names, on the same terms: what
+  // it *names*, not what still counts. Authorization decides whether a removal
+  // happens; it must not decide whether one that already happened can be
+  // accounted for, or a fetch starts failing on the day a redactor's grant
+  // lapses and the bytes are already gone.
+  for (const removal of yield* marks()) {
+    const blob = yield* payloadOf(removal.target);
+    if (blob !== null) found.add(blob);
   }
 
   names.delete(identity);

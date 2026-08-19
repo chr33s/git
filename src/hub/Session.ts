@@ -31,6 +31,7 @@ import type { Oid } from "../git/Store.ts";
 import * as Record from "../trust/Record.ts";
 import * as Secrets from "./Secrets.ts";
 import * as Event from "./Event.ts";
+import * as Tombstone from "./Tombstone.ts";
 
 /** Where one session's events live. */
 export const refOf = (session: string): string => `refs/hub/session/${session}`;
@@ -170,11 +171,27 @@ export const DecisionResolved = Schema.Struct({
   note: Schema.NullOr(Schema.String),
 });
 
+/**
+ * A record removed from this session.
+ *
+ * Prompts are where credentials leak, and the scanner in front of `issue` is
+ * heuristic by construction — so the way back has to exist, and it has to be a
+ * signed statement rather than a deletion: a deletion comes back from the
+ * first replica that still holds the object. The commit and its place in the
+ * chain stay; the payload goes at the next collection.
+ */
+export const RecordRedacted = Schema.Struct({
+  type: Schema.tag("event.redacted"),
+  ...envelope,
+  ...Tombstone.fields,
+});
+
 export const SessionPayload = Schema.Union([
   SessionOpened,
   SessionProduced,
   DecisionRequested,
   DecisionResolved,
+  RecordRedacted,
 ]);
 export type SessionPayload = (typeof SessionPayload)["Type"];
 
@@ -316,6 +333,10 @@ const prose = (payload: SessionPayload): string => {
       return [payload.question, ...payload.options].join("\n");
     case "decision.resolved":
       return [payload.chose, payload.note ?? ""].join("\n");
+    case "event.redacted":
+      // The reason and nothing else. A tombstone written *because* a record
+      // leaked a token is the one place somebody is most likely to quote it.
+      return payload.reason;
   }
 };
 
@@ -416,6 +437,64 @@ export const answer = Effect.fn("hub.Session.answer")(function* (input: {
 });
 
 /**
+ * Remove one record's content from this session.
+ *
+ * `target` is the record's event id, resolved here to the commit that carries
+ * it, because a commit is the thing that stays stable across exactly the
+ * change a tombstone makes. A session that has two records claiming one id is
+ * a session somebody built by hand; naming which commit to remove is then the
+ * caller's job rather than a guess this makes for them.
+ *
+ * Nothing is deleted. The tombstone is what replicates, and the bytes go at
+ * the next `gc`, which is the only pass that can tell whether the blob is
+ * reachable from anywhere else — see `Redaction.ts`.
+ */
+export const redact = Effect.fn("hub.Session.redact")(function* (input: {
+  readonly repo: string;
+  readonly session: string;
+  /** The record's event id — what the tombstone names for a reader. */
+  readonly target: string;
+  readonly reason: string;
+  readonly key: PrivateKey;
+}) {
+  yield* Tombstone.permitted(input.key);
+
+  const walked = yield* entries(input.session);
+  const claimants = walked.events.filter(({ payload }) => payload.id === input.target);
+  if (claimants.length === 0) {
+    return yield* new Invalid({
+      field: "target",
+      reason: `${input.session} has no record ${input.target}`,
+    });
+  }
+  if (claimants.length > 1) {
+    return yield* new Invalid({
+      field: "target",
+      reason: `${input.session} has ${claimants.length} records claiming ${input.target}`,
+    });
+  }
+  const target = claimants[0]!;
+  if (target.payload.type === "event.redacted") {
+    return yield* new Invalid({
+      field: "target",
+      reason: "a tombstone is the record of a removal and is not itself removable",
+    });
+  }
+
+  const base = yield* context(input.repo, input.session);
+  return yield* issue(
+    {
+      ...base,
+      type: "event.redacted",
+      target: input.target,
+      targetCommit: Event.qualify(target.commit),
+      reason: input.reason,
+    },
+    input.key,
+  );
+});
+
+/**
  * One session's events, oldest first, with what could not be read named.
  *
  * The same walk a wake makes, and for the same reasons: bounded to this
@@ -488,7 +567,17 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
     { readonly question: string; readonly options: ReadonlyArray<string>; chose: string | null }
   >();
 
+  const redacted: Array<string> = [];
+
   for (const { payload } of walked.events) {
+    if (payload.type === "event.redacted") {
+      // Recorded, not applied: the record it names reads as unreadable here
+      // either way, once its payload is gone. What this adds is the account of
+      // *why* — an absence with a tombstone beside it is a removal, and one
+      // without is a replica that has not caught up.
+      redacted.push(payload.targetCommit);
+      continue;
+    }
     if (payload.type === "decision.requested") {
       asked.set(payload.id, { question: payload.question, options: payload.options, chose: null });
       continue;
@@ -528,6 +617,7 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
     pulls,
     notes,
     decisions: [...asked].map(([id, value]) => ({ id, ...value })),
+    redacted,
     usage: { inputTokens, outputTokens },
     unreadable: walked.unreadable,
   };

@@ -29,6 +29,21 @@ describe("Secrets", () => {
     assert.ok(caught('config: { "api_key": "9f8Xk2Lm4Qp7Rs1Tv6Wy" }').includes("named credential"));
   });
 
+  it("finds a token the same prompt also names in prose", () => {
+    // The first `AKIA` is a bare word, and a scan that stopped at the first
+    // occurrence never looked at the key beside it. Nothing else covers a
+    // twenty-character token.
+    const caught = scan("AWS keys start with AKIA. Mine is AKIAIOSFODNN7EXAMPLE, rotate it.");
+    assert.deepEqual(
+      caught.map((finding) => finding.kind),
+      ["provider token"],
+    );
+    assert.deepEqual(
+      scan("xoxb- tokens look like xoxb-2334-4444-abcdefghijklmnop").map((finding) => finding.kind),
+      ["provider token"],
+    );
+  });
+
   it("says what it found without repeating it", () => {
     const [finding] = scan("token=ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789");
     assert.notEqual(finding, undefined);

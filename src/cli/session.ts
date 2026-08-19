@@ -320,15 +320,21 @@ if (process.argv[2] === "start") {
 } else if (fs.existsSync(STATE)) {
   const session = fs.readFileSync(STATE, "utf8").trim();
   const branch = process.env.CHR33S_GIT_BRANCH ?? "";
-  run([
-    "session", "produce",
-    "--root", ROOT, "--key", KEY,
-    "--session", session,
-    ...(branch === "" ? [] : ["--ref", branch]),
-    REPO,
-  ]);
-  // The session is closed by being reported: the next start opens a new one.
-  fs.rmSync(STATE, { force: true });
+  try {
+    run([
+      "session", "produce",
+      "--root", ROOT, "--key", KEY,
+      "--session", session,
+      ...(branch === "" ? [] : ["--ref", branch]),
+      REPO,
+    ]);
+  } finally {
+    // Cleared whether or not the report landed. Left behind on failure, the
+    // *next* session skipped its opening — the prompt was never recorded —
+    // and reported its work against this session's id, for every run
+    // afterwards, until somebody deleted the file by hand.
+    fs.rmSync(STATE, { force: true });
+  }
 }
 `;
 
@@ -336,6 +342,46 @@ if (process.argv[2] === "start") {
 const entryFor = (script: string, phase: "start" | "stop") => ({
   hooks: [{ type: "command", command: `node ${JSON.stringify(script)} ${phase}` }],
 });
+
+/**
+ * Remove one record's content, which is the only way back out of a prompt that
+ * carried something it should not have.
+ *
+ * The scanner in front of `session open` is heuristic and says so, so the way
+ * back has to exist. What this writes is a signed tombstone; the bytes go at
+ * the next `gc`, which is the only pass that can tell whether the blob is
+ * reachable from anywhere else — so the message says "at the next collection"
+ * rather than reporting a removal that has not happened yet.
+ */
+const redact = Command.make(
+  "redact",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    session: Flag.string("session").pipe(Flag.withDescription("The session holding the record")),
+    target: Flag.string("target").pipe(Flag.withDescription("The record's event id")),
+    reason: Flag.string("reason").pipe(Flag.withDescription("Why it is being removed")),
+    repo: repoArgument,
+  },
+  ({ key, reason, repo, root, session, target }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      yield* withRepo(
+        root,
+        repo,
+        Effect.gen(function* () {
+          yield* Session.redact({
+            repo: yield* identityOf(repo),
+            session,
+            target,
+            reason,
+            key: signer,
+          });
+        }),
+      );
+      yield* Console.log(`Redacted ${target}; the payload goes at the next gc`);
+    }),
+);
 
 const enable = Command.make(
   "enable",
@@ -430,7 +476,9 @@ const memoryShow = Command.make(
 );
 
 export const sessionCommand = Command.make("session", {}, () =>
-  Console.log("chr33s-git session <open|produce|show|ask|answer|enable|memory> — see --help"),
+  Console.log(
+    "chr33s-git session <open|produce|show|ask|answer|redact|enable|memory> — see --help",
+  ),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record who was instructed, and what they were asked")),
@@ -438,6 +486,7 @@ export const sessionCommand = Command.make("session", {}, () =>
     show.pipe(Command.withDescription("What a session amounts to, by id or by branch")),
     ask.pipe(Command.withDescription("Record a question only a person can answer")),
     answer.pipe(Command.withDescription("Answer one, which unblocks the session that asked")),
+    redact.pipe(Command.withDescription("Remove one record's content, needing hub.redact")),
     enable.pipe(Command.withDescription("Install the harness hooks that record sessions")),
     memoryShow.pipe(
       Command.withDescription("What agents have learned here, distilled from their sessions"),

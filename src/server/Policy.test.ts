@@ -1184,6 +1184,49 @@ describe("Policy", () => {
       assert.match(outcome.bare.refused[0]?.reason ?? "", /Session: trailer/);
     });
 
+    it("charges hub.redact for a tombstone on a session, not just on a pull request", async () => {
+      // The gate below read the record with `Event.decode`, which is the pull
+      // request's union — a session's tombstone decoded as nothing there and
+      // fell through the `event.redacted` check entirely. So the namespace
+      // whose records are prompts, the one this matters most for, let any
+      // holder of `hub.session` push a removal of somebody else's prompt.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["hub.session", "source.push"]);
+          const repository = yield* Repository;
+
+          const opened = yield* Session.open({
+            repo: where.genesis.repoId,
+            agent: { kind: "claude-code", model: "m", harness: "h" },
+            prompt: "do the thing",
+            key: where.dev,
+          });
+          const { events } = yield* Session.entries(opened.session);
+          const first = events[0]!;
+          const before = yield* repository.resolve(Session.refOf(opened.session));
+
+          const base = yield* Session.context(where.genesis.repoId, opened.session);
+          yield* Session.issue(
+            {
+              ...base,
+              type: "event.redacted",
+              target: first.payload.id,
+              targetCommit: Event.qualify(first.commit),
+              reason: "I would rather that were not there",
+            },
+            where.dev,
+          );
+          const head = yield* repository.resolve(Session.refOf(opened.session));
+          yield* repository.setRef({ name: Session.refOf(opened.session), to: before! });
+
+          return yield* judge(where, { name: Session.refOf(opened.session), value: head });
+        }),
+      );
+
+      assert.equal(outcome.ok, false, "a removal is not something hub.session buys");
+      assert.match(outcome.ok === false ? outcome.reason : "", /hub\.redact/);
+    });
+
     it("admits a session ref, which is the other shape this namespace holds", async () => {
       // Sessions live under `refs/hub/session/<id>` on the same machinery a
       // pull request uses, so the namespace rules have to know about both:

@@ -134,7 +134,7 @@ describe("the acceptance scenario", () => {
         }),
       );
       const delegated = await Effect.runPromise(
-        Auth.openDelegation(credential, established.repoId, new Date()),
+        Auth.openDelegation(credential, established.repoId, new Date(), null),
       );
       assert.notEqual(delegated, null, "the credential verifies against its own signature");
       assert.equal(
