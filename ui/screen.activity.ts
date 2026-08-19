@@ -13,11 +13,11 @@
  * have no HTTP surface yet (see `model.ts`). When the API cannot be reached the
  * screen falls back to the design's own Task timeline and says so.
  *
- * The header controls work on the live window: the zoom segments set how many
- * days it spans (a week, the design's fortnight, or a month) and ‹ › page it
- * back and forth through history. The fixture timeline is drawn for exactly
- * the design's fortnight, so in fallback mode those controls disable rather
- * than pretending to page data that does not move.
+ * The header controls work the same in both modes: the zoom segments set how
+ * many days the window spans (a week, the design's fortnight, or a month) and
+ * ‹ › page it back and forth. Both modes therefore need a window expressed as
+ * dates, so the fixture timeline is anchored to the day the design drew it
+ * around and its cards are placed — and clipped — by date like real commits.
  */
 import { html, nothing, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
@@ -36,8 +36,18 @@ type Zoom = "day" | "week" | "month";
 
 const SPANS = { day: 7, week: 14, month: 31 } satisfies Record<Zoom, number>;
 
-/** The design's own fortnight, which the fixture timeline is drawn for. */
-const FIXTURE_SPAN = 14;
+/**
+ * The day the design's timeline is drawn around, and the fortnight it sits in.
+ *
+ * `fixtures.ts` places its cards in 1-based columns of that fortnight, which
+ * began five days before this date and ran five days after it. Anchoring both
+ * to a real date is what lets the fixture window zoom and page: a column is
+ * just a day, so any window can say which of its days a card covers.
+ */
+const FIXTURE_TODAY = new Date(2026, 7, 18);
+const FIXTURE_LEAD = 5;
+/** The day before fixture column 1 — the origin its columns are counted from. */
+const FIXTURE_ORIGIN = new Date(2026, 7, 9);
 
 interface Day {
   readonly letter: string;
@@ -47,14 +57,12 @@ interface Day {
 
 const LETTERS = ["S", "M", "T", "W", "T", "F", "S"] as const;
 
-/** Mon 10th – Sun 23rd August 2026, the window the design draws. */
-const FIXTURE_DAYS: readonly Day[] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23].map(
-  (date, index) => ({
-    letter: LETTERS[(index + 1) % 7] ?? "M",
-    date,
-    today: date === 18,
-  }),
-);
+/** `at`, moved by whole days, without mutating the argument. */
+const shift = (at: Date, days: number): Date => {
+  const moved = new Date(at);
+  moved.setDate(moved.getDate() + days);
+  return moved;
+};
 
 @customElement("gp-activity")
 export class GpActivity extends GitPlusElement {
@@ -120,9 +128,25 @@ export class GpActivity extends GitPlusElement {
     }
   }
 
-  /** The design's fortnight when showing fixtures; the chosen zoom when live. */
   get #span(): number {
-    return this.commits === null ? FIXTURE_SPAN : SPANS[this.zoom];
+    return SPANS[this.zoom];
+  }
+
+  /** Today, or the day the fixture timeline stands in for. */
+  get #today(): Date {
+    return this.commits === null ? FIXTURE_TODAY : startOfDay(new Date());
+  }
+
+  /**
+   * The date of the window's last column.
+   *
+   * Live history ends today; the fixture fortnight ran five days past the day
+   * it is drawn around, so its window ends there and "now" sits mid-grid — the
+   * ninth of fourteen columns the design drew. `offset` pages both back.
+   */
+  get #end(): Date {
+    const lead = this.commits === null ? FIXTURE_LEAD : 0;
+    return shift(this.#today, lead - this.offset);
   }
 
   /** The group types its own `value`, so nothing here is asserted. */
@@ -135,28 +159,24 @@ export class GpActivity extends GitPlusElement {
     this.offset = 0;
   };
 
-  /** The `span` days ending `offset` days ago, which real commits land in. */
+  /** The `span` days the window covers, oldest first. */
   #days(): readonly Day[] {
-    if (this.commits === null) return FIXTURE_DAYS;
     const span = this.#span;
-    const today = startOfDay(new Date());
+    const end = this.#end;
+    const today = this.#today.getTime();
     return Array.from({ length: span }, (_, index) => {
-      const at = new Date(today);
-      at.setDate(at.getDate() - this.offset - (span - 1 - index));
+      const at = shift(end, index - (span - 1));
       return {
         letter: LETTERS[at.getDay()] ?? "M",
         date: at.getDate(),
-        today: this.offset === 0 && index === span - 1,
+        today: at.getTime() === today,
       };
     });
   }
 
   #month(): string {
-    if (this.commits === null) return "August 2026";
-    const end = new Date();
-    end.setDate(end.getDate() - this.offset);
-    const start = new Date(end);
-    start.setDate(start.getDate() - (this.#span - 1));
+    const end = this.#end;
+    const start = shift(end, -(this.#span - 1));
     const month = (at: Date): string =>
       at.toLocaleString(undefined, { month: "long", year: "numeric" });
     return start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear()
@@ -168,8 +188,7 @@ export class GpActivity extends GitPlusElement {
     const days = this.#days();
     const first = days[0]?.date ?? 1;
     const last = days[days.length - 1]?.date ?? 1;
-    const suffix = this.commits === null ? " Aug" : "";
-    return `${String(first)} – ${String(last)}${suffix}`;
+    return `${String(first)} – ${String(last)}`;
   }
 
   /**
@@ -203,7 +222,7 @@ export class GpActivity extends GitPlusElement {
 
   protected override render(): TemplateResult {
     const days = this.#days();
-    const live = this.commits !== null;
+    const now = this.#nowOffset();
     return html`
       <div class="gp-screen" style="--gp-cal-cols: ${String(this.#span)}">
         <div class="gp-activity-head">
@@ -211,11 +230,7 @@ export class GpActivity extends GitPlusElement {
           <ui-toggle-group class="gp-segmented" aria-label="Timeline zoom" @change=${this.#onZoom}>
             ${(["day", "week", "month"] as const).map(
               (level) => html`
-                <ui-toggle
-                  class="gp-segment"
-                  value=${level}
-                  ?disabled=${!live}
-                  ?data-active=${this.zoom === level}
+                <ui-toggle class="gp-segment" value=${level} ?data-active=${this.zoom === level}
                   >${level.charAt(0).toUpperCase() + level.slice(1)}</ui-toggle
                 >
               `,
@@ -225,7 +240,6 @@ export class GpActivity extends GitPlusElement {
             <button
               type="button"
               aria-label="Earlier"
-              ?disabled=${!live}
               @click=${() => {
                 this.offset += this.#span;
               }}
@@ -236,7 +250,7 @@ export class GpActivity extends GitPlusElement {
             <button
               type="button"
               aria-label="Later"
-              ?disabled=${!live || this.offset === 0}
+              ?disabled=${this.offset === 0}
               @click=${() => {
                 this.offset = Math.max(0, this.offset - this.#span);
               }}
@@ -266,11 +280,11 @@ export class GpActivity extends GitPlusElement {
 
         <div class="gp-cal-body">
           ${
-            live && this.offset > 0
+            now === null
               ? nothing
               : html`
-                  <div class="gp-cal-now" style=${this.#nowOffset()} aria-hidden="true"></div>
-                  <div class="gp-cal-now-dot" style=${this.#nowOffset()} aria-hidden="true"></div>
+                  <div class="gp-cal-now" style=${now} aria-hidden="true"></div>
+                  <div class="gp-cal-now-dot" style=${now} aria-hidden="true"></div>
                 `
           }
           <div class="gp-cal-grid">${this.#cards()}</div>
@@ -280,16 +294,17 @@ export class GpActivity extends GitPlusElement {
   }
 
   /**
-   * Where the "now" marker sits.
+   * Where the "now" marker sits, or `null` when that day is not in the window.
    *
-   * The design pinned it mid-column 9 for its fixed fortnight; with a window
-   * that ends today it belongs in the last column instead, and a window paged
-   * into the past has no "now" to mark at all — the marker is omitted there.
+   * Mid-column of the day `#today` names, which is the last column for a live
+   * window ending today and the design's column 9 for the fixture fortnight.
+   * A window paged into the past has no "now" to mark.
    */
-  #nowOffset(): string {
+  #nowOffset(): string | null {
     const span = this.#span;
-    const column = this.commits === null ? 8.5 : span - 0.5;
-    return `left: calc(100% / ${String(span)} * ${String(column)})`;
+    const index = span - 1 - daysBetween(this.#today, this.#end);
+    if (index < 0 || index >= span) return null;
+    return `left: calc(100% / ${String(span)} * ${String(index + 0.5)})`;
   }
 
   #cards(): TemplateResult | readonly TemplateResult[] {
@@ -297,12 +312,28 @@ export class GpActivity extends GitPlusElement {
 
     const commits = this.commits;
     if (commits === null) {
-      return timeline.map((event) => {
+      const span = this.#span;
+      const start = shift(this.#end, -(span - 1));
+      // A fixture column is a day of the design's fortnight, so it maps onto
+      // the window the same way a commit's date does. Cards reaching past an
+      // edge are clipped to it rather than dropped, which is what keeps the
+      // week zoom showing the bars that started before it.
+      const cards: TemplateResult[] = [];
+      for (const event of timeline) {
         const task = byId.get(event.id);
-        return task === undefined
-          ? html``
-          : this.#task(task, event.column, event.span, event.row, event.epic === true);
-      });
+        if (task === undefined) continue;
+        const from = Math.max(daysBetween(start, shift(FIXTURE_ORIGIN, event.column)), 0);
+        const to = Math.min(
+          daysBetween(start, shift(FIXTURE_ORIGIN, event.column + event.span - 1)),
+          span - 1,
+        );
+        if (from > to) continue;
+        cards.push(this.#task(task, from + 1, to - from + 1, event.row, event.epic === true));
+      }
+      if (cards.length === 0) {
+        return html`<div class="gp-empty">No events in this window.</div>`;
+      }
+      return cards;
     }
 
     // Bucket by day, then stack each day's commits into successive grid rows so

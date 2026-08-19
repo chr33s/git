@@ -521,9 +521,15 @@ export class GpDetail extends GitPlusElement {
         <div class="gp-diff-file-head"><span>${cr.diffFile}</span></div>
         <div class="gp-diff-static">
           ${cr.diff.map(
-            (line) => html`<div class="gp-diff-line" data-kind=${line.kind}>
-              <span class="gp-diff-num">${line.n}</span>${line.text}
-            </div>`,
+            // Only the text span preserves whitespace, and the row is a flex
+            // container: this template's own newlines and indentation are
+            // whitespace-only nodes there, so they are dropped rather than
+            // rendered as leading spaces and blank lines.
+            (line) =>
+              html`<div class="gp-diff-line" data-kind=${line.kind}>
+                <span class="gp-diff-num">${line.n}</span>
+                <span class="gp-diff-text">${line.text}</span>
+              </div>`,
           )}
         </div>
       </div>

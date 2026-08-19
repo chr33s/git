@@ -58,6 +58,10 @@
   --trees-indent-guide-bg-override: var(--gp-border);
   --trees-item-padding-x-override: 10px;
   --trees-level-gap-override: 16px;
+  /* The tree's scroll container insets its rows by 16px of its own, on top of
+     the 12px `.gp-explorer` already pads by. Zeroed here so rows run to the
+     panel's inset and line up with the header above them. */
+  --trees-padding-inline-override: 0px;
   /* Status hues follow the design's explorer badges: M amber, A green. */
   --trees-git-added-color-override: var(--gp-accent);
   --trees-git-modified-color-override: var(--gp-amber);

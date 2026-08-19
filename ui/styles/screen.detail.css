@@ -159,9 +159,14 @@
 }
 
 .gp-diff-line {
+  display: flex;
   padding: 0 16px;
-  white-space: pre;
   color: var(--gp-fg-muted);
+}
+
+/* The code itself, and only it, keeps its spacing — see `screen.detail.ts`. */
+.gp-diff-text {
+  white-space: pre;
 }
 
 .gp-diff-line[data-kind="add"] {
@@ -175,7 +180,7 @@
 }
 
 .gp-diff-num {
-  display: inline-block;
+  flex: none;
   width: 38px;
   color: var(--gp-fg-fainter);
   text-align: right;

@@ -710,7 +710,9 @@ const verifyProxy = async (upstream: string, port: number): Promise<void> => {
       );
       const append = (chunk: Buffer): void => {
         output += chunk.toString("utf8");
-        if (!output.includes("git+ UI on")) return;
+        // Matched on the port rather than the wording around it, so that
+        // rephrasing the boot message cannot silently stall this suite.
+        if (!output.includes(`http://localhost:${String(port)}`)) return;
         clearTimeout(timeout);
         resolve();
       };
@@ -921,10 +923,16 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   await page.goto(`${origin}/#/activity`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(600);
   check("the timeline lays out every event", (await page.locator(".gp-cal-event").count()) === 7);
-  check(
-    "the zoom disables while showing the sample timeline",
-    (await page.locator('.gp-segment[value="day"][disabled]').count()) === 1,
-  );
+  const columns = (): Promise<number> => page.locator(".gp-cal-day").count();
+  check("the sample timeline spans the design's fortnight", (await columns()) === 14);
+  await page.click('.gp-segment[value="day"]');
+  await page.waitForTimeout(300);
+  // The sample timeline is anchored to dates, so zooming re-windows it rather
+  // than disabling — the day columns are what prove the window actually moved.
+  check("the zoom narrows the sample timeline too", (await columns()) === 7);
+  await page.click('.gp-segment[value="week"]');
+  await page.waitForTimeout(300);
+  check("and widens it back", (await columns()) === 14);
   await page.click(".gp-cal-event:nth-child(1)");
   await page.waitForTimeout(500);
   check("a timeline card opens its task", (await hash()).startsWith("#/detail/"), await hash());
