@@ -80,14 +80,26 @@ to write to.
 pull requests, reviews, checks and tasks as signed events in `refs/hub/*`, and
 `Api.ts` now projects them over HTTP: `GET /hub/tasks`, `GET /hub/pulls`,
 `GET /hub/pulls/:id`, and one write — `POST /hub/events`, which appends a
-*pre-signed* event (the server holds nobody's key, so authorship stays where
+_pre-signed_ event (the server holds nobody's key, so authorship stays where
 the key lives). `hub.ts` queries those endpoints through the derived atom
 client and folds the answers into `store.ts`; while the hub holds anything,
 the screens show the repository's own state. A repository whose hub is empty,
 absent or unreachable keeps the design's fixtures (`fixtures.ts`) — the
-documented sample, never passed off as live. Mutations (creating a Task,
-commenting, the projection half of merging) remain tab-local, because signing
-an event needs a key this browser does not hold, and the dialogs say so.
+documented sample, never passed off as live.
+
+**The browser holds a signing key.** `identity.ts` generates an Ed25519 key
+on first use (WebCrypto, through the same `SshSignature` module every other
+author uses), keeps the seed in OPFS beside the clone, and signs hub events
+with it: creating a Task opens a real `task.opened` event over
+`POST /hub/events`, commenting on a hub Change Request appends
+`comment.created`, and both are read back from the server's projection —
+never shown optimistically. When the server answers a 401 nonce challenge,
+the request retries once under a signed `auth.request` envelope, the same
+native scheme the CLI presents. A fresh key is nobody: the Settings identity
+card shows its public half so an operator can `hub grant` it, and until a
+repository accepts the key (or is served `--open`), mutations fall back to
+tab-local state and the dialogs say which happened. The projection half of a
+fixture merge remains tab-local, as before.
 
 When the API cannot be reached, Code and Diff fall back to the design's sample
 repository and **say so** in an inline note, rather than passing fixtures off as
@@ -170,37 +182,38 @@ disabled states of what has no endpoint); and the live surface really does
 read and write the API — editing, branch creation, history, grep and the whole
 Settings administration surface — the third suite serves the shapes
 from `src/server/Api.ts`, so it fails loudly if this UI and that declaration
-drift apart. The fourth drives the whole local loop against a *real* node
+drift apart. The fourth drives the whole local loop against a _real_ node
 host: the page clones into OPFS over smart HTTP, commits locally, pushes back
 to origin, and adopts a hub task served by `GET /hub/tasks` — the deployed
 shape, end to end.
 
 ## Files
 
-| File               | Role                                 |
-| ------------------ | ------------------------------------ |
-| `main.ts`          | Entry point                          |
-| `app.ts`           | Shell, routing                       |
-| `base.ts`          | Light-DOM Lit base, navigation event |
-| `elements.ts`      | base-wc element registration         |
-| `api.ts`           | Typed client for the JSON API        |
-| `client.ts`        | Atom client derived from `Api.ts`    |
+| File               | Role                                  |
+| ------------------ | ------------------------------------- |
+| `main.ts`          | Entry point                           |
+| `app.ts`           | Shell, routing                        |
+| `base.ts`          | Light-DOM Lit base, navigation event  |
+| `elements.ts`      | base-wc element registration          |
+| `api.ts`           | Typed client for the JSON API         |
+| `client.ts`        | Atom client derived from `Api.ts`     |
 | `atoms.ts`         | Atom ↔ Lit reactive-controller bridge |
-| `hub.ts`           | Hub queries folded into the store    |
-| `local.ts`         | OPFS repository; clone, commit, push |
-| `model.ts`         | Task / Change Request domain         |
-| `fixtures.ts`      | The design's Task data               |
-| `store.ts`         | The mutable, observable Task store   |
-| `theme.ts`         | Palette choice and persistence       |
-| `icons.ts`         | Inline SVG icon set                  |
-| `highlight.ts`     | Lazy `@pierre/diffs` loader          |
-| `nav.sidebar.ts`   | The left rail                        |
-| `screen.*.ts`      | One module per screen                |
-| `screen.search.ts` | ⌘K results: tasks and `/grep` hits   |
-| `tokens.css`       | Both palettes, as custom properties  |
-| `styles/*.css`     | Shell, primitives, and screen styles |
-| `build.ts`         | esbuild bundle                       |
-| `verify.ts`        | Browser checks                       |
+| `hub.ts`           | Hub queries folded into the store     |
+| `identity.ts`      | The browser's signing key; hub writes |
+| `local.ts`         | OPFS repository; clone, commit, push  |
+| `model.ts`         | Task / Change Request domain          |
+| `fixtures.ts`      | The design's Task data                |
+| `store.ts`         | The mutable, observable Task store    |
+| `theme.ts`         | Palette choice and persistence        |
+| `icons.ts`         | Inline SVG icon set                   |
+| `highlight.ts`     | Lazy `@pierre/diffs` loader           |
+| `nav.sidebar.ts`   | The left rail                         |
+| `screen.*.ts`      | One module per screen                 |
+| `screen.search.ts` | ⌘K results: tasks and `/grep` hits    |
+| `tokens.css`       | Both palettes, as custom properties   |
+| `styles/*.css`     | Shell, primitives, and screen styles  |
+| `build.ts`         | esbuild bundle                        |
+| `verify.ts`        | Browser checks                        |
 
 ## Notes for whoever picks this up
 

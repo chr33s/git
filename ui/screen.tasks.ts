@@ -75,7 +75,7 @@ export class GpTasks extends GitPlusElement {
     this.filter = value === "tasks" || value === "crs" ? value : "all";
   };
 
-  #create = (event: SubmitEvent): void => {
+  #create = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
     const form = event.currentTarget;
     if (!(form instanceof HTMLFormElement)) return;
@@ -85,14 +85,21 @@ export class GpTasks extends GitPlusElement {
     if (!(descField instanceof HTMLTextAreaElement)) return;
     const title = titleField.value.trim();
     if (title === "") return;
-    const name = this.viewer ?? "anonymous";
-    const task = store.create({
-      title,
-      desc: descField.value.trim(),
-      author: { name, avatar: initials(name) },
-    });
+    const desc = descField.value.trim();
+
+    // The hub first: signed with this browser's key and appended for real.
+    // Only when the event cannot land — offline, or a key the repository
+    // does not (yet) trust — does the task stay in this tab, as the dialog
+    // warns.
+    const remote = await store.createRemote({ title, description: desc });
     form.reset();
     this.querySelector("ui-dialog")?.hide();
+    if (remote !== null) {
+      navigate(this, { screen: "detail", id: remote });
+      return;
+    }
+    const name = this.viewer ?? "anonymous";
+    const task = store.create({ title, desc, author: { name, avatar: initials(name) } });
     navigate(this, { screen: "detail", id: task.id });
   };
 
@@ -136,9 +143,11 @@ export class GpTasks extends GitPlusElement {
    * The "New task" dialog.
    *
    * `ui-dialog` owns the modality — trigger wiring, focus trap, Escape and
-   * outside-press dismissal — and this template owns only the form. Creation
-   * stays in this browser until the hub gets an HTTP surface, and the dialog
-   * says so rather than passing a local change off as a durable one.
+   * outside-press dismissal — and this template owns only the form. The
+   * submit signs a `task.opened` event with the browser's key and appends it
+   * to the hub; only when that cannot land does the task stay tab-local, and
+   * the dialog says which it will be rather than passing one off as the
+   * other.
    */
   #newTask(): TemplateResult {
     return html`
@@ -147,8 +156,8 @@ export class GpTasks extends GitPlusElement {
         <ui-dialog-popup class="gp-dialog">
           <h2 class="gp-dialog-title" data-dialog-title>New task</h2>
           <p class="gp-dialog-hint" data-dialog-description>
-            Stored in this browser tab — hub events are signed by their author, and this browser
-            holds no signing key, so nothing is written to the repository.
+            Signed with this browser's key and appended to the repository's hub. If the repository
+            refuses the key — it may not be a member yet — the task stays in this tab instead.
           </p>
           <form @submit=${this.#create}>
             <label class="gp-field-label" for="gp-new-title">Title</label>

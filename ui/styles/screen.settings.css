@@ -265,3 +265,16 @@ ui-switch.gp-switch > input:focus-visible ~ .gp-switch-thumb {
   font-family: var(--gp-mono);
   font-size: 12px;
 }
+
+/* The browser-key line: the public key beside its copy button. */
+.gp-field-value--row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gp-field-value--row .gp-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--gp-mono, monospace);
+  font-size: 12px;
+}
