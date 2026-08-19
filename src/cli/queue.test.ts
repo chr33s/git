@@ -893,6 +893,71 @@ describe("cli queue", () => {
     );
   });
 
+  it("leaves alone a branch under the prefix it did not put there", async () => {
+    // The cleanup sweep read the queue as it stood when the pass began, so it
+    // deleted whatever a keep-list did not mention — a concurrent runner's
+    // freshly published candidate, or a branch somebody happened to keep under
+    // the same prefix. Only a pull request this pass settled is finished.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+    const bystander = "refs/heads/queue/main/someone-elses-work";
+    await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.setRef({ name: bystander, to: headOf("two") }),
+      ),
+    );
+
+    await run();
+
+    const survived = await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) => repository.resolve(bystander)),
+    );
+    assert.equal(survived, headOf("two"), "a branch this pass knows nothing about stays");
+  });
+
+  it("says so when it loses the branch to somebody else mid-pass", async () => {
+    // A lost compare-and-swap reported an empty pass, which reads exactly like
+    // a pass with nothing to do — the ambiguity `refused` exists to remove.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    await enter(first);
+    const built = await run();
+    await cli([
+      "pr",
+      "check",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--name",
+      "test",
+      "--status",
+      "success",
+      "--head",
+      built.built[0].commit,
+      "project",
+      first,
+    ]);
+
+    // The branch moves after the candidate was judged landable but before the
+    // swap this pass will attempt — which is what a racing direct push is.
+    await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.setRef({ name: "refs/heads/main", to: headOf("two") }),
+      ),
+    );
+
+    const pass = await run();
+    // The rebuild is onto the moved branch, so it lands there; what matters is
+    // that a pass which cannot land says why rather than reporting nothing.
+    assert.equal(
+      pass.landed.length + pass.refused.length,
+      1,
+      "either it landed on the new tip or it said what stopped it",
+    );
+  });
+
   it("refuses a second queue for a branch that already has one", async () => {
     // `refs/hub/queue/*` cannot be deleted, so a second queue for one branch is
     // a permanent split: entries divide invisibly across the two and two

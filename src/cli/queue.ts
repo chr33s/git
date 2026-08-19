@@ -440,7 +440,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     (entry) => entry.candidate !== null && entry.candidate.onto !== from,
   );
   const chainStart = state.entries.find((entry) => entry.candidate !== null)?.candidate?.onto;
-  const reset = stale && chainStart !== from;
+  let reset = stale && chainStart !== from;
   if (reset) {
     yield* record(
       Queue.reset({ repo: genesis.repoId, queue: state.queue, at: from, key: input.key }),
@@ -703,13 +703,17 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       }
     } else {
       // Somebody else moved the branch while this pass was building. Nothing
-      // was lost; the next pass rebuilds on what they left.
-      yield* Queue.reset({
-        repo: genesis.repoId,
-        queue: state.queue,
-        at: yield* repository.resolve(target).pipe(Effect.map((oid) => oid ?? from)),
-        key: input.key,
+      // was lost; the next pass rebuilds on what they left — but a pass that
+      // reported an empty `landed` and nothing else here read exactly like a
+      // pass with nothing to do, which is the ambiguity `refused` exists to
+      // remove. Said out loud, and `reset` says a record was written.
+      const now = yield* repository.resolve(target).pipe(Effect.map((oid) => oid ?? from));
+      reset = true;
+      refused.push({
+        pr: top.pr,
+        reason: `${target} moved from ${from} to ${now} while this pass was building`,
       });
+      yield* Queue.reset({ repo: genesis.repoId, queue: state.queue, at: now, key: input.key });
     }
   } else if (landedAt >= 0) {
     for (const step of chain.slice(0, landedAt + 1)) landed.push(step.pr);
@@ -740,26 +744,19 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     .filter((step) => !dropped.some((entry) => entry.pr === step.pr));
 
   // Candidate branches are ordinary branches, so they are cleaned up like
-  // ordinary branches: what is still in the queue keeps its branch, because
-  // that is what CI fetches, and everything else goes. Left behind, every
-  // candidate the queue had ever built stayed a ref — pinning its objects out
-  // of reach of collection for good, on a repository whose whole point is that
-  // it can be collected.
+  // ordinary branches: a candidate whose entry this pass *settled* is one
+  // nothing will fetch again, and leaving it behind pins its objects out of
+  // reach of collection for good.
   //
-  // Every entry still queued, not only the steps this pass built. An entry can
-  // flip to `unbuilt` — the batch ahead of it conflicts, or this replica is
-  // missing an object — while the `queue.candidate` record naming its branch
-  // stands, and deleting it then pointed `queue show` at a branch nothing could
-  // fetch. What is settled about an entry is whether it is still queued.
+  // Only what this pass settled, and named exactly. Sweeping the prefix for
+  // anything a keep-list did not mention read the queue as it stood when the
+  // pass began, so it deleted a concurrent runner's freshly published candidate
+  // — still named by its own `queue.candidate` record — and any branch a person
+  // happened to keep under the same prefix. A pull request this pass landed or
+  // dropped is the one thing it knows is finished.
   if (!input.dryRun) {
-    const settled = new Set([...landed, ...dropped.map((entry) => entry.pr)]);
-    const keep = new Set(
-      state.entries.filter((entry) => !settled.has(entry.pr)).map((entry) => branchOf(entry.pr)),
-    );
-    const prefix = `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/`;
-    for (const [name] of yield* repository.refs) {
-      if (!name.startsWith(prefix) || keep.has(name)) continue;
-      yield* repository.deleteRef(name);
+    for (const pr of [...landed, ...dropped.map((entry) => entry.pr)]) {
+      yield* repository.deleteRef(branchOf(pr));
     }
   }
 
