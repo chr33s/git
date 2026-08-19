@@ -38,6 +38,7 @@ import type { Invalid, ObjectNotFound, RefConflict, StorageFailure } from "../gi
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
+import * as Policy from "./Policy.ts";
 
 /**
  * What one record, and one file, may hold.
@@ -242,6 +243,21 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
           // The base tree is read now rather than at `done`: every file is
           // applied on top of it as it arrives, so it has to exist first.
           const ref = branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
+
+          // And the boundary is crossed *here*, before a byte of the body is
+          // written. This endpoint takes a ref name from its caller and moves
+          // it, which is every rule the boundary exists for — branch
+          // protection, genesis immutability, hub append-only, `policy.write`
+          // — and asked at `done` it was asked too late: the blobs and trees
+          // had already been written by `writeFiles` as they streamed, so a
+          // caller the boundary refused had still put arbitrary content into
+          // the object store. The branch is known from the first record, so
+          // there is nothing to wait for.
+          const refusal = yield* Policy.gateWrite(ref).pipe(
+            Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+          );
+          if (refusal !== null) return yield* bad(refusal);
+
           const tip = yield* rejected(repository.resolve(ref));
           state.tree =
             tip === null ? EMPTY_TREE_OID : (yield* rejected(repository.readCommit(tip))).tree;

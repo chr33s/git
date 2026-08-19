@@ -27,6 +27,13 @@ import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { serve, type Server } from "../host/Node.ts";
 import { hasGit } from "../testing/Git.ts";
+import { formatPublicKey, generate } from "../crypto/SshSignature.ts";
+import * as Event from "../hub/Event.ts";
+import * as PullRequest from "../hub/PullRequest.ts";
+import * as Redaction from "../hub/Redaction.ts";
+import * as Certificate from "../trust/Certificate.ts";
+import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
+import * as Log from "../trust/Log.ts";
 import { push, type PushRef, type PushResult } from "./Push.ts";
 
 const execFileAsync = promisify(execFile);
@@ -159,7 +166,7 @@ const serverRef = (repo: string, name: string): Promise<Oid | null> =>
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "client-push-"));
-  server = await serve({ root });
+  server = await serve({ root, allowAnonymousWrites: true });
 });
 
 afterAll(async () => {
@@ -240,6 +247,71 @@ describe.skipIf(!hasGit)("Push, read back by the git binary", () => {
 });
 
 describe("Push", () => {
+  it("pushes a pull request whose payload a tombstone has already removed", async () => {
+    // A redacted payload is absent by design while the tree naming it
+    // survives, so a strict object closure over a hub ref fails the moment
+    // anything in it has been redacted. The server's fetch retries against
+    // what the tombstones account for; the push side did not, so a client
+    // could not push back the pull requests it had itself redacted.
+    const outcome = await inLocal(
+      "redacted",
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const root = yield* generate("root@example.com");
+        const author = yield* generate("author@example.com");
+
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: genesis.repoId,
+            publicKey: formatPublicKey(author.publicKey),
+            capabilities: ["hub.create-pr", "hub.comment", "hub.redact"],
+            id: Log.newId(),
+          }),
+          [root],
+        );
+
+        const { pr } = yield* PullRequest.open({
+          repo: genesis.repoId,
+          title: "Add a thing",
+          base: "refs/heads/main",
+          // SAFETY: forty lowercase hex characters, which is what `Oid` brands.
+          head: "a".repeat(40) as Oid,
+          key: author,
+        });
+        const said = yield* PullRequest.comment({
+          repo: genesis.repoId,
+          pr,
+          body: "the deploy key is hunter2",
+          key: author,
+        });
+        const { events } = yield* Event.entries(pr);
+        const target = events.find((entry) => entry.commit === said)?.payload?.id ?? "";
+        yield* PullRequest.redact({
+          repo: genesis.repoId,
+          pr,
+          target,
+          reason: "sensitive-content",
+          key: author,
+        });
+
+        // The payload really goes, which is what makes the closure strict-fail.
+        yield* repository.gc({ repack: true, exclude: yield* Redaction.excluded() });
+        return Event.refOf(pr);
+      }),
+    );
+
+    const results = await pushFrom("redacted", "tombstoned", [{ local: outcome, remote: outcome }]);
+
+    assert.deepEqual(
+      results.map((result) => [result.ok, result.reason ?? ""]),
+      [[true, ""]],
+      "the pull request must push with its payload already gone",
+    );
+    assert.notEqual(await serverRef("tombstoned", outcome), null);
+  });
+
   it("refuses a non-fast-forward, and accepts it with force", async () => {
     const first = await commitFile("diverged-a", "f.txt", "theirs\n", "theirs");
     assert.deepEqual(

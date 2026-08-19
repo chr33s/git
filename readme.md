@@ -60,10 +60,13 @@ Both hosts speak:
   same declaration
 - **webhooks** — signed push events, delivered with retries
 
-The deployed Worker always enforces scoped read/write tokens (it fails to
-deploy without `GIT_AUTH_SECRET`); the node host wants `--secret` too, and
-refuses to start without it unless you pass `--open` to say you meant an
-unauthenticated server. `git` presents a token as `http://<token>@host/repo`.
+Authority belongs to the repository, not to the server. There is no shared
+secret to deploy and no server flag to set: a repository with a genesis
+(`refs/meta/trust/genesis`) is guarded by its own SSH-key membership log, and
+one without is a plain git repository served as one. `chr33s-git hub init`
+gives a repository an identity; `chr33s-git credential` mints a short-lived
+credential the holder signs with their own key, which `git` presents as
+`http://<credential>@host/repo`. See `docs/hub.md`.
 
 ## Use the CLI
 
@@ -71,9 +74,25 @@ The CLI drives the same code the server runs — one `Repository`, one host, one
 client, one auth path:
 
 ```sh
-npx chr33s-git init my-repo && npx chr33s-git serve --secret s3cret &
-npx chr33s-git token my-repo --secret s3cret --scope write
-npx chr33s-git clone --token <token> http://127.0.0.1:8080/my-repo my-copy
+npx chr33s-git init my-repo && npx chr33s-git serve &
+npx chr33s-git clone http://127.0.0.1:8080/my-repo my-copy
+```
+
+A repository with no genesis is readable by anyone who can reach the port and
+writable by nobody — it has no membership to authorize a write with. `--open`
+serves writes to those repositories anyway, which is what a scratch server on a
+laptop wants and what a shared one should not have.
+
+To require membership, give the repository an identity and mint a credential
+for the key that holds it. `hub init` seeds that key as `repo.admin`, which
+makes the repository private — so the credential needs `repo.read` to clone it
+as well as `source.push` to write:
+
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/hub -N ""
+npx chr33s-git hub init my-repo --key ~/.ssh/hub
+npx chr33s-git credential my-repo --key ~/.ssh/hub --capability repo.read,source.push
+npx chr33s-git clone --token <credential> http://127.0.0.1:8080/my-repo my-copy
 ```
 
 Working-tree commands take `--work`, a checkout whose repository is `.git`
@@ -85,8 +104,8 @@ npx chr33s-git commit --work . --message "first"
 npx chr33s-git switch --work . --create topic
 ```
 
-29 commands in all: repositories (`init`, `clone`, `serve`, `token`), the
-working tree (`add`, `rm`, `mv`, `restore`, `status`, `switch`, `commit`),
+30 commands in all: repositories (`init`, `clone`, `serve`, `hub`,
+`credential`), the working tree (`add`, `rm`, `mv`, `restore`, `status`, `switch`, `commit`),
 history (`log`, `history`, `show`, `diff`, `grep`, `bisect`, `files`), refs
 (`branch`, `tag`, `refs`, `reset`), rewriting (`merge`, `cherry-pick`,
 `rebase`), transport (`push`, `archive`), and maintenance (`fsck`, `gc`).

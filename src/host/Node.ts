@@ -16,8 +16,8 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
-import { Config, Effect, Layer, Predicate } from "effect";
-import { HttpRouter } from "effect/unstable/http";
+import { Config, Context, Effect, Layer, Predicate } from "effect";
+import { FetchHttpClient, HttpClient, HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
@@ -25,14 +25,18 @@ import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
+import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
 import { file as lfsFile } from "../server/Lfs.node.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
+import * as Remotes from "../server/Remotes.ts";
 import { collects, routeOf, settledWithin } from "../server/Route.ts";
+import * as Sending from "../server/Sending.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
+import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 
 export interface ServeOptions {
@@ -42,12 +46,13 @@ export interface ServeOptions {
   readonly port?: number;
   readonly hostname?: string;
   /**
-   * When present, every request passes `server/Auth.ts`'s guard with this
-   * verifier — `Auth.hmacVerify` for stateless tokens, or the Artifacts
-   * provider's `Tokens.verify` for revocable ones. Absent means open, which
-   * is what local development wants.
+   * Serve writes to repositories that have no genesis.
+   *
+   * Off by default: such a repository has no membership to authorize anybody,
+   * and "no policy" must not read as "no protection". On for a scratch server
+   * where saying so out loud is the point.
    */
-  readonly verify?: (repo: string, credential: string | null) => Promise<Auth.Scope | null>;
+  readonly allowAnonymousWrites?: boolean;
 }
 
 export interface Server {
@@ -71,7 +76,12 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   interface RepoState {
     readonly layer: Layer.Layer<Repository>;
     readonly lfs: Layer.Layer<Lfs.LfsStore>;
-    readonly api: (request: Request) => Promise<Response>;
+    readonly api: (
+      request: Request,
+      requester: Context.Context<Auth.Requester>,
+    ) => Promise<Response>;
+    /** Closes the router's scope — the layers it built are finalized here. */
+    readonly disposeApi: () => Promise<void>;
     /** The input-gate stand-in: requests to one repo run strictly in order. */
     gate: Promise<unknown>;
     /**
@@ -90,6 +100,19 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const repos = new Map<string, RepoState>();
 
   /**
+   * Challenge nonces, one store for the process.
+   *
+   * Shared across repositories rather than one store each: a nonce is a
+   * one-shot value, and the envelope that carries it names the repository
+   * inside the signed bytes — so a nonce cannot be moved between repositories
+   * even though the pool is common.
+   */
+  const nonces = Auth.noncesInMemory();
+
+  /** One value for the process; see `Policy.AnonymousWrites`. */
+  const openWrites = Policy.anonymousWrites(options.allowAnonymousWrites === true);
+
+  /**
    * How many repositories keep a built layer.
    *
    * One entry per name ever asked for is a leak with a name: a scan for
@@ -104,9 +127,44 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     for (const [name, state] of repos) {
       if (state.active > 0 || state.delivering.size > 0) continue;
       repos.delete(name);
+      // The router holds a `Scope`: the layers it built — stores, hooks, the
+      // webhook registry — have finalizers, and dropping the entry without
+      // running them leaks a file handle per evicted repository.
+      //
+      // Caught, not merely detached. A finalizer that rejects becomes an
+      // unhandled rejection, and node's default is to turn that into a throw
+      // that takes the whole server down — so a file handle this host could
+      // not close would stop it serving every repository it holds. Eviction is
+      // housekeeping; it says so and carries on.
+      state.disposeApi().catch((cause: unknown) => {
+        console.error(`could not release ${name}: ${String(cause)}`);
+      });
       if (repos.size <= REPO_CACHE) return;
     }
   };
+
+  /**
+   * Just enough of a repository to check who is asking.
+   *
+   * `Auth.guard` reads the genesis and the trust log, and nothing else — no
+   * hooks, no webhook registry, no API router. Answering it from the cached
+   * per-repository state meant every request built that state *before* it was
+   * allowed, so an unauthenticated scan over names that need not exist opened
+   * a `Scope` apiece and evicted live repositories' routers out of the cache
+   * it was thrashing. Built per request and thrown away: the guard is one read
+   * of two refs, and the repositories that pass it go on to be cached below.
+   */
+  const guardLayer = (repo: string) =>
+    GitRepository.layer.pipe(
+      Layer.provide(GitRepository.hooksNoop),
+      // `provideMerge`, not `provide`: the stores carry the repository's
+      // `Storage` identity, and `provide` consumes a layer's outputs without
+      // re-exporting them — so the memos keyed on it saw `null` on every host,
+      // and an origin and its mirror under one root shared every entry again.
+      // The aliasing was invisible because nothing fails: the wrong answer is
+      // a well-formed one.
+      Layer.provideMerge(stores(path.join(options.root, repo))),
+    );
 
   const stateFor = (repo: string): RepoState => {
     const cached = repos.get(repo);
@@ -127,21 +185,63 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     // to remember.
     const remotes = remotesFile(path.join(options.root, repo, "remotes.json"));
 
+    // What happens after a push lands: deliver to whoever subscribed, and
+    // forward to whoever this repository is configured to send to. Both, not
+    // one — `Hooks` is a single service, so the two are combined rather than
+    // chosen between.
+    //
+    // The forwarder gets a repository built with no hooks at all. Handed the
+    // one it is installed on, a forward would be its own trigger: a push
+    // forwards, the forward is a push, and that one forwards again.
+    const afterPush = Layer.effect(
+      GitRepository.Hooks,
+      Effect.gen(function* () {
+        const subscribed = yield* Subscribers.Subscribers;
+        const client = yield* HttpClient.HttpClient;
+        const registry = yield* Remotes.Remotes;
+        return GitRepository.hooksAll([
+          Webhooks.service({ subscribers: subscribed, client }),
+          // The repository a forward pushes from is built when the push lands,
+          // not when this layer is: it cannot be a dependency of the hooks the
+          // repository itself depends on. `guardLayer` is the no-hooks one.
+          Sending.service({
+            remotes: registry,
+            using: (effect) => effect.pipe(Effect.provide(guardLayer(repo))),
+          }),
+        ]);
+      }),
+    ).pipe(Layer.provide(Layer.mergeAll(subscribers, remotes, FetchHttpClient.layer)));
+
     const layer = GitRepository.layer.pipe(
       // Real hooks, not `hooksNoop`: this is what makes a push deliver.
       // `forkDetach` is the node stand-in for `waitUntil` — delivery outlives
       // the response without the push waiting on a slow receiver.
-      Layer.provide(Webhooks.hooksFetch().pipe(Layer.provide(subscribers))),
-      Layer.provide(stores(path.join(options.root, repo))),
+      Layer.provide(afterPush),
+      // As `guardLayer` above: `provide` would swallow `Storage`.
+      Layer.provideMerge(stores(path.join(options.root, repo))),
+    );
+
+    // Built once per repository, not once per request. The requester stays
+    // *out* of the graph and arrives as a per-request context instead, which
+    // is what `toWebHandler`'s second argument is for: a router built per
+    // call rebuilds the whole API handler tree and opens a `Scope` nobody
+    // ever closes, and one built with the requester baked in would answer
+    // every later request as whoever made the first.
+    const router = HttpRouter.toWebHandler(
+      Api.layer(remotes).pipe(
+        Layer.provideMerge(layer),
+        Layer.provideMerge(subscribers),
+        Layer.provideMerge(openWrites),
+      ),
+      { disableLogger: true },
     );
 
     const state: RepoState = {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
-      api: HttpRouter.toWebHandler(
-        Api.layer(remotes).pipe(Layer.provideMerge(layer), Layer.provideMerge(subscribers)),
-        { disableLogger: true },
-      ).handler,
+      api: (request: Request, requester: Context.Context<Auth.Requester>) =>
+        router.handler(request, requester),
+      disposeApi: router.dispose,
       gate: Promise.resolve(),
       delivering: new Set(),
       active: 0,
@@ -166,9 +266,16 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     repo: string,
     request: Request,
     deliver: (response: Response) => Promise<void>,
+    authenticated: Auth.Authenticated,
   ): Promise<void> => {
     const state = stateFor(repo);
     state.active += 1;
+
+    // Two shapes of the same fact. The protocol and bulk paths build their own
+    // effect per request and take a layer; the API router is built once and
+    // takes a context per call, which is what keeps it memoisable.
+    const requester = Auth.requester(authenticated);
+    const asked = Auth.requesterContext(authenticated);
 
     // Outside the gate, deliberately: a collection waits on bodies that finish
     // at their clients' pace, and waiting for them with the gate held would
@@ -185,13 +292,17 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // LFS first: it shares the `info/` prefix with the advertisement, and
       // its bodies are the large ones, so it must not be behind a handler
       // that would read them.
-      const lfs = await Effect.runPromise(Lfs.handle(request).pipe(Effect.provide(state.lfs)));
+      const lfs = await Effect.runPromise(
+        Lfs.handle(request).pipe(Effect.provide(Layer.mergeAll(state.lfs, requester))),
+      );
       if (lfs !== null) return lfs;
 
       // Also ahead of the API: a bulk commit body is arbitrarily large and is
       // consumed as a stream, so nothing that would buffer it may see it first.
       const bulk = await Effect.runPromise(
-        CommitPack.handle(request).pipe(Effect.provide(state.layer)),
+        CommitPack.handle(request).pipe(
+          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites)),
+        ),
       );
       if (bulk !== null) return bulk;
 
@@ -205,10 +316,10 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           Effect.catch((error) =>
             Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
           ),
-          Effect.provide(state.layer),
+          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites)),
         ),
       );
-      return matched ?? (await state.api(request));
+      return matched ?? (await state.api(request, asked));
     };
 
     const answered = state.gate.then(answer, answer);
@@ -287,13 +398,22 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       }
       const request = new Request(url, init);
 
-      const verify = options.verify;
-      const denied =
-        verify === undefined
-          ? null
-          : await Effect.runPromise(
-              Auth.guard(request, (credential) => Effect.promise(() => verify(repo, credential))),
-            );
+      // Whether a repository is guarded is the repository's own answer: one
+      // with a genesis has members, and one without is a plain git repository
+      // that nothing here should start refusing to serve. There is no server
+      // secret to configure any more, so there is nothing to leave off.
+      const denied = await Effect.runPromise(
+        Auth.guard(request).pipe(
+          Effect.provide(Layer.mergeAll(guardLayer(repo), nonces, openWrites)),
+          // A repository whose identity cannot be read is not a repository
+          // with no members: it is one nobody can be checked against, and the
+          // honest answer is that the service is unavailable.
+          Effect.orElseSucceed(() => ({
+            denied: new Response("authentication unavailable", { status: 503 }),
+            authenticated: Auth.anonymous,
+          })),
+        ),
+      );
       const deliver = async (response: Response) => {
         outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
         if (response.body === null) {
@@ -304,8 +424,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           await pipeline(Readable.fromWeb(response.body as WebReadableStream), outgoing);
         }
       };
-      if (denied !== null) await deliver(denied);
-      else await dispatch(repo, request, deliver);
+      if (denied.denied !== null) await deliver(denied.denied);
+      else await dispatch(repo, request, deliver, denied.authenticated);
     })().catch((cause: unknown) => {
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end(String(cause));

@@ -25,6 +25,7 @@
     }
   ],
   "vars": {
-    "ENABLE_CONFORMANCE": "1"
+    "ENABLE_CONFORMANCE": "1",
+    "ALLOW_ANONYMOUS_WRITES": "1"
   }
 }

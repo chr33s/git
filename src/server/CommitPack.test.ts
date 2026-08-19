@@ -12,13 +12,24 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Fiber, Layer, Predicate } from "effect";
 
+import { hashObject } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import * as CommitPack from "./CommitPack.ts";
+import * as Policy from "./Policy.ts";
 
+// Scratch repositories with no genesis, which the policy boundary refuses to
+// write to unless the host says otherwise — `serve --open`'s choice.
 const live = GitRepository.layer.pipe(
+  Layer.provide(GitRepository.hooksNoop),
+  Layer.provide(stores),
+  Layer.provideMerge(Policy.anonymousWrites(true)),
+);
+
+/** And one the host has *not* opened, where the boundary refuses every write. */
+const closed = GitRepository.layer.pipe(
   Layer.provide(GitRepository.hooksNoop),
   Layer.provide(stores),
 );
@@ -489,6 +500,44 @@ describe("CommitPack", () => {
         }
       }),
     ),
+  );
+
+  it.live("refuses a write the boundary rejects before it writes any of the body", () =>
+    Effect.gen(function* () {
+      // The gate was asked at `done`, by which point every blob and tree in
+      // the body had already been written on the way past — so a caller the
+      // boundary refused had still put arbitrary content into the object
+      // store. The branch is named in the first record; there is nothing to
+      // wait for. This repository has no membership and the host has not
+      // opened it, which is one of the several ways the boundary says no.
+      const repository = yield* Repository;
+      const content = "a secret the boundary said no to\n";
+      const answer = yield* send(
+        post(
+          ndjson([
+            { type: "commit", branch: "main", message: "nope\n", author: alice },
+            { type: "file", path: "leak.txt" },
+            { type: "chunk", data: utf8(content) },
+            { type: "end" },
+            { type: "done" },
+          ]),
+        ),
+      );
+
+      assert.equal(answer.status, 400, JSON.stringify(answer.payload));
+
+      // And the bytes never landed. The oid is computed rather than written,
+      // so asking for it cannot be what puts it there.
+      const oid = yield* hashObject({ type: "blob", data: encoder.encode(content) });
+      assert.equal(
+        yield* repository.readBlob(oid).pipe(
+          Effect.as(true),
+          Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+        ),
+        false,
+        "a refused pack must not leave its content in the object store",
+      );
+    }).pipe(Effect.provide(closed), Effect.orDie),
   );
 
   it.live("leaves requests that are not its own alone", () =>

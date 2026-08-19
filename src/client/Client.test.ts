@@ -18,7 +18,11 @@ import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { serve, type Server } from "../host/Node.ts";
-import { hmacMint, hmacVerify } from "../server/Auth.ts";
+import { mintDelegation } from "../server/Auth.ts";
+import { formatPublicKey, generate } from "../crypto/SshSignature.ts";
+import * as Certificate from "../trust/Certificate.ts";
+import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
+import * as Log from "../trust/Log.ts";
 import { fetchRepository } from "./Fetch.ts";
 import { local, remote } from "./Client.ts";
 
@@ -36,7 +40,7 @@ describe("Client", () => {
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "client-"));
-    server = await serve({ root });
+    server = await serve({ root, allowAnonymousWrites: true });
     head = await Effect.runPromise(
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -100,20 +104,40 @@ describe("Client", () => {
     assert.deepEqual(messages, ["second", "first"]);
   });
 
-  it("sends its token on every derived-client request", async () => {
-    const secret = "client-secret";
+  it("sends its credential on every derived-client request", async () => {
     const authRoot = await fs.mkdtemp(path.join(os.tmpdir(), "client-auth-"));
-    const authed = await serve({
-      root: authRoot,
-      verify: (repo, credential) => Effect.runPromise(hmacVerify(secret, repo, credential)),
-    });
+    const authed = await serve({ root: authRoot, allowAnonymousWrites: true });
     try {
-      await Effect.runPromise(
+      // A repository with a genesis and one member who may read: that is what
+      // makes it private, and there is no server secret involved anywhere.
+      const token = await Effect.runPromise(
         Effect.gen(function* () {
           const repository = yield* Repository;
           const blob = yield* repository.writeBlob(new TextEncoder().encode("locked\n"));
           const tree = yield* repository.writeTree([{ mode: "100644", name: "l.txt", oid: blob }]);
-          return yield* repository.commit({ branch: "main", tree, message: "locked", author });
+          yield* repository.commit({ branch: "main", tree, message: "locked", author });
+
+          const root = yield* generate("root@example.com");
+          const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+          yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+
+          const reader = yield* generate("reader@example.com");
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: genesis.repoId,
+              publicKey: formatPublicKey(reader.publicKey),
+              capabilities: ["repo.read"],
+              id: Log.newId(),
+            }),
+            [root],
+          );
+
+          return yield* mintDelegation({
+            key: reader,
+            repo: genesis.repoId,
+            capabilities: ["repo.read"],
+            ttlSeconds: 300,
+          });
         }).pipe(
           Effect.provide(
             GitRepository.layer.pipe(
@@ -123,7 +147,6 @@ describe("Client", () => {
           ),
         ),
       );
-      const token = await Effect.runPromise(hmacMint(secret, "vault", "read", 300));
 
       const denied = await Effect.runPromise(
         Effect.gen(function* () {
@@ -139,7 +162,11 @@ describe("Client", () => {
           return yield* client.repo.refs({ params: { repo: "vault" } });
         }).pipe(Effect.scoped),
       );
-      assert.equal(allowed.refs.length, 1);
+      // The trust refs are refs too, so the branch is named rather than counted.
+      assert.ok(
+        allowed.refs.some((ref) => ref.name === "refs/heads/main"),
+        `expected the branch among ${allowed.refs.map((ref) => ref.name).join(", ")}`,
+      );
     } finally {
       await authed.close();
       await fs.rm(authRoot, { recursive: true, force: true });

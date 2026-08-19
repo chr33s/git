@@ -16,16 +16,59 @@
  * token in a request body is a token in an access log. It goes in once and
  * has no read path back out — `redact` is what the API is allowed to show.
  */
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Option, Result, Schema } from "effect";
 
+import { parsePrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
+import { DELEGATION_PREFIX } from "./Auth.ts";
+
+/**
+ * What this repository does about a remote on its own.
+ *
+ * `manual` is the default and the old behaviour: a remote is somewhere a
+ * person or a job fetches from when they say so. `push` and `mirror` are the
+ * standing instruction this implementation acts on: what lands here is
+ * forwarded, on the `post-receive` that made it durable.
+ *
+ * `fetch` is the half with no trigger. Pulling on a schedule needs a
+ * scheduler, and nothing here has one — so storing it would leave a remote
+ * configured to do something that never happens, which is worse than saying
+ * no. It stays in the vocabulary because the shape is the spec's and the
+ * trigger is the only thing missing; `mirror` is accepted for its push half,
+ * and its fetch half waits on the same scheduler.
+ *
+ * `refs` is what the standing instruction covers, as ref patterns. Empty means
+ * everything the mode would otherwise carry, which is the reading that makes
+ * `{mode: "push"}` mean what it looks like it means.
+ */
+export interface Sync {
+  readonly mode: "manual" | "fetch" | "push" | "mirror";
+  readonly refs: ReadonlyArray<string>;
+}
 
 export interface Remote {
   readonly name: string;
   readonly url: string;
   /** Sent to the remote as a Bearer token, and never returned. */
   readonly credential: string | null;
+  /**
+   * An SSH private key to mint a credential from, per request.
+   *
+   * The alternative to a stored token, and the only one that keeps working
+   * against a hub. Every credential such a destination accepts is either a
+   * signature over *this* request or a delegation that expires within a day
+   * (§12), so a token registered once stops authenticating within a day of
+   * being written — and a standing instruction fails detached, into a log,
+   * which is where a mirror goes quiet without anybody being told. A key does
+   * not expire: the credential is minted where it is used, scoped by the
+   * trust graph to whatever its holder still holds.
+   *
+   * Write-only exactly as `credential` is, and for the same reason.
+   */
+  readonly key: string | null;
+  /** `null` is `manual`: nothing happens to this remote unless somebody asks. */
+  readonly sync: Sync | null;
   readonly createdAt: Date;
 }
 
@@ -33,7 +76,15 @@ export interface NewRemote {
   readonly name: string;
   readonly url: string;
   readonly credential?: string | undefined;
+  readonly key?: string | undefined;
+  readonly sync?: Sync | undefined;
 }
+
+export const MODES = ["manual", "fetch", "push", "mirror"] as const;
+
+/** Whether this remote wants what lands here sent on. */
+export const sends = (remote: Remote): boolean =>
+  remote.sync !== null && (remote.sync.mode === "push" || remote.sync.mode === "mirror");
 
 export class Remotes extends Context.Service<
   Remotes,
@@ -73,6 +124,39 @@ export const validate = (input: NewRemote): Effect.Effect<NewRemote, Invalid> =>
     if (input.name.endsWith(".lock"))
       return bad(`bad remote name '${input.name}': reserved suffix`);
 
+    // A mode nobody implements is a remote that quietly does nothing, and a
+    // pattern that is not a ref is one that quietly matches nothing. Both are
+    // refused where they are written rather than discovered as silence.
+    if (input.sync !== undefined) {
+      // SAFETY: widened to compare a caller-supplied string against the
+      // literal union; the comparison is the check, and nothing is narrowed by
+      // it.
+      // Refused rather than stored: nothing drives a scheduled fetch here, so
+      // a remote configured for one would sit doing nothing while its
+      // configuration said otherwise.
+      if (input.sync.mode === "fetch") {
+        return Effect.fail(
+          new Invalid({
+            field: "sync",
+            reason: "scheduled fetch is not implemented; use 'manual' and pull, or 'push'",
+          }),
+        );
+      }
+      const known: ReadonlyArray<string> = MODES;
+      if (!known.includes(input.sync.mode)) {
+        return Effect.fail(
+          new Invalid({ field: "sync", reason: `unknown sync mode '${input.sync.mode}'` }),
+        );
+      }
+      for (const pattern of input.sync.refs) {
+        if (!pattern.startsWith("refs/")) {
+          return Effect.fail(
+            new Invalid({ field: "sync", reason: `'${pattern}' is not a ref pattern` }),
+          );
+        }
+      }
+    }
+
     let parsed: URL;
     try {
       parsed = new URL(input.url);
@@ -102,6 +186,36 @@ export const validate = (input: NewRemote): Effect.Effect<NewRemote, Invalid> =>
         new Invalid({ field: "credential", reason: "an empty credential is not a credential" }),
       );
     }
+    // A delegated credential lives a day at the outside (§12), so storing one
+    // registers a remote that authenticates until tomorrow and then stops.
+    // Refused for a *standing instruction* specifically, because that is
+    // where it stops quietly: a forward runs detached and reports into a log,
+    // so the mirror goes silent — revocations included — while the origin
+    // goes on accepting the pushes it is failing to send. A manual remote
+    // hands its 401 straight back to whoever asked, which is a person who can
+    // read it. Refused where it is written, as `fetch` mode is, with the
+    // thing that does keep working named in the refusal.
+    const standing = input.sync?.mode === "push" || input.sync?.mode === "mirror";
+    if (standing && input.credential?.startsWith(DELEGATION_PREFIX) === true) {
+      return Effect.fail(
+        new Invalid({
+          field: "credential",
+          reason:
+            "a delegated credential expires within a day, and a standing instruction fails where nobody is looking; register 'key' with the signing key instead",
+        }),
+      );
+    }
+    if (input.key !== undefined) {
+      const parsed = parsePrivateKey(input.key);
+      if (Result.isFailure(parsed)) {
+        return Effect.fail(
+          new Invalid({
+            field: "key",
+            reason: `not an OpenSSH private key: ${parsed.failure.reason}`,
+          }),
+        );
+      }
+    }
     return Effect.succeed(input);
   });
 
@@ -112,6 +226,9 @@ export const redact = (remote: Remote) => ({
   // That there is one is worth knowing and cannot be guessed from the URL;
   // the value itself has no way out of this process.
   has_credential: remote.credential !== null,
+  /** Likewise: that a remote can mint is worth knowing; the key is not. */
+  has_key: remote.key !== null,
+  sync: remote.sync,
   created_at: remote.createdAt.toISOString(),
 });
 
@@ -139,16 +256,24 @@ export const none = Layer.succeed(Remotes, {
  */
 export const of = (
   remotes: ReadonlyArray<
-    Omit<Remote, "createdAt" | "credential"> & {
+    Omit<Remote, "createdAt" | "credential" | "key" | "sync"> & {
       readonly credential?: string | null;
+      readonly key?: string | null;
+      readonly sync?: Sync | null;
       readonly createdAt?: Date;
     }
   >,
 ) => {
+  // Spread first, defaults after: an explicit `undefined` is a legal way to
+  // write "no opinion" and a spread carries it straight over a default, so
+  // `sync` arrived as `undefined` where every reader had been promised
+  // `Sync | null` — and `sends` reads `.mode` off it.
   const rows = remotes.map((remote) => ({
-    createdAt: new Date(0),
-    credential: null,
     ...remote,
+    createdAt: remote.createdAt ?? new Date(0),
+    credential: remote.credential ?? null,
+    key: remote.key ?? null,
+    sync: remote.sync ?? null,
   }));
   return Layer.succeed(Remotes, {
     list: Effect.succeed(rows),
@@ -162,6 +287,8 @@ const remoteOf = (input: NewRemote): Remote => ({
   name: input.name,
   url: input.url,
   credential: input.credential ?? null,
+  key: input.key ?? null,
+  sync: input.sync ?? null,
   createdAt: new Date(),
 });
 
@@ -196,13 +323,44 @@ interface Row extends Record<string, string | number | null> {
   readonly name: string;
   readonly url: string;
   readonly credential: string | null;
+  readonly key: string | null;
+  /** JSON, because a mode and a pattern list are one decision and travel as one. */
+  readonly sync: string | null;
   readonly created_at: string;
 }
+
+/**
+ * A stored `sync`, or `null` for anything this version cannot read as one.
+ *
+ * Decoded with a schema rather than by hand: a column written by a newer
+ * version, or edited by somebody, is input from outside this process however
+ * it got into the database — and unreadable has to mean `manual`, which is
+ * the behaviour a repository that never configured one already has.
+ */
+const StoredSync = Schema.Struct({
+  mode: Schema.Literals(MODES),
+  refs: Schema.Array(Schema.String),
+});
+
+export const decodeSync = Schema.decodeUnknownOption(StoredSync);
+
+const syncOf = (stored: string | null): Sync | null => {
+  if (stored === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {
+    return null;
+  }
+  return Option.getOrElse(decodeSync(parsed), (): Sync | null => null);
+};
 
 const rowOf = (row: Row): Remote => ({
   name: row.name,
   url: row.url,
   credential: row.credential,
+  key: row.key ?? null,
+  sync: syncOf(row.sync),
   createdAt: new Date(row.created_at),
 });
 
@@ -223,10 +381,23 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
         name       TEXT NOT NULL,
         url        TEXT NOT NULL,
         credential TEXT,
+        key        TEXT,
+        sync       TEXT,
         created_at TEXT NOT NULL,
         PRIMARY KEY (repo, name)
       )
     `);
+
+    // A table that predates standing instructions has no `sync` column, and
+    // recreating it would drop every remote the repository had. Added instead,
+    // and the failure ignored because "already there" is the ordinary case.
+    for (const column of ["sync TEXT", "key TEXT"]) {
+      try {
+        db.exec(`ALTER TABLE remotes ADD COLUMN ${column}`);
+      } catch {
+        // The column is already there, which is what we wanted.
+      }
+    }
 
     const failed = (operation: string) => (cause: unknown) =>
       new StorageFailure({ operation, path: `remotes/${repo}`, cause });
@@ -259,11 +430,13 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
             try: () => {
               const remote = remoteOf(input);
               db.exec(
-                `INSERT INTO remotes (repo, name, url, credential, created_at) VALUES (?, ?, ?, ?, ?)`,
+                `INSERT INTO remotes (repo, name, url, credential, key, sync, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
                 repo,
                 remote.name,
                 remote.url,
                 remote.credential,
+                remote.key,
+                remote.sync === null ? null : JSON.stringify(remote.sync),
                 remote.createdAt.toISOString(),
               );
               return remote;
@@ -290,8 +463,17 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
  * The wire shape of a registration, shared by the API and any host that wants
  * to seed remotes from configuration.
  */
+export const SyncWire = Schema.Struct({
+  mode: Schema.Literals(MODES),
+  /** Empty, or absent, is everything the mode carries. */
+  refs: Schema.optional(Schema.Array(Schema.String)),
+});
+
 export const NewRemoteWire = Schema.Struct({
   name: Schema.String,
   url: Schema.String,
   credential: Schema.optional(Schema.String),
+  /** An SSH private key to mint from, for a destination that is a replica. */
+  key: Schema.optional(Schema.String),
+  sync: Schema.optional(SyncWire),
 });

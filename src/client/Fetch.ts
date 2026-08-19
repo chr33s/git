@@ -19,6 +19,7 @@ import {
   type StorageFailure,
 } from "../git/Error.ts";
 import * as Pack from "../git/Pack.ts";
+import * as Refspec from "../git/Refspec.ts";
 import { noPacks } from "../git/Packed.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -109,6 +110,73 @@ const advertisement = (
     catch: (cause) => unreachable(String(cause)),
   });
 
+/**
+ * Protocol v2's `ls-refs`, for the refs a v0 advertisement does not carry.
+ *
+ * The server keeps `refs/hub/*` and `refs/meta/trust/*` out of the v0
+ * advertisement, so that a stock clone does not pay for a year of review
+ * history it cannot read. The cost of that decision is this: a client that
+ * *does* want them has to ask by name, and v2 is where asking by name exists.
+ *
+ * Only reached when a refspec names one of those namespaces, so an ordinary
+ * clone still makes exactly the requests it always did.
+ */
+const lsRefsV2 = (
+  url: string,
+  prefixes: ReadonlyArray<string>,
+  token: string | undefined,
+): Effect.Effect<ReadonlyArray<RemoteRef>, Invalid> =>
+  Effect.tryPromise({
+    try: async () => {
+      const lines = [
+        pktLine("command=ls-refs\n"),
+        "0001",
+        ...prefixes.map((prefix) => pktLine(`ref-prefix ${prefix}\n`)),
+        "0000",
+      ].join("");
+
+      const response = await fetch(`${url}/git-upload-pack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-git-upload-pack-request",
+          // The version travels in a header, not the body: the server has to
+          // know which conversation this is before it reads a pkt-line.
+          "git-protocol": "version=2",
+          ...authorization(token),
+        },
+        body: lines,
+      });
+      // A server with no v2 to offer answers 404 or 501, and has no hub state
+      // either. Anything else is a failure the caller has to see, or a
+      // replication run reports success having fetched nothing, revocations
+      // included — and this is only ever called when the caller *needs* the
+      // hidden namespaces, which no other request can reach.
+      //
+      // 400 is not on that list, deliberately. It is what this project's own
+      // upload-pack answers when the `Git-Protocol` header did not arrive —
+      // a proxy that strips unknown headers is the ordinary cause — so reading
+      // it as "no v2 here" turned the one misconfiguration that breaks hub
+      // replication into a silent success.
+      if (response.status === 404 || response.status === 501) return [];
+      if (!response.ok) throw new Error(`ls-refs returned ${response.status}`);
+      if (response.body === null) return [];
+
+      const refs: RemoteRef[] = [];
+      const reader = new PktReader(chunks(response.body));
+      for (;;) {
+        const item = await reader.next();
+        if (item === "eof" || item === "flush" || item === "end") break;
+        if (item === "delim") continue;
+        // `<oid> <name>` and, for HEAD, a trailing `symref-target:` this
+        // caller has no use for.
+        const [oid = "", name = ""] = decoder.decode(item).replace(/\n$/, "").split(" ");
+        if (isOid(oid) && name.length > 0) refs.push({ oid, name });
+      }
+      return refs;
+    },
+    catch: (cause) => unreachable(String(cause)),
+  });
+
 /** The refs a remote advertises for fetching, `HEAD` included. */
 export const lsRemote = (
   url: string,
@@ -161,7 +229,12 @@ const HAVES_PER_ROUND = 32;
 const requestedCapabilities = (offered: ReadonlySet<string>): ReadonlyArray<string> =>
   offered.has("multi_ack_detailed") ? ["multi_ack_detailed"] : [];
 
-const pktLine = (line: string) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
+// The length is of the bytes on the wire, not of the string's code units: a
+// pkt-line's four hex digits are a byte count, and a ref prefix carrying
+// anything outside ASCII would declare a frame shorter than it sent, leaving
+// the server to read the tail of one line as the header of the next.
+const pktLine = (line: string) =>
+  `${(encoder.encode(line).length + 4).toString(16).padStart(4, "0")}${line}`;
 
 /**
  * One request body: the wants, then the haves offered so far.
@@ -439,25 +512,77 @@ export const fetchRepository = (options: {
   readonly branch?: string | undefined;
   readonly token?: string | undefined;
   readonly stores: FetchStores;
+  /**
+   * Which refs to fetch, and what to call them here.
+   *
+   * Absent keeps the historical behaviour — branches and tags — so a caller
+   * that never heard of refspecs is unaffected. A caller that wants
+   * `refs/hub/*` or `refs/meta/trust/*` names them, and nothing below this
+   * line needs to know what a hub event is.
+   */
+  readonly refspecs?: ReadonlyArray<Refspec.Refspec> | undefined;
 }): Effect.Effect<FetchResult, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> =>
   Effect.gen(function* () {
     const { branch, stores, token, url } = options;
     const advertised = yield* advertisement(url, { token });
     const capabilities = requestedCapabilities(advertised.capabilities);
 
+    const specs =
+      options.refspecs ??
+      (branch === undefined
+        ? Refspec.DEFAULT_FETCH
+        : [
+            {
+              force: false,
+              source: `refs/heads/${branch}`,
+              destination: `refs/heads/${branch}`,
+            },
+          ]);
+
     const head = advertised.refs.find((ref) => ref.name === "HEAD")?.oid;
-    const picked = advertised.refs.filter(
-      (ref) =>
-        (branch === undefined
-          ? ref.name.startsWith("refs/heads/") || ref.name.startsWith("refs/tags/")
-          : ref.name === `refs/heads/${branch}`) &&
-        ref.name !== "HEAD" &&
-        // `refs/tags/v1^{}` is what an annotated tag *points at*, advertised
-        // beside the tag itself. It is a value, not a ref: `^` is not a legal
-        // ref name, so writing it is a name no store will accept and no
-        // client asked for.
-        !ref.name.endsWith("^{}"),
-    );
+
+    // Refspecs that reach into a namespace the v0 advertisement withholds
+    // need a second, explicit ask. Anything already advertised wins, so a ref
+    // that appears in both is taken once.
+    const hidden = [...new Set(specs.flatMap(Refspec.probes))];
+    // Not swallowed: `lsRefsV2` already answers with an empty list for a
+    // remote that has no v2 to offer, so a *failure* here is a real one and
+    // reporting success without it would be reporting a replication that did
+    // not happen.
+    const extra = hidden.length === 0 ? [] : yield* lsRefsV2(url, hidden, token);
+
+    const seen = new Set(advertised.refs.map((ref) => ref.name));
+    const available = [...advertised.refs, ...extra.filter((ref) => !seen.has(ref.name))];
+
+    const picked: Array<{
+      readonly name: string;
+      readonly oid: Oid;
+      readonly destination: string;
+      readonly force: boolean;
+    }> = [];
+    for (const ref of available) {
+      // `refs/tags/v1^{}` is what an annotated tag *points at*, advertised
+      // beside the tag itself. It is a value, not a ref: `^` is not a legal
+      // ref name, so writing it is a name no store will accept and no client
+      // asked for.
+      if (ref.name === "HEAD" || ref.name.endsWith("^{}")) continue;
+      const resolved = Refspec.resolve(specs, ref.name);
+      if (resolved === null) continue;
+      // One update per *destination*, not per source. Two refspecs can name
+      // the same local ref from different remote ones, and both updates then
+      // go into a single `apply` batch judged against the value the ref held
+      // before either — so the store takes both, the second silently wins,
+      // and nothing is reported as rejected. Whichever the caller listed
+      // first is the one that lands, which is the rule a refspec list already
+      // implies.
+      if (picked.some((held) => held.destination === resolved.destination)) continue;
+      picked.push({
+        name: ref.name,
+        oid: ref.oid,
+        destination: resolved.destination,
+        force: resolved.spec.force,
+      });
+    }
     if (picked.length === 0) {
       if (branch !== undefined) {
         return yield* new Invalid({ field: "branch", reason: `remote has no branch '${branch}'` });
@@ -492,23 +617,29 @@ export const fetchRepository = (options: {
     const updates: RefUpdate[] = [];
     const rejected: Array<{ name: string; oid: Oid }> = [];
     for (const ref of picked) {
-      const current = yield* stores.refs.read(ref.name);
+      const current = yield* stores.refs.read(ref.destination);
       if (current !== null && current !== ref.oid) {
-        // A tag is a name that does not move: re-pointing one rewrites what
-        // this repository has already published under it, which is why
-        // `Sync.fetchFrom` refuses the same thing on the server side. A
-        // branch moves when the move keeps its commits.
-        const forward = ref.name.startsWith("refs/tags/")
+        // Three rules, because there are three kinds of ref here. A tag is a
+        // name that does not move: re-pointing one rewrites what this
+        // repository has already published under it. Hub and trust refs only
+        // grow, so a move that drops history is refused even when the refspec
+        // said `+` — append-only is a property of the namespace, not a
+        // preference of whoever wrote the config. A branch moves when the move
+        // keeps its commits, or whenever the refspec forces it.
+        const appendOnly = Refspec.isAppendOnly(ref.destination);
+        const forward = ref.destination.startsWith("refs/tags/")
           ? false
-          : yield* repository
-              .isAncestor(current, ref.oid)
-              .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)));
+          : ref.force && !appendOnly
+            ? true
+            : yield* repository
+                .isAncestor(current, ref.oid)
+                .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)));
         if (!forward) {
-          rejected.push({ name: ref.name, oid: ref.oid });
+          rejected.push({ name: ref.destination, oid: ref.oid });
           continue;
         }
       }
-      updates.push({ name: ref.name, value: ref.oid, reason: "fetch" });
+      updates.push({ name: ref.destination, value: ref.oid, reason: "fetch" });
     }
     yield* stores.refs.apply(updates);
 

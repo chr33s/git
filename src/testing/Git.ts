@@ -17,6 +17,8 @@
  * import, not a `*.test.ts` file that discovery should collect.
  */
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 
 /**
  * The environment every `git` in the suite runs under.
@@ -61,3 +63,82 @@ export const gitIn =
       encoding: "utf8",
       env: gitEnv,
     });
+
+/**
+ * A whole history in one `git` process.
+ *
+ * Building a fixture commit by commit costs four processes per commit — write
+ * the file, `add`, `commit`, `rev-parse` — and spawning `git` is ~84ms on
+ * macOS against ~5ms on a Linux CI box, so a thirteen-commit fixture spent
+ * over three seconds doing nothing but starting processes. `fast-import`
+ * reads the whole thing on stdin and makes it in one.
+ *
+ * The marks are the point as much as the speed: a stream names each commit
+ * `:1`, `:2`, … and `--export-marks` writes back what each became, so the
+ * caller gets its oids without a `rev-parse` per commit.
+ */
+export const fastImport = (cwd: string, stream: string): ReadonlyMap<number, string> => {
+  const marks = path.join(cwd, "fast-import-marks");
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=T",
+      "-c",
+      "user.email=t@e.com",
+      "fast-import",
+      "--quiet",
+      `--export-marks=${marks}`,
+    ],
+    { cwd, input: stream, env: gitEnv },
+  );
+
+  return new Map(
+    readFileSync(marks, "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => {
+        const [mark, oid] = line.split(" ");
+        return [Number(mark!.slice(1)), oid!] as const;
+      }),
+  );
+};
+
+/**
+ * One commit in a `fast-import` stream.
+ *
+ * `from` is written out even where fast-import would infer it from the
+ * branch's current head, because a fixture that says which commit it descends
+ * from is a fixture whose shape can be read off the page — and the two cases
+ * that *must* say so, a new branch and a merge, would otherwise look like the
+ * ones that need not.
+ */
+export const importCommit = (input: {
+  readonly branch: string;
+  readonly mark: number;
+  readonly message: string;
+  /** Omitted for a root commit. */
+  readonly from?: number;
+  readonly merge?: number;
+  readonly files: ReadonlyArray<{ readonly path: string; readonly content: string }>;
+}): string => {
+  // Fixed, increasing timestamps: a fixture whose commit times come from the
+  // clock is one whose history differs between runs.
+  const when = 1_700_000_000 + input.mark;
+  const lines = [
+    `commit ${input.branch}`,
+    `mark :${input.mark}`,
+    `author T <t@e.com> ${when} +0000`,
+    `committer T <t@e.com> ${when} +0000`,
+    `data ${Buffer.byteLength(input.message)}`,
+    input.message,
+    ...(input.from === undefined ? [] : [`from :${input.from}`]),
+    ...(input.merge === undefined ? [] : [`merge :${input.merge}`]),
+    ...input.files.flatMap((file) => [
+      `M 100644 inline ${file.path}`,
+      `data ${Buffer.byteLength(file.content)}`,
+      file.content,
+    ]),
+  ];
+  return `${lines.join("\n")}\n\n`;
+};

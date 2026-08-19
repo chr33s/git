@@ -13,8 +13,14 @@
  */
 import * as Alchemy from "alchemy/Cloudflare";
 import type * as Http from "alchemy/Http";
-import { Effect, Layer } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { Config, Context, Effect, Layer } from "effect";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
 import { type GitError, statusOf } from "../git/Error.ts";
@@ -22,13 +28,16 @@ import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
+import * as Auth from "../server/Auth.ts";
 import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as LfsCore from "../server/Lfs.ts";
+import * as Policy from "../server/Policy.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
+import * as Sending from "../server/Sending.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 import { Objects } from "../objects.ts";
@@ -72,7 +81,6 @@ export default Repo.make(
        * That correspondence is why a repository maps onto a DO at all.
        */
       const layers = new Map<string, Layer.Layer<Repository>>();
-      const handlers = new Map<string, (request: Request) => Promise<Response>>();
 
       /**
        * The subscriber registry on this instance's own SQLite, beside the
@@ -90,23 +98,62 @@ export default Repo.make(
       const live = (repo: string): Layer.Layer<Repository> => {
         const existing = layers.get(repo);
         if (existing !== undefined) return existing;
+        // Delivery runs in `waitUntil`, so a slow receiver never adds its
+        // latency to the push that triggered it — and so does forwarding, for
+        // the same reason and under the same rule: a remote that is down must
+        // not touch the push that has already been accepted.
+        const detached = <A, E>(effect: Effect.Effect<A, E>) =>
+          // `runPromiseWith` rather than `runPromise`: the work is detached
+          // from this fiber, not from its services, and a fresh runtime would
+          // drop the ones it was handed.
+          Effect.context<never>().pipe(
+            Effect.map((context) => {
+              state.raw.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
+            }),
+          );
+
+        const afterPush = Layer.effect(
+          GitRepository.Hooks,
+          Effect.gen(function* () {
+            const subscribed = yield* Subscribers.Subscribers;
+            const client = yield* HttpClient.HttpClient;
+            const registry = yield* Remotes.Remotes;
+            return GitRepository.hooksAll([
+              Webhooks.service({
+                subscribers: subscribed,
+                client,
+                options: { background: detached },
+              }),
+              // The repository a forward pushes from is built when the push
+              // lands, not when this layer is: it cannot be a dependency of
+              // the hooks the repository itself depends on. See `Sending`.
+              Sending.service({
+                remotes: registry,
+                using: (effect) =>
+                  effect.pipe(
+                    Effect.provide(
+                      GitRepository.layer.pipe(
+                        Layer.provide(GitRepository.hooksNoop),
+                        Layer.provideMerge(
+                          stores({ bucket: r2, repo, storage: state.raw.storage }),
+                        ),
+                      ),
+                    ),
+                  ),
+                options: { background: detached },
+              }),
+            ]);
+          }),
+        ).pipe(
+          Layer.provide(Layer.mergeAll(subscribers(repo), remotes(repo), FetchHttpClient.layer)),
+        );
+
         const built = GitRepository.layer.pipe(
-          // Delivery runs in `waitUntil`, so a slow receiver never adds its
-          // latency to the push that triggered it.
-          Layer.provide(
-            Webhooks.hooksFetch({
-              background: (effect) =>
-                // `runPromiseWith` rather than `runPromise`: the delivery is
-                // detached from this fiber, not from its services, and a
-                // fresh runtime would drop the ones it was handed.
-                Effect.context<never>().pipe(
-                  Effect.map((context) => {
-                    state.raw.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
-                  }),
-                ),
-            }).pipe(Layer.provide(subscribers(repo))),
-          ),
-          Layer.provide(stores({ bucket: r2, repo, storage: state.raw.storage })),
+          Layer.provide(afterPush),
+          // `provideMerge`: `provide` would swallow the `Storage` identity the
+          // cross-request memos key on, and two repositories in one namespace
+          // would share every entry.
+          Layer.provideMerge(stores({ bucket: r2, repo, storage: state.raw.storage })),
         );
         layers.set(repo, built);
         return built;
@@ -150,30 +197,93 @@ export default Repo.make(
 
       const awaitDelivery = (repo: string) => settledWithin(delivering.get(repo) ?? nothing);
 
+      /**
+       * The JSON API's router, one per repository.
+       *
+       * Memoised for the same reason `live` is, and possible for the same
+       * reason: the requester is kept *out* of the graph and arrives as a
+       * per-request context instead. Rebuilding it per request reconstructs
+       * the whole handler tree and opens a `Scope` nothing closes; baking the
+       * requester in would answer every later request as the first caller.
+       */
+      const routers = new Map<
+        string,
+        (request: Request, requester: Context.Context<Auth.Requester>) => Promise<Response>
+      >();
+
       const api = (repo: string) => {
-        const existing = handlers.get(repo);
+        const existing = routers.get(repo);
         if (existing !== undefined) return existing;
         const built = HttpRouter.toWebHandler(
           Api.layer(remotes(repo)).pipe(
             Layer.provideMerge(live(repo)),
             Layer.provideMerge(subscribers(repo)),
+            Layer.provideMerge(openWrites),
           ),
           { disableLogger: true },
         ).handler;
-        handlers.set(repo, built);
+        routers.set(repo, built);
         return built;
       };
 
+      /**
+       * Challenge nonces for this instance.
+       *
+       * Built once, here: a layer rebuilt per request would hand out a nonce
+       * from one map and look for it in another, so no native client could
+       * ever complete a challenge.
+       */
+      const nonces = Auth.noncesInMemory();
+
+      /**
+       * Whether writes to repositories with no genesis are served.
+       *
+       * Off unless the binding says so, like `serve --open`: such a repository
+       * has no membership to authorize anybody with.
+       */
+      const openWrites = Policy.anonymousWrites(
+        yield* Config.boolean("ALLOW_ANONYMOUS_WRITES").pipe(
+          Config.withDefault(false),
+          Effect.orElseSucceed(() => false),
+        ),
+      );
+
       /** The routing, over the platform request the bridge was handed. */
       const serve = (request: Request): Effect.Effect<Response> =>
-        Effect.suspend(() => {
+        Effect.gen(function* () {
           const matched = routeOf(new URL(request.url).pathname);
           if (matched === null) {
-            return Effect.succeed(Response.json({ error: "Invalid" }, { status: 400 }));
+            return Response.json({ error: "Invalid" }, { status: 400 });
           }
           const { repo, route } = matched;
           request = normalize(request, matched);
 
+          // Auth runs here because this is where the trust state is: the
+          // guard reads the repository's own genesis and membership log. The
+          // Worker in front of this is a router and holds no secret — there is
+          // nothing for it to authenticate with.
+          const guarded = yield* Auth.guard(request).pipe(
+            Effect.provide(Layer.mergeAll(live(repo), nonces, openWrites)),
+            Effect.orElseSucceed(() => ({
+              denied: new Response("authentication unavailable", { status: 503 }),
+              authenticated: Auth.anonymous,
+            })),
+          );
+          if (guarded.denied !== null) return guarded.denied;
+          return yield* route_(request, repo, route, matched, guarded.authenticated);
+        });
+
+      const route_ = (
+        request: Request,
+        repo: string,
+        route: string,
+        matched: { readonly rest: string },
+        authenticated: Auth.Authenticated,
+      ): Effect.Effect<Response> =>
+        Effect.suspend(() => {
+          // Two shapes of the same fact: the protocol paths build an effect
+          // per request and take a layer, the memoised router takes a context.
+          const requester = Auth.requester(authenticated);
           // LFS shares the `info/` prefix with the advertisement, so it is
           // tried first; its bodies are the large ones.
           if (route === "info" && matched.rest.includes("/lfs/")) {
@@ -181,7 +291,7 @@ export default Repo.make(
               Effect.map(
                 (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
               ),
-              Effect.provide(lfsR2({ bucket: r2, repo })),
+              Effect.provide(Layer.mergeAll(lfsR2({ bucket: r2, repo }), requester)),
             );
           }
 
@@ -193,7 +303,9 @@ export default Repo.make(
               Effect.map(
                 (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
               ),
-              Effect.provide(live(repo)),
+              // With the requester: `commit-pack` writes a ref and so crosses
+              // the policy boundary, which has to know who is asking.
+              Effect.provide(Layer.mergeAll(live(repo), requester, openWrites)),
               Effect.map((response) => track(repo, response)),
             );
           }
@@ -221,7 +333,7 @@ export default Repo.make(
               Effect.catch((error: GitError) =>
                 Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
               ),
-              Effect.provide(live(repo)),
+              Effect.provide(Layer.mergeAll(live(repo), requester, openWrites)),
               // The pack is the body that outlives its handler.
               Effect.map((response) => track(repo, response)),
             );
@@ -229,7 +341,7 @@ export default Repo.make(
 
           return Effect.promise(async () => {
             if (collects(request)) await awaitDelivery(repo);
-            return track(repo, await api(repo)(request));
+            return track(repo, await api(repo)(request, Auth.requesterContext(authenticated)));
           });
         });
 

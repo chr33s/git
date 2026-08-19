@@ -15,6 +15,7 @@ import { lsRemote, requestPack } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import * as Auth from "./Auth.ts";
 import { Remotes, validate as validateRemote } from "./Remotes.ts";
 
 /**
@@ -52,13 +53,22 @@ export const remoteFor = Effect.fn("Sync.remoteFor")(function* (payload: {
   if (stored === null) {
     return yield* new Invalid({ field: "name", reason: `unknown remote '${name}'` });
   }
-  return { name: stored.name, url: stored.url, credential: stored.credential };
+  // Minted here rather than read straight off the row, when the registration
+  // stored a key: what a hub-enabled destination accepts is a signature over
+  // this request or a delegation good for a day, so a token written into a
+  // registry authenticates until tomorrow and then stops.
+  return {
+    name: stored.name,
+    url: stored.url,
+    credential: (yield* Auth.present(stored)) ?? null,
+  };
 });
 
 /** What `remoteFor` resolves to, and what every operation below acts on. */
 export interface Target {
   readonly name: string;
   readonly url: string;
+  /** What to present, already minted where the registration stored a key. */
   readonly credential: string | null;
 }
 
@@ -109,6 +119,15 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
   readonly credential: string | null;
   readonly refs?: ReadonlyArray<string> | undefined;
   readonly depth?: number | undefined;
+  /**
+   * Whether tag names may be written, default yes.
+   *
+   * A caller whose policy protects `refs/tags/*` still has tracking refs to
+   * update — refusing the whole fetch for the half it may not do left such a
+   * repository unable to replicate at all, which is a stronger rule than the
+   * one the operator wrote.
+   */
+  readonly tags?: boolean | undefined;
 }) {
   const repository = yield* Repository;
   const token = input.credential ?? undefined;
@@ -129,7 +148,8 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
         // `refs/tags/v1^{}` is the tag's target, not a ref to hold, and
         // `HEAD` is a symbolic ref this repository has one of already.
         !ref.name.endsWith("^{}") &&
-        (ref.name.startsWith("refs/heads/") || ref.name.startsWith("refs/tags/")) &&
+        (ref.name.startsWith("refs/heads/") ||
+          (input.tags !== false && ref.name.startsWith("refs/tags/"))) &&
         selects(input.refs, ref.name),
     )
     .map((ref) => ({ name: trackingOf(input.remote, ref.name), oid: ref.oid }))
@@ -215,10 +235,23 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
 }) {
   const repository = yield* Repository;
 
-  const short = input.branch.startsWith("refs/heads/")
-    ? input.branch.slice("refs/heads/".length)
-    : input.branch;
-  const branch = `refs/heads/${short}`;
+  // The same normalization the policy gate applied, and then a check that the
+  // two agree. Stripping only a `refs/heads/` prefix meant `refs/tags/x` was
+  // *judged* as `refs/tags/x` and *written* as `refs/heads/refs/tags/x` — so a
+  // `source.push` holder could create a ref inside a fully protected
+  // `refs/heads/*` namespace without the protected-branch rules ever seeing
+  // it. A pull moves a branch; anything else is a request this cannot serve.
+  const branch =
+    input.branch === "HEAD" || input.branch.startsWith("refs/")
+      ? input.branch
+      : `refs/heads/${input.branch}`;
+  if (!branch.startsWith("refs/heads/") || branch === "refs/heads/") {
+    return yield* new Invalid({
+      field: "branch",
+      reason: `'${input.branch}' is not a branch; a pull moves refs/heads/*`,
+    });
+  }
+  const short = branch.slice("refs/heads/".length);
   const tracking = `refs/remotes/${input.target.name}/${short}`;
 
   const fetched = yield* fetchFrom({
@@ -227,6 +260,9 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
     credential: input.target.credential,
     refs: [`refs/heads/${short}`],
     depth: input.depth,
+    // Said rather than implied: `refs` already selects one branch, and the
+    // policy gate above this reads the same fact off the call.
+    tags: false,
   });
 
   // Absent from the fetch's own report means the tracking ref was

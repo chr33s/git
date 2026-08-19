@@ -29,6 +29,7 @@ import { Effect } from "effect";
 import { remote } from "../client/Client.ts";
 import type { Sql } from "../git/Sql.ts";
 import { serve, type Server } from "../host/Node.ts";
+import { enableHubUnder } from "../testing/Hub.ts";
 import { hasGit } from "../testing/Git.ts";
 import { file as remotesFile } from "./Remotes.node.ts";
 import * as Remotes from "./Remotes.ts";
@@ -56,7 +57,14 @@ const author = {
   offset: 0,
 };
 
-const TOKEN = "a-stored-credential";
+/**
+ * The credential the guarded server accepts.
+ *
+ * Assigned once the repository behind that server has a genesis and a member:
+ * there is no server-side secret to invent one from any more, so the
+ * credential has to come from a key that repository actually trusts.
+ */
+let TOKEN = "";
 
 let root: string;
 let server: Server;
@@ -65,11 +73,13 @@ let guarded: Server;
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "server-remotes-"));
-  server = await serve({ root: path.join(root, "open") });
-  guarded = await serve({
-    root: path.join(root, "guarded"),
-    verify: (_repo, credential) => Promise.resolve(credential === TOKEN ? "write" : null),
-  });
+  server = await serve({ root: path.join(root, "open"), allowAnonymousWrites: true });
+  guarded = await serve({ root: path.join(root, "guarded"), allowAnonymousWrites: true });
+  const member = await enableHubUnder(path.join(root, "guarded"), "received", [
+    "repo.read",
+    "source.push",
+  ]);
+  TOKEN = member.credential;
 });
 
 afterAll(async () => {
@@ -119,6 +129,9 @@ describe("Remotes", () => {
         name: "origin",
         url: "https://example.com/repo.git",
         has_credential: true,
+        has_key: false,
+        // Nothing was asked for, so nothing happens to this remote on its own.
+        sync: null,
         created_at: added.createdAt.toISOString(),
       });
       const rows = yield* registry.list;
@@ -127,6 +140,136 @@ describe("Remotes", () => {
       assert.equal(yield* registry.remove("origin"), true);
       assert.equal(yield* registry.remove("origin"), false);
       assert.deepEqual(yield* registry.list, []);
+    }).pipe(Effect.provide(Remotes.memory)),
+  );
+
+  it.effect("refuses a delegated credential, which stops working within a day", () =>
+    Effect.gen(function* () {
+      // A delegated credential is capped at `MAX_DELEGATION_SECONDS` on both
+      // the minting and the verifying side, so one written into the registry
+      // authenticates until tomorrow and then stops. Behind a standing
+      // instruction that is invisible: the forward runs detached and reports
+      // into a log, so the mirror goes quiet — revocations included — while
+      // the origin goes on accepting the pushes it is failing to send.
+      // Refused where it is written, as `fetch` mode is, and the refusal
+      // names the thing that does keep working.
+      const registry = yield* Remotes.Remotes;
+      const refused = yield* Effect.exit(
+        registry.add({
+          name: "mirror",
+          url: "https://example.com/repo.git",
+          credential: "hub1.eyJ2ZXJzaW9uIjoxfQ.c2ln",
+          sync: { mode: "mirror", refs: [] },
+        }),
+      );
+      assert.equal(refused._tag, "Failure");
+      assert.match(JSON.stringify(refused), /expires within a day/);
+
+      // A manual remote keeps it: nothing happens to that remote unless
+      // somebody asks, and what comes back when it stops working comes back
+      // to them.
+      const manual = yield* registry.add({
+        name: "byhand",
+        url: "https://example.com/repo.git",
+        credential: "hub1.eyJ2ZXJzaW9uIjoxfQ.c2ln",
+      });
+      assert.equal(manual.name, "byhand");
+
+      // And the key that replaces it has to be one, rather than a token
+      // somebody put in the new field.
+      const bent = yield* Effect.exit(
+        registry.add({ name: "mirror", url: "https://example.com/repo.git", key: "s3cret" }),
+      );
+      assert.equal(bent._tag, "Failure");
+      assert.match(JSON.stringify(bent), /not an OpenSSH private key/);
+
+      assert.deepEqual(
+        (yield* registry.list).map((row) => row.name),
+        ["byhand"],
+      );
+    }).pipe(Effect.provide(Remotes.memory)),
+  );
+
+  it("reads a hand-edited standing instruction it cannot make sense of as none", async () => {
+    // The file is a repository's, and repositories get edited and get carried
+    // between versions. Trusted as written, a `refs` that is not a list is a
+    // shape the forwarder walks straight into — on `post-receive`, where
+    // nothing is watching. The SQL registry already decoded it with a schema;
+    // the file registry now decodes it with the same one.
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "remotes-file-"));
+    try {
+      const location = path.join(directory, "remotes.json");
+      await fs.writeFile(
+        location,
+        JSON.stringify([
+          {
+            name: "bent",
+            url: "https://example.com/repo.git",
+            credential: null,
+            sync: { mode: "push", refs: "refs/heads/main" },
+            createdAt: new Date(0).toISOString(),
+          },
+        ]),
+      );
+
+      const held = await Effect.runPromise(
+        Effect.flatMap(Remotes.Remotes, (registry) => registry.list).pipe(
+          Effect.provide(remotesFile(location)),
+        ),
+      );
+
+      assert.equal(
+        held[0]?.sync,
+        null,
+        "unreadable reads as manual, not as a shape nothing checked",
+      );
+      assert.equal(Remotes.sends(held[0]!), false);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.effect("reads a remote with no standing instruction as having none", () =>
+    Effect.gen(function* () {
+      // `undefined` is a legal way to write "no opinion", and a spread carries
+      // it straight over a default — so `sync` arrived as `undefined` where
+      // every reader had been promised `Sync | null`, and the one that decides
+      // whether to forward reads `.mode` off it.
+      const registry = yield* Remotes.Remotes;
+      const [held] = yield* registry.list;
+      assert.equal(held?.sync, null);
+      assert.equal(Remotes.sends(held!), false);
+    }).pipe(
+      Effect.provide(
+        Remotes.of([{ name: "quiet", url: "https://example.com/repo.git", sync: undefined }]),
+      ),
+    ),
+  );
+
+  it.effect("refuses a standing instruction nothing here can carry out", () =>
+    Effect.gen(function* () {
+      // Nothing drives a scheduled fetch, so storing one would leave a remote
+      // configured to do something that never happens — configuration that
+      // reads as working and is not. `push` is the half that has a trigger.
+      const registry = yield* Remotes.Remotes;
+      const refused = yield* registry
+        .add({
+          name: "scheduled",
+          url: "https://example.com/repo.git",
+          sync: { mode: "fetch", refs: [] },
+        })
+        .pipe(
+          Effect.as(null),
+          Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+        );
+      const taken = yield* registry.add({
+        name: "forwarded",
+        url: "https://example.com/other.git",
+        sync: { mode: "push", refs: [] },
+      });
+
+      assert.match(refused ?? "", /not implemented/);
+      assert.equal(taken.sync?.mode, "push", "the half that does have a trigger is stored");
     }).pipe(Effect.provide(Remotes.memory)),
   );
 
@@ -365,9 +508,11 @@ describe("Remotes, over HTTP", () => {
 
       const behind = yield* remote(guarded.url, { token: TOKEN });
       const refs = yield* behind.repo.refs({ params: { repo: "received" } });
-      assert.deepEqual(
-        refs.refs.map((ref) => ref.name),
-        ["refs/heads/main"],
+      // The guarded repository has trust refs of its own, so the branch that
+      // arrived is named rather than counted.
+      assert.ok(
+        refs.refs.some((ref) => ref.name === "refs/heads/main"),
+        `expected the pushed branch among ${refs.refs.map((ref) => ref.name).join(", ")}`,
       );
     }).pipe(Effect.scoped),
   );
@@ -465,6 +610,42 @@ describe("Remotes, over HTTP", () => {
       const tip = yield* api.repo.read({ params: { repo: "down", oid: ours } });
       assert.deepEqual(tip.parents, [second]);
       assert.equal(tip.message, "ours");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("refuses a branch that is not one, rather than nesting it under heads", () =>
+    Effect.gen(function* () {
+      // The gate judged what `refNameOf` made of the name and the write used
+      // what `Sync.pull` made of it, and the two disagreed: `refs/tags/x` was
+      // judged as `refs/tags/x` and written as `refs/heads/refs/tags/x`, so a
+      // `source.push` holder could create a ref inside a fully protected
+      // `refs/heads/*` namespace without the branch rules ever seeing it.
+      const api = yield* remote(server.url);
+      // `HEAD` too: the gate leaves it alone — it is already a full ref name —
+      // while the write qualified it to `refs/heads/HEAD`, so a ref landed
+      // inside a namespace the branch rules were judging under another name.
+      const head = yield* api.remotes
+        .pull({ params: { repo: "down" }, payload: { name: "up", branch: "HEAD" } })
+        .pipe(Effect.flip);
+      assert.equal(head._tag, "Invalid");
+      assert.match(head.reason, /is not a branch/);
+
+      const failed = yield* api.remotes
+        .pull({ params: { repo: "down" }, payload: { name: "up", branch: "refs/tags/x" } })
+        .pipe(Effect.flip);
+      // Refused for being the wrong *shape*, before anything is fetched — not
+      // for the remote happening not to have `refs/heads/refs/tags/x`, which
+      // is what the nesting bug produced and is indistinguishable from success
+      // on a remote that does.
+      assert.equal(failed._tag, "Invalid");
+      assert.match(failed.reason, /is not a branch/);
+
+      const { refs } = yield* api.repo.refs({ params: { repo: "down" } });
+      assert.equal(
+        refs.find((ref) => ref.name.startsWith("refs/heads/refs/")),
+        undefined,
+        `nothing nested under heads: ${refs.map((ref) => ref.name).join(", ")}`,
+      );
     }).pipe(Effect.scoped),
   );
 });

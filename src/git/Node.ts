@@ -47,6 +47,7 @@ import {
   tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
+  Storage,
 } from "./Store.ts";
 
 const failure = (operation: string, target: string) => (cause: unknown) =>
@@ -243,27 +244,46 @@ export const objectStore = (root: string) =>
         return null;
       };
 
+      /**
+       * Whether a name is one this store will build a path from.
+       *
+       * The check is the containment, and it belongs here rather than only at
+       * whichever caller was wrong. `Oid` is a brand, and a brand is only as
+       * good as the casts that mint it — one of them turned a string an
+       * event's own signer chose into an `Oid` without looking. Joined into a
+       * path, `../HEAD` leaves the objects directory: a read oracle over the
+       * filesystem, and a decompression failure that then took down every
+       * fold, every protected-branch push and every collection that touched
+       * the ref carrying it. Answered here it is one absent object, which is
+       * what every caller already knows how to handle.
+       */
+      const named = (oid: Oid) => isOid(oid);
+
       const read = (oid: Oid) =>
-        Effect.tryPromise({
-          // This repository's own copy first: a fork that has received its own
-          // pushes would otherwise stat the parent once per object it already
-          // holds, on the event-loop thread.
-          try: () =>
-            fs.readFile(existsSync(pathFor(oid)) ? pathFor(oid) : (borrowed(oid) ?? pathFor(oid))),
-          catch: () => new ObjectNotFound({ oid }),
-        }).pipe(
-          Effect.flatMap((deflated) =>
-            Effect.try({
-              try: () => inflateSync(deflated),
-              catch: failure("read", pathFor(oid)),
-            }),
-          ),
-          Effect.flatMap((bytes) =>
-            Effect.fromResult(decodeObject(new Uint8Array(bytes))).pipe(
-              Effect.mapError(() => new ObjectNotFound({ oid })),
-            ),
-          ),
-        );
+        !named(oid)
+          ? Effect.fail(new ObjectNotFound({ oid }))
+          : Effect.tryPromise({
+              // This repository's own copy first: a fork that has received its own
+              // pushes would otherwise stat the parent once per object it already
+              // holds, on the event-loop thread.
+              try: () =>
+                fs.readFile(
+                  existsSync(pathFor(oid)) ? pathFor(oid) : (borrowed(oid) ?? pathFor(oid)),
+                ),
+              catch: () => new ObjectNotFound({ oid }),
+            }).pipe(
+              Effect.flatMap((deflated) =>
+                Effect.try({
+                  try: () => inflateSync(deflated),
+                  catch: failure("read", pathFor(oid)),
+                }),
+              ),
+              Effect.flatMap((bytes) =>
+                Effect.fromResult(decodeObject(new Uint8Array(bytes))).pipe(
+                  Effect.mapError(() => new ObjectNotFound({ oid })),
+                ),
+              ),
+            );
 
       const loose: ObjectStore["Service"] = {
         read,
@@ -290,12 +310,15 @@ export const objectStore = (root: string) =>
 
             return oid;
           }),
-        has: (oid) => Effect.sync(() => existsSync(pathFor(oid)) || borrowed(oid) !== null),
+        has: (oid) =>
+          Effect.sync(() => named(oid) && (existsSync(pathFor(oid)) || borrowed(oid) !== null)),
         delete: (oid) =>
-          Effect.tryPromise({
-            try: () => fs.rm(pathFor(oid), { force: true }),
-            catch: failure("delete", pathFor(oid)),
-          }),
+          !named(oid)
+            ? Effect.void
+            : Effect.tryPromise({
+                try: () => fs.rm(pathFor(oid), { force: true }),
+                catch: failure("delete", pathFor(oid)),
+              }),
 
         /**
          * What this repository lends and borrows.
@@ -1530,4 +1553,6 @@ export const refStore = (root: string) =>
 
 /** Both stores over one directory. */
 export const stores = (root: string) =>
-  Layer.mergeAll(objectStore(root), refStore(root)).pipe(Layer.provideMerge(packStore(root)));
+  Layer.mergeAll(objectStore(root), refStore(root), Layer.succeed(Storage)(root)).pipe(
+    Layer.provideMerge(packStore(root)),
+  );

@@ -16,7 +16,7 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { serve } from "../host/Node.ts";
-import { hmacMint, hmacVerify } from "../server/Auth.ts";
+import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "main.ts");
@@ -28,6 +28,28 @@ const cli = async (args: string[], env?: Record<string, string>) => {
   });
   return result.stdout;
 };
+
+/** The same, for the one command whose input is a stream rather than a flag. */
+const withStdin = (args: ReadonlyArray<string>, input: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const child = spawn("node", [entry, ...args], { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      out += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      err += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(`exit ${String(code)}: ${err}${out}`));
+    });
+    child.stdin.end(input);
+  });
 
 const author = {
   name: "Alice",
@@ -82,25 +104,105 @@ describe("cli", () => {
     }
   });
 
-  it("mints verifiable tokens, secret from flag or environment", async () => {
-    const fromFlag = (await cli(["token", "repo-a", "--secret", "s3cret", "-s", "write"])).trim();
-    assert.equal(await Effect.runPromise(hmacVerify("s3cret", "repo-a", fromFlag)), "write");
+  it("answers git's credential helper protocol on stdin", async () => {
+    // git does not take a password on a command line: it runs a helper and
+    // speaks a line protocol at it. Without this, "mint a credential" was a
+    // thing a person did by hand and pasted, which is the manual step the
+    // delegated path exists to remove.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-helper-"));
+    try {
+      const member = await enableHubUnder(root, "helped", ["repo.read", "source.push"]);
+      const keyFile = path.join(root, "member.key");
+      await fs.writeFile(keyFile, opensshPrivateKey(member.member, "member@example.com"), {
+        mode: 0o600,
+      });
 
-    const fromEnv = (await cli(["token", "repo-a"], { GIT_AUTH_SECRET: "s3cret" })).trim();
-    assert.equal(await Effect.runPromise(hmacVerify("s3cret", "repo-a", fromEnv)), "read");
+      // What git writes once `credential.useHttpPath` is on. Off — which is
+      // its default — there is no `path` line, and a credential scoped to one
+      // repository cannot be minted from protocol and host alone. The refusal
+      // has to say which knob turns it on, or the helper fails obscurely on
+      // every stock clone.
+      const blind = await withStdin(
+        ["credential-helper", "--root", root, "--key", keyFile, "get"],
+        "protocol=http\nhost=git.example.com\n\n",
+      ).then(
+        () => null,
+        (error: Error) => error.message,
+      );
+      assert.notEqual(blind, null, "no repository named is a refusal, not a guess");
+      assert.match(blind ?? "", /useHttpPath/);
+
+      // Spelled the way git spells a clone URL, trailing `.git` and all. The
+      // server strips that suffix before it looks for a directory, so a helper
+      // that does not reports every `host/repo.git` push as a repository with
+      // no identity while the same push to `host/repo` works.
+      const answered = await withStdin(
+        ["credential-helper", "--root", root, "--key", keyFile, "get"],
+        "protocol=http\nhost=git.example.com\npath=helped.git\n\n",
+      );
+
+      assert.match(answered, /^username=/m);
+      const password = /^password=(.+)$/m.exec(answered)?.[1] ?? "";
+      assert.notEqual(password, "", `no credential in: ${answered}`);
+
+      // And it is the real thing: the server takes it.
+      const server = await serve({ root });
+      try {
+        const refused = await fetch(`${server.url}/helped/info/refs?service=git-upload-pack`);
+        assert.equal(refused.status, 401, "the repository is not public");
+        const allowed = await fetch(`${server.url}/helped/info/refs?service=git-upload-pack`, {
+          headers: { authorization: `Basic ${btoa(`x:${password}`)}` },
+        });
+        assert.equal(allowed.status, 200, "and the minted credential opens it");
+      } finally {
+        await server.close();
+      }
+
+      // `store` and `erase` are asked for after a push and must succeed
+      // silently: exiting non-zero there reports a failure for a push that
+      // worked.
+      assert.equal(
+        await withStdin(
+          ["credential-helper", "--root", root, "--key", keyFile, "store"],
+          "protocol=http\npath=helped\n\n",
+        ),
+        "",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
-  it("clones over smart HTTP, with and without a token", async () => {
+  it("says what to do when asked for a credential on a repository with no genesis", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-credential-"));
+    try {
+      await seed(path.join(root, "plain"), "unclaimed");
+      const failed = await cli([
+        "credential",
+        "--root",
+        root,
+        "--key",
+        "/nonexistent/key",
+        "plain",
+      ]).then(
+        () => null,
+        (error: { stderr?: string; stdout?: string }) => error,
+      );
+      assert.ok(failed !== null, "a missing key must fail rather than mint something");
+      assert.match(`${failed.stderr ?? ""}${failed.stdout ?? ""}`, /cannot read/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("clones over smart HTTP, with and without a credential", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-clone-"));
     const serverRoot = path.join(root, "server");
-    const secret = "clone-secret";
-    const server = await serve({
-      root: serverRoot,
-      verify: (repo, credential) => Effect.runPromise(hmacVerify(secret, repo, credential)),
-    });
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
     try {
       await seed(path.join(serverRoot, "origin"), "published");
-      const token = await Effect.runPromise(hmacMint(secret, "origin", "read", 300));
+      // Granting `repo.read` to somebody is what makes the repository private.
+      const { credential: token } = await enableHubUnder(serverRoot, "origin", ["repo.read"]);
 
       const denied = await cli(["clone", "--root", root, `${server.url}/origin`, "denied"]).then(
         () => null,
@@ -139,9 +241,9 @@ describe("cli", () => {
 
     let child: ChildProcess | null = null;
     try {
-      // `--open` on purpose: with no secret the command refuses to start, so
-      // an unauthenticated server has to be asked for by name.
-      child = spawn("node", [entry, "serve", "--root", root, "--port", "0", "--open"], {
+      // No auth flags: whether a repository is guarded is the repository's
+      // own answer now, so `serve` has nothing to be told about it.
+      child = spawn("node", [entry, "serve", "--root", root, "--port", "0"], {
         stdio: ["ignore", "pipe", "pipe"],
       });
       const url = await new Promise<string>((resolve, reject) => {
@@ -170,22 +272,39 @@ describe("cli", () => {
     }
   });
 
-  it("refuses to serve unauthenticated unless asked to", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-serve-closed-"));
+  it("serves a repository with a genesis only to its members", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-serve-guarded-"));
+
+    let child: ChildProcess | null = null;
     try {
-      // No `--secret` and no `--open`: an open server is a thing to ask for,
-      // not a thing to arrive at by leaving a flag off. The message has to name
-      // both ways forward, or the refusal is just an obstacle.
-      const refused = await cli(["serve", "--root", root, "--port", "0"]).then(
-        () => null,
-        (error: { stderr?: string; stdout?: string }) => error,
-      );
-      assert.ok(refused !== null, "serve without --secret or --open must fail");
-      const said = `${refused.stderr ?? ""}${refused.stdout ?? ""}`;
-      assert.match(said, /refusing to serve/);
-      assert.match(said, /--secret/);
-      assert.match(said, /--open/);
+      await seed(path.join(root, "guarded"), "members only");
+      // The same server, and one repository under it that has claimed itself.
+      // Nothing about `serve` changed — the genesis is what guards it.
+      const { credential } = await enableHubUnder(root, "guarded", ["repo.read"]);
+
+      child = spawn("node", [entry, "serve", "--root", root, "--port", "0"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const url = await new Promise<string>((resolve, reject) => {
+        let buffered = "";
+        child!.stdout!.on("data", (chunk: Buffer) => {
+          buffered += chunk.toString();
+          const match = buffered.match(/server on (http:\/\/[^,]+),/);
+          if (match) resolve(match[1]!);
+        });
+        child!.on("exit", (code) => reject(new Error(`serve exited early: ${code}`)));
+        setTimeout(() => reject(new Error(`serve never announced: ${buffered}`)), 15_000);
+      });
+
+      const anonymous = await fetch(`${url}/guarded/refs`);
+      assert.equal(anonymous.status, 401);
+
+      const member = await fetch(`${url}/guarded/refs`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      assert.equal(member.status, 200);
     } finally {
+      child?.kill();
       await fs.rm(root, { recursive: true, force: true });
     }
   });
@@ -308,7 +427,7 @@ describe("cli", () => {
   it("pushes to a server and exports an archive", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-push-"));
     const serverRoot = path.join(root, "server");
-    const server = await serve({ root: serverRoot });
+    const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
     try {
       await seed(path.join(root, "local"), "pushed");
 

@@ -32,6 +32,53 @@ storeContract(
   { describe, it },
 );
 
+describe("what a name may be", () => {
+  it("reads no object from a name that is not an object id", async () => {
+    // `Oid` is a brand, and a brand is only as good as the casts that mint it
+    // — one of them turned a string an event's own signer chose into an `Oid`
+    // without looking. Joined into a path, `../HEAD` leaves the objects
+    // directory: a read oracle over the filesystem, and a decompression
+    // failure that then took down every fold, every protected-branch push and
+    // every collection touching the ref that carried it. The check belongs
+    // here as well as at the caller that was wrong.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-store-names-"));
+    try {
+      await fs.writeFile(path.join(root, "HEAD"), "ref: refs/heads/main\n");
+      await fs.mkdir(path.join(root, "objects"), { recursive: true });
+
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const objects = yield* ObjectStore;
+          // SAFETY: exactly the string this test exists to refuse; the brand
+          // is what the store may no longer take on trust.
+          const escape = "../HEAD" as Oid;
+          return {
+            read: yield* objects.read(escape).pipe(
+              Effect.as("read something"),
+              Effect.catchTags({
+                ObjectNotFound: () => Effect.succeed("absent"),
+                StorageFailure: () => Effect.succeed("reached the file"),
+              }),
+            ),
+            has: yield* objects.has(escape),
+          };
+        }).pipe(Effect.provide(stores(root))),
+      );
+
+      assert.equal(
+        outcome.read,
+        "absent",
+        "the file outside the objects directory is not an object",
+      );
+      assert.equal(outcome.has, false);
+      // And nothing was removed on the way past.
+      await fs.stat(path.join(root, "HEAD"));
+    } finally {
+      await fs.rm(root, { force: true, recursive: true });
+    }
+  });
+});
+
 /**
  * `git gc` and `git pack-refs` move loose refs into a `packed-refs` file and
  * delete them from `refs/`. A backend that only walked the directory would

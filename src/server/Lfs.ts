@@ -15,9 +15,11 @@
  * streaming digest is the one primitive that differs per platform
  * (`node:crypto` on node, `crypto.DigestStream` on Workers).
  */
-import { Context, Effect, Predicate, Schema, Stream } from "effect";
+import { Context, Effect, Option, Predicate, Schema, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import { permits } from "../trust/Certificate.ts";
+import * as Auth from "./Auth.ts";
 import { bytesToHex, concatBytes } from "../git/Format.ts";
 
 /** LFS object ids are SHA-256, so 64 hex characters rather than git's 40. */
@@ -192,10 +194,26 @@ const download = (oid: string): Effect.Effect<Response, never, LfsStore> =>
     );
   });
 
-const upload = (request: Request, oid: string): Effect.Effect<Response, never, LfsStore> =>
+const upload = (
+  request: Request,
+  oid: string,
+): Effect.Effect<Response, never, LfsStore | Auth.Requester> =>
   Effect.gen(function* () {
     const store = yield* LfsStore;
     if (!isLfsOid(oid)) return failure(422, "invalid oid");
+
+    // Uploading writes unbounded content and moves no ref, so the policy
+    // boundary never sees it and the guard's charge is deliberately coarse: a
+    // write is `source.push` *or* `source.delete`, since the guard cannot read
+    // a push's commands. Left at that, a credential scoped to delete a branch
+    // could fill the object store — the same gap `POST /blob` and the
+    // bulk-commit path each had. The batch endpoint above is charged
+    // `repo.read` and stays that way: it negotiates downloads too.
+    const requester = yield* Effect.serviceOption(Auth.Requester);
+    const who = Option.getOrElse(requester, () => Auth.anonymous);
+    if (!permits(who.capabilities, "source.push")) {
+      return failure(403, "uploading an LFS object needs source.push");
+    }
 
     const body = request.body;
     const bytes: Stream.Stream<Uint8Array, StorageFailure> =
@@ -219,7 +237,9 @@ const upload = (request: Request, oid: string): Effect.Effect<Response, never, L
  * Route an LFS request whose repository the caller has already resolved.
  * `null` means "not an LFS request", so a host can try the next handler.
  */
-export const handle = (request: Request): Effect.Effect<Response | null, never, LfsStore> =>
+export const handle = (
+  request: Request,
+): Effect.Effect<Response | null, never, LfsStore | Auth.Requester> =>
   Effect.suspend(() => {
     const segments = new URL(request.url).pathname.split("/").filter((part) => part !== "");
     // …/info/lfs/objects/<batch|oid>

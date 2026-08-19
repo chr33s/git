@@ -27,6 +27,7 @@ import * as Pack from "./Pack.ts";
 import { bufferSource, readAt } from "./PackFile.ts";
 import { buildPackIndex, parsePackIndex } from "./PackIndex.ts";
 import type { PackStore } from "./Packed.ts";
+import * as Refspec from "./Refspec.ts";
 import { isOid, ObjectStore, type Oid, type RawObject, type RefStore } from "./Store.ts";
 
 /** The two ports every operation here reads; `repack` also needs the third. */
@@ -380,6 +381,16 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
     readonly repack?: boolean;
     /** Milliseconds; `0` collects everything only the reflog still names. */
     readonly reflogGrace?: number;
+    /**
+     * Objects a ref may name and still not protect.
+     *
+     * Redaction's other half. A tombstoned payload blob is still referenced by
+     * the tree of the commit that carried it — that structure has to survive,
+     * or every later event's hash breaks — so reachability alone would protect
+     * the content forever. Excluding it here is what lets a repack drop the
+     * pack copy, which is the only way a packed object is ever removed.
+     */
+    readonly exclude?: ReadonlySet<Oid>;
   },
 ) {
   const { objects, packs, refs } = stores;
@@ -401,10 +412,23 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   /** Only refs gate the walk below; a reflog may name what a purge collected. */
   const refRoots = named.map(([, oid]) => oid);
   const roots = [...refRoots];
+  /**
+   * The same roots, less the hub's own.
+   *
+   * An exclusion says the *hub* must not keep a payload alive; it does not say
+   * a branch may not. So the refs the exclusion is not about are walked a
+   * second time without it, and this is that root set — kept in step with
+   * `roots` rather than rebuilt from ref names, so it carries `HEAD` and the
+   * reflog entries too.
+   */
+  const sourceRoots = named
+    .filter(([name]) => !Refspec.hiddenFromAdvertisement(name))
+    .map(([, oid]) => oid);
   const head = yield* refs.resolve("HEAD");
   if (head !== null) {
     refRoots.push(head);
     roots.push(head);
+    sourceRoots.push(head);
   }
 
   // Where a ref has been, not only where it is. Without these, a reset or a
@@ -426,6 +450,9 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
       if (Number.isNaN(at) || at <= cutoff) continue;
       if (entry.from !== null) roots.push(entry.from);
       if (entry.to !== null) roots.push(entry.to);
+      if (Refspec.hiddenFromAdvertisement(name)) continue;
+      if (entry.from !== null) sourceRoots.push(entry.from);
+      if (entry.to !== null) sourceRoots.push(entry.to);
     }
   }
 
@@ -442,8 +469,28 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   const walked = yield* reachable(objects, roots, {
     ignoreMissing: true,
     classify: willRepack,
+    skip: options?.exclude,
   });
-  const keep = walked.seen;
+
+  // An exclusion says "the hub must not keep this alive", not "delete this".
+  // Git dedupes by content, so a redacted event payload can be byte-identical
+  // to a blob the source history also holds — post the comment, commit the
+  // same bytes as a file, have the comment redacted — and a skip applied to
+  // the *whole* walk then deleted an object `refs/heads/*` still reaches,
+  // leaving the source history dangling. So the refs the exclusion is not
+  // about are walked again without it, and what they reach survives.
+  const source =
+    (options?.exclude?.size ?? 0) === 0
+      ? null
+      : yield* reachable(objects, sourceRoots, { ignoreMissing: true, classify: willRepack });
+  const keep = source === null ? walked.seen : new Set([...walked.seen, ...source.seen]);
+  const classified =
+    source === null
+      ? walked.classified
+      : {
+          kinds: new Map([...source.classified.kinds, ...walked.classified.kinds]),
+          names: new Map([...source.classified.names, ...walked.classified.names]),
+        };
 
   // What a pack holds cannot be deleted object by object, so an unreachable
   // object that is packed is only reported as removed when a repack — which
@@ -507,7 +554,7 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
     : yield* repack(
         objects,
         packs,
-        walked.classified,
+        classified,
         handles.map((handle) => handle.name),
       );
 

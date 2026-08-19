@@ -11,19 +11,21 @@
  * `RefStore.apply`'s check-then-write, and instances are isolated by name.
  */
 import { DurableObject } from "cloudflare:workers";
-import { Effect, Layer } from "effect";
-import { HttpRouter } from "effect/unstable/http";
+import { Context, Effect, Layer } from "effect";
+import { FetchHttpClient, HttpClient, HttpRouter } from "effect/unstable/http";
 
 import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
+import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Remotes from "../server/Remotes.ts";
+import * as Sending from "../server/Sending.ts";
 import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
@@ -42,18 +44,36 @@ import { storeContract } from "./Store.contract.ts";
  */
 interface TestEnv {
   readonly ENABLE_CONFORMANCE?: string;
-  /** When set, every request must carry an `Auth.hmacMint`-issued token. */
-  readonly GIT_AUTH_SECRET?: string;
+  /**
+   * `"1"` serves writes to repositories that have no genesis.
+   *
+   * Off unless set, like `serve --open`: such a repository has no membership
+   * to authorize anybody, and a host that wrote to them by default would be
+   * an open write endpoint nobody asked for.
+   */
+  readonly ALLOW_ANONYMOUS_WRITES?: string;
   readonly GIT_OBJECTS: R2Bucket;
   readonly GIT_REPO: DurableObjectNamespace<GitRepo>;
 }
 
 export class GitRepo extends DurableObject<TestEnv> {
   #layer: Layer.Layer<Repository> | null = null;
-  #api: ((request: Request) => Promise<Response>) | null = null;
 
   #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
+  #nonceStore: Layer.Layer<Auth.Nonces> | null = null;
+  /**
+   * The JSON API's router, built once per instance.
+   *
+   * The requester is deliberately *not* in the graph it is built from: it
+   * arrives as a per-request context instead. A router rebuilt per request
+   * reconstructs the whole handler tree and opens a `Scope` this class never
+   * closes, and one with the requester baked in would answer every later
+   * request as whoever made the first.
+   */
+  #api:
+    | ((request: Request, requester: Context.Context<Auth.Requester>) => Promise<Response>)
+    | null = null;
 
   /** The registry on this instance's own SQLite, beside the refs. */
   #registry(repo: string): Layer.Layer<Subscribers.Subscribers> {
@@ -67,23 +87,95 @@ export class GitRepo extends DurableObject<TestEnv> {
     return this.#remotes;
   }
 
+  /**
+   * Challenge nonces for this instance.
+   *
+   * In memory, and per Durable Object, which is the right scope: one instance
+   * is one repository, and a nonce is only meaningful against the repository
+   * that issued it. An evicted instance forgets them, and a client whose nonce
+   * is no longer recognised is told to ask for another — a retry, not a
+   * failure worth persisting through.
+   */
+  /**
+   * Whether this host serves writes to repositories with no genesis.
+   *
+   * Exactly the spellings `Config.boolean` accepts, and exactly as it accepts
+   * them — case-sensitively, `y` included — because that is what the Worker
+   * beside this reads the very same variable with. A list that merely looked
+   * similar was the same defect in a smaller size: `=y` opened one host and
+   * not the other, `=TRUE` opened the other and not the one, and a security
+   * switch that means different things on two hosts is worse than one that
+   * means nothing.
+   */
+  #openWrites(): Layer.Layer<Auth.AnonymousWrites> {
+    const value = this.env.ALLOW_ANONYMOUS_WRITES ?? "";
+    return Policy.anonymousWrites(["true", "yes", "on", "1", "y"].includes(value));
+  }
+
+  #nonces(): Layer.Layer<Auth.Nonces> {
+    this.#nonceStore ??= Auth.noncesInMemory();
+    return this.#nonceStore;
+  }
+
   /** Built once per instance: the DO is the unit of isolation, not the request. */
   #live(repo: string): Layer.Layer<Repository> {
-    this.#layer ??= GitRepository.layer.pipe(
+    // Delivery runs in `waitUntil`, and so does forwarding: a remote that is
+    // down must not touch a push that has already been accepted.
+    const detached = <A, E>(effect: Effect.Effect<A, E>) =>
+      // `runPromiseWith` rather than `runPromise`: the work is detached from
+      // this fiber, not from its services, and a fresh runtime would drop the
+      // ones it was handed.
+      Effect.context<never>().pipe(
+        Effect.map((context) => {
+          this.ctx.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
+        }),
+      );
+
+    // `function*` does not carry `this`, and the forward needs the bindings.
+    const bucket = this.env.GIT_OBJECTS;
+    const storage = this.ctx.storage;
+
+    const afterPush = Layer.effect(
+      GitRepository.Hooks,
+      Effect.gen(function* () {
+        const subscribed = yield* Subscribers.Subscribers;
+        const client = yield* HttpClient.HttpClient;
+        const registry = yield* Remotes.Remotes;
+        return GitRepository.hooksAll([
+          Webhooks.service({
+            subscribers: subscribed,
+            client,
+            options: { background: detached },
+          }),
+          // The repository a forward pushes from is built when the push lands,
+          // not when this layer is: it cannot be a dependency of the hooks the
+          // repository itself depends on. See `Sending`.
+          Sending.service({
+            remotes: registry,
+            using: (effect) =>
+              effect.pipe(
+                Effect.provide(
+                  GitRepository.layer.pipe(
+                    Layer.provide(GitRepository.hooksNoop),
+                    Layer.provideMerge(stores({ bucket, repo, storage })),
+                  ),
+                ),
+              ),
+            options: { background: detached },
+          }),
+        ]);
+      }),
+    ).pipe(
       Layer.provide(
-        Webhooks.hooksFetch({
-          background: (effect) =>
-            // `runPromiseWith` rather than `runPromise`: the delivery is
-            // detached from this fiber, not from its services, and a fresh
-            // runtime would drop the ones it was handed.
-            Effect.context<never>().pipe(
-              Effect.map((context) => {
-                this.ctx.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
-              }),
-            ),
-        }).pipe(Layer.provide(this.#registry(repo))),
+        Layer.mergeAll(this.#registry(repo), this.#remoteRegistry(repo), FetchHttpClient.layer),
       ),
-      Layer.provide(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
+    );
+
+    this.#layer ??= GitRepository.layer.pipe(
+      Layer.provide(afterPush),
+      // `provideMerge`: `provide` would swallow the `Storage` identity the
+      // cross-request memos key on.
+      Layer.provideMerge(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
     );
     return this.#layer;
   }
@@ -123,13 +215,17 @@ export class GitRepo extends DurableObject<TestEnv> {
    * The only place a failure becomes a status code, and it does so from the
    * error's own `httpApiStatus` annotation rather than a mapping table.
    */
-  #respond(repo: string, effect: Effect.Effect<Response, GitError, Repository>): Promise<Response> {
+  #respond(
+    repo: string,
+    requester: Layer.Layer<Auth.Requester>,
+    effect: Effect.Effect<Response, GitError, Repository>,
+  ): Promise<Response> {
     return Effect.runPromise(
       effect.pipe(
         Effect.catch((error: GitError) =>
           Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
         ),
-        Effect.provide(this.#live(repo)),
+        Effect.provide(Layer.mergeAll(this.#live(repo), requester, this.#openWrites())),
         Effect.map((response) => this.#track(response)),
       ),
     );
@@ -141,15 +237,27 @@ export class GitRepo extends DurableObject<TestEnv> {
     const { repo, route } = matched;
     request = normalize(request, matched);
 
-    // Stateless auth, on when the secret binding exists: nothing to store,
-    // nothing to look up, and a token minted for one repo verifies nowhere else.
-    const secret = this.env.GIT_AUTH_SECRET;
-    if (secret !== undefined && secret.length > 0) {
-      const denied = await Effect.runPromise(
-        Auth.guard(request, (credential) => Auth.hmacVerify(secret, repo, credential)),
-      );
-      if (denied !== null) return denied;
-    }
+    // Auth runs here rather than at the edge because this is where the trust
+    // state is: the guard reads the repository's own genesis and membership
+    // log. A repository with no genesis is not hub-enabled and stays open,
+    // which is what every repository that predates this was.
+    const guarded = await Effect.runPromise(
+      Auth.guard(request).pipe(
+        Effect.provide(Layer.mergeAll(this.#live(repo), this.#nonces(), this.#openWrites())),
+        // As the other two hosts do: a repository whose identity cannot be
+        // read is unavailable, not open, and not an exception out of `fetch`.
+        Effect.orElseSucceed(() => ({
+          denied: new Response("authentication unavailable", { status: 503 }),
+          authenticated: Auth.anonymous,
+        })),
+      ),
+    );
+    if (guarded.denied !== null) return guarded.denied;
+    // Who the requester is travels with the rest of the request as an
+    // argument, not as instance state: the `await` before a collection reopens
+    // the input gate, so a field would be whatever the *last* request through
+    // the door set it to.
+    const requester = Auth.requester(guarded.authenticated);
 
     if (route === "conformance") return this.#conformance(repo);
     if (route === "registry-conformance") return this.#registryConformance();
@@ -162,7 +270,7 @@ export class GitRepo extends DurableObject<TestEnv> {
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
           ),
-          Effect.provide(lfsR2({ bucket: this.env.GIT_OBJECTS, repo })),
+          Effect.provide(Layer.mergeAll(lfsR2({ bucket: this.env.GIT_OBJECTS, repo }), requester)),
         ),
       );
     }
@@ -172,6 +280,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     if (route === "commit-pack") {
       return this.#respond(
         repo,
+        requester,
         CommitPack.handle(request).pipe(
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
@@ -183,6 +292,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     if (route === "archive") {
       return this.#respond(
         repo,
+        requester,
         Archive.handle(request).pipe(
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
@@ -195,6 +305,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
       return this.#respond(
         repo,
+        requester,
         Protocol.handle(request).pipe(
           Effect.map(
             (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
@@ -214,10 +325,11 @@ export class GitRepo extends DurableObject<TestEnv> {
       Api.layer(this.#remoteRegistry(repo)).pipe(
         Layer.provideMerge(this.#live(repo)),
         Layer.provideMerge(this.#registry(repo)),
+        Layer.provideMerge(this.#openWrites()),
       ),
       { disableLogger: true },
     ).handler;
-    return this.#track(await this.#api(request));
+    return this.#track(await this.#api(request, Auth.requesterContext(guarded.authenticated)));
   }
 
   /**

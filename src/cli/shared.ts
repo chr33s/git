@@ -5,11 +5,18 @@
  * than in `main.ts` because `main.ts` imports the command modules — a helper
  * they need has to sit below both to avoid a cycle.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Result } from "effect";
 import { Argument, Flag } from "effect/unstable/cli";
 
+import {
+  formatPublicKey,
+  parsePrivateKey,
+  parsePublicKey,
+  type PrivateKey,
+} from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
 import type { Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
@@ -78,3 +85,36 @@ export const withRepo = <A, E>(
       ),
     ),
   );
+
+/**
+ * An SSH private key from disk.
+ *
+ * Read here rather than passed as a value so that no command takes key
+ * material as an argument: a private key on a command line is a private key
+ * in a shell history. The failure is deliberately specific — "no such file"
+ * and "this key is encrypted" send a user to different places.
+ */
+export const readPrivateKey = (location: string): Effect.Effect<PrivateKey, Invalid> =>
+  Effect.gen(function* () {
+    const contents = yield* Effect.try({
+      try: () => fs.readFileSync(location, "utf8"),
+      catch: () => new Invalid({ field: "key", reason: `cannot read ${location}` }),
+    });
+    const parsed = parsePrivateKey(contents);
+    return Result.isFailure(parsed)
+      ? yield* new Invalid({ field: "key", reason: `${location}: ${parsed.failure.reason}` })
+      : parsed.success;
+  });
+
+/** The public half of a key, as an `authorized_keys` line. */
+export const readPublicKey = (location: string): Effect.Effect<string, Invalid> =>
+  Effect.gen(function* () {
+    const contents = yield* Effect.try({
+      try: () => fs.readFileSync(location, "utf8").trim(),
+      catch: () => new Invalid({ field: "key", reason: `cannot read ${location}` }),
+    });
+    const parsed = parsePublicKey(contents);
+    return Result.isFailure(parsed)
+      ? yield* new Invalid({ field: "key", reason: `${location}: ${parsed.failure.reason}` })
+      : formatPublicKey(parsed.success);
+  });

@@ -23,6 +23,7 @@ import {
   tracedRefStore,
   type RefUpdate,
   type RefUpdateResult,
+  Storage,
 } from "./Store.ts";
 import { bufferSource } from "./PackFile.ts";
 import { packed, PackStore } from "./Packed.ts";
@@ -191,5 +192,19 @@ export const refStore = Layer.effect(
   }),
 );
 
-/** Both stores, for tests and for the browser/CLI until their backends land. */
-export const stores = Layer.mergeAll(objectStore, refStore).pipe(Layer.provideMerge(packStore));
+/**
+ * Both stores, for tests and for the browser/CLI until their backends land.
+ *
+ * `Layer.effect` rather than `Layer.succeed` for the identity: this value is a
+ * *description*, so a fresh one is minted per build — which is exactly right,
+ * since each build is a different set of maps and therefore a different
+ * repository.
+ */
+export const stores = Layer.mergeAll(
+  objectStore,
+  refStore,
+  Layer.effect(
+    Storage,
+    Effect.sync(() => crypto.randomUUID()),
+  ),
+).pipe(Layer.provideMerge(packStore));

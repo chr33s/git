@@ -19,6 +19,7 @@ import { Invalid, type ObjectNotFound, PackCorrupt, type StorageFailure } from "
 import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
+import { absent } from "../hub/Redaction.ts";
 
 const decoder = new TextDecoder();
 
@@ -268,10 +269,22 @@ export const push = Effect.fn("Client.push")(function* (input: {
     wants.length === 0
       ? new Uint8Array(0)
       : yield* Effect.gen(function* () {
-          const plan = yield* repository.fetch({
-            wants,
-            haves: [...new Set(advertisement.refs.values())],
-          });
+          const request = { wants, haves: [...new Set(advertisement.refs.values())] };
+          // Strict first, and retried once against what the tombstones account
+          // for — the same shape the server's `planFor` uses, and for the same
+          // reason. A redacted payload is absent by design while the tree
+          // naming it survives, so a strict closure over a hub ref fails the
+          // moment anything in it has been redacted: this client would have
+          // been unable to push its own pull requests back. Computing the
+          // exclusion up front instead would fold the trust log on every push,
+          // including the overwhelming majority that touch no hub ref at all.
+          const strict = yield* repository
+            .fetch(request)
+            .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+          // An absence no tombstone covers fails the retry too, which is the
+          // corruption it is.
+          const plan =
+            strict ?? (yield* repository.fetch({ ...request, exclude: yield* absent() }));
           return concat(yield* Stream.runCollect(repository.packOids(plan.oids)));
         });
 

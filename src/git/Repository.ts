@@ -98,6 +98,17 @@ export interface FetchRequest {
   readonly since?: Date;
   /** `deepen-not <ref>`: nothing reachable from these. */
   readonly notRefs?: ReadonlyArray<string>;
+  /**
+   * Objects a tree may name and the pack must not carry.
+   *
+   * Redaction's shape from this side. A tombstoned payload's blob is deleted
+   * while the tree naming it survives — the hash chain depends on that tree —
+   * so a walk that treats every named object as required fails the whole
+   * fetch the moment anything is redacted. The caller supplies the set,
+   * because "which absences are explained" is a question about tombstones and
+   * this layer has never heard of one.
+   */
+  readonly exclude?: ReadonlySet<Oid>;
 }
 
 export type { FsckProblem, FsckReport, GcReport } from "./Maintenance.ts";
@@ -159,6 +170,15 @@ export class Repository extends Context.Service<
   {
     readonly refs: Effect.Effect<ReadonlyArray<readonly [string, Oid]>, StorageFailure>;
     readonly resolve: (name: string) => Effect.Effect<Oid | null, StorageFailure>;
+    /**
+     * What the ref itself holds, without following a symbolic one.
+     *
+     * The pairing `setRef`'s and `receive`'s `expected` is checked against:
+     * comparing a compare-and-swap against the *resolved* value of a symbolic
+     * ref names an oid the store will never agree with, so every such write
+     * would fail as a conflict against a value nobody wrote.
+     */
+    readonly readRef: (name: string) => Effect.Effect<Oid | null, StorageFailure>;
     readonly head: Effect.Effect<string, StorageFailure>;
     /** Point HEAD at a ref — what a checkout does last. */
     readonly setHead: (ref: string) => Effect.Effect<void, StorageFailure | Invalid>;
@@ -371,6 +391,13 @@ export class Repository extends Context.Service<
        * milliseconds. `0` collects those too — what purging a secret needs.
        */
       readonly reflogGrace?: number;
+      /**
+       * Objects that a ref may name and still not protect — the payload blobs
+       * a redaction tombstone covers. Reachability would otherwise keep them
+       * forever, because the tree that names them has to survive for the
+       * hash chain to hold.
+       */
+      readonly exclude?: ReadonlySet<Oid>;
     }) => Effect.Effect<GcReportType, ObjectNotFound | StorageFailure | Invalid>;
 
     /**
@@ -429,6 +456,15 @@ export class Repository extends Context.Service<
       readonly strategy?: MergeStrategy;
       /** The ref to move on success; absent computes the merge and stops. */
       readonly into?: string;
+      /**
+       * What `into` held when the *caller* judged this write, if it judged one.
+       *
+       * Read at write time instead, the swap compares the ref's value against
+       * itself and cannot fail — so a push landing while the merge was being
+       * computed was silently overwritten, and a write the boundary had judged
+       * a fast-forward became one that drops commits.
+       */
+      readonly expected?: Oid | null;
       /** A fast-forward is the default when history allows one. */
       readonly noFastForward?: boolean;
     }) => Effect.Effect<MergeOutcome, RefConflict | ObjectNotFound | Invalid | StorageFailure>;
@@ -444,6 +480,26 @@ export class Hooks extends Context.Service<
     readonly postReceive: (results: ReadonlyArray<ReceiveResult>) => Effect.Effect<void>;
   }
 >()("git/Hooks") {}
+
+/**
+ * Every one of these, in order, as one.
+ *
+ * `Hooks` is a single service, so a host that wants two things to happen after
+ * a push — deliver a webhook *and* forward to a mirror — cannot provide two
+ * layers and hope. Refusals short-circuit, because a refusal is an answer and
+ * the rest of the chain has nothing to add to it; `postReceive` runs all of
+ * them, because it cannot refuse anything and one silent receiver must not
+ * cost the next one its notification.
+ */
+export const hooksAll = (all: ReadonlyArray<Hooks["Service"]>): Hooks["Service"] => ({
+  preReceive: (updates) =>
+    Effect.forEach(all, (hooks) => hooks.preReceive(updates), { discard: true }),
+  update: (update) => Effect.forEach(all, (hooks) => hooks.update(update), { discard: true }),
+  postReceive: (results) =>
+    Effect.forEach(all, (hooks) => hooks.postReceive(results).pipe(Effect.ignoreCause), {
+      discard: true,
+    }),
+});
 
 /** No-op hooks, which is what a server without policy wants. */
 export const hooksNoop = Layer.succeed(Hooks, {
@@ -1024,17 +1080,25 @@ export const layer = Layer.effect(
       wants: ReadonlyArray<Oid>,
       haves: ReadonlyArray<Oid>,
       clientShallow?: ReadonlySet<Oid>,
+      exclude?: ReadonlySet<Oid>,
     ) =>
       Effect.gen(function* () {
         // What the client has is walked tolerantly: a `have` can reference
         // history this repository never saw, and that is not an error.
-        const excluded = (yield* reachable(
-          objects,
-          haves,
-          clientShallow === undefined
-            ? { ignoreMissing: true }
-            : { ignoreMissing: true, boundary: clientShallow },
-        )).seen;
+        const excluded = new Set(
+          (yield* reachable(
+            objects,
+            haves,
+            clientShallow === undefined
+              ? { ignoreMissing: true }
+              : { ignoreMissing: true, boundary: clientShallow },
+          )).seen,
+        );
+        // Redacted payloads join the set the walk steps over. Still strict
+        // about everything else: a missing object nobody accounted for is
+        // corruption, and answering a fetch as though it were not would hand
+        // the client a pack it cannot check.
+        for (const oid of exclude ?? []) excluded.add(oid);
         return (yield* reachable(objects, wants, { ignoreMissing: false, skip: excluded })).order;
       });
 
@@ -1091,7 +1155,7 @@ export const layer = Layer.effect(
         input.depth !== undefined || input.since !== undefined || (input.notRefs?.length ?? 0) > 0;
 
       if (!deepening) {
-        const order = yield* closure(input.wants, input.haves, clientShallow);
+        const order = yield* closure(input.wants, input.haves, clientShallow, input.exclude);
         return { shallow: [], unshallow: [], oids: order };
       }
 
@@ -1174,10 +1238,17 @@ export const layer = Layer.effect(
         else boundary.delete(oid);
       }
 
-      const excluded = (yield* reachable(objects, input.haves, {
-        ignoreMissing: true,
-        boundary: clientShallow,
-      })).seen;
+      const excluded = new Set(
+        (yield* reachable(objects, input.haves, {
+          ignoreMissing: true,
+          boundary: clientShallow,
+        })).seen,
+      );
+      // The same absences the shallow path steps over. Dropping `exclude`
+      // here meant a `deepen`/`deepen-since`/`deepen-not` fetch that reached a
+      // redacted event's tree put the deleted blob into the plan, and the pack
+      // writer then failed on an object the tombstone accounts for.
+      for (const oid of input.exclude ?? []) excluded.add(oid);
 
       const loose =
         unwalkable.length === 0
@@ -1199,6 +1270,7 @@ export const layer = Layer.effect(
     return Repository.of({
       refs: refs.list("refs/"),
       resolve: refs.resolve,
+      readRef: refs.read,
       head: refs.head,
       setHead: refs.setHead,
 
@@ -1566,7 +1638,13 @@ export const layer = Layer.effect(
         const settled = (kind: MergeOutcome["kind"], commit: Oid, tree: Oid, base: Oid | null) =>
           Effect.gen(function* () {
             if (input.into !== undefined && kind !== "up-to-date") {
-              const expected = isOid(input.into) ? undefined : yield* refs.read(input.into);
+              // The caller's snapshot wins when it took one; see `expected`.
+              const expected =
+                input.expected !== undefined
+                  ? input.expected
+                  : isOid(input.into)
+                    ? undefined
+                    : yield* refs.read(input.into);
               const update: RefUpdateDraft = {
                 name: input.into,
                 value: commit,

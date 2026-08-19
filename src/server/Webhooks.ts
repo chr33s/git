@@ -150,6 +150,29 @@ export const deliver = Effect.fn("Webhooks.deliver")(function* (
  * Hooks that deliver on `post-receive` — the only hook that runs after the
  * refs are durable, which is exactly when a receiver should hear about them.
  */
+export const service = (input: {
+  readonly subscribers: Subscribers["Service"];
+  readonly client: HttpClient.HttpClient;
+  readonly options?: DeliveryOptions;
+}): Hooks["Service"] => {
+  const { client, options, subscribers } = input;
+  const background =
+    options?.background ??
+    (<A, E>(effect: Effect.Effect<A, E>) => Effect.forkDetach(effect).pipe(Effect.asVoid));
+
+  return Hooks.of({
+    preReceive: () => Effect.void,
+    update: () => Effect.void,
+    postReceive: (results) =>
+      background(
+        deliver(results, options).pipe(
+          Effect.provideService(Subscribers, subscribers),
+          Effect.provideService(HttpClient.HttpClient, client),
+        ),
+      ),
+  });
+};
+
 export const hooks = (
   options?: DeliveryOptions,
 ): Layer.Layer<Hooks, never, Subscribers | HttpClient.HttpClient> =>
@@ -158,21 +181,8 @@ export const hooks = (
     Effect.gen(function* () {
       const subscribers = yield* Subscribers;
       const client = yield* HttpClient.HttpClient;
-      const background =
-        options?.background ??
-        (<A, E>(effect: Effect.Effect<A, E>) => Effect.forkDetach(effect).pipe(Effect.asVoid));
-
-      return Hooks.of({
-        preReceive: () => Effect.void,
-        update: () => Effect.void,
-        postReceive: (results) =>
-          background(
-            deliver(results, options).pipe(
-              Effect.provideService(Subscribers, subscribers),
-              Effect.provideService(HttpClient.HttpClient, client),
-            ),
-          ),
-      });
+      if (options === undefined) return service({ subscribers, client });
+      return service({ subscribers, client, options });
     }),
   );
 

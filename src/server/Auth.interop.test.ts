@@ -22,8 +22,8 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { serve, type Server } from "../host/Node.ts";
+import { enableHubUnder, grantMemberUnder } from "../testing/Hub.ts";
 import { hasGit } from "../testing/Git.ts";
-import { hmacMint, hmacVerify } from "./Auth.ts";
 
 const execFileAsync = promisify(execFile);
 const git = async (cwd: string, ...args: string[]): Promise<string> => {
@@ -42,29 +42,25 @@ const author = {
   offset: 0,
 };
 
-const SECRET = "interop-secret";
-
 describe.skipIf(!hasGit)("Auth interop with git", () => {
   let root: string;
   let server: Server;
   let readToken: string;
   let writeToken: string;
 
-  /** `http://<token>@host/…` — the token as the Basic credential. */
-  const remote = (token: string | null, repo: string) => {
+  /**
+   * `http://<credential>@host/…` — the credential as the Basic username,
+   * which is how `git` presents one from a URL.
+   */
+  const remote = (credential: string | null, repo: string) => {
     const url = new URL(server.url);
-    if (token !== null) url.username = token;
+    if (credential !== null) url.username = credential;
     return `${url.href}${repo}`;
   };
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-auth-interop-"));
-    server = await serve({
-      root,
-      verify: (repo, credential) => Effect.runPromise(hmacVerify(SECRET, repo, credential)),
-    });
-    readToken = await Effect.runPromise(hmacMint(SECRET, "authed", "read", 300));
-    writeToken = await Effect.runPromise(hmacMint(SECRET, "authed", "write", 300));
+    server = await serve({ root, allowAnonymousWrites: true });
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -81,6 +77,17 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
         ),
       ),
     );
+
+    // Membership is what makes the repository private: a reader who may only
+    // read, and a writer who may push. Both credentials are signed by their
+    // own holder's key — there is no server secret in this suite at all.
+    const reader = await enableHubUnder(root, "authed", ["repo.read"]);
+    const writer = await grantMemberUnder(root, "authed", reader.root, reader.repoId, [
+      "repo.read",
+      "source.push",
+    ]);
+    readToken = reader.credential;
+    writeToken = writer.credential;
   });
 
   afterAll(async () => {

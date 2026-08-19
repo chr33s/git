@@ -25,6 +25,9 @@ import { Effect, Stream } from "effect";
 import { type GitError, Invalid, PackCorrupt, type StorageFailure } from "../git/Error.ts";
 import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
+import * as Refspec from "../git/Refspec.ts";
+import * as Policy from "./Policy.ts";
+import * as Redaction from "../hub/Redaction.ts";
 import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
 const decoder = new TextDecoder();
@@ -33,6 +36,69 @@ const ZERO_OID = "0".repeat(40);
 const AGENT = "agent=chr33s-git/0";
 
 const corrupt = (reason: string) => new PackCorrupt({ reason });
+
+/**
+ * The objects a fetch needs, computed strictly and retried once.
+ *
+ * A redacted payload is absent by design while the tree naming it survives, so
+ * a strict closure fails the moment anything has been redacted — and computing
+ * "which absences a tombstone accounts for" up front would fold the trust log
+ * and walk every pull request on *every* fetch, including the overwhelming
+ * majority that never touch a hub ref at all.
+ *
+ * So the strict walk goes first and pays nothing, and only a walk that actually
+ * hits a missing object asks what the tombstones say. An absence no tombstone
+ * covers fails the retry too, which is the corruption it is.
+ */
+export const planFor = (request: {
+  readonly wants: ReadonlyArray<Oid>;
+  readonly haves: ReadonlyArray<Oid>;
+  readonly clientShallow: ReadonlyArray<Oid>;
+  readonly depth: number | undefined;
+  readonly since: Date | undefined;
+  readonly notRefs: ReadonlyArray<string>;
+}) =>
+  Effect.gen(function* () {
+    const repository = yield* Repository;
+
+    // A deepening fetch assembles its object set without reading blobs, so it
+    // cannot notice a redacted one and would succeed with it in the plan — and
+    // the failure would then land in `packOids`, after the 200 and the
+    // boundary lines had gone out. There is nothing to retry from there, so
+    // that path pays for the exclusion up front. It is also the rare one:
+    // ordinary clones and fetches take the strict walk below and pay nothing.
+    const deepening =
+      request.depth !== undefined || request.since !== undefined || request.notRefs.length > 0;
+    if (deepening) {
+      // Not swallowed. An exclusion this could not compute is an exclusion the
+      // plan does not have, and the request would then fail inside `packOids`
+      // — after the 200 and the boundary lines — which is precisely the
+      // outcome computing it up front exists to avoid.
+      return yield* repository.fetch({ ...request, exclude: yield* missing() });
+    }
+
+    // Only a *missing object* is worth a second look; a storage fault is not
+    // something tombstones explain, and retrying it would pay for a trust fold
+    // to fail the same way twice.
+    const plan = yield* repository
+      .fetch(request)
+      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+    if (plan !== null) return plan;
+
+    return yield* repository.fetch({ ...request, exclude: yield* missing() });
+  });
+
+/**
+ * What a tombstone covers *and this repository no longer holds*.
+ *
+ * The exclusion `gc` takes says "stop protecting this"; the one a fetch takes
+ * says "this is not here, walk past it". They are not the same set, because
+ * git dedupes by content: a redacted payload can be the very object a branch's
+ * tree names, and `gc` keeps that one. Handing the whole set to a fetch then
+ * dropped an object the pack genuinely needs, and the client rebuilt a tree
+ * pointing at nothing.
+ */
+const missing = Redaction.absent;
 
 /** A text pkt-line, the conventional trailing newline stripped. */
 const text = (payload: Uint8Array): string => {
@@ -166,7 +232,21 @@ export const advertise = (
       const target = detached ? head : refs.find(([name]) => name === head)?.[1];
       if (target !== undefined) lines.push(`${target} HEAD`);
     }
-    for (const [name, oid] of refs) lines.push(`${oid} ${name}`);
+    // Hub and trust refs are left out of the v0 advertisement. A repository
+    // with a year of review history has more hub refs than branches, and a
+    // stock `git clone` would pay for all of them on every fetch to get
+    // something it cannot read. Clients that want them ask by name — the
+    // refspec is what carries the request, and `want` still serves the oids.
+    // The genesis stays visible: it is one commit, and it is what lets any
+    // client compute the RepoID and check it against what it trusts.
+    for (const [name, oid] of refs) {
+      // Only from the fetch advertisement. A client pushing has to know what
+      // it is replacing — receive-pack's old-oid is how a stale push is
+      // caught — so hiding these here would make every hub ref writable
+      // exactly once and then never again.
+      if (service === "git-upload-pack" && Refspec.hiddenFromAdvertisement(name)) continue;
+      lines.push(`${oid} ${name}`);
+    }
 
     const parts: Uint8Array[] = [pkt(`# service=${service}\n`), FLUSH];
     if (lines.length === 0) {
@@ -346,7 +426,7 @@ export const uploadPack = (request: Request): Effect.Effect<Response, GitError, 
 
     // `fetch` reads an undefined `depth` or `since` exactly as it reads their
     // absence, and an empty `notRefs` as no stops — the locals pass through.
-    const plan = yield* repository.fetch({ wants, haves, clientShallow, depth, since, notRefs });
+    const plan = yield* planFor({ wants, haves, clientShallow, depth, since, notRefs });
 
     /**
      * The boundary section comes before anything else, and only when the
@@ -471,6 +551,21 @@ const lsRefs = (request: V2Request): Effect.Effect<Response, GitError, Repositor
 
     for (const [name, oid] of refs) {
       if (!matches(name)) continue;
+      // v2's advertisement, and so subject to the same hiding as v0's — with
+      // the exception v2 is able to express and v0 is not. Hiding is about
+      // sparing a stock clone an event per comment, not about withholding
+      // state: a client that *names* the namespace is asking for it, and this
+      // is the only way it can ever be fetched, since v0 withholds it too.
+      //
+      // The prefix has to name a hidden namespace itself, not merely overlap
+      // one. `ref-prefix refs/` is what "everything" looks like, and answering
+      // it with hub state would be the default this exists to avoid.
+      if (
+        Refspec.hiddenFromAdvertisement(name) &&
+        !prefixes.some((prefix) => name.startsWith(prefix) && Refspec.namesHiddenNamespace(prefix))
+      ) {
+        continue;
+      }
       let line = `${oid} ${name}`;
       if (peel && name.startsWith("refs/tags/")) {
         const peeled = yield* repository.readTag(oid).pipe(
@@ -559,7 +654,7 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
 
     // As in the v0 round: `fetch` treats undefined options and an empty
     // `notRefs` exactly like their absence, so the locals pass through.
-    const plan = yield* repository.fetch({ wants, haves, clientShallow, depth, since, notRefs });
+    const plan = yield* planFor({ wants, haves, clientShallow, depth, since, notRefs });
 
     const prelude: Uint8Array[] = [...acks];
     if (deepening) {
@@ -686,20 +781,68 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         headers: headers("application/x-git-receive-pack-result"),
       });
     };
-    const allFailed = (reason: string): ReadonlyArray<ReceiveResult> =>
-      updates.map((update) => ({
-        ref: update.name,
-        from: update.expected ?? null,
-        to: null,
+    /**
+     * One `ng` per ref, for a failure that took the whole push down.
+     *
+     * Takes the commands it is reporting on rather than reading `updates`,
+     * because after the policy gate those two lists differ: `refused` already
+     * carries an `ng` for every ref the gate declined, so reporting the client's
+     * full list again emitted two `ng` lines for the same ref — and a status
+     * line for a ref that was never submitted to the store at all.
+     */
+    const allFailed = (
+      commands: ReadonlyArray<RefUpdate>,
+      reason: string,
+    ): ReadonlyArray<ReceiveResult> =>
+      commands
+        // And never a ref `refused` already carries: `respond` concatenates
+        // the two, so a command refused before this point would otherwise get
+        // an `ng` line here as well — twice, with two different reasons.
+        .filter((update) => !refused.some((entry) => entry.ref === update.name))
+        .map((update) => ({
+          ref: update.name,
+          from: update.expected ?? null,
+          to: null,
+          ok: false,
+          reason,
+        }));
+
+    // The envelope binds *every* command, delete or not, and checking it needs
+    // nothing from the pack — so it is asked with the other refusals that need
+    // nothing from it. Left to `gate`, a push naming refs the signed request
+    // never covered had its whole pack unpacked and persisted first.
+    //
+    // Recorded here rather than after the atomic and drain handling below,
+    // because those are what every refusal in this function shares: an atomic
+    // batch with one uncovered ref applies none of it, and a body sent for
+    // commands now all refused still has to be read before the report can
+    // reach the client.
+    const uncovered = new Set<string>();
+    // Not swallowed. Every other gate in this function fails closed, and this
+    // one decides whether a signed request covers the commands sent under it —
+    // so reading a failure as "all of them" is the one answer it must never
+    // give by accident.
+    for (const entry of yield* Policy.uncovered(updates)) {
+      const command = updates.find((update) => update.name === entry.ref);
+      uncovered.add(entry.ref);
+      refused.push({
+        ref: entry.ref,
+        from: command?.expected ?? null,
+        to: command?.value ?? null,
         ok: false,
-        reason,
-      }));
+        reason: entry.reason,
+      });
+    }
 
     // An atomic push is all-or-nothing, and a refused name is part of the all:
     // applying the rest would be exactly what the capability promises not to.
     if (refused.length > 0 && (atomic || updates.length === 0)) {
       yield* drain;
-      return respond(allFailed("atomic push refused: funny refname"), "ok");
+      // The reason a *clean* ref failed is that the batch was atomic, and not
+      // whatever the first refusal happened to say. Borrowed, the report told
+      // a client that `refs/heads/main` had a funny refname — an accusation
+      // about a name that is fine, and the one line they have to debug from.
+      return respond(allFailed(updates, "atomic push refused: another command was refused"), "ok");
     }
 
     // A refused command may have had a pack behind it even when every command
@@ -709,9 +852,58 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
       yield* drain;
     }
 
+    // What can be judged before the body is read, is. The full rules need the
+    // objects — a fast-forward cannot be told from a force push until the pack
+    // is unpacked, so `Policy.gate` has to run after — but a credential scoped
+    // to *delete* a branch is not one that may create or move one, and the
+    // guard charges receive-pack either. Left entirely to the gate, such a
+    // caller had their whole pack persisted before being refused, which is the
+    // object half of the write the refusal is about.
+    //
+    // Only the commands it is about, though. Refusing the batch took the
+    // *delete* down with the create in a mixed push, and the delete is the one
+    // thing this principal was entitled to do — `Policy.gate` would have
+    // refused the create alone.
+    const writes = updates.filter((update) => update.value !== null && !uncovered.has(update.name));
+    const refusal =
+      writes.length === 0
+        ? null
+        : yield* Policy.mayWrite("source.push").pipe(
+            Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+          );
+    // The body only ever gets read by the object phase below, and that runs
+    // only when there is a write left to unpack for. Every other way out of
+    // here has to read it first, or the report is written while the pack is
+    // still arriving and the client sees a hung-up connection instead: a
+    // refusal, an atomic batch, and — the case this used to miss — a push
+    // whose creates were all refused but whose deletes were not, where
+    // `writes` is empty and nothing downstream would have touched the stream.
+    if (
+      updates.some((update) => update.value !== null) &&
+      (refusal !== null || writes.length === 0)
+    )
+      yield* drain;
+
+    if (refusal !== null) {
+      if (atomic) return respond(allFailed(updates, refusal), "ok");
+      for (const update of writes) {
+        refused.push({
+          ref: update.name,
+          from: update.expected ?? null,
+          to: update.value,
+          ok: false,
+          reason: refusal,
+        });
+      }
+    }
+    const allowed = (refusal === null ? updates : updates.filter((u) => u.value === null)).filter(
+      (update) => !uncovered.has(update.name),
+    );
+
     // The object phase. A pack arrives whenever any command creates or moves
-    // a ref; a delete-only push sends none.
-    if (updates.some((update) => update.value !== null)) {
+    // a ref; a delete-only push sends none, and a push whose creates were all
+    // refused above has already had its body drained.
+    if (refusal === null && writes.length > 0) {
       const unpacked = yield* repository
         .unpack(Stream.fromAsyncIterable(reader.rest(), (cause) => corrupt(String(cause))))
         .pipe(
@@ -723,23 +915,69 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
         // The unpacker stopped part-way, so the rest of the pack is still
         // arriving; the report only reaches the client if it is read first.
         yield* drain;
-        return respond(allFailed("unpacker error"), reason);
+        return respond(allFailed(updates, "unpacker error"), reason);
       }
 
       // No full connectivity check, but never point a ref at an object this
       // repository does not hold.
-      for (const update of updates) {
+      for (const update of allowed) {
         if (update.value !== null && !(yield* repository.contains(update.value))) {
           yield* drain;
-          return respond(allFailed("missing necessary objects"), "ok");
+          return respond(allFailed(updates, "missing necessary objects"), "ok");
         }
       }
     }
 
-    const results = yield* repository.receive(updates, { atomic }).pipe(
+    // Every mutable ref update converges here. The guard has already said who
+    // the requester is; this is where what they may do meets what the branch
+    // requires, and the compare-and-swap that carries the verdict is applied
+    // with it rather than after it.
+    const judged = yield* Policy.gate(allowed, atomic);
+    if (atomic && judged.refused.length > 0) {
+      // The client's whole list, not `judged.updates`: an atomic batch with a
+      // refusal in it has *no* allowed updates, so reporting on those produces
+      // no `ng` lines at all — a push refused in complete silence. Atomic means
+      // every command failed, and the report has to say so for each of them.
+      //
+      // Each with its *own* reason where the gate gave it one. Stamping the
+      // first refusal onto all of them told a user their clean ref had failed
+      // for something that was never about it — and threw away every other
+      // refusal's reason, which on a batch refused for two different things is
+      // the half they needed. A ref the gate did not decline failed because
+      // the batch did, and says so.
+      const own = new Map(judged.refused.map((entry) => [entry.ref, entry.reason]));
+      const together = `atomic push refused: ${judged.refused[0]!.reason}`;
+      return respond(
+        updates
+          .filter((update) => !refused.some((entry) => entry.ref === update.name))
+          .map((update) => ({
+            ref: update.name,
+            from: update.expected ?? null,
+            to: null,
+            ok: false,
+            reason: own.get(update.name) ?? together,
+          })),
+        "ok",
+      );
+    }
+    // Non-atomic: the refusals ride back in the same report as the `ok`s, so a
+    // client is told which refs the policy declined and why, rather than
+    // seeing them silently missing from the answer.
+    for (const entry of judged.refused) {
+      const command = updates.find((update) => update.name === entry.ref);
+      refused.push({
+        ref: entry.ref,
+        from: command?.expected ?? null,
+        to: command?.value ?? null,
+        ok: false,
+        reason: entry.reason,
+      });
+    }
+
+    const results = yield* repository.receive(judged.updates, { atomic }).pipe(
       Effect.catchTags({
-        HookRejected: (error) => Effect.succeed(allFailed(error.message)),
-        Invalid: (error) => Effect.succeed(allFailed(error.reason)),
+        HookRejected: (error) => Effect.succeed(allFailed(judged.updates, error.message)),
+        Invalid: (error) => Effect.succeed(allFailed(judged.updates, error.reason)),
         // No `StorageFailure` catch: the stores report a ref they could not
         // write as an unapplied result carrying its own reason, which comes
         // through as `ng <ref> cannot lock ref` below. What is left here is a

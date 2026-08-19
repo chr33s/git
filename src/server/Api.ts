@@ -18,7 +18,7 @@
  * handler lives elsewhere — the server-as-client machinery in `Sync.ts`, the
  * algorithms in `git/`.
  */
-import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
+import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
 import { Etag, HttpPlatform } from "effect/unstable/http";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 
@@ -30,9 +30,23 @@ import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { type Strategy as MergeStrategy } from "../git/Merge.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
+import * as Redaction from "../hub/Redaction.ts";
 import { type FileChange, Repository, treeAt } from "../git/Repository.ts";
-import { isOid, type Oid } from "../git/Store.ts";
+import * as Policy from "./Policy.ts";
+import * as Auth from "./Auth.ts";
+import { permits } from "../trust/Certificate.ts";
+import { readGenesis } from "../trust/Genesis.ts";
+import { isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 import { NewRemoteWire, redact as redactRemote, Remotes } from "./Remotes.ts";
+
+/** `NewRemote` under construction: built field by field, handed over as one. */
+interface RemoteRequest {
+  name: string;
+  url: string;
+  credential?: string;
+  key?: string;
+  sync?: { mode: "manual" | "fetch" | "push" | "mirror"; refs: ReadonlyArray<string> };
+}
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
 import { fetchFrom, pull, remoteFor } from "./Sync.ts";
 
@@ -145,6 +159,235 @@ const FileWire = Schema.Struct({
   content: Schema.NullOr(Schema.String),
   encoding: Schema.optional(Encoding),
   mode: Schema.optional(Schema.String),
+});
+
+/**
+ * A branch name as a ref, for the payloads that accept either spelling.
+ *
+ * `HEAD` is left alone: it is already a full ref name, and qualifying it
+ * produced a literal branch called `refs/heads/HEAD` — so a merge `into:
+ * "HEAD"` reported success while the checked-out branch never moved. Left as
+ * it is, it reaches the ref-name check that refuses it, which is the clean
+ * failure it had before.
+ */
+const refNameOf = (value: string): string =>
+  value === "HEAD" || value.startsWith("refs/") ? value : `refs/heads/${value}`;
+
+/**
+ * The same, for a destination a caller may only name as a branch.
+ *
+ * An object id is not a destination: nothing moves it, and qualifying one made
+ * `into: "<40 hex>"` create a branch *named after the object id* — silently,
+ * and reported as success. Refused instead, which is the answer the caller can
+ * act on. `Repository.merge` still resolves an oid `into` for its own callers;
+ * what is closed here is the door that let a request spell one.
+ */
+const branchRefOf = Effect.fn("Api.branchRefOf")(function* (value: string) {
+  if (isOid(value)) {
+    return yield* new Invalid({
+      field: "into",
+      reason: "a destination is a branch, not an object id",
+    });
+  }
+  return refNameOf(value);
+});
+
+const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = false) {
+  // Fail closed: a policy that cannot be evaluated refuses the write rather
+  // than allowing it. The alternative is a repository whose protection turns
+  // itself off the moment its own trust state cannot be read.
+  const refusal = yield* Policy.gateWrite(ref, rewrites).pipe(
+    Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+  );
+  if (refusal !== null) return yield* new Invalid({ field: "ref", reason: refusal });
+});
+
+/**
+ * Judge one ref change and hand back the update to apply.
+ *
+ * The returned update carries the value the decision was made against, so the
+ * write goes out under exactly that condition — deciding on one state and
+ * writing against another is the race this boundary exists to close.
+ *
+ * `bindEnvelope: false`: an envelope describes a *push's* ref commands, and
+ * this is not that conversation. Holding a JSON verb to commands it never
+ * claimed would read silence as a denial.
+ */
+/**
+ * The requester may read this repository.
+ *
+ * Every ordinary read is charged `repo.read` by the guard before a handler
+ * runs. The exceptions are the verbs whose *primary* effect is a write but
+ * whose work involves sending content elsewhere, which the guard charges
+ * `source.push` — a capability that does not carry `repo.read`, deliberately,
+ * because a contributor who may push need not be able to read everything.
+ */
+const requireRead = Effect.fn("Api.requireRead")(function* () {
+  // Fail closed. Reading an unreadable genesis as "not hub-enabled" would let
+  // the copy through at the moment storage was least trustworthy — the exact
+  // fail-open `Auth.authenticate` and `Policy.gate` each refuse.
+  const stored = yield* readGenesis().pipe(
+    Effect.mapError(
+      () => new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+    ),
+  );
+  if (stored === null) return;
+
+  // No requester at all is a host that did not provide one, not an anonymous
+  // request — and `Auth.anonymous` carries the *empty* projection, which has
+  // no members and so reads as a repository anonymous readers may clone. Left
+  // to the fallback, a hub-enabled repository that restricts reads answered
+  // `POST /push` to anybody the moment the context was missing, which is the
+  // fail-open this function's own comment says it refuses.
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  if (Option.isNone(requester)) {
+    return yield* new Invalid({
+      field: "capability",
+      reason: "sending this repository's objects elsewhere needs repo.read",
+    });
+  }
+  const who = requester.value;
+  if (permits(who.capabilities, "repo.read")) return;
+
+  // A repository the world may already clone has nothing to protect here: a
+  // member scoped to `source.push` could copy it out by cloning it themselves,
+  // and refusing them the verb would only be theatre.
+  if (Auth.anonymousReadAllowed(who.projection)) return;
+
+  return yield* new Invalid({
+    field: "capability",
+    reason: "sending this repository's objects elsewhere needs repo.read",
+  });
+});
+
+/**
+ * The requester holds a capability, for verbs the ref gates never see.
+ *
+ * A webhook or a remote is a *destination* this repository will send to, and
+ * `gc` is an irreversible rewrite of the object store. None of them moves a
+ * ref, so `Policy.gateWrite` has nothing to judge — and the guard's charge is
+ * deliberately coarse there, `source.push` *or* `source.delete`, because it
+ * cannot see a push's commands. Left at that, a bot scoped to delete a branch
+ * could register a webhook receiving every push, or collect the repository.
+ *
+ * Fails closed on a missing requester for the reason `requireRead` gives: an
+ * absent context is a host that did not say who is asking.
+ */
+const requireCapability = Effect.fn("Api.requireCapability")(function* (capability: string) {
+  // A repository with no genesis has no membership to charge anything against.
+  // The guard is no help here either: it lets every *read* through on such a
+  // repository, exactly as a plain git repository has always done — and these
+  // verbs are not reads whatever their method says. Left at "no genesis, no
+  // charge", a plain repository served read-only handed its webhook delivery
+  // URLs and every remote it pushes to, to anybody who could reach it.
+  //
+  // So the host's own decision stands in for the membership there is none of:
+  // a repository opened to anonymous writes is one whose operator has said
+  // anybody may administer it, and one that was not is closed. That keeps
+  // `serve --open` working and stops a repository nobody opened from being
+  // administered — or read — by strangers.
+  const stored = yield* readGenesis().pipe(
+    Effect.mapError(
+      () => new Invalid({ field: "repo", reason: "the repository's identity could not be read" }),
+    ),
+  );
+  if (stored === null) {
+    const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
+    if (Option.getOrElse(open, () => false)) return;
+    return yield* new Invalid({
+      field: "capability",
+      reason: `this repository has no membership to authorize ${capability}; run \`hub init\``,
+    });
+  }
+
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  if (Option.isSome(requester) && permits(requester.value.capabilities, capability)) return;
+  return yield* new Invalid({ field: "capability", reason: `this needs ${capability}` });
+});
+
+/** Whether a ref is there to be rewritten; a create discards nothing. */
+/**
+ * Whether landing on `into` would drop commits it already holds.
+ *
+ * Asked before the work, which is why it asks about the *bases* rather than
+ * about the result: a replay lands on top of `onto`, and a merge commit holds
+ * both of its sides, so a destination either side already reaches is one the
+ * write contains. Charged on whether `into` merely exists instead, an ordinary
+ * fast-forward — `{onto: "main", into: "main"}` — was refused to a member
+ * holding `source.push`, and comparing tips by oid missed the case where a
+ * side reaches the destination without being it.
+ */
+export const discards = Effect.fn("Api.discards")(function* (
+  into: string,
+  bases: ReadonlyArray<string>,
+) {
+  const repository = yield* Repository;
+  // Resolved exactly as `Repository.merge` resolves them: an oid as itself,
+  // anything else through the ref store, which follows symrefs. Qualifying
+  // first answered `null` for `HEAD`, and a `null` side is a side nothing
+  // matches — so the write was charged a rewrite for the one spelling git
+  // itself uses most.
+  const at = (revision: string) =>
+    isOid(revision)
+      ? Effect.succeed(revision)
+      : repository.resolve(revision).pipe(Effect.catchTag("StorageFailure", Effect.die));
+
+  // Reported as well as judged. The verdict is about the value `into` held at
+  // this instant, and the write happens after a merge or a replay that can
+  // take as long as the history is deep — so the write has to swap against
+  // *this* value, or a push landing in the window turns a write judged a
+  // fast-forward into one that drops commits, which is `source.force-push`'s
+  // to allow and not this caller's.
+  //
+  // Two readings of "what `into` is now", and they differ for a symbolic ref.
+  // Reachability wants the commit it resolves to; the compare-and-swap wants
+  // exactly what the store will compare against, which is the ref's own value
+  // — `null` for a symref, and nothing at all when the destination was spelled
+  // as an oid. Handing the resolved oid over as the swap names a value nobody
+  // wrote, so every write to a symbolic destination failed as a conflict for
+  // good. `Policy.evaluate` splits the same two readings for the same reason.
+  const swap = isOid(into)
+    ? undefined
+    : yield* repository.readRef(into).pipe(Effect.catchTag("StorageFailure", Effect.die));
+  const tip = yield* at(into);
+  // A destination that does not exist yet holds nothing a write could discard.
+  if (tip === null) return { rewrites: false, swap } as const;
+  for (const base of bases) {
+    const oid = yield* at(base);
+    // A base this repository cannot resolve is not evidence of a rewrite. The
+    // verb is about to fail on that revision anyway, and claiming a rewrite
+    // here turns "unknown revision" into a `source.force-push` refusal — an
+    // answer that is both wrong and only given to callers who lack that
+    // capability, so the same request reports two different problems depending
+    // on who asks it.
+    if (oid === null) return { rewrites: false, swap } as const;
+    if (oid === tip) return { rewrites: false, swap } as const;
+    const reaches = yield* repository.isAncestor(tip, oid).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(false),
+        StorageFailure: Effect.die,
+      }),
+    );
+    if (reaches) return { rewrites: false, swap } as const;
+  }
+  return { rewrites: true, swap } as const;
+});
+
+const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
+  // Fail closed, for the reason `gateWrite` gives.
+  const judged = yield* Policy.gate([update], true, false).pipe(Effect.orElseSucceed(() => null));
+  if (judged === null) {
+    return yield* new Invalid({
+      field: "ref",
+      reason: "the repository's policy could not be evaluated",
+    });
+  }
+
+  const refusal = judged.refused.at(0);
+  if (refusal !== undefined) {
+    return yield* new Invalid({ field: "ref", reason: refusal.reason });
+  }
+  return judged.updates.at(0) ?? update;
 });
 
 const changesOf = (files: ReadonlyArray<(typeof FileWire)["Type"]>): ReadonlyArray<FileChange> =>
@@ -358,6 +601,9 @@ const RemoteWire = Schema.Struct({
   name: Schema.String,
   url: Schema.String,
   has_credential: Schema.Boolean,
+  has_key: Schema.Boolean,
+  /** The standing instruction, or `null` for a remote nothing happens to. */
+  sync: Schema.NullOr(Schema.Struct({ mode: Schema.String, refs: Schema.Array(Schema.String) })),
   created_at: Schema.String,
 });
 
@@ -407,6 +653,9 @@ const repo = HttpApiGroup.make("repo")
         encoding: Schema.optional(Encoding),
       }),
       success: Schema.Struct({ oid: OidString }),
+      // Writing objects is a write, and "you may not" is an answer this has
+      // to be able to give.
+      error: Invalid,
     }),
   )
   .add(
@@ -537,6 +786,9 @@ const repo = HttpApiGroup.make("repo")
         problems: Schema.Array(Schema.Struct({ oid: OidString, problem: Schema.String })),
         dangling_refs: Schema.Array(Schema.Struct({ ref: Schema.String, oid: OidString })),
       }),
+      // `Invalid` when the caller may not ask: a whole-store scan is charged
+      // like the other maintenance verbs.
+      error: [Invalid],
     }),
   )
   .add(
@@ -778,12 +1030,18 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("webhookList", "/webhooks", {
       params: RepoParam,
       success: Schema.Struct({ webhooks: Schema.Array(WebhookWire) }),
+      // `Invalid` when the caller may not ask: where a repository sends its
+      // pushes is administrative, not public.
+      error: Invalid,
     }),
   )
   .add(
     HttpApiEndpoint.delete("webhookRemove", "/webhooks/:id", {
       params: { ...RepoParam, id: Schema.String },
       success: Schema.Struct({ deleted: Schema.Boolean }),
+      // Where this repository sends what it holds is administrative, and
+      // "you may not" is an answer this has to be able to give.
+      error: Invalid,
     }),
   )
   .add(
@@ -859,12 +1117,15 @@ const remotes = HttpApiGroup.make("remotes")
     HttpApiEndpoint.get("remoteList", "/remotes", {
       params: RepoParam,
       success: Schema.Struct({ remotes: Schema.Array(RemoteWire) }),
+      // As `webhookList`: administrative, not public.
+      error: Invalid,
     }),
   )
   .add(
     HttpApiEndpoint.delete("remoteRemove", "/remotes/:name", {
       params: { ...RepoParam, name: Schema.String },
       success: Schema.Struct({ deleted: Schema.Boolean }),
+      error: Invalid,
     }),
   )
   .add(
@@ -985,6 +1246,7 @@ type MergeRequest = {
   message?: string;
   strategy?: MergeStrategy;
   into?: string;
+  expected?: Oid | null;
   noFastForward?: boolean;
 };
 
@@ -993,12 +1255,14 @@ type CherryPickRequest = {
   onto: string;
   author?: Signature;
   into?: string;
+  expected?: Oid | null;
 };
 
 type RebaseRequest = {
   branch: string;
   onto: string;
   into?: string;
+  expected?: Oid | null;
 };
 
 type PatchOptions = {
@@ -1011,6 +1275,7 @@ type GcRequest = {
   dryRun?: boolean;
   repack?: boolean;
   reflogGrace?: number;
+  exclude?: ReadonlySet<Oid>;
 };
 
 type PushRequest = {
@@ -1028,6 +1293,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const branch = payload.branch ?? "main";
+        yield* gateWrite(branch.startsWith("refs/") ? branch : `refs/heads/${branch}`);
 
         const built = yield* treeFor(repository, branch, payload).pipe(
           Effect.catchTag("StorageFailure", Effect.die),
@@ -1053,6 +1319,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("blob", ({ payload }) =>
       Effect.gen(function* () {
+        // Writing objects moves no ref, so the policy boundary never sees it
+        // and the guard's charge is deliberately coarse — a write being
+        // `source.push` *or* `source.delete`, since it cannot read a push's
+        // commands. Left at that, a credential scoped to delete a branch could
+        // put unbounded content into the object store, which is the same gap
+        // `CommitPack` closed by gating before it writes the body.
+        yield* requireCapability("source.push");
         const repository = yield* Repository;
         const oid = yield* repository
           .writeBlob(decodeContent(payload.content, payload.encoding))
@@ -1071,6 +1344,8 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("tree", ({ payload }) =>
       Effect.gen(function* () {
+        // As `blob` above: objects are written here and no ref moves.
+        yield* requireCapability("source.push");
         const repository = yield* Repository;
         const oid = yield* (
           payload.entries === undefined
@@ -1132,6 +1407,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("branch", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        yield* gateWrite(`refs/heads/${payload.name}`);
         const oid = yield* repository
           .branch(payload)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
@@ -1141,6 +1417,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("tagCreate", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
+        // `force` drops `Repository.tag`'s create-only compare-and-swap, which
+        // is re-pointing a published tag at an arbitrary commit — the thing
+        // receive-pack charges `source.force-push` for. Gating it as an
+        // ordinary write let a member with `source.push` do it here instead.
+        yield* gateWrite(`refs/tags/${payload.name}`, payload.force === true);
         const request: TagRequest = { name: payload.name, target: payload.target };
         if (payload.message !== undefined) request.message = payload.message;
         if (payload.tagger !== undefined) request.tagger = signatureFrom(payload.tagger);
@@ -1171,14 +1452,53 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("tagRemove", ({ params }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const deleted = yield* repository
-          .deleteTag(params.name)
+        // Applied under the value it was judged against, like every other
+        // gated write: `deleteTag` takes a name and nothing else, so a tag
+        // re-pointed between the decision and the delete would be removed at
+        // a value the policy boundary never saw. `receive` is the delete that
+        // carries a compare-and-swap.
+        const judged = yield* gateOne({
+          name: `refs/tags/${params.name}`,
+          value: null,
+          reason: "tag: delete",
+        });
+        // Whether there was anything to delete, asked before the delete and
+        // through `resolve`. `receive` reports `from` as the value the command
+        // was *judged* against, which for a symbolic ref is `null` — so a
+        // symbolic tag was removed and the answer said it had not been.
+        const existed = yield* repository
+          .resolve(`refs/tags/${params.name}`)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        return { deleted };
+        const results = yield* repository.receive([judged]).pipe(
+          Effect.catchTags({
+            StorageFailure: Effect.die,
+            // A hook refusing a deletion is the repository saying no, not
+            // this server failing — and these endpoints can say so now.
+            HookRejected: (error) => new Invalid({ field: "name", reason: error.message }),
+          }),
+        );
+        const outcome = results.at(0);
+        if (outcome !== undefined && !outcome.ok) {
+          return yield* new Invalid({
+            field: "name",
+            reason: outcome.reason ?? `refs/tags/${params.name} moved while it was being deleted`,
+          });
+        }
+        // `undefined` is "the store returned no result for a command we
+        // submitted", which is not "it was deleted": reading it as `true`
+        // would report a removal that never happened.
+        return { deleted: outcome !== undefined && existed !== null };
       }),
     )
     .handle("fsck", () =>
       Effect.gen(function* () {
+        // Charged like `gc`, for the same reason and not for `gc`'s reason:
+        // this changes nothing, and it reads every object in the store. That
+        // is the whole cost, and it has no ref for a gate to hang off, so
+        // anybody who could push could drive a full-store scan in a loop. The
+        // guard already keeps it off the anonymous path; this keeps it off the
+        // contributor's.
+        yield* requireCapability("repo.admin");
         const repository = yield* Repository;
         const report = yield* repository.fsck.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return {
@@ -1192,17 +1512,71 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("branchRemove", ({ params }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const deleted = yield* repository
-          .deleteRef(`refs/heads/${params.name}`)
+        // Under the judged value, for the reason `tagRemove` gives: a branch
+        // that moved between the decision and the delete would otherwise lose
+        // a push the boundary never judged.
+        const judged = yield* gateOne({
+          name: `refs/heads/${params.name}`,
+          value: null,
+          reason: "delete",
+        });
+        // As in `tagRemove`: asked before the delete and through `resolve`, so
+        // a symbolic branch is not reported as one that was never there.
+        const existed = yield* repository
+          .resolve(`refs/heads/${params.name}`)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        return { deleted };
+        const results = yield* repository.receive([judged]).pipe(
+          Effect.catchTags({
+            StorageFailure: Effect.die,
+            // A hook refusing a deletion is the repository saying no, not
+            // this server failing — and these endpoints can say so now.
+            HookRejected: (error) => new Invalid({ field: "name", reason: error.message }),
+          }),
+        );
+        const outcome = results.at(0);
+        if (outcome !== undefined && !outcome.ok) {
+          return yield* new Invalid({
+            field: "name",
+            reason: outcome.reason ?? `refs/heads/${params.name} moved while it was being deleted`,
+          });
+        }
+        // As in `tagRemove`: a missing result is not a deletion.
+        return { deleted: outcome !== undefined && existed !== null };
       }),
     )
     .handle("reset", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const request: SetRefRequest = { name: payload.ref, to: payload.to };
-        if (payload.expected !== undefined) request.expected = payload.expected;
+        // Through the policy boundary, not around it. This endpoint moves a
+        // ref to an arbitrary value, which is every rule that boundary
+        // exists for — genesis immutability, hub append-only, protected
+        // branches — and reaching `setRef` directly skipped all of them.
+        // A raw oid is a legal target here — `setRef` takes one — and not
+        // every ref store resolves one, so it is recognised before asking.
+        const target = isOid(payload.to)
+          ? payload.to
+          : yield* repository
+              .resolve(payload.to)
+              .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        if (target === null) {
+          return yield* new Invalid({ field: "to", reason: `unknown revision '${payload.to}'` });
+        }
+
+        // The judged update carries the value the decision was made against,
+        // and it is that value the write is applied under: deciding on one
+        // state and writing against another is the race the boundary exists
+        // to close.
+        const judged = yield* gateOne({
+          name: payload.ref,
+          value: target,
+          expected: payload.expected,
+        });
+
+        // The *resolved* oid, not the name it was resolved from: handing
+        // `setRef` the name would resolve it a second time, and a source ref
+        // that moved in between would land a value the policy never saw.
+        const request: SetRefRequest = { name: payload.ref, to: target };
+        if (judged.expected !== undefined) request.expected = judged.expected;
         const moved = yield* repository
           .setRef(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
@@ -1219,25 +1593,82 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         };
         if (payload.message !== undefined) request.message = payload.message;
         if (payload.strategy !== undefined) request.strategy = payload.strategy;
-        if (payload.into !== undefined) request.into = payload.into;
+        // Objects are written whether or not `into` is set — a merge produces
+        // a commit and a tree either way — and without `into` no ref moves, so
+        // `gateWrite` below never runs and nothing else charges it. The same
+        // gap `blob` and `tree` were closed for.
+        yield* requireCapability("source.push");
         if (payload.no_fast_forward !== undefined) request.noFastForward = payload.no_fast_forward;
+        // A merge *into a third branch* is a rewrite: the result is a commit
+        // over `ours` and `theirs`, and nothing makes it contain what `into`
+        // currently holds. Only merging into one of its own sides is the
+        // fast-forward-or-descend transition an ordinary push is.
+        //
+        // The *qualified* name goes to both the gate and the write. Judged
+        // qualified and written raw, `into: "main"` was gated as
+        // `refs/heads/main` and written to a top-level ref called `main`: the
+        // branch never moved and the response said it had.
+        if (payload.into !== undefined) {
+          const into = yield* branchRefOf(payload.into);
+          request.into = into;
+          // Compared as *revisions*, not as names. `ours` and `theirs` take
+          // anything `merge` can resolve — an oid, a tag, a tracking ref — so
+          // comparing the spellings charged `source.force-push` for a merge
+          // into one of its own sides whenever the side happened to be
+          // written another way, and refused it to a member holding only
+          // `source.push`. An `into` that does not exist yet holds nothing
+          // that a merge could discard.
+          // Resolved exactly as `Repository.merge` resolves them: an oid as
+          // itself, anything else through the ref store, which follows
+          // symrefs. Qualifying first answered `null` for `HEAD` — and a
+          // `null` side is a side nothing matches, so the merge was charged a
+          // rewrite again for the one spelling git itself uses most.
+          const judged = yield* discards(into, [payload.ours, payload.theirs]);
+          yield* gateWrite(into, judged.rewrites);
+          request.expected = judged.swap;
+        }
         const outcome = yield* repository
           .merge(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return outcome;
       }),
     )
-    .handle("cherry-pick", ({ payload }) => {
-      const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
-      if (payload.author !== undefined) request.author = signatureFrom(payload.author);
-      if (payload.into !== undefined) request.into = payload.into;
-      return cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
-    })
-    .handle("rebase", ({ payload }) => {
-      const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
-      if (payload.into !== undefined) request.into = payload.into;
-      return rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
-    })
+    .handle("cherry-pick", ({ payload }) =>
+      Effect.gen(function* () {
+        // As `merge` above: a cherry-pick writes a commit with or without a
+        // branch to land it on.
+        yield* requireCapability("source.push");
+        const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
+        if (payload.author !== undefined) request.author = signatureFrom(payload.author);
+        // Qualified once, for the gate and the write alike; see `merge` above.
+        // And a rewrite only when there is something to rewrite: an `into`
+        // that does not exist yet holds nothing a replay could discard, and
+        // charging `source.force-push` for it refused the readme's own
+        // contributor set a branch they were creating.
+        if (payload.into !== undefined) {
+          request.into = yield* branchRefOf(payload.into);
+          const judged = yield* discards(request.into, [payload.onto]);
+          yield* gateWrite(request.into, judged.rewrites);
+          request.expected = judged.swap;
+        }
+        return yield* cherryPick(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
+      }),
+    )
+    .handle("rebase", ({ payload }) =>
+      Effect.gen(function* () {
+        // As `merge` above: a rebase writes its replayed commits either way.
+        yield* requireCapability("source.push");
+        const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
+        // As `cherry-pick` above.
+        if (payload.into !== undefined) {
+          request.into = yield* branchRefOf(payload.into);
+          const judged = yield* discards(request.into, [payload.onto]);
+          yield* gateWrite(request.into, judged.rewrites);
+          request.expected = judged.swap;
+        }
+        return yield* rebase(request).pipe(Effect.catchTag("StorageFailure", Effect.die));
+      }),
+    )
     .handle("diff", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
@@ -1436,6 +1867,11 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("gc", ({ payload }) =>
       Effect.gen(function* () {
+        // Irreversible, and charged accordingly: this deletes objects and
+        // rewrites packs, and a `--reflog-grace 0` collection takes the record
+        // of where a branch was with them. Every other verb that reaches the
+        // object store this hard is behind a ref gate; this one has no ref.
+        yield* requireCapability("repo.admin");
         const repository = yield* Repository;
         const request: GcRequest = {};
         if (payload.dry_run !== undefined) request.dryRun = payload.dry_run;
@@ -1445,6 +1881,17 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         if (payload.reflog_grace_ms !== undefined) {
           request.reflogGrace = Math.max(0, payload.reflog_grace_ms);
         }
+        // Redaction's other half: a tombstoned payload is still named by its
+        // own event's tree, so it survives reachability unless excluded here.
+        //
+        // Computed for a dry run too, though it deletes nothing. A dry run
+        // exists to predict the real one, and skipping the set to save a trust
+        // fold made it predict the wrong answer: a tombstoned payload was
+        // reported as reachable and "would remove 0", and the same call
+        // without `dry_run` removed it.
+        request.exclude = yield* Redaction.excluded().pipe(
+          Effect.catchTag("StorageFailure", Effect.die),
+        );
         const report = yield* repository
           .gc(request)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
@@ -1460,6 +1907,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("webhookAdd", ({ payload }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const subscribers = yield* Subscribers;
         const added = yield* subscribers
           .add(payload)
@@ -1469,6 +1919,13 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("webhookList", () =>
       Effect.gen(function* () {
+        // Charged what registering one is charged. Listing looks like a read
+        // and is not: what it hands back is every receiver's delivery URL —
+        // where this repository's pushes are already being sent, and often an
+        // internal address that was never meant to be published. On a
+        // repository nobody granted `repo.read`, which is how an open-source
+        // repository is served, it was readable by anyone who could reach it.
+        yield* requireCapability("repo.admin");
         const subscribers = yield* Subscribers;
         const rows = yield* subscribers.list.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { webhooks: rows.map(redact) };
@@ -1476,6 +1933,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     )
     .handle("webhookRemove", ({ params }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const subscribers = yield* Subscribers;
         const deleted = yield* subscribers
           .remove(params.id)
@@ -1546,15 +2006,32 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
   group
     .handle("remoteAdd", ({ payload }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const registry = yield* Remotes;
+        // `refs` is optional on the wire and not in the registry: absent means
+        // everything the mode carries, and saying so once here keeps every
+        // reader from having to know that.
+        const asked: RemoteRequest = { name: payload.name, url: payload.url };
+        if (payload.credential !== undefined) asked.credential = payload.credential;
+        if (payload.key !== undefined) asked.key = payload.key;
+        if (payload.sync !== undefined) {
+          asked.sync = { mode: payload.sync.mode, refs: payload.sync.refs ?? [] };
+        }
         const added = yield* registry
-          .add(payload)
+          .add(asked)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return redactRemote(added);
       }),
     )
     .handle("remoteList", () =>
       Effect.gen(function* () {
+        // As `webhookList`: every remote's URL, whether it holds a credential,
+        // and the standing instruction that says what this repository sends
+        // there. Administrative either way, and charged like the registration
+        // that put it there.
+        yield* requireCapability("repo.admin");
         const registry = yield* Remotes;
         const rows = yield* registry.list.pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { remotes: rows.map(redactRemote) };
@@ -1562,6 +2039,9 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("remoteRemove", ({ params }) =>
       Effect.gen(function* () {
+        // Where this repository sends what it holds is an administrative
+        // question, and nothing about it moves a ref for the boundary to judge.
+        yield* requireCapability("repo.admin");
         const registry = yield* Remotes;
         const deleted = yield* registry
           .remove(params.name)
@@ -1571,8 +2051,29 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("fetch", ({ payload }) =>
       Effect.gen(function* () {
+        // Negotiation is a disclosure. `Sync.fetchFrom` offers a `have` line
+        // for every local ref, so pointing this at a URL of the caller's
+        // choosing hands that URL the commit oids of a read-restricted
+        // repository — and `source.push` does not carry `repo.read`. The
+        // remote need not even be registered, so `remoteAdd`'s own charge is
+        // not the one standing behind this.
+        yield* requireRead();
         const target = yield* remoteFor(payload);
-        // `fetchFrom` declares both options as possibly-undefined and treats an
+        // A fetch writes this repository's tracking refs, so it is a write.
+        // Both namespaces it can reach, not only the tracking one: `Sync`
+        // rewrites `refs/heads/*` into `refs/remotes/<name>/*` and leaves tag
+        // names exactly as the remote spelled them, so gating tracking alone
+        // let `refs/tags/*` in past the policy boundary.
+        yield* gateWrite(`refs/remotes/${target.name}/*`);
+        // Tags are asked about rather than demanded. A repository protecting
+        // `refs/tags/*` still has tracking refs to update, and refusing the
+        // whole verb for the half it may not do left it unable to replicate at
+        // all — a stronger rule than the one the operator wrote. The tags it
+        // did not take are visible in the answer, which lists what moved.
+        const tags = yield* Policy.gateWrite("refs/tags/*").pipe(
+          Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
+        );
+        // `fetchFrom` declares its options as possibly-undefined and treats an
         // absent value and an undefined one the same way.
         const fetched = yield* fetchFrom({
           remote: target.name,
@@ -1580,12 +2081,18 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
           credential: target.credential,
           refs: payload.refs,
           depth: payload.depth,
+          tags: tags === null,
         });
         return { remote: target.name, refs: fetched.refs, objects: fetched.objects };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
     .handle("push", ({ payload }) =>
       Effect.gen(function* () {
+        // Sending this repository's objects to a URL of the caller's choosing
+        // is a *read* of everything named, and `source.push` does not imply
+        // `repo.read`: a credential scoped exactly as the readme shows for a
+        // contributor could otherwise copy a read-restricted repository out.
+        yield* requireRead();
         const target = yield* remoteFor(payload);
         const request: PushRequest = {
           url: target.url,
@@ -1611,7 +2118,19 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
     )
     .handle("pull", ({ payload }) =>
       Effect.gen(function* () {
+        // A pull is a fetch with a branch move on the end; the disclosure
+        // `fetch` above describes is the same one.
+        yield* requireRead();
         const target = yield* remoteFor(payload);
+        // A pull moves a local branch, which is the same transition a push
+        // makes and has to meet the same rules — a protected branch is not
+        // less protected because the commits arrived over a remote.
+        yield* gateWrite(refNameOf(payload.branch));
+        // And the fetch underneath it, which writes tracking refs. Not tags:
+        // a pull asks for one branch by name, so it never takes any — and
+        // gating a namespace it cannot write left a repository that protects
+        // `refs/tags/*` unable to pull at all.
+        yield* gateWrite(`refs/remotes/${target.name}/*`);
         // `pull` declares `depth` as possibly-undefined and treats an absent
         // value and an undefined one the same way.
         return yield* pull({ target, branch: payload.branch, depth: payload.depth });

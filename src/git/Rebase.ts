@@ -194,6 +194,17 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   readonly author?: Signature;
   /** The ref to move on success; absent computes the replay and stops. */
   readonly into?: string;
+  /**
+   * What `into` held when the *caller* judged this write, if it judged one.
+   *
+   * The boundary decides whether a replay is a force push by asking what
+   * `into` holds, and it asks before any of this runs. Read again here, the
+   * swap compares against a value the boundary never saw — so a push landing
+   * between the two turns a write that was judged a fast-forward into one that
+   * drops commits, which is `source.force-push`'s to allow and not this
+   * caller's. Handed in, the swap fails and the caller is told to look again.
+   */
+  readonly expected?: Oid | null;
 }) {
   const repository = yield* Repository;
   const commit = yield* resolveCommit(input.commit);
@@ -202,7 +213,12 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   // and writes objects, and a push landing in that window is a real race. With
   // no `expected` the swap below is an unconditional write, so the pick would
   // silently overwrite whatever arrived.
-  const intoWas = input.into === undefined ? null : yield* repository.resolve(input.into);
+  const intoWas =
+    input.expected !== undefined
+      ? input.expected
+      : input.into === undefined
+        ? null
+        : yield* repository.resolve(input.into);
 
   const replayed = yield* replayOne({ commit, onto, author: input.author });
 
@@ -238,13 +254,20 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
   readonly onto: string;
   /** The ref to move on success; absent computes the replay and stops. */
   readonly into?: string;
+  /** What `into` held when the caller judged this write; see `cherryPick`. */
+  readonly expected?: Oid | null;
 }) {
   const repository = yield* Repository;
   const branch = yield* resolveCommit(input.branch);
   const onto = yield* resolveCommit(input.onto);
   // Read before the replay, which takes as long as the history is deep: this
   // is what the ref move at the end compares against.
-  const intoWas = input.into === undefined ? null : yield* repository.resolve(input.into);
+  const intoWas =
+    input.expected !== undefined
+      ? input.expected
+      : input.into === undefined
+        ? null
+        : yield* repository.resolve(input.into);
 
   // `onto..branch`, oldest first — the merge base is where the two histories
   // parted, so everything after it on `branch` is what `onto` lacks. A branch

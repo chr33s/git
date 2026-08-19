@@ -155,7 +155,7 @@ describe.skipIf(!hasChromium)("Client in real Chromium", () => {
     const browser = await chromium.launch();
 
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "browser-"));
-    const server = await serve({ root });
+    const server = await serve({ root, allowAnonymousWrites: true });
     try {
       const head = await Effect.runPromise(
         Effect.gen(function* () {
