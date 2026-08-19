@@ -454,7 +454,7 @@ export const entries = Effect.fn("hub.Queue.entries")(function* (queue: string) 
   const repository = yield* Repository;
 
   const head = yield* repository.resolve(refOf(queue));
-  if (head === null) return { events: [], unreadable: [] } as const;
+  if (head === null) return { events: [], unreadable: [], walked: 0 } as const;
 
   const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* Event.ceilingOf());
   const events: Array<{
@@ -485,7 +485,12 @@ export const entries = Effect.fn("hub.Queue.entries")(function* (queue: string) 
     events.push({ commit, payload, signer: yield* signerOf(record.payload, record.signatures) });
   }
 
-  return { events, unreadable } as const;
+  // `walked`, not `events.length`: the ceiling bounds every commit this walk
+  // reads — joins and records it cannot decode included — so a count of the
+  // decodable ones is the wrong number to warn on. Undercounted, the warning
+  // that a queue is filling up could never fire before the ref crossed the
+  // ceiling and became unreadable and unremovable at once.
+  return { events, unreadable, walked: parents.size } as const;
 });
 
 /** One pull request's place in the queue. */
@@ -522,11 +527,13 @@ export interface Projection {
    */
   readonly openedBy: Fingerprint | null;
   /**
-   * How many records this queue holds.
+   * How many commits this queue's history holds.
    *
-   * Surfaced because it is the number that decides whether the ref is
-   * approaching the ceiling a fold will walk — the one bound a queue, unlike
-   * every other hub ref, can reach just by doing its job for long enough.
+   * Every commit, not every readable record: joins and undecodable records are
+   * walked too, and it is the walk the ceiling bounds. Surfaced because this is
+   * the number that decides whether the ref is approaching that ceiling — the
+   * one bound a queue, unlike every other hub ref, can reach just by doing its
+   * job for long enough.
    */
   readonly records: number;
   readonly ignored: ReadonlyArray<Oid>;
@@ -574,7 +581,14 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
 
       case "queue.entered": {
         const head = Event.unqualify(payload.head);
-        if (opened === null || head === null) {
+        // The id as well as the oid. `issue` refuses a record whose `pr` cannot
+        // name a pull request, but the boundary charges this namespace by ref
+        // name without decoding what lands on it — so a record written another
+        // way could put an unusable id in `entries`, and every verb that later
+        // tried to *act* on that entry refused it, aborting the run and every
+        // run after it on a ref nothing can shorten. What this fold yields has
+        // to be what the verbs can act on.
+        if (opened === null || head === null || !Event.isPullRequestId(payload.pr)) {
           ignored.push(commit);
           break;
         }
@@ -637,7 +651,7 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
     resets,
     closed,
     openedBy: opened?.by ?? null,
-    records: walked.events.length,
+    records: walked.walked,
     // Said out loud rather than swallowed: a record that did not count is
     // exactly what somebody will be looking for.
     ignored,

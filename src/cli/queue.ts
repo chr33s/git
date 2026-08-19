@@ -874,6 +874,10 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // folded for one prefix is the same pull request in the next.
   const folds: Policy.FoldCache = new Map();
   const mentions: Policy.MentionCache = new Map();
+  // And the merges, which is the expensive one: each ask re-derives the whole
+  // chain beneath it, so without this a pass waiting on a check part-way up a
+  // deep chain paid for the same merges again on every wake.
+  const merges: Policy.MergeCache = new Map();
   let landedAt = -1;
   for (const [at, step] of chain.entries()) {
     const decision = yield* Policy.evaluate({
@@ -884,6 +888,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       rules,
       folds,
       mentions,
+      merges,
     });
     if (!decision.ok) {
       // Kept, not discarded. A pass that refused every candidate used to report

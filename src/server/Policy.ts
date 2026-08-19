@@ -318,6 +318,28 @@ export type FoldCache = Map<string, PullRequestState>;
 export type MentionCache = Map<string, ReadonlySet<string>>;
 
 /**
+ * Merges one batch has already re-derived, keyed by the two commits merged.
+ *
+ * A merge is a pure function of its two sides and of objects that never change,
+ * so within one request the same pair has one answer. Shared for the reason
+ * `FoldCache` is, and it matters more here: verifying a chain of depth D asks
+ * about D merges, and a caller looking for the longest landable prefix asks
+ * about the chain once per prefix — which without this is D(D+1)/2 full
+ * three-way merges per pass, each one a merge-base walk and three whole-tree
+ * flattens, repeated on every wake while a check is pending.
+ *
+ * The caller's, not a module-level cache, and deliberately: a merged tree is a
+ * tree this wrote, and a memo outliving the request could hand back an oid that
+ * a collection in between had swept.
+ */
+export type MergeCache = Map<string, MergeOf>;
+
+interface MergeOf {
+  readonly tree: Oid;
+  readonly conflicts: ReadonlyArray<{ readonly path: string }>;
+}
+
+/**
  * The hub refs one batch has already been allowed to create.
  *
  * A push is judged in full before any of it is applied, so a bound read from
@@ -662,6 +684,8 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   readonly folds?: FoldCache;
   /** As `folds`, for the walk that decides which pull requests to fold. */
   readonly mentions?: MentionCache;
+  /** As `folds`, for the merges a candidate chain re-derives. */
+  readonly merges?: MergeCache;
   /** As `folds`, for the bounds a batch could otherwise outrun; see `Openings`. */
   readonly opening?: Openings;
 }) {
@@ -671,6 +695,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // direct caller outside `gate` is.
   const folds: FoldCache = input.folds ?? new Map();
   const mentions: MentionCache = input.mentions ?? new Map();
+  const merges: MergeCache = input.merges ?? new Map();
   const opening: Openings = input.opening ?? new Set();
   const current = yield* repository.resolve(update.name);
   // Two readings of "what the ref is now", and they differ for a symbolic ref.
@@ -896,6 +921,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     rules: input.rules,
     folds,
     mentions,
+    merges,
   });
   return gate ?? namespace;
 });
@@ -1526,6 +1552,7 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
   readonly rules: Rules;
   readonly folds: FoldCache;
   readonly mentions: MentionCache;
+  readonly merges: MergeCache;
 }) {
   const repository = yield* Repository;
   const { rules } = input;
@@ -1602,14 +1629,19 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
       } satisfies Chain;
     }
 
-    // And now the expensive half, asked only of a step everything else allows.
-    const merged = yield* repository.mergeTree({ ours: step.onto, theirs: step.head }).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        StorageFailure: () => Effect.succeed(null),
-        Invalid: () => Effect.succeed(null),
-      }),
-    );
+    // And now the expensive half, asked only of a step everything else allows —
+    // and asked once per pair within a request, however many times a caller
+    // walks the chain.
+    const key = `${step.onto}\u0000${step.head}`;
+    const merged =
+      input.merges.get(key) ??
+      (yield* repository.mergeTree({ ours: step.onto, theirs: step.head }).pipe(
+        Effect.catchTags({
+          ObjectNotFound: () => Effect.succeed(null),
+          StorageFailure: () => Effect.succeed(null),
+          Invalid: () => Effect.succeed(null),
+        }),
+      ));
     if (merged === null) {
       return {
         kind: "refused",
@@ -1624,6 +1656,8 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
           .join(", ")}`,
       } satisfies Chain;
     }
+    input.merges.set(key, { tree: merged.tree, conflicts: merged.conflicts });
+
     // The one rule everything else here exists to make safe.
     if (merged.tree !== step.tree) {
       return {
@@ -1654,6 +1688,7 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   readonly rules: Rules;
   readonly folds: FoldCache;
   readonly mentions: MentionCache;
+  readonly merges: MergeCache;
 }) {
   if (!needsReview(input.rules)) return null;
 
