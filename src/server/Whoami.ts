@@ -97,13 +97,21 @@ const requirementsOf = (rules: Policy.Rules): ReadonlyArray<string> => {
     why.push(`requiredChecks: [${rules.requiredChecks.join(", ")}]`);
   }
   if (rules.requireResolvedThreads) why.push("requireResolvedThreads");
-  // Not a requirement but a second way to meet the ones above, and the one an
-  // agent most needs told: without it a queue candidate is refused however well
-  // it is built, and there is nothing in the refusal to say the branch simply
-  // does not take them.
-  if (rules.queueCandidates) why.push(`queueCandidates: up to ${rules.queueDepth} deep`);
   return why;
 };
+
+/**
+ * What a branch offers *besides* a direct push of an approved revision.
+ *
+ * Kept apart from `requirementsOf` deliberately. `verdictFor` reads a non-empty
+ * requirement list as "a direct push meets none of these", which is exactly
+ * what `Policy.protectedBranch` does — it returns early when no requirement is
+ * set. Listed among them, `queueCandidates` made a branch with no review
+ * requirements at all report itself as refusing pushes the boundary allows: a
+ * setting that widens what may land, reported as though it narrowed it.
+ */
+const alternativesOf = (rules: Policy.Rules): ReadonlyArray<string> =>
+  rules.queueCandidates ? [`or a queue candidate, up to ${String(rules.queueDepth)} deep`] : [];
 
 /**
  * The standing verdict for one ref, before any particular push exists.
@@ -131,7 +139,11 @@ const verdictFor = (input: {
     ? { push: "allowed", why: ["protected: no force-push, no deletion"] }
     : {
         push: "refused",
-        why: [...requirements, "a direct push meets none of these; open a pull request"],
+        why: [
+          ...requirements,
+          "a direct push meets none of these; open a pull request",
+          ...alternativesOf(input.rules),
+        ],
       };
 };
 

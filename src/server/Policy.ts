@@ -278,13 +278,26 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     maxUsageTokens: loaded.maxUsageTokens ?? 0,
     usageWindowSeconds: loaded.usageWindowSeconds ?? 0,
     queueCandidates: loaded.queueCandidates ?? false,
-    // Clamped rather than taken as written. What this number buys is work the
-    // host does on the synchronous push path, so the document may ask for less
-    // than the host's ceiling and never for more; a negative one reads as none,
-    // which is what a chain of no steps already is.
-    queueDepth: Math.min(Math.max(loaded.queueDepth ?? QUEUE_DEPTH, 0), MAX_QUEUE_DEPTH),
+    queueDepth: clampDepth(loaded.queueDepth),
   };
 });
+
+/**
+ * The queue depth a repository actually gets, from what it asked for.
+ *
+ * Clamped rather than taken as written. What this number buys is work the host
+ * does on the synchronous push path, so the document may ask for less than the
+ * host's ceiling and never for more; a negative one reads as none, which is
+ * what a chain of no steps already is.
+ *
+ * Exported because every door that accepts rules has to clamp them the same
+ * way. The JSON verb echoed back whatever it was handed, so a caller writing
+ * `queueDepth: 1000000` was told the repository now enforced that, while the
+ * rules file it had just written would be read back clamped — two answers to
+ * one question, from one repository.
+ */
+export const clampDepth = (asked: number | undefined): number =>
+  Math.min(Math.max(asked ?? QUEUE_DEPTH, 0), MAX_QUEUE_DEPTH);
 
 /**
  * Pull requests folded once for a batch of ref updates.

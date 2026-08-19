@@ -1879,7 +1879,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const rules: Policy.Rules = {
           ...payload,
           queueCandidates: payload.queueCandidates ?? Policy.OPEN.queueCandidates,
-          queueDepth: payload.queueDepth ?? Policy.OPEN.queueDepth,
+          // Clamped by the same rule that reads the file back, so what this
+          // answers with is what the repository will enforce.
+          queueDepth: Policy.clampDepth(payload.queueDepth),
         };
         const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
         const tree = yield* repository.writeTree([

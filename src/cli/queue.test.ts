@@ -655,6 +655,153 @@ describe("cli queue", () => {
     assert.equal(state.entries[0].head, moved, "at its new revision, in its old place");
   });
 
+  it("records a candidate once, however many passes rebuild it", async () => {
+    // `refs/hub/queue/*` is append-only, undeletable, and capped at the number
+    // of events a fold will walk. A pass that re-recorded an identical
+    // candidate every time — and the documented wake rules run one constantly —
+    // would grow it to that cap, at which point the queue becomes unreadable
+    // and unremovable at once.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    await enter(await propose("one"));
+
+    await run();
+    const once = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    await run();
+    await run();
+    const thrice = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+
+    assert.deepEqual(thrice.entries[0].candidate, once.entries[0].candidate);
+    const events = await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.resolve(`refs/hub/queue/${queue}`),
+      ),
+    );
+    assert.notEqual(events, null);
+    const walked = await inRepo(
+      Effect.gen(function* () {
+        const repository = yield* GitRepository.Repository;
+        let at = events;
+        let count = 0;
+        while (at !== null) {
+          const commit = yield* repository.readCommit(at);
+          count += 1;
+          at = commit.parents[0] ?? null;
+        }
+        return count;
+      }),
+    );
+    // opened, entered, one candidate — and nothing added by the two passes
+    // that rebuilt exactly the same commit.
+    assert.equal(walked, 3);
+  });
+
+  it("builds no deeper than the branch will take", async () => {
+    // Past the ceiling the boundary reads a push as not a chain at all, so
+    // anything built beyond it is published and recorded and can never land.
+    await publish(protectedRules({ queueDepth: 1 }));
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+
+    const pass = await run();
+    assert.deepEqual(pass.landed, [first]);
+    assert.equal(pass.built.length, 1, "one step, because one is all it can land");
+    assert.deepEqual(
+      pass.unbuilt.map((entry: { pr: string }) => entry.pr),
+      [second],
+    );
+  });
+
+  it("evicts an entry whose required check came back failing", async () => {
+    // A check that has not run is the ordinary case and must keep waiting; one
+    // that reported failure is the entry's own problem, and leaving it queued
+    // blocks everything behind it for ever.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    await enter(first);
+
+    const built = await run();
+    assert.deepEqual(built.dropped, [], "not run is not failed");
+
+    await cli([
+      "pr",
+      "check",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--name",
+      "test",
+      "--status",
+      "failure",
+      "--head",
+      built.built[0].commit,
+      "project",
+      first,
+    ]);
+
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { pr: string; reason: string }) => entry.reason),
+      ["failed"],
+    );
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.deepEqual(state.entries, [], "and the queue is free to move on");
+  });
+
+  it("cleans up the candidate branches it no longer needs", async () => {
+    // Ordinary branches, cleaned up like ordinary branches. Left behind, every
+    // candidate the queue ever built stays a ref pinning its objects out of
+    // reach of collection for good.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+
+    const built = await run();
+    assert.equal(built.built.length, 2);
+    const queueBranches = () =>
+      inRepo(
+        Effect.gen(function* () {
+          const repository = yield* GitRepository.Repository;
+          const names: Array<string> = [];
+          for (const [name] of yield* repository.refs) {
+            if (name.startsWith("refs/heads/queue/")) names.push(name);
+          }
+          return names.sort();
+        }),
+      );
+    assert.equal((await queueBranches()).length, 2, "both are published for CI to fetch");
+
+    // The first candidate goes green and lands; its branch is no longer what
+    // anything fetches, and the second is rebuilt onto the new tip.
+    await cli([
+      "pr",
+      "check",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--name",
+      "test",
+      "--status",
+      "success",
+      "--head",
+      built.built[0].commit,
+      "project",
+      first,
+    ]);
+    const landed = await run();
+    assert.deepEqual(landed.landed, [first]);
+    assert.equal(
+      (await queueBranches()).length,
+      1,
+      "what is still waiting keeps its branch, and nothing else does",
+    );
+  });
+
   it("refuses an entry for a pull request aimed somewhere else", async () => {
     await publish(protectedRules());
     const pr = (

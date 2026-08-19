@@ -403,17 +403,49 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   const branchOf = (position: number) =>
     `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/${String(position)}`;
 
-  const chain: Array<{ readonly pr: string; readonly commit: Oid; readonly head: Oid }> = [];
+  const chain: Array<{
+    readonly pr: string;
+    readonly commit: Oid;
+    readonly head: Oid;
+    readonly branch: string;
+    readonly checks: ReadonlyArray<HubProjection.Check>;
+  }> = [];
   let tip = from;
   let position = 0;
 
   for (const entry of state.entries) {
+    // Bounded by what the boundary will actually walk. Past the ceiling
+    // `candidateChain` reads a push as not a chain at all, so building beyond
+    // it publishes candidates and records that can never land — work nobody
+    // asked for on a ref that only grows.
+    if (position >= rules.queueDepth) {
+      unbuilt.push({
+        pr: entry.pr,
+        reason: `this branch takes chains ${String(rules.queueDepth)} deep, and this pass is full`,
+      });
+      continue;
+    }
+
+    // Every way a read can fail, not only `Invalid` — the same rule the merge
+    // below follows, and for the same reason: a fold this replica cannot
+    // complete says nothing about the entry, and letting it escape aborted the
+    // whole pass.
     const pullRequest = yield* HubProjection.project(genesis, trust, entry.pr).pipe(
-      Effect.catchTag("Invalid", () => Effect.succeed(null)),
+      Effect.catchTags({
+        Invalid: (error) => Effect.succeed(error),
+        ObjectNotFound: (error) => Effect.succeed(error),
+        StorageFailure: (error) => Effect.succeed(error),
+      }),
     );
+    if ("_tag" in pullRequest) {
+      unbuilt.push({ pr: entry.pr, reason: `could not be read here: ${pullRequest._tag}` });
+      continue;
+    }
+
     // Whatever put it in the queue, what it proposes *now* is what can land.
+    // Separated from the read failure above deliberately: this is a fact about
+    // the pull request, which is what a permanent `queue.left` may record.
     if (
-      pullRequest === null ||
       pullRequest.state !== "open" ||
       pullRequest.base !== target ||
       pullRequest.head !== entry.head
@@ -422,11 +454,10 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       continue;
     }
 
-    // Every way a read can fail, not only `Invalid`. A replica that does not
-    // hold one entry's objects is a runner that cannot build *that* entry, and
-    // letting the failure escape stopped the whole pass — so one unfetched head
-    // blocked every other pull request in the queue, on every later run, with
-    // nothing in the output naming the cause.
+    // A replica that does not hold one entry's objects is a runner that cannot
+    // build *that* entry. Letting the failure escape stopped the whole pass, so
+    // one unfetched head blocked every other pull request in the queue, on
+    // every later run, with nothing in the output naming the cause.
     const merged = yield* repository.mergeTree({ ours: tip, theirs: entry.head }).pipe(
       Effect.catchTags({
         Invalid: (error) => Effect.succeed(error),
@@ -455,19 +486,39 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       message: `queue: ${entry.pr} onto ${target}\n`,
       author: yield* candidateSignature(tip, entry.head),
     });
-    chain.push({ pr: entry.pr, commit: candidate, head: entry.head });
+    chain.push({
+      pr: entry.pr,
+      commit: candidate,
+      head: entry.head,
+      branch,
+      checks: pullRequest.checks,
+    });
     built.push({ pr: entry.pr, commit: candidate });
+
+    // Recorded only where it differs from what the queue already says. A
+    // candidate is a pure function of what it merges, so an unchanged batch
+    // rebuilds the identical commit — and appending that every pass would grow
+    // an undeletable ref towards the ceiling a fold will walk, at which point
+    // the queue becomes unreadable and unremovable at once. The branch is
+    // written unconditionally, because it is cheap and may have been deleted.
+    const unchanged =
+      entry.candidate !== null &&
+      entry.candidate.commit === candidate &&
+      entry.candidate.onto === tip &&
+      entry.candidate.branch === branch;
     if (!input.dryRun) {
       yield* repository.setRef({ name: branch, to: candidate });
-      yield* Queue.candidate({
-        repo: genesis.repoId,
-        queue: state.queue,
-        pr: entry.pr,
-        commit: candidate,
-        onto: tip,
-        branch,
-        key: input.key,
-      });
+      if (!unchanged) {
+        yield* Queue.candidate({
+          repo: genesis.repoId,
+          queue: state.queue,
+          pr: entry.pr,
+          commit: candidate,
+          onto: tip,
+          branch,
+          key: input.key,
+        });
+      }
     }
     tip = candidate;
   }
@@ -543,6 +594,45 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     for (const step of chain.slice(0, landedAt + 1)) landed.push(step.pr);
   }
 
+  // A required check that came back *failing* against a candidate is the one
+  // outcome that says the entry itself is the problem, so it is evicted rather
+  // than left to block everything behind it for ever. "Has not run" is not
+  // failure and must not be read as one — a batch waiting on CI is the ordinary
+  // case, and `checksPassedAt` cannot tell the two apart, so the status is read
+  // here rather than inferred from a boolean.
+  const failing = (step: (typeof chain)[number]): string | null => {
+    for (const name of rules.requiredChecks) {
+      const check = step.checks.find(
+        (candidate) => candidate.name === name && candidate.head === step.commit,
+      );
+      if (check?.status === "failure") return name;
+    }
+    return null;
+  };
+  for (const step of chain.slice(landed.length)) {
+    const broke = failing(step);
+    if (broke !== null) yield* drop(step.pr, "failed");
+  }
+
+  const waiting = chain
+    .slice(landed.length)
+    .filter((step) => !dropped.some((entry) => entry.pr === step.pr));
+
+  // Candidate branches are ordinary branches, so they are cleaned up like
+  // ordinary branches: what is still waiting keeps its branch, because that is
+  // what CI fetches, and everything else goes. Left behind, every candidate the
+  // queue had ever built stayed a ref — pinning its objects out of reach of
+  // collection for good, on a repository whose whole point is that it can be
+  // collected.
+  if (!input.dryRun) {
+    const keep = new Set(waiting.map((step) => step.branch));
+    const prefix = `refs/heads/queue/${target.replace(/^refs\/heads\//, "")}/`;
+    for (const [name] of yield* repository.refs) {
+      if (!name.startsWith(prefix) || keep.has(name)) continue;
+      yield* repository.deleteRef(name);
+    }
+  }
+
   return {
     queue: state.queue,
     target,
@@ -552,7 +642,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     built,
     dropped,
     unbuilt,
-    waiting: chain.slice(landed.length).map((step) => step.pr),
+    waiting: waiting.map((step) => step.pr),
     refused,
     reset,
     dryRun: input.dryRun,
