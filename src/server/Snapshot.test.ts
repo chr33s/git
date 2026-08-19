@@ -214,6 +214,70 @@ describe("Snapshot", () => {
     }
   });
 
+  it("journals each state with the movement that produced it, and restores any of them", async () => {
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+
+        // Three states: main born, topic born beside it, topic gone again.
+        const first = yield* repository.commit({
+          branch: "refs/heads/main",
+          tree: EMPTY_TREE_OID,
+          message: "first",
+          author: alice,
+        });
+        const one = Snapshot.entryOf(1, yield* Snapshot.capture(), undefined);
+
+        const second = yield* repository.commit({
+          branch: "refs/heads/topic",
+          tree: EMPTY_TREE_OID,
+          message: "aside",
+          author: alice,
+        });
+        const two = Snapshot.entryOf(2, yield* Snapshot.capture(one), one);
+
+        yield* repository.setRef({ name: "refs/heads/main", to: second });
+        const three = Snapshot.entryOf(3, yield* Snapshot.capture(two), two);
+
+        return { first, second, one, two, three };
+      }).pipe(Effect.provide(repositoryLayer)),
+    );
+
+    // Each entry explains exactly what moved since the one before it.
+    assert.deepEqual(outcome.one.changes, [
+      { name: "refs/heads/main", from: null, to: outcome.first },
+    ]);
+    assert.deepEqual(outcome.two.changes, [
+      { name: "refs/heads/topic", from: null, to: outcome.second },
+    ]);
+    assert.deepEqual(outcome.three.changes, [
+      { name: "refs/heads/main", from: outcome.first, to: outcome.second },
+    ]);
+
+    // An entry round-trips through its own encoding, and garbage does not.
+    assert.deepEqual(Snapshot.decodeJournal(Snapshot.encodeJournal(outcome.two)), outcome.two);
+    assert.equal(Snapshot.decodeJournal(new TextEncoder().encode("[]")), null);
+
+    // Restoring the middle entry into an empty store rebuilds that point in
+    // time — refs and HEAD — not the state the repository went on to reach.
+    const restored = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Snapshot.restore(outcome.two);
+        const refs = yield* RefStore;
+        return { listed: yield* refs.list(), head: yield* refs.head };
+      }).pipe(Effect.provide(stores)),
+    );
+    assert.deepEqual(restored.listed, [
+      ["refs/heads/main", outcome.first],
+      ["refs/heads/topic", outcome.second],
+    ]);
+    assert.equal(restored.head, "refs/heads/main");
+
+    // And the key layout keeps the journal listable in order.
+    assert.equal(Snapshot.journalKeyOf("r", 7), "r/meta/journal/0000000007.json");
+    assert.ok(Snapshot.journalKeyOf("r", 99) < Snapshot.journalKeyOf("r", 100));
+  });
+
   it("answers only anonymous upload-pack conversations", () => {
     const base = "http://host/r";
     assert.equal(Snapshot.readable(advertisement(base)), true);

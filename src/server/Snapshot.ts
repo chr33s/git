@@ -31,7 +31,7 @@
  */
 import { Effect, Layer, Result, Schema } from "effect";
 
-import type { GitError } from "../git/Error.ts";
+import type { GitError, Invalid } from "../git/Error.ts";
 import { StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid, type RefUpdateResult, RefStore } from "../git/Store.ts";
@@ -199,3 +199,102 @@ export const readable = (request: Request): boolean => {
  */
 export const serve = (request: Request): Effect.Effect<Response | null, GitError, Repository> =>
   readable(request) ? Protocol.handle(request) : Effect.succeed(null);
+
+// -- the journal ----------------------------------------------------------------
+
+/**
+ * The journal: every state the refs have been in, appended beside the
+ * `latest` pointer the read path serves from.
+ *
+ * The latest snapshot answers "where are the refs now"; the journal answers
+ * "where have they been" — which is the question every recovery starts
+ * with. Each entry carries the *whole* refs view (a repository's ref list
+ * is small; its history is what is large) plus the delta from the entry
+ * before it, so an operator can read what a push did without diffing, and
+ * `restore` can rebuild a ref store from any retained point without
+ * replaying anything. Entries are sequenced with zero-padded keys so the
+ * store lists them in order, and retention is a single keyed delete per
+ * append — the entry that just fell off the window — never a listing.
+ *
+ * Objects are content-addressed and never rewritten, so a journal entry
+ * whose objects still exist (retention inside the `gc` horizon) names a
+ * fully working tree of states: refs from here, bytes from the store.
+ */
+export const RETAIN = 256;
+
+const SEQ_WIDTH = 10;
+
+export const journalKeyOf = (repo: string, seq: number): string =>
+  `${repo}/meta/journal/${String(seq).padStart(SEQ_WIDTH, "0")}.json`;
+
+/** One ref's movement between two captures; `null` is absence on that side. */
+const Change = Schema.Struct({
+  name: Schema.String,
+  from: Schema.NullOr(Schema.String),
+  to: Schema.NullOr(Schema.String),
+});
+
+export const JournalEntry = Schema.Struct({
+  ...Published.fields,
+  /** This entry's position in the journal — the suffix of its own key. */
+  seq: Schema.Int,
+  /** What moved since the previous entry, in the order refs list. */
+  changes: Schema.Array(Change),
+});
+export type JournalEntry = (typeof JournalEntry)["Type"];
+
+const decodeEntry = Schema.decodeUnknownResult(JournalEntry);
+
+export const encodeJournal = (entry: JournalEntry): Uint8Array =>
+  encoder.encode(`${JSON.stringify(entry, null, 2)}\n`);
+
+/** `null` for bytes that are not a journal entry, like `decode` above. */
+export const decodeJournal = (bytes: Uint8Array): JournalEntry | null => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoder.decode(bytes));
+  } catch {
+    return null;
+  }
+  const result = decodeEntry(parsed);
+  return Result.isSuccess(result) ? result.success : null;
+};
+
+/**
+ * A capture as the journal's next entry: the same view, stamped with its
+ * sequence and the movement since `previous` — additions, moves, and
+ * deletions, each named once.
+ */
+export const entryOf = (
+  seq: number,
+  captured: Published,
+  previous: Published | undefined,
+): JournalEntry => {
+  const before = new Map((previous?.refs ?? []).map((ref) => [ref.name, ref.oid]));
+  const changes: Array<{ name: string; from: string | null; to: string | null }> = [];
+  for (const ref of captured.refs) {
+    const from = before.get(ref.name) ?? null;
+    if (from !== ref.oid) changes.push({ name: ref.name, from, to: ref.oid });
+    before.delete(ref.name);
+  }
+  for (const [name, from] of before) changes.push({ name, from, to: null });
+  return { ...captured, seq, changes };
+};
+
+/**
+ * Rebuild a ref store from one journal entry — refs and `HEAD`, exactly as
+ * the entry observed them. The store this writes into is the *caller's*
+ * choice, and an empty one is the honest starting point: restoration is a
+ * statement about what was, not a merge with what is.
+ */
+export const restore = (
+  entry: JournalEntry,
+): Effect.Effect<void, StorageFailure | Invalid, RefStore> =>
+  Effect.gen(function* () {
+    const refs = yield* RefStore;
+    const updates = entry.refs.flatMap((ref) =>
+      isOid(ref.oid) ? [{ name: ref.name, value: ref.oid, reason: "journal restore" }] : [],
+    );
+    yield* refs.apply(updates);
+    yield* refs.setHead(entry.head);
+  });
