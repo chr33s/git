@@ -41,7 +41,8 @@
 import { context, build as esbuild, type Plugin } from "esbuild";
 
 import { serve as serveHost } from "../host/Node.ts";
-import { access, cp, writeFile } from "node:fs/promises";
+import { access, cp, mkdtemp, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,6 +70,34 @@ const diffsWebComponents = join(
 const announce = (url: string, repositories: string): void => {
   console.info(`\nui:   ${url}`);
   console.info(`      repositories under ${repositories}\n`);
+};
+
+/**
+ * The checkout itself, where nothing else was asked for.
+ *
+ * `--serve` with no GIT_ROOT hands out the working directory, which almost
+ * never holds a bare repository named `core` — the name `index.html` bakes
+ * into `gp-repo` — so the page came up live-but-empty. A checkout's `.git`
+ * *is* a repository in the layout the host serves, so preview that instead:
+ * a scratch root whose `core` is a symlink to it. Reads only, unless the
+ * repository carries a genesis saying otherwise — the host serves writes
+ * behind membership or `--open`, and this passes neither. Explicit intent
+ * still wins: any GIT_ROOT, or a real `core` in the working directory, and
+ * this never runs. A worktree or submodule checkout, whose `.git` is a file,
+ * falls through the same way.
+ */
+const previewRoot = async (): Promise<string | undefined> => {
+  const isDirectory = (target: string): Promise<boolean> =>
+    stat(target).then(
+      (s) => s.isDirectory(),
+      () => false,
+    );
+  if (await isDirectory(join(process.cwd(), "core"))) return undefined;
+  const git = join(process.cwd(), ".git");
+  if (!(await isDirectory(git))) return undefined;
+  const root = await mkdtemp(join(tmpdir(), "git-ui-preview-"));
+  await symlink(git, join(root, "core"), "dir");
+  return root;
 };
 
 const watch = process.argv.includes("--watch");
@@ -166,13 +195,20 @@ if (watch || serve) {
     // nothing forwarding between them. `--watch` above rewrites `dist/ui` on
     // every change and the host reads it per request, so a rebuild needs no
     // restart to be picked up.
-    const repositories = process.env["GIT_ROOT"] ?? process.cwd();
+    const configured = process.env["GIT_ROOT"];
+    const preview = configured === undefined ? await previewRoot() : undefined;
+    const repositories = configured ?? preview ?? process.cwd();
     const host = await serveHost({
       root: repositories,
       port: Number(process.env["PORT"] ?? 8000),
       ui: outdir,
     });
-    announce(host.url, repositories);
+    announce(
+      host.url,
+      preview === undefined
+        ? repositories
+        : `${repositories} — this checkout's .git, previewed as "core"`,
+    );
   } else {
     // Watch-only serves nothing, which is worth saying out loud: the process
     // then sits in the foreground by design, waiting for the next change.

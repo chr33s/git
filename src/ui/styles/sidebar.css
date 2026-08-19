@@ -352,9 +352,19 @@
 }
 
 /* base-wc puts the popup in the top layer via the Popover API, so it escapes
-   the header's overflow; position and look are ours. */
+   the header's overflow; position and look are ours. Where CSS anchor
+   positioning exists base-wc only pairs `position-anchor` to the trigger and
+   leaves placement to this rule — without it the UA popover `inset: 0` pins
+   the popup to the viewport corner. Elsewhere the `anchor()` declarations are
+   invalid and drop out, `inset: auto` clears the UA default, and base-wc's JS
+   fallback places it with inline viewport `top`/`left` — which is why
+   `position` must be `fixed`. */
 .gp-menu-popup {
-  position: absolute;
+  position: fixed;
+  inset: auto;
+  top: calc(anchor(bottom) + 6px);
+  left: anchor(left);
+  position-try-fallbacks: flip-inline;
   margin: 0;
   min-width: 220px;
   max-height: 320px;
