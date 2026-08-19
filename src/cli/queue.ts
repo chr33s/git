@@ -22,6 +22,7 @@ import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
+import * as Event from "../hub/Event.ts";
 import * as HubProjection from "../hub/Projection.ts";
 import * as Queue from "../hub/Queue.ts";
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
@@ -46,6 +47,17 @@ const keyFlag = Flag.string("key").pipe(
 );
 
 const queueArgument = Argument.string("queue");
+
+/**
+ * A target as somebody types it.
+ *
+ * `pr open --base main` takes a bare branch name and reads it as
+ * `refs/heads/main`, and a sibling command that refused the same spelling
+ * would be the only one here that did. The record itself still stores the full
+ * name, because the protected-branch rules match on the ref being written and a
+ * bare one matches nothing (`hub/Queue.ts`); this is where the two meet.
+ */
+const targetRef = (value: string): string => (value === "" ? value : Event.branchRef(value));
 
 /**
  * Which queue a command is about.
@@ -79,7 +91,7 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
       reason: "name a queue with --queue <id> or the branch it serves with --target <ref>",
     });
   }
-  const { found } = yield* Queue.forTarget(input.target);
+  const { found } = yield* Queue.forTarget(targetRef(input.target));
   if (found === null) {
     return yield* new Invalid({
       field: "target",
@@ -116,11 +128,11 @@ const open = Command.make(
           // both see nothing and both write. There is no compare-and-swap
           // across refs to have instead, and the same is true of a task claim
           // — saying so is better than implying a guarantee this cannot give.
-          const existing = yield* Queue.forTarget(target);
+          const existing = yield* Queue.forTarget(targetRef(target));
           if (existing.found !== null) {
             return yield* new Invalid({
               field: "target",
-              reason: `${target} already has a queue: ${existing.found.queue}`,
+              reason: `${targetRef(target)} already has a queue: ${existing.found.queue}`,
             });
           }
           // A queue this replica cannot project could be for this branch, and
@@ -134,12 +146,12 @@ const open = Command.make(
           // they name its id.
           if (existing.unreadable.length > 0) {
             yield* Console.error(
-              `warning: ${existing.unreadable.join(", ")} cannot be read here, so this cannot tell whether one of them already serves ${target}`,
+              `warning: ${existing.unreadable.join(", ")} cannot be read here, so this cannot tell whether one of them already serves ${targetRef(target)}`,
             );
           }
           const opened = yield* Queue.open({
             repo: (yield* identityOf(repo)).repoId,
-            target,
+            target: targetRef(target),
             key: signer,
           });
           return opened.queue;
@@ -727,6 +739,11 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // the queue becomes unreadable and unremovable at once. The branch is
     // written unconditionally, because it is cheap and may have been deleted.
     const unchanged =
+      // Not after a reset this pass wrote. `state` was projected before it, so
+      // an identically rebuilt candidate looked unchanged against a record the
+      // reset had just cleared — and skipping it left the projection showing no
+      // candidate for an entry whose branch exists, for good.
+      !reset &&
       entry.candidate !== null &&
       entry.candidate.commit === candidate &&
       entry.candidate.onto === tip &&
@@ -788,6 +805,8 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   }
 
   const landed: Array<string> = [];
+  /** Whether somebody else moved the branch while this pass was building. */
+  let raced = false;
   /** What a dry run would have landed; empty on a pass that actually lands. */
   const wouldLand: Array<string> = [];
   if (landedAt >= 0 && !input.dryRun) {
@@ -828,6 +847,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       // remove. Said out loud, and `reset` says a record was written.
       const now = yield* repository.resolve(target).pipe(Effect.map((oid) => oid ?? from));
       reset = true;
+      raced = true;
       refused.push({
         pr: top.pr,
         reason: `${target} moved from ${from} to ${now} while this pass was building`,
@@ -874,7 +894,11 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // fault, permanently, on a ref nothing can shorten. The same distinction the
   // conflict path makes between the batch and the branch, arrived at from the
   // other side: the steps behind a failure are victims of it, not causes.
-  for (const step of chain.slice(landed.length + wouldLand.length)) {
+  // Skipped where the swap was lost: the branch moved, so the chain those
+  // checks ran against is not a combination anybody is proposing any more, and
+  // a permanent eviction on stale evidence is the same mistake as dropping an
+  // entry that merely conflicted with the batch.
+  for (const step of raced ? [] : chain.slice(landed.length + wouldLand.length)) {
     if (failing(step) !== null) {
       yield* drop(step.pr, "failed");
       break;

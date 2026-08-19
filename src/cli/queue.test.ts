@@ -1214,6 +1214,60 @@ describe("cli queue", () => {
     assert.equal(state.state, "open", "and the pull request stays open for it");
   });
 
+  it("takes a bare branch name for a target, as pr --base does", async () => {
+    // The record stores the full name, because the protected-branch rules match
+    // on the ref being written; a sibling command that refused the spelling
+    // `pr open --base main` accepts would be the only one here that did.
+    const second = (
+      await cli(["queue", "open", "--root", root, "--key", key, "--target", "release", "project"])
+    ).trim();
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", second]));
+    assert.equal(state.target, "refs/heads/release");
+
+    // And it finds the queue again by the same spelling.
+    const refused = await failing([
+      "queue",
+      "open",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--target",
+      "release",
+      "project",
+    ]);
+    assert.match(refused, /already has a queue/);
+  });
+
+  it("re-records a candidate the reset in the same pass cleared", async () => {
+    // The projection was read before this pass appended its own `queue.reset`,
+    // so an identically rebuilt candidate looked unchanged against a record the
+    // reset had just cleared — leaving the queue showing no candidate for an
+    // entry whose branch exists, permanently.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    await enter(first);
+    await run();
+
+    // The branch moves, so the next pass resets and rebuilds.
+    await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.setRef({ name: "refs/heads/main", to: headOf("two") }),
+      ),
+    );
+    const rebuilt = await run();
+    assert.equal(rebuilt.reset, true);
+    assert.equal(rebuilt.built.length, 1);
+
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.notEqual(
+      state.entries[0].candidate,
+      null,
+      "the rebuild is recorded, not skipped as unchanged",
+    );
+    assert.equal(state.entries[0].candidate.commit, rebuilt.built[0].commit);
+  });
+
   it("refuses a second queue for a branch that already has one", async () => {
     // `refs/hub/queue/*` cannot be deleted, so a second queue for one branch is
     // a permanent split: entries divide invisibly across the two and two
