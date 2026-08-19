@@ -161,12 +161,33 @@ that dies holding work releases it by doing nothing. `session` records what an
 agent was told and what came of it, and `wake` runs a repository's own rules
 when a push moves its hub refs. See [docs/agents.md](docs/agents.md).
 
-34 commands in all: repositories (`init`, `clone`, `serve`, `hub`,
+`queue` is what keeps a fleet from serializing on one branch. A protected
+branch is advanced by pushing the approved revision onto it and by nothing
+else, which is exactly right and exactly serial: each landing stales every
+other pull request's approvals. A queue lands several at once instead —
+merging each approved head onto the last, testing that combination, and
+advancing the branch in one compare-and-swap:
+
+```sh
+npx git+ queue open my-repo --key ~/.ssh/hub --target refs/heads/main
+npx git+ queue enter my-repo <pr> --key ~/.ssh/hub --target refs/heads/main
+npx git+ queue run my-repo --key ~/.ssh/hub --target refs/heads/main --dry-run
+```
+
+What makes that safe is that the boundary re-derives every merge rather than
+trusting it: a candidate counts only if its tree is exactly what merging its
+two parents produces, so it can carry nothing beyond the composition of
+revisions that were each reviewed. The runner is an ordinary member and
+decides nothing — it proposes candidates and the boundary disposes, which is
+why two of them running at once is safe and none at all costs only throughput.
+See [docs/queue.md](docs/queue.md).
+
+35 commands in all: repositories (`init`, `clone`, `serve`, `hub`,
 `credential`, `credential-helper`), the working tree (`add`, `rm`, `mv`,
 `restore`, `status`, `switch`, `commit`), history (`log`, `history`, `show`,
 `diff`, `grep`, `bisect`, `files`), refs (`branch`, `tag`, `refs`, `reset`),
 rewriting (`merge`, `cherry-pick`, `rebase`), transport (`push`, `archive`),
-agents (`task`, `session`, `wake`), and maintenance (`fsck`, `gc`).
+agents (`task`, `session`, `wake`, `queue`), and maintenance (`fsck`, `gc`).
 `npx git+ --help` lists them; every command takes `--help`.
 
 ## Web UI

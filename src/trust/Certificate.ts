@@ -56,6 +56,7 @@ export const CAPABILITIES = [
   "hub.redact",
   "hub.session",
   "hub.task",
+  "hub.queue",
   "member.invite",
   "member.revoke",
   "policy.write",

@@ -43,6 +43,7 @@ import * as Event from "../hub/Event.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
 import * as Task from "../hub/Task.ts";
+import * as Queue from "../hub/Queue.ts";
 import {
   approvals,
   checksPassedAt,
@@ -767,14 +768,21 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // a `hub.comment` holder could open, claim and close tasks. A redaction
     // holder still passes: a tombstone is the one event either namespace
     // accepts from a signer outside its own capability.
+    //
+    // A queue ref is charged `hub.queue` and nothing else, redaction included:
+    // every field a queue record carries is an identifier, an object id or a
+    // ref name, so the namespace has no tombstone to admit a redactor for. See
+    // `hub/Queue.ts`.
     const needed = (name: string): { exact: ReadonlyArray<string> } | { prefix: string } =>
       Task.taskOf(name) !== null
         ? { exact: ["hub.task", "hub.redact"] }
         : Session.sessionOf(name) !== null
           ? { exact: ["hub.session", "hub.redact"] }
-          : name.startsWith("refs/hub/")
-            ? { prefix: "hub." }
-            : { prefix: "member." };
+          : Queue.queueOf(name) !== null
+            ? { exact: ["hub.queue"] }
+            : name.startsWith("refs/hub/")
+              ? { prefix: "hub." }
+              : { prefix: "member." };
     const charge = needed(update.name);
     const passes =
       "exact" in charge
@@ -893,19 +901,23 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     return refused(update.name, `${update.name} is append-only and may not be deleted`);
   }
 
-  // A ref in this namespace is a pull request or a session, and nothing else.
-  // `refs/hub/` as a whole is undeletable, so a name outside those shapes is a
-  // permanent entry nothing counts, nothing folds and nothing can ever remove
-  // — one more object graph pinned into every ref listing, every
+  // A ref in this namespace is a pull request, a session, a task or a queue,
+  // and nothing else. `refs/hub/` as a whole is undeletable, so a name outside
+  // those shapes is a permanent entry nothing counts, nothing folds and nothing
+  // can ever remove — one more object graph pinned into every ref listing, every
   // advertisement, every collection root and every memo key for the life of
   // the repository.
   if (
     update.name.startsWith("refs/hub/") &&
     Event.prOf(update.name) === null &&
     Session.sessionOf(update.name) === null &&
-    Task.taskOf(update.name) === null
+    Task.taskOf(update.name) === null &&
+    Queue.queueOf(update.name) === null
   ) {
-    return refused(update.name, `${update.name} does not name a pull request, session or task`);
+    return refused(
+      update.name,
+      `${update.name} does not name a pull request, session, task or queue`,
+    );
   }
 
   // And its value is a commit of this namespace's own kind. Nothing else here
@@ -943,12 +955,14 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // let a fleet's ordinary week exhaust what a repository's pull requests
     // are allowed, and a session ref is exactly as undeletable as a pull
     // request's.
-    const classOf = (name: string): "sessions" | "tasks" | "pull requests" =>
+    const classOf = (name: string): "sessions" | "tasks" | "queues" | "pull requests" =>
       Session.sessionOf(name) !== null
         ? "sessions"
         : Task.taskOf(name) !== null
           ? "tasks"
-          : "pull requests";
+          : Queue.queueOf(name) !== null
+            ? "queues"
+            : "pull requests";
 
     const kind = classOf(update.name);
     const held =
@@ -956,7 +970,9 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
         ? yield* Session.sessions()
         : kind === "tasks"
           ? yield* Task.tasks()
-          : yield* Event.pullRequests();
+          : kind === "queues"
+            ? yield* Queue.queues()
+            : yield* Event.pullRequests();
     const opened = [...opening].filter((name) => classOf(name) === kind).length;
     const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {

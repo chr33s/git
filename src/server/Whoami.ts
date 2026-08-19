@@ -97,6 +97,11 @@ const requirementsOf = (rules: Policy.Rules): ReadonlyArray<string> => {
     why.push(`requiredChecks: [${rules.requiredChecks.join(", ")}]`);
   }
   if (rules.requireResolvedThreads) why.push("requireResolvedThreads");
+  // Not a requirement but a second way to meet the ones above, and the one an
+  // agent most needs told: without it a queue candidate is refused however well
+  // it is built, and there is nothing in the refusal to say the branch simply
+  // does not take them.
+  if (rules.queueCandidates) why.push(`queueCandidates: up to ${rules.queueDepth} deep`);
   return why;
 };
 

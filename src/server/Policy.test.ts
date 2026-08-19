@@ -16,6 +16,7 @@ import { ObjectStore, type Oid, type RefUpdate, storageOf } from "../git/Store.t
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Session from "../hub/Session.ts";
+import * as Queue from "../hub/Queue.ts";
 import * as Task from "../hub/Task.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, GENESIS_REF, signGenesis, writeGenesis } from "../trust/Genesis.ts";
@@ -1309,6 +1310,40 @@ describe("Policy", () => {
 
       const allowed = await write(["hub.task", "source.push"]);
       assert.equal(allowed.ok, true, "hub.task is exactly what the namespace charges");
+    });
+
+    it("charges hub.queue for a queue ref, and nothing else buys it", async () => {
+      // Redaction included, unlike a task or a session: every field a queue
+      // record carries is an identifier, an object id or a ref name, so the
+      // namespace has no tombstone to admit a redactor for.
+      const write = (capabilities: ReadonlyArray<string>) =>
+        scenario(
+          Effect.gen(function* () {
+            const where = yield* world(capabilities);
+            const repository = yield* Repository;
+            const opened = yield* Queue.open({
+              repo: where.genesis.repoId,
+              target: "refs/heads/main",
+              key: where.dev,
+            });
+            const head = yield* repository.resolve(Queue.refOf(opened.queue));
+            return yield* judge(where, { name: Queue.refOf(opened.queue), value: head });
+          }),
+        );
+
+      const refused = await write(["hub.comment", "source.push"]);
+      assert.equal(refused.ok, false, "hub.comment does not buy the queue namespace");
+      assert.match(refused.ok === false ? refused.reason : "", /hub\.queue/);
+
+      const noRedaction = await write(["hub.redact", "source.push"]);
+      assert.equal(
+        noRedaction.ok,
+        false,
+        "and neither does hub.redact, which has nothing to remove",
+      );
+
+      const allowed = await write(["hub.queue", "source.push"]);
+      assert.equal(allowed.ok, true, "hub.queue is exactly what the namespace charges");
     });
 
     it("admits a session ref, which is the other shape this namespace holds", async () => {

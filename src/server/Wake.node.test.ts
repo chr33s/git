@@ -19,6 +19,8 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
+import * as Queue from "../hub/Queue.ts";
+import * as Task from "../hub/Task.ts";
 import { enableHub } from "../testing/Hub.ts";
 import * as Wake from "./Wake.node.ts";
 
@@ -114,6 +116,67 @@ describe("Wake", () => {
         "and the one that did not must not be",
       );
       assert.ok(summary.failed > 0, "the failure is still reported");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("wakes for every namespace under refs/hub, not only pull requests", async () => {
+    // agents.md §20's working rhythm is `task.opened → hooks wake the fleet`,
+    // and docs/queue.md's is `queue.entered → the runner builds`. Both were
+    // silently impossible: the walk decoded every record as a pull-request
+    // payload, so a task or queue event read as one this version "cannot
+    // read" and its rule never fired. What a rule matches on is the type, and
+    // every hub envelope spells that the same way.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "wake-namespaces-"));
+    const project = path.join(root, "project");
+    await fs.mkdir(project, { recursive: true });
+
+    try {
+      const fixture = await enableHub(project, ["hub.task", "hub.queue"]);
+      const layer = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provide(stores(project)),
+      );
+
+      const built = await Effect.runPromise(
+        Effect.gen(function* () {
+          const opened = yield* Task.open({
+            repo: fixture.repoId,
+            title: "something to do",
+            key: fixture.member,
+          });
+          const queue = yield* Queue.open({
+            repo: fixture.repoId,
+            target: "refs/heads/main",
+            key: fixture.member,
+          });
+          return { task: opened.task, queue: queue.queue };
+        }).pipe(Effect.provide(layer)),
+      );
+
+      await fs.writeFile(
+        path.join(project, "wake.json"),
+        JSON.stringify({
+          rules: [
+            { ref: "refs/hub/task/*", on: ["task.opened"], run: [process.execPath, "-e", ""] },
+            { ref: "refs/hub/queue/*", on: ["queue.opened"], run: [process.execPath, "-e", ""] },
+          ],
+        }),
+      );
+
+      const summary = await Effect.runPromise(
+        Wake.dispatch({ directory: project, repo: "project" }).pipe(Effect.provide(layer)),
+      );
+
+      assert.equal(summary.failed, 0);
+      assert.equal(summary.fired, 2, "one rule per namespace, both matched by type");
+
+      const bookmarks: Record<string, string> = JSON.parse(
+        await fs.readFile(path.join(project, "wake.cursor.json"), "utf8"),
+      );
+      assert.ok(bookmarks[`refs/hub/task/${built.task}`] !== undefined);
+      assert.ok(bookmarks[`refs/hub/queue/${built.queue}`] !== undefined);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

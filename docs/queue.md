@@ -1,6 +1,6 @@
 # Git-Native Merge Queue
 
-**Status:** Proposed (revision 1)
+**Status:** Implemented (revision 2)
 **Scope:** `chr33s/git` — composes with [hub.md](hub.md) (§11 advancing a
 protected branch, §16 event DAGs, §26 merge policy) and
 [agents.md](agents.md) (§19 wake, §20 tasks and claims). Nothing here
@@ -360,56 +360,81 @@ either drown reviewers or need an approval-carry exception that guts the
 rule. The candidate chain leaves `H_i` — and everything reviewers said
 about it — untouched.
 
-## 9. Implementation phases
+## 9. What was built
 
-Ordered so the enforcement lands first and alone — it is the only part
-that touches the boundary, and it is independently valuable (a human can
-hand-build a two-PR candidate and land it with no queue at all). Every
-phase lands green through `npm run check` and `npm test`, per
-[internals.md](internals.md); phase 1 interop-tests against stock `git`
-since a wire-visible judgement changes.
+All four phases landed, each green through `npm run check` and `npm test`.
+The enforcement went first and alone, because it is the only part that
+touches the boundary and it is independently useful: a person can
+hand-build a two-pull-request candidate and land it with no queue running
+at all.
 
 ```text
 Phase 1 — the boundary
-  src/server/Policy.ts   candidate-chain walk in protectedBranch:
-                         parent shape, per-step proposes pre-filter,
-                         merge-base uniqueness, mergeTrees equality,
-                         per-PR rules against H_i, checks against
-                         C_i, queueDepth ceiling; rules fields
-                         queueCandidates / queueDepth (optional in
-                         the schema, defaulted off)
-  src/git/Merge.ts       no change expected — the reuse is the point
-  tests                  adversarial first: wrapped tree ≠ merge,
-                         conflicted step, second merge base, depth
-                         ceiling, stale swap, self-approval inside a
-                         chain, checks on H_i offered where C_i is
-                         required
+  src/git/Repository.ts     mergeTree: the merge decision without a
+                            commit or a ref, and `merge` rewritten in
+                            terms of it so a candidate's builder and
+                            its verifier cannot disagree
+  src/hub/Projection.ts     checksPassedAt: the revision a check ran
+                            against, separated from the pull request's
+                            head
+  src/server/Policy.ts      authorizes (the direct path's own loop,
+                            now shared) and candidateChain: parent
+                            shape, per-step rules, checks against the
+                            candidate, tree equality, queueDepth
+                            ceiling; rules fields queueCandidates and
+                            queueDepth, both optional and off
 
 Phase 2 — queue events
-  src/hub/Queue.ts       event schemas + projection (order, chain
-                         state), on Event.appendTo like Task.ts
+  src/hub/Queue.ts          opened / entered / candidate / left /
+                            reset, and the projection over them
   src/trust/Certificate.ts  hub.queue
-  src/server/Policy.ts   the namespace admitted, capability charged,
-                         population counted per class
-  src/cli/queue.ts       open | enter | leave | show | list
-  free rides, verified   append-only enforcement, advertisement
-                         hiding, replication join, redaction
+  src/server/Policy.ts      the namespace admitted, hub.queue charged,
+                            population counted as its own class
+  free rides, verified      append-only enforcement, advertisement
+                            hiding, replication join
 
 Phase 3 — the runner
-  src/cli/queue.ts       run, and --dry-run; conflict prediction via
-                         the same merge the boundary re-runs
-  wake                   rules as §6; no dispatcher changes
-  tests, end to end      two PRs land in one swap; middle PR's check
-                         fails and only it is evicted; direct push
-                         races the swap and the queue resets; runner
-                         killed mid-batch and a second runner finishes
+  src/cli/queue.ts          open | enter | leave | run | list | show,
+                            with --dry-run; conflicts predicted with
+                            the same merge the boundary recomputes
+  src/server/Wake.node.ts   the walk decodes an event's tag rather
+                            than the pull-request union — see below
 
 Phase 4 — surfaces
-  whoami                 reports hub.queue and the target's queue rules
-  src/ui/                a queue lane on the Change Requests screen
-  docs                   hub.md §11 gains a pointer here; agents.md
-                         Part III gains the queue in the walkthrough
+  src/server/Whoami.ts      a branch says whether it takes candidates,
+                            and how deep
+  docs, readme              hub.md §11, the capability list, the
+                            command inventory
 ```
+
+### Two things the implementation settled
+
+**Candidates must be deterministic, and that is load-bearing.** The first
+runner stamped each candidate with a wall clock, and the queue could
+never land anything: a candidate built, published and tested in one pass
+came back with a different object id in the next, so the check bound to
+the first named nothing the second held. A candidate is therefore a pure
+function of what it merges — a constant identity, and a committer date
+taken from the later of its two parents. The second-order benefit is
+larger than the fix: two runners building the same batch now produce the
+_same commit_ rather than two commits with the same content, so a
+candidate one of them published and CI tested is the one the other lands.
+
+**`wake` could not see the namespaces it was extended to serve.** The
+dispatcher decoded every record as a pull-request payload, so a
+`task.opened` — and any `queue.entered` — read as a record this version
+"cannot read" and its rule never fired. agents.md §20's whole working
+rhythm was silently impossible. What a rule matches on is the event's
+type, and every hub envelope spells that field the same way, so the walk
+now reads the tag alone. That was a pre-existing defect this work
+uncovered rather than caused; it is fixed and covered by a test.
+
+### Not built
+
+A queue lane in the web UI. `queue list` and `queue show` answer the same
+question in JSON, and the screens are fixture-backed in places
+(`src/ui/readme.md`), so this waits for the screen work rather than
+leading it.
 
 ## 10. What this buys
 

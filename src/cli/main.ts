@@ -60,6 +60,7 @@ import {
   withRepo,
 } from "./shared.ts";
 import { sessionCommand } from "./session.ts";
+import { queueCommand } from "./queue.ts";
 import { taskCommand } from "./task.ts";
 import { prCommand } from "./pr.ts";
 import { wakeCommand } from "./wake.ts";
@@ -1215,6 +1216,7 @@ const git = Command.make("git+").pipe(
     ),
     tag.pipe(Command.withDescription("List, create or delete tags")),
     taskCommand.pipe(Command.withDescription("What needs doing, and who is on it")),
+    queueCommand.pipe(Command.withDescription("Land approved pull requests as one tested batch")),
     wakeCommand,
     webhookCommand.pipe(
       Command.withDescription("Administer a server's webhooks over its JSON API"),
