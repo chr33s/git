@@ -109,12 +109,17 @@ export const scan = (text: string): ReadonlyArray<Finding> => {
   };
 
   for (const prefix of PREFIXES) {
-    const at = text.indexOf(prefix);
-    if (at < 0) continue;
-    const rest = text.slice(at).split(/[\s"',;]/)[0] ?? prefix;
-    // The prefix alone is a word — `sk-` appears in prose — so it counts only
-    // with a body behind it long enough to be the token it announces.
-    if (rest.length >= prefix.length + 8) note("provider token", rest);
+    // *Every* occurrence, not the first. A prompt that names the prefix in
+    // prose — "AWS keys start with AKIA. Mine is AKIA…" — put a bare word at
+    // the first position, and a scan that stopped there walked straight past
+    // the key beside it. Nothing else covers a 20-character token: `DENSE`
+    // wants 32, and `NAMED_SECRET` wants a `key=` in front.
+    for (let at = text.indexOf(prefix); at >= 0; at = text.indexOf(prefix, at + 1)) {
+      const rest = text.slice(at).split(/[\s"',;]/)[0] ?? prefix;
+      // The prefix alone is a word — `sk-` appears in prose — so it counts
+      // only with a body behind it long enough to be the token it announces.
+      if (rest.length >= prefix.length + 8) note("provider token", rest);
+    }
   }
 
   for (const [, secret] of text.matchAll(CREDENTIALED_URI)) {

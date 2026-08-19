@@ -120,6 +120,13 @@ and revoking the member invalidates every credential it ever minted. Mint one
 per task at the start of the agent's session rather than storing a long-lived
 one — the private key is the durable secret, the credential is disposable.
 
+A credential minted for a _host_ also carries that host inside its signed
+bytes, and is refused anywhere else. That is what the credential helper mints
+(it binds to the host `git` names) and what a registered remote is handed on
+replication, and it closes the case a `RepoID` alone cannot: an origin and its
+replicas share one `RepoID`, so a token good at a mirror is otherwise good
+back at the origin, for whatever its holder could push by hand.
+
 ### Knowing what you hold: hub whoami
 
 Everything above tells the operator how to authorize an agent. The other
@@ -742,6 +749,15 @@ session payloads are scanned for secrets before they
   are written, and a record that trips it is refused —
   redaction is recovery, not hygiene
 ```
+
+`session redact` and `task redact` are the verbs, and both need `hub.redact`
+as a pull request's does. A session and a task carry no fold of their own, so
+the two questions a tombstone raises are asked against the trust graph
+directly: whether the key may write one (now, expiry included) and whether a
+written one counts (ever held the capability, so that what `gc` deleted stays
+deleted). What a tombstone _names_ is what explains an absence to a fetch,
+whether or not it counted — otherwise a lapsed grant would make every fetch
+fail over bytes that had already gone.
 
 This is **built**, and layered as Entire's is (§18): the cheap unambiguous
 layers unconditional, the judgement calls left to configuration.

@@ -21,6 +21,7 @@ import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
 import * as Event from "./Event.ts";
 import * as PullRequest from "./PullRequest.ts";
+import * as Session from "./Session.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Redaction from "./Redaction.ts";
 import { blobs } from "./Redaction.ts";
@@ -137,6 +138,131 @@ describe("hub redaction", () => {
     // the bytes go when the pack is next rewritten.
     assert.equal(outcome.afterRedact, true, "a packed object survives a plain delete");
     assert.equal(outcome.afterGc, false, "the repack must not carry the payload forward");
+  });
+
+  it("removes a prompt a session should never have carried", async () => {
+    // The namespace whose records are prompts is the one most likely to need
+    // this, and it had no way back at all: `excluded` walked pull requests
+    // only, so a tombstone on a session was a signed statement `gc` ignored
+    // and the prompt stayed in every pack and every clone.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+        const where = yield* world();
+
+        const { session } = yield* Session.open({
+          repo: where.genesis.repoId,
+          agent: { kind: "claude", model: "opus", harness: "claude-code" },
+          prompt: "deploy using the key in the pinned message",
+          key: where.author,
+        });
+        const { events } = yield* Session.entries(session);
+        const first = events[0]!;
+        const info = yield* repository.readCommit(first.commit);
+        const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
+        const blob = path?.oid ?? null;
+
+        // Packed first, so the blob is somewhere a plain delete cannot reach.
+        yield* repository.gc({ repack: true });
+        const packed = yield* objects.has(blob!);
+
+        yield* Session.redact({
+          repo: where.genesis.repoId,
+          session,
+          target: first.payload.id,
+          reason: "sensitive-content",
+          key: where.author,
+        });
+
+        const exclude = yield* Redaction.excluded();
+        yield* repository.gc({ repack: true, exclude });
+        return {
+          packed,
+          excluded: exclude.has(blob!),
+          afterGc: yield* objects.has(blob!),
+          // What a fetch takes: an absence a tombstone explains is not
+          // corruption, and without this every deepening fetch of the
+          // repository fails on the object the removal was asking for.
+          covered: (yield* Redaction.covered()).has(blob!),
+          state: yield* Session.project(session),
+        };
+      }),
+    );
+
+    assert.equal(outcome.packed, true, "the fixture must actually pack the payload");
+    assert.equal(outcome.excluded, true, "a valid tombstone must name its payload blob");
+    assert.equal(outcome.afterGc, false, "the repack must not carry the prompt forward");
+    assert.equal(outcome.covered, true, "and a fetch must be able to account for the absence");
+    assert.equal(outcome.state.redacted.length, 1, "the session says a record was removed");
+    assert.equal(outcome.state.unreadable.length, 1, "and which commit no longer reads");
+  });
+
+  it("ignores a tombstone from a signer who never held hub.redact", async () => {
+    // The boundary refuses such a push, and a replica applies refs without one
+    // — so if `gc` took every tombstone at its word, anybody who may append to
+    // a session could name another agent's prompt and have it destroyed.
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+
+        const stranger = yield* generate("stranger@example.com");
+        yield* Log.issue(
+          yield* Certificate.grant({
+            repo: where.genesis.repoId,
+            publicKey: formatPublicKey(stranger.publicKey),
+            capabilities: ["hub.session"],
+            id: Log.newId(),
+          }),
+          [where.root],
+        );
+
+        const { session } = yield* Session.open({
+          repo: where.genesis.repoId,
+          agent: { kind: "claude", model: "opus", harness: "claude-code" },
+          prompt: "the prompt somebody else wants gone",
+          key: where.author,
+        });
+        const { events } = yield* Session.entries(session);
+        const first = events[0]!;
+        const info = yield* repository.readCommit(first.commit);
+        const path = yield* repository.findPath(info.tree, `${Event.RECORD}.json`);
+
+        // Written past the verb, which refuses it: this is the tombstone that
+        // reaches a replica by fetch rather than through this host's boundary.
+        const base = yield* Session.context(where.genesis.repoId, session);
+        yield* Session.issue(
+          {
+            ...base,
+            type: "event.redacted",
+            target: first.payload.id,
+            targetCommit: Event.qualify(first.commit),
+            reason: "I would rather that were not there",
+          },
+          stranger,
+        );
+
+        const blob = path?.oid ?? null;
+        return {
+          refused: yield* Session.redact({
+            repo: where.genesis.repoId,
+            session,
+            target: first.payload.id,
+            reason: "no capability here either",
+            key: stranger,
+          }).pipe(Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason))),
+          excluded: blob !== null && (yield* Redaction.excluded()).has(blob),
+          // Named, though: what a tombstone *says* is missing is how a fetch
+          // explains an absence, and that must not move with a capability.
+          covered: blob !== null && (yield* Redaction.covered()).has(blob),
+        };
+      }),
+    );
+
+    assert.match(String(outcome.refused), /hub\.redact/);
+    assert.equal(outcome.excluded, false, "an unauthorized tombstone must not send bytes to gc");
+    assert.equal(outcome.covered, true, "though it still explains an absence");
   });
 
   it("lets a fetch plan the pull request whose payload was redacted", async () => {

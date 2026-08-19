@@ -419,7 +419,7 @@ describe("Auth", () => {
           const armored = yield* sign(member, bytes, NAMESPACE);
           const forged = `hub1.${base64url(bytes)}.${base64url(new TextEncoder().encode(armored))}`;
 
-          return yield* openDelegation(forged, genesis.repoId, new Date());
+          return yield* openDelegation(forged, genesis.repoId, new Date(), null);
         }),
       );
       assert.equal(opened, null);
@@ -454,7 +454,12 @@ describe("Auth", () => {
             capabilities: ["repo.read"],
             ttlSeconds: 60,
           });
-          return yield* openDelegation(credential, genesis.repoId, new Date(Date.now() + 120_000));
+          return yield* openDelegation(
+            credential,
+            genesis.repoId,
+            new Date(Date.now() + 120_000),
+            null,
+          );
         }),
       );
       assert.equal(opened, null);
@@ -787,11 +792,21 @@ describe("what a registered remote presents", () => {
       Effect.gen(function* () {
         const where = yield* hub(["source.push", "hub.comment", "member.revoke"]);
         const presented = yield* present({
+          url: "https://mirror.example.com:8443/mirror.git",
           credential: null,
           key: opensshPrivateKey(where.member, "mirror@example.com"),
         });
-        const opened = yield* openDelegation(presented ?? "", where.genesis.repoId, new Date());
-        return { presented, opened, signer: yield* fingerprint(where.member.publicKey) };
+        const at = (host: string | null) =>
+          openDelegation(presented ?? "", where.genesis.repoId, new Date(), host);
+        return {
+          presented,
+          opened: yield* at("mirror.example.com:8443"),
+          // The origin holds the same `RepoID` as its mirror, so this is the
+          // replay the audience exists to stop.
+          elsewhere: yield* at("origin.example.com"),
+          unknown: yield* at(null),
+          signer: yield* fingerprint(where.member.publicKey),
+        };
       }),
     );
 
@@ -808,6 +823,12 @@ describe("what a registered remote presents", () => {
       [...(outcome.opened?.delegation.capabilities ?? [])],
       [...REPLICATION_CAPABILITIES],
     );
+    // Which is safe only because it is spendable at one host. A mirror is not
+    // a party the sender has to trust, and a claim this wide handed over
+    // unbound was a near-admin token for the origin, valid for the hour.
+    assert.equal(outcome.opened?.delegation.audience, "mirror.example.com:8443");
+    assert.equal(outcome.elsewhere, null, "a bound credential must not open at another host");
+    assert.equal(outcome.unknown, null, "nor where the host is unknown");
   });
 
   it("hands over a stored token when there is no key, and nothing at all when there is neither", async () => {
@@ -818,8 +839,16 @@ describe("what a registered remote presents", () => {
       Effect.gen(function* () {
         yield* hub(["source.push"]);
         return {
-          token: yield* present({ credential: "s3cret", key: null }),
-          neither: yield* present({ credential: null, key: null }),
+          token: yield* present({
+            url: "https://mirror.example.com",
+            credential: "s3cret",
+            key: null,
+          }),
+          neither: yield* present({
+            url: "https://mirror.example.com",
+            credential: null,
+            key: null,
+          }),
         };
       }),
     );
