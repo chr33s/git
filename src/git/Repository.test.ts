@@ -77,6 +77,98 @@ describe("Repository", () => {
     assert.deepEqual(messages, ["two", "one"]);
   });
 
+  it("logs a history whose dates are unreadable rather than throwing", async () => {
+    // A commit object carries whatever a client wrote, and a timestamp far
+    // enough out of range makes a `Date` that is `NaN` — which equals nothing,
+    // itself included. The walk took the newest date, kept the commits equal
+    // to it (none of them), and reduced an empty array: `git log` on the whole
+    // repository died with `Reduce of empty array` and named no commit.
+    const messages = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+
+        const good = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "readable",
+          author: alice,
+        });
+        // Written as bytes, because nothing in this codebase would produce it:
+        // the seconds field is digits, as the format demands, and larger than
+        // any date can hold.
+        const odd = yield* objects.write({
+          type: "commit",
+          data: new TextEncoder().encode(
+            [
+              `tree ${EMPTY_TREE_OID}`,
+              `parent ${good}`,
+              "author Alice <alice@example.com> 99999999999999999999 +0000",
+              "committer Alice <alice@example.com> 99999999999999999999 +0000",
+              "",
+              "from the far future",
+            ].join("\n"),
+          ),
+        });
+
+        const commits = yield* Stream.runCollect(repository.log(odd));
+        return commits.map((commit) => commit.message);
+      }),
+    );
+
+    // The tip first and its parent after it: an unreadable date reads as the
+    // epoch, which is the oldest a commit can be, so it never sorts above the
+    // history it sits on.
+    assert.deepEqual(messages, ["from the far future", "readable"]);
+  });
+
+  it("walks a commit with more parents than a spread can carry", async () => {
+    // A commit object states its own parents and a client writes as many as
+    // it likes. Handed to `push` as a spread, past the argument limit — around
+    // a hundred thousand — the call throws a `RangeError`, which is not a
+    // refusal a caller can catch by kind: every walk that met such a commit
+    // died, `gc` and merge-base with it.
+    const walked = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const objects = yield* ObjectStore;
+
+        const root = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "root",
+          author: alice,
+        });
+        // The same parent, repeated: what matters is the count handed to the
+        // spread, and a hundred thousand distinct commits would be a fixture
+        // nobody could run.
+        const many = yield* objects.write({
+          type: "commit",
+          data: new TextEncoder().encode(
+            [
+              `tree ${EMPTY_TREE_OID}`,
+              ...Array.from({ length: 200_000 }, () => `parent ${root}`),
+              "author Alice <alice@example.com> 1700000000 +0000",
+              "committer Alice <alice@example.com> 1700000000 +0000",
+              "",
+              "an improbable octopus",
+            ].join("\n"),
+          ),
+        });
+
+        yield* repository.setRef({ name: "refs/heads/main", to: many });
+
+        // `gc` rather than `log`: the walk that decides what to keep is the
+        // one where a `RangeError` costs objects, and a two-hundred-thousand
+        // wide frontier is a slow thing to ask `log` to order.
+        yield* repository.gc();
+        return yield* objects.has(root);
+      }),
+    );
+
+    assert.equal(walked, true, "the parent is still reachable, so it is still here");
+  });
+
   it("honours the log limit", async () => {
     const count = await scenario(
       Effect.gen(function* () {

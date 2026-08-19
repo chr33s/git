@@ -91,6 +91,24 @@ const advertisedRefs = async (body: ReadableStream<Uint8Array> | null): Promise<
   return { refs, capabilities };
 };
 
+/**
+ * Which branch the remote's `HEAD` points at, as the remote itself says.
+ *
+ * git advertises this as a `symref=HEAD:refs/heads/<name>` capability, and it
+ * is the only statement of the fact: matching by oid instead guesses, and
+ * guesses wrong exactly where it matters — two branches at the same commit
+ * (a release cut this morning, a fork's mirror) make the answer whichever the
+ * server happened to list first, and a detached `HEAD` makes it a branch that
+ * is not the default at all.
+ */
+const symrefHead = (capabilities: ReadonlySet<string>): string | null => {
+  const prefix = "symref=HEAD:";
+  for (const capability of capabilities) {
+    if (capability.startsWith(prefix)) return capability.slice(prefix.length);
+  }
+  return null;
+};
+
 /** `fetch` rejects credentials in URLs, so a token travels as a header. */
 const authorization = (token: string | undefined): Record<string, string> =>
   token === undefined ? {} : { authorization: `Bearer ${token}` };
@@ -643,8 +661,13 @@ export const fetchRepository = (options: {
     }
     yield* stores.refs.apply(updates);
 
-    const defaultBranch = picked
+    // What the remote said, and only then what its oids suggest: a server too
+    // old to advertise the symref, or one this client reached through a proxy
+    // that dropped the capability line, still gets an answer.
+    const named = symrefHead(advertised.capabilities);
+    const stated = named !== null && named.startsWith("refs/heads/") ? named.slice(11) : null;
+    const guessed = picked
       .find((ref) => ref.name.startsWith("refs/heads/") && ref.oid === head)
       ?.name.slice("refs/heads/".length);
-    return { refs: updates, rejected, defaultBranch: branch ?? defaultBranch };
+    return { refs: updates, rejected, defaultBranch: branch ?? stated ?? guessed };
   });

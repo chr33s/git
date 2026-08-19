@@ -279,6 +279,31 @@ describe("Fetch", () => {
     assert.equal(outcome, 1, "one destination, one update");
   });
 
+  it("takes the default branch from what the remote says HEAD is", async () => {
+    // Worked out by matching HEAD's *oid* against the branches, the answer was
+    // whichever branch the server happened to advertise first — so two
+    // branches at one commit, which is every release cut and every fresh
+    // fork, made a clone check out a branch the remote does not consider
+    // default. The remote states it outright in `symref=HEAD:`.
+    const source = path.join(root, "symref-source");
+    await commitFile(source, "a.txt", "one\n", "one");
+    await inRepo(
+      source,
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const head = yield* repository.resolve("refs/heads/main");
+        if (head === null) return;
+        // `release` carries the same commit as `main` and sorts after it, so
+        // an oid match finds `main` first and gets it wrong.
+        yield* repository.setRef({ name: "refs/heads/release", to: head });
+      }),
+    );
+    await setHead(source, "refs/heads/release");
+
+    const cloned = await fetchInto(path.join(root, "symref-target"), `${server.url}/symref-source`);
+    assert.equal(cloned.defaultBranch, "release");
+  });
+
   it("clones an empty target whole, and sends no haves doing it", async () => {
     await commitFile(path.join(root, "clone-source"), "a.txt", "one\n", "one");
     await commitFile(path.join(root, "clone-source"), "b.txt", "two\n", "two");

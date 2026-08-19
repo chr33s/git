@@ -242,7 +242,7 @@ const ancestryOf = Effect.fn("Rebase.ancestry")(function* (onto: Oid) {
       Effect.map((value): { readonly parents: ReadonlyArray<Oid> } | null => value),
       Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
     );
-    if (commit !== null) stack.push(...commit.parents);
+    if (commit !== null) for (const parent of commit.parents) stack.push(parent);
   }
   return seen;
 });
