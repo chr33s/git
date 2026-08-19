@@ -1584,13 +1584,14 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
   let at = input.to;
   while (at !== from) {
     if (steps.length >= rules.queueDepth) {
-      // Named rather than left to the generic refusal. Everything walked so far
-      // was a well-formed step, so whoever built this was building a chain —
-      // and "may only be moved by an approved pull request" tells them nothing
-      // about the ceiling they actually hit.
+      // Both readings, because the shape alone cannot tell them apart. A
+      // well-formed chain past the ceiling and an ordinary integration branch
+      // of nine merges look identical from here, and each wants a different
+      // half of this sentence: one needs the ceiling named, the other needs to
+      // be told it is not a candidate at all and never was.
       return {
         kind: "refused",
-        reason: `${input.to} does not reach ${from} within ${String(rules.queueDepth)} merge steps, which is as deep a chain as ${input.ref} takes`,
+        reason: `${input.ref} may only be moved by an approved pull request; ${input.to} is not one, and it does not reach ${from} within ${String(rules.queueDepth)} merge steps to be a queue candidate either`,
       } satisfies Chain;
     }
     const info = yield* read(at);

@@ -73,17 +73,6 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
 }) {
   if (input.queue !== "") {
     const state = yield* Queue.project(input.queue);
-    // Both named and disagreeing is a caller that thinks it is talking about
-    // one branch while this talks about another — a drifted hook appending
-    // records to, or landing on, a branch its invocation never named. Refused
-    // rather than resolved by precedence, because either precedence is silently
-    // wrong for somebody.
-    if (input.target !== "" && state.target !== targetRef(input.target)) {
-      return yield* new Invalid({
-        field: "target",
-        reason: `${input.queue} serves ${state.target ?? "no branch"}, and --target names ${targetRef(input.target)}`,
-      });
-    }
     // A queue nobody opened is a queue nothing reads. Refused here because
     // appending anyway would *create* `refs/hub/queue/<typo>` — on a namespace
     // that cannot be deleted, holding records the projection ignores for ever,
@@ -104,6 +93,17 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
       return yield* new Invalid({
         field: "queue",
         reason: `${input.queue} was closed (${state.closed}); open a fresh queue for its branch`,
+      });
+    }
+    // Both named and disagreeing is a caller that thinks it is talking about
+    // one branch while this talks about another — a drifted hook appending
+    // records to, or landing on, a branch its invocation never named. Refused
+    // rather than resolved by precedence, because either precedence is silently
+    // wrong for somebody.
+    if (input.target !== "" && state.target !== targetRef(input.target)) {
+      return yield* new Invalid({
+        field: "target",
+        reason: `${input.queue} serves ${state.target ?? "no branch"}, and --target names ${targetRef(input.target)}`,
       });
     }
     return state;
@@ -319,19 +319,6 @@ const close = Command.make(
         Effect.gen(function* () {
           const genesis = yield* identityOf(repo);
           const state = yield* resolve({ queue, target });
-          // A queue is its opener's to end, as a task is its opener's to close,
-          // and the fold says so by ignoring a close from anybody else. Asked
-          // here as well, and before anything is destroyed: written blind, this
-          // command deleted every candidate branch the queue had published and
-          // reported success, while `show`, `forTarget` and `run` all went on
-          // seeing the queue as live.
-          const mine = yield* fingerprint(signer.publicKey);
-          if (state.openedBy !== mine) {
-            return yield* new Invalid({
-              field: "queue",
-              reason: `${state.queue} is not this key's to close; a queue is ended by whoever opened it`,
-            });
-          }
           yield* Queue.close({
             repo: genesis.repoId,
             queue: state.queue,

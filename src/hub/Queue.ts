@@ -517,14 +517,7 @@ export interface Projection {
   readonly resets: number;
   /** Why this queue was ended, or `null` while it is still running. */
   readonly closed: string | null;
-  /**
-   * Who opened it, and so whose it is to end.
-   *
-   * Exposed because a caller about to *act* on a close — deleting the branches
-   * it published — has to be able to ask the same question the fold does before
-   * doing anything, rather than write the record and find out afterwards that
-   * nothing counted it.
-   */
+  /** Who opened it, for a reader that wants to know rather than to decide. */
   readonly openedBy: Fingerprint | null;
   /**
    * How many commits this queue's history holds.
@@ -626,11 +619,21 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
         break;
 
       case "queue.closed":
-        // The opener's to end, as a task is theirs to close: an ended queue
-        // cannot be reopened, and letting anybody holding the namespace's
-        // capability end somebody else's would be a way to stop a branch's
-        // queue rather than a way to coordinate with it.
-        if (opened === null || signer !== opened.by) ignored.push(commit);
+        // Any member holding the namespace's capability, deliberately — unlike
+        // a task close, which is its opener's alone. The rule everywhere here
+        // is that what comes back cheaply may be done by anybody and what does
+        // not stays with whoever started it: a task close *ends the work*, and
+        // a redaction destroys content. Ending a queue destroys nothing — the
+        // pull requests are untouched, and a fresh queue plus a re-entry is one
+        // command each.
+        //
+        // And the alternative is worse than the abuse it would prevent. This is
+        // the one hub ref that grows without bound, so a queue nobody can end
+        // is a queue that eventually crosses the ceiling and becomes unreadable
+        // and unremovable at once — which is the state closing exists to
+        // prevent. Held to the opening key, a lost or revoked one would strand
+        // the ref there permanently.
+        if (opened === null) ignored.push(commit);
         else closed ??= payload.reason;
         break;
 

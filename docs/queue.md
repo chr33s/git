@@ -325,12 +325,34 @@ The wake rules that close the loop, in `wake.json`:
     {
       "ref": "refs/hub/pr/*",
       "on": ["review.submitted", "check.completed"],
-      "run": ["git+", "queue", "run", "--root", ".", "repo"]
+      "run": [
+        "git+",
+        "queue",
+        "run",
+        "--root",
+        ".",
+        "--key",
+        "/run/keys/queue",
+        "--target",
+        "main",
+        "repo"
+      ]
     },
     {
       "ref": "refs/hub/queue/*",
       "on": ["queue.entered", "queue.reset"],
-      "run": ["git+", "queue", "run", "--root", ".", "repo"]
+      "run": [
+        "git+",
+        "queue",
+        "run",
+        "--root",
+        ".",
+        "--key",
+        "/run/keys/queue",
+        "--target",
+        "main",
+        "repo"
+      ]
     }
   ]
 }

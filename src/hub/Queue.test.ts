@@ -244,26 +244,23 @@ describe("hub Queue", () => {
     assert.match(failure.reason, /one ref path component/);
   });
 
-  it("ends a queue only for the key that opened it", async () => {
-    // A queue is its opener's to end, as a task is its opener's to close:
-    // ending is not undoable, so leaving it to anybody holding the namespace's
-    // capability would be a way to stop a branch's queue rather than a way to
-    // coordinate with it.
+  it("ends a queue for any member holding the capability", async () => {
+    // Unlike a task close, which is its opener's alone. What comes back cheaply
+    // may be done by anybody and what does not stays with whoever started it:
+    // ending a queue destroys nothing, and the alternative is worse than the
+    // abuse it would prevent — this is the one hub ref that grows without
+    // bound, so a queue nobody can end is one that eventually crosses the
+    // ceiling, and a lost opening key would strand it there for good.
     const state = await scenario(
       Effect.gen(function* () {
         const world = yield* opened();
         const stranger = yield* generate("stranger@example.com");
         const base = yield* Queue.context(REPO, world.queue);
-        yield* Queue.issue({ ...base, type: "queue.closed", reason: "not yours" }, stranger);
-        const ignored = yield* Queue.project(world.queue);
-
-        yield* Queue.close({ repo: REPO, queue: world.queue, reason: "rotated", key: world.key });
-        return { ignored, ended: yield* Queue.project(world.queue) };
+        yield* Queue.issue({ ...base, type: "queue.closed", reason: "rotated" }, stranger);
+        return yield* Queue.project(world.queue);
       }),
     );
-    assert.equal(state.ignored.closed, null, "a stranger's close counts for nothing");
-    assert.equal(state.ignored.ignored.length, 1, "and is said out loud");
-    assert.equal(state.ended.closed, "rotated");
+    assert.equal(state.closed, "rotated");
   });
 
   it("names who opened a queue, so a caller can ask before acting", async () => {
