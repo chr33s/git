@@ -23,7 +23,7 @@ import { Effect, Layer, Schema } from "effect";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1915,7 +1915,7 @@ const localMode = async (browser: Browser): Promise<void> => {
     // filing work this browser did not open, which is what the looser rule on
     // re-filing (see `hub/Task.ts`) exists to allow.
     const idOf = (title: string): string =>
-      served.tasks.find((task) => task.title === title)?.task ?? "";
+      served.items.find((task) => task.title === title)?.task ?? "";
     const created = idOf("Opened by the browser key");
     const release = idOf("v0.4 — Identity");
     await page.goto(`${origin}/#/detail/${created}`, { waitUntil: "networkidle" });
@@ -1923,15 +1923,15 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.selectOption(".gp-meta-select", release);
     await page.waitForTimeout(2500);
     const filed = await fetch(`${upstream}/core/hub/tasks`).then(async (response) =>
-      Schema.decodeUnknownSync(Contract.HubTasksResponse)(await response.json()),
+      Schema.decodeUnknownSync(Contract.HubTaskPage)(await response.json()),
     );
     check(
       "the move control files a task in the hub itself",
-      filed.tasks.find((task) => task.task === created)?.parent === release,
+      filed.items.find((task) => task.task === created)?.parent === release,
     );
     check(
       "and the release reads it back as its own",
-      (filed.tasks.find((task) => task.task === release)?.children ?? []).includes(created),
+      (filed.items.find((task) => task.task === release)?.children ?? []).includes(created),
     );
     await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);

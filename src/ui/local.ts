@@ -46,7 +46,7 @@ import {
   type GrepResponse,
   type Ref,
 } from "./api.ts";
-import type { BisectAnswer, ReplayResult } from "../src/server/ApiContract.ts";
+import type { BisectAnswer, ReplayResult } from "../server/ApiContract.ts";
 
 import { authorizeSmartHttp } from "./identity.ts";
 import type { SyncState } from "./api.ts";

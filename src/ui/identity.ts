@@ -35,16 +35,11 @@ import {
 } from "../crypto/SshSignature.ts";
 import * as HubEvent from "../hub/Event.ts";
 import * as HubTask from "../hub/Task.ts";
-import {
-  HubEventAppended,
-  HubMerged,
-  RefsResponse,
-  WhoamiAnswer,
-} from "../server/ApiContract.ts";
+import { HubEventAppended, HubMerged, RefsResponse, WhoamiAnswer } from "../server/ApiContract.ts";
 import { signEnvelope } from "../server/Auth.ts";
 import { Schema } from "effect";
 
-import { type Authorize, nonceOf, repoOf, type SignedCommand } from "../src/client/Authorize.ts";
+import { type Authorize, nonceOf, repoOf, type SignedCommand } from "../client/Authorize.ts";
 import { ApiError } from "./api.ts";
 import { apiBase, repoFromDocument } from "./client.ts";
 

@@ -1339,8 +1339,8 @@ describe("Api hub", () => {
         });
 
         const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
-        const answer = yield* client.hub.tasks({ params: { repo: "r" } });
-        const byId = new Map(answer.tasks.map((task) => [task.task, task]));
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
 
         assert.deepEqual(
           [...(byId.get(milestone.task)?.children ?? [])].sort(),
@@ -1377,8 +1377,8 @@ describe("Api hub", () => {
         yield* HubTask.close({ repo: "r", task: work.task, key: other });
 
         const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
-        const answer = yield* client.hub.tasks({ params: { repo: "r" } });
-        const byId = new Map(answer.tasks.map((task) => [task.task, task]));
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
         assert.equal(byId.get(work.task)?.parent, milestone.task);
         assert.deepEqual(byId.get(milestone.task)?.children, [work.task]);
         assert.equal(byId.get(work.task)?.closed, null);
@@ -1408,8 +1408,8 @@ describe("Api hub", () => {
         });
 
         const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
-        const answer = yield* client.hub.tasks({ params: { repo: "r" } });
-        const byId = new Map(answer.tasks.map((task) => [task.task, task]));
+        const answer = yield* client.hub.tasks({ params: { repo: "r" }, query: {} });
+        const byId = new Map(answer.items.map((task) => [task.task, task]));
         // Both ends of the loop report no parent, so every chain a reader can
         // walk is finite — which is what lets the walkers not guard.
         assert.equal(byId.get(a.task)?.parent, null);
