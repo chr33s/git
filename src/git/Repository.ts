@@ -1537,9 +1537,16 @@ export const layer = Layer.effect(
       canServe,
 
       // Traced: ingesting a pack is the expensive half of a push, and the
-      // span is where its cost shows up.
+      // span is where its cost shows up. `ingest` rather than `unpack`: a
+      // push worth keeping as a pack is kept as one — two store writes
+      // however many objects it carries — and everything else (tiny,
+      // oversized, or a backend without packs) explodes loose exactly as
+      // before. See `Pack.ingest`.
       unpack: Effect.fn("Repository.unpack")(function* (pack) {
-        return yield* Pack.unpack(pack).pipe(Effect.provideService(ObjectStore, objects));
+        return yield* Pack.ingest(pack).pipe(
+          Effect.provideService(ObjectStore, objects),
+          Effect.provideService(PackStore, packs),
+        );
       }),
 
       packOf: (wants, haves) =>
