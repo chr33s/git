@@ -289,6 +289,32 @@ describe("hub Queue", () => {
     assert.equal(found.after.found, null, "so a fresh queue can take the branch over");
   });
 
+  it("admits nothing into a queue that has ended", async () => {
+    // Unreachable through the verbs, which refuse a closed queue outright — but
+    // a holder of this namespace's capability can append to any ref in it
+    // directly, and an entry admitted after a close is one whose candidate
+    // branch nothing will ever clean up.
+    const state = await scenario(
+      Effect.gen(function* () {
+        const world = yield* opened();
+        yield* Queue.close({ repo: REPO, queue: world.queue, reason: "rotated", key: world.key });
+        const base = yield* Queue.context(REPO, world.queue);
+        yield* Queue.issue(
+          {
+            ...base,
+            type: "queue.entered",
+            pr: Event.newId(),
+            head: Event.qualify(yield* commitOf("head")),
+          },
+          world.key,
+        );
+        return yield* Queue.project(world.queue);
+      }),
+    );
+    assert.deepEqual(state.entries, []);
+    assert.equal(state.ignored.length, 1, "said out loud rather than swallowed");
+  });
+
   it("finds a queue by the branch it serves", async () => {
     const found = await scenario(
       Effect.gen(function* () {

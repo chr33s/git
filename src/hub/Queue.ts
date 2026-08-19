@@ -251,11 +251,11 @@ export const context = Effect.fn("hub.Queue.context")(function* (repo: string, q
   } as const;
 });
 
-/** The pull request a record is about, where it names one. */
 /** The one field of a queue record somebody types. */
 const prose = (payload: QueuePayload): string =>
   payload.type === "queue.closed" ? payload.reason : "";
 
+/** The pull request a record is about, where it names one. */
 const prOf = (payload: QueuePayload): string | null =>
   payload.type === "queue.entered" ||
   payload.type === "queue.candidate" ||
@@ -574,6 +574,15 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
 
       case "queue.entered": {
         const head = Event.unqualify(payload.head);
+        // Nothing joins a queue that has ended. Unreachable through the verbs,
+        // which refuse a closed queue outright — but a holder of this
+        // namespace's capability can append to any ref in it directly, and an
+        // entry admitted after a close is one whose candidate branch nothing
+        // will ever clean up.
+        if (closed !== null) {
+          ignored.push(commit);
+          break;
+        }
         // The id as well as the oid. `issue` refuses a record whose `pr` cannot
         // name a pull request, but the boundary charges this namespace by ref
         // name without decoding what lands on it — so a record written another

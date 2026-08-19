@@ -2161,6 +2161,12 @@ export const gate = Effect.fn("Policy.gate")(function* (
   const decisions: Decision[] = [];
   const folds: FoldCache = new Map();
   const mentions: MentionCache = new Map();
+  // The expensive one, and the one this door most needs: a push moving several
+  // protected branches re-derives a candidate chain per ref, and every step of
+  // it is a merge-base walk and three whole-tree flattens — on the synchronous
+  // receive-pack path. The runner shares one of these across its own asks;
+  // leaving it out here made the untrusted door the costly one.
+  const merges: MergeCache = new Map();
   const opening: Openings = new Set();
   for (const at of order) {
     const update = updates[at]!;
@@ -2189,6 +2195,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
       sessions,
       folds,
       mentions,
+      merges,
       opening,
     });
     // The namespace rules record a create as soon as they have passed it, and
