@@ -145,35 +145,61 @@ npx chr33s-git commit --work . --message "first"
 npx chr33s-git switch --work . --create topic
 ```
 
-30 commands in all: repositories (`init`, `clone`, `serve`, `hub`,
-`credential`), the working tree (`add`, `rm`, `mv`, `restore`, `status`, `switch`, `commit`),
-history (`log`, `history`, `show`, `diff`, `grep`, `bisect`, `files`), refs
-(`branch`, `tag`, `refs`, `reset`), rewriting (`merge`, `cherry-pick`,
-`rebase`), transport (`push`, `archive`), and maintenance (`fsck`, `gc`).
+A fleet coordinates through the repository rather than beside it. `task`
+records what needs doing, who holds it and how it resolved — signed events
+appended to `refs/hub/task/<id>`, projected rather than stored. One task can
+belong to another, and that is the whole hierarchy: a release, an epic and a
+parent story are all just tasks that other tasks name, so each inherits
+claiming, closing and provenance for free.
+
+```sh
+npx chr33s-git task open my-repo --key ~/.ssh/hub --title "v0.4 — Identity"
+npx chr33s-git task open my-repo --key ~/.ssh/hub --title "Sign events" --parent <release>
+npx chr33s-git task reparent my-repo <task> --key ~/.ssh/hub --parent <other-release>
+npx chr33s-git task list my-repo          # what nobody currently holds
+```
+
+A claim is a lease and advisory: it frees itself when it expires, so an agent
+that dies holding work releases it by doing nothing. `session` records what an
+agent was told and what came of it, and `wake` runs a repository's own rules
+when a push moves its hub refs. See [docs/agents.md](docs/agents.md).
+
+34 commands in all: repositories (`init`, `clone`, `serve`, `hub`,
+`credential`, `credential-helper`), the working tree (`add`, `rm`, `mv`,
+`restore`, `status`, `switch`, `commit`), history (`log`, `history`, `show`,
+`diff`, `grep`, `bisect`, `files`), refs (`branch`, `tag`, `refs`, `reset`),
+rewriting (`merge`, `cherry-pick`, `rebase`), transport (`push`, `archive`),
+agents (`task`, `session`, `wake`), and maintenance (`fsck`, `gc`).
 `npx chr33s-git --help` lists them; every command takes `--help`.
 
 ## Web UI
 
 `src/ui/` is a browser interface for a hosted repository — a file explorer and code
-view over the JSON API, plus Tasks and Change Requests. Built with Lit,
+view over the JSON API, plus Tasks and Change Requests grouped by the release
+they belong to. Built with Lit,
 [`@chr33s/base-wc`](https://github.com/chr33s/base-wc) and Pierre's tree and
 diff components; light and dark.
 
 ```sh
-npm run ui:build              # bundle to dist/ui
-node src/ui/build.ts --serve  # watch, and serve it on :8000
-npm run ui:verify             # drive it in a browser
+GIT_ROOT=repos npm run dev:ui   # watch, and serve page + API on :8000
+npm run build:ui                # bundle to dist/ui
+npm run verify:ui               # build it, then drive it in a browser
 ```
 
-To serve it for real, hand the bundle to the server itself — the page and the
-API then share one origin, which is the only arrangement a browser permits:
+`dev:ui` is the one to reach for. It hands the built directory to the server
+itself, so the page, the bundle and `/:repo/…` all answer on one port — a
+browser blocks the cross-origin alternative outright, and the UI would quietly
+fall back to its fixtures. `GIT_ROOT` defaults to the working directory.
+
+The same arrangement without the watcher, from a finished bundle:
 
 ```sh
-chr33s-git serve --root /path/to/repos --ui
+npm run build:ui && chr33s-git serve --root /path/to/repos --ui
 ```
 
 `--ui-dir` points at a bundle built somewhere else. Which repository the page
-shows is `<meta name="gp-repo">` in its `index.html`, `core` by default.
+shows is `<meta name="gp-repo">` in its `index.html`, `core` by default — so a
+root without that repository serves the design's fixtures instead.
 
 See [`src/ui/readme.md`](src/ui/readme.md) for what is wired to the server and what is
 still fixture data.
@@ -314,17 +340,24 @@ reasoning, module map, conventions and testing philosophy live in
 ## Development
 
 ```sh
-npm run check             # format, lint, and typecheck (tsc -b --noEmit)
+npm run check             # format, lint, and typecheck — both programs
 npm run fix               # auto-fix both
 npm test                  # unit + integration (workerd) projects
 npm run build:sea         # dist/sea/chr33s-git — self-contained CLI binary (node 26+)
+npm run build:ui          # bundle the browser UI to dist/ui
+npm run dev:ui            # watch it, and serve page + API on :8000
+npm run verify:ui         # build it, then drive it in a browser
 npx wrangler dev          # run the Worker locally on port 8080
 npx wrangler deploy       # deploy (the tested path)
 ```
 
-`npm run check` must be green before a commit. The interop tests verify
-against the real `git` binary and need it on `PATH`; the real-browser test
-needs Chromium via Playwright. Both skip when missing.
+`npm run check` must be green before a commit. It typechecks two programs, not
+one: `src/` targets a Worker and `src/ui/` a browser, and they need different
+`lib`s — DOM and WebWorker declare overlapping globals, and one program holding
+both mis-resolves DOM members. `src/ui/tsconfig.json` says the rest.
+
+The interop tests verify against the real `git` binary and need it on `PATH`;
+the browser suites need Chromium via Playwright. Both skip when missing.
 
 Before contributing, read [docs/internals.md](docs/internals.md) — the module
 map, code conventions and testing philosophy explain constraints the code

@@ -670,97 +670,50 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
   return server;
 };
 
-/** Exercise the actual `ui:dev` proxy, including its one-shot request stream. */
-const verifyProxy = async (upstream: string, port: number): Promise<void> => {
-  console.info("\nproxy");
-  const proxyOut = await mkdtemp(join(tmpdir(), "git-plus-ui-proxy-"));
-  const child = spawn(process.execPath, [join(here, "build.ts"), "--serve"], {
-    cwd: join(here, "..", ".."),
-    env: {
-      ...process.env,
-      GIT_API: upstream,
-      GIT_UI_OUTDIR: proxyOut,
-      PORT: String(port),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error(`dev proxy did not start:\n${output}`)),
-        10_000,
-      );
-      const append = (chunk: Buffer): void => {
-        output += chunk.toString("utf8");
-        // Matched on the port rather than the wording around it, so that
-        // rephrasing the boot message cannot silently stall this suite.
-        if (!output.includes(`http://localhost:${String(port)}`)) return;
-        clearTimeout(timeout);
-        resolve();
-      };
-      child.stdout.on("data", append);
-      child.stderr.on("data", append);
-      child.once("error", reject);
-      child.once("exit", (code) => {
-        if (!output.includes(`http://localhost:${String(port)}`)) {
-          clearTimeout(timeout);
-          reject(new Error(`dev proxy exited ${String(code)}:\n${output}`));
-        }
-      });
-    });
-    const response = await fetch(`http://127.0.0.1:${String(port)}/core/diff`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ from: "refs/heads/main", to: `refs/heads/${BRANCH}` }),
-    });
-    check(
-      "the development proxy preserves POST bodies",
-      response.status === 200,
-      `${String(response.status)} ${await response.text()}`,
-    );
-  } finally {
-    if (child.exitCode === null) {
-      child.kill();
-      await once(child, "exit");
-    }
-    await rm(proxyOut, { force: true, recursive: true });
-  }
-};
-
+/** Exercise the actual `dev:ui` proxy, including its one-shot request stream. */
 /**
- * `chr33s-git serve --ui`: the page and the API from one process, one origin.
+ * One origin, from whichever entry point put it there.
  *
- * The proxy above fakes that arrangement for development; this is the shipped
- * one, and the thing worth proving is that no proxy is involved — the bundle
- * and `/{repo}/...` answer on the same port, which is the only shape a browser
- * will let the UI use.
+ * Both ways of running the UI hand the built directory to the same server —
+ * `dev:ui` while watching, `serve --ui` from a finished bundle — and the
+ * property worth pinning is the one a browser enforces: the page, the bundle
+ * and `/{repo}/...` all answer on a single port. It used to take a proxy in
+ * front of esbuild's own server to arrange that, and the proxy was the part
+ * that could be wrong; there is nothing between them now.
  */
-const verifyServeUi = async (browser: Browser, port: number): Promise<void> => {
-  console.info("\nserve --ui");
-  const root = await mkdtemp(join(tmpdir(), "git-plus-serve-ui-"));
+const oneOrigin = async (input: {
+  readonly label: string;
+  /** Built from the root this makes, since the two entry points differ on how
+   * they are told about it: `dev:ui` reads the environment, the CLI a flag. */
+  readonly argv: (root: string, port: number) => readonly string[];
+  readonly ready: string;
+  readonly port: number;
+  readonly browser: Browser;
+}): Promise<void> => {
+  console.info(`\n${input.label}`);
+  const root = await mkdtemp(join(tmpdir(), "git-plus-one-origin-"));
   const cli = join(here, "..", "cli", "bin.ts");
   const init = spawn(process.execPath, [cli, "init", "--root", root, "core"], { stdio: "ignore" });
   await once(init, "exit");
 
-  const child = spawn(
-    process.execPath,
-    [cli, "serve", "--root", root, "--port", String(port), "--ui"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const page = await browser.newPage();
+  const child = spawn(process.execPath, [...input.argv(root, input.port)], {
+    cwd: join(here, "..", ".."),
+    env: { ...process.env, GIT_ROOT: root, PORT: String(input.port) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const page = await input.browser.newPage();
   const thrown: string[] = [];
   page.on("pageerror", (error) => thrown.push(error.message));
   let output = "";
   try {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(
-        () => reject(new Error(`serve --ui did not start:\n${output}`)),
-        15_000,
+        () => reject(new Error(`${input.label} did not start:\n${output}`)),
+        20_000,
       );
       const append = (chunk: Buffer): void => {
         output += chunk.toString("utf8");
-        if (!output.includes("browser UI on")) return;
+        if (!output.includes(input.ready)) return;
         clearTimeout(timeout);
         resolve();
       };
@@ -768,17 +721,17 @@ const verifyServeUi = async (browser: Browser, port: number): Promise<void> => {
       child.stderr.on("data", append);
       child.once("error", reject);
       child.once("exit", (code) => {
-        if (!output.includes("browser UI on")) {
+        if (!output.includes(input.ready)) {
           clearTimeout(timeout);
-          reject(new Error(`serve --ui exited ${String(code)}:\n${output}`));
+          reject(new Error(`${input.label} exited ${String(code)}:\n${output}`));
         }
       });
     });
 
-    const origin = `http://127.0.0.1:${String(port)}`;
+    const origin = `http://127.0.0.1:${String(input.port)}`;
     const index = await fetch(`${origin}/`);
     check(
-      "serve --ui answers the page itself",
+      `${input.label} answers the page itself`,
       index.status === 200 && (index.headers.get("content-type") ?? "").startsWith("text/html"),
       `${String(index.status)} ${index.headers.get("content-type") ?? ""}`,
     );
@@ -792,11 +745,27 @@ const verifyServeUi = async (browser: Browser, port: number): Promise<void> => {
     // hold falls through to the repository the server is hosting.
     const api = await fetch(`${origin}/core/hub/tasks`);
     check("and the API on that same origin", api.status === 200, String(api.status));
+    // A method that is not a read is the API's whatever it is addressed to,
+    // and its body has to survive the trip — this is what the proxy used to
+    // get wrong, so it is still asked.
+    const post = await fetch(`${origin}/core/diff`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from: "refs/heads/nowhere", to: "refs/heads/main" }),
+    });
+    // The repository is empty, so the honest answer is that the ref is not
+    // there — and it can only name the ref if the body arrived and was read.
+    const said = await post.text();
+    check(
+      "and reads a POST body on it",
+      said.includes("refs/heads/nowhere"),
+      `${String(post.status)} ${said.slice(0, 80)}`,
+    );
 
     await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1500);
     check(
-      "the UI it served actually mounts",
+      "and the UI it served actually mounts",
       (await page.locator(".gp-sidebar").count()) === 1 &&
         (await page.locator(".gp-task-row").count()) > 0,
     );
@@ -1771,7 +1740,7 @@ const localMode = async (browser: Browser): Promise<void> => {
   const host = await serveHost({ root, allowAnonymousWrites: true });
   const upstream = host.url;
 
-  // Static for the bundle, everything else forwarded — `ui:dev`'s shape.
+  // Static for the bundle, everything else forwarded — `dev:ui`'s shape.
   const front = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
@@ -2136,7 +2105,6 @@ check(
 
 const offline = await serve(false, 8131);
 const online = await serve(true, 8132);
-await verifyProxy("http://127.0.0.1:8132", 8133);
 const browser = await chromium.launch(
   executable === undefined ? {} : { executablePath: executable },
 );
@@ -2148,7 +2116,29 @@ try {
     await live(browser, "http://localhost:8132");
   }
   await localMode(browser);
-  await verifyServeUi(browser, 8134);
+  // Both entry points, held to the same property; see `oneOrigin`.
+  await oneOrigin({
+    label: "dev:ui",
+    argv: () => [join(here, "build.ts"), "--serve"],
+    ready: "ui:   http",
+    port: 8133,
+    browser,
+  });
+  await oneOrigin({
+    label: "serve --ui",
+    argv: (root, port) => [
+      join(here, "..", "cli", "bin.ts"),
+      "serve",
+      "--root",
+      root,
+      "--port",
+      String(port),
+      "--ui",
+    ],
+    ready: "browser UI on",
+    port: 8134,
+    browser,
+  });
 } finally {
   await browser.close();
   offline.close();

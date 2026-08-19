@@ -23,19 +23,24 @@
  *   node src/ui/build.ts --watch    # watch only, for an external server
  *   node src/ui/build.ts --debug    # unminified, for reading a stack trace
  *
- * `--serve` fronts the bundle with a proxy so the page and the API share an
- * origin, which is the arrangement the deployed Worker gives them and the only
- * one a browser will allow: served from :8000 and calling :8787 directly, every
- * request is cross-origin and is blocked, and the UI silently falls back to its
- * fixtures. Point it elsewhere with `GIT_API`.
+ * `--serve` hands the built directory to the server itself, which is how the
+ * UI is deployed and how `chr33s-git serve --ui` runs it. The page and the API
+ * must share an origin — a browser blocks the alternative outright, and the UI
+ * silently falls back to its fixtures — and one process serving both is the
+ * plainest way to have one.
+ *
+ * It used to be two servers and a proxy in front: esbuild's own on a random
+ * port, forwarded to by a hand-written one, because esbuild has no way to send
+ * what it does not have somewhere else (its docs say to put a proxy in front,
+ * and that is what this was). None of it is needed once the API can serve a
+ * directory: `--watch` writes the bundle to `dist/ui`, the host reads it from
+ * there per request, and a rebuild is picked up without a restart.
+ *
+ * `GIT_ROOT` says which directory of repositories it serves.
  */
 import { context, build as esbuild, type Plugin } from "esbuild";
-import {
-  createServer,
-  type IncomingHttpHeaders,
-  type IncomingMessage,
-  type RequestListener,
-} from "node:http";
+
+import { serve as serveHost } from "../host/Node.ts";
 import { access, cp, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,60 +58,17 @@ const diffsWebComponents = join(
 );
 
 /**
- * Say where everything is, and whether the API behind it is actually up.
+ * Say where it is, and which repositories are behind it.
  *
- * Three ports are in play and only `ui` is meant to be opened, so all three are
- * named together rather than left to be pieced together from esbuild's output:
- * `api` is what the proxy forwards to, and `dev` is esbuild's own asset server,
- * which is ephemeral and serves the bundle without the API beside it.
- *
- * Probed at startup because the alternative is what it replaced: the page loads,
- * every request 502s, and the UI quietly shows its fixtures. Any HTTP answer
- * counts as reachable — `/` is not a route, so even a 400 from the router
- * proves something is listening.
+ * One address now, where there were three: the bundle, the API and the page
+ * are one server. The root is worth printing because which repository the page
+ * asks for is baked into its `index.html` — a root without that one answers
+ * 404 and the UI shows fixtures, which is a thing to be told rather than to
+ * work out.
  */
-const announce = async (port: number, upstream: string, assets: number): Promise<void> => {
-  const reachable = await fetch(new URL("/", upstream))
-    .then(() => true)
-    .catch(() => false);
-
-  console.info(`\nui:   http://localhost:${String(port)}`);
-  console.info(
-    `api:  ${new URL(upstream).origin}${reachable ? "" : "  (\u2716 :-> GIT_API | GIT_ROOT)"}`,
-  );
-  console.info(`dev:  http://127.0.0.1:${String(assets)}\n`);
-};
-
-/**
- * A request body, for the methods that carry one.
- *
- * Returned as a `Uint8Array<ArrayBuffer>` rather than a `Buffer`: this project
- * compiles against the DOM lib, where `BodyInit` admits an `ArrayBufferView`
- * over a plain `ArrayBuffer` — not node's `Buffer`, and not the wider
- * `ArrayBufferLike` a bare `new Uint8Array(n)` is inferred as.
- */
-const collect = async (request: IncomingMessage): Promise<Uint8Array<ArrayBuffer>> => {
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of request) chunks.push(new Uint8Array(Buffer.from(chunk)));
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const body = new Uint8Array(new ArrayBuffer(total));
-  let at = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return body;
-};
-
-/** node's header bag to `fetch`'s, dropping the ones a proxy must not repeat. */
-const headersOf = (incoming: IncomingHttpHeaders): Headers => {
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(incoming)) {
-    if (value === undefined) continue;
-    if (name === "host" || name === "connection" || name === "content-length") continue;
-    headers.set(name, Array.isArray(value) ? value.join(", ") : value);
-  }
-  return headers;
+const announce = (url: string, repositories: string): void => {
+  console.info(`\nui:   ${url}`);
+  console.info(`      repositories under ${repositories}\n`);
 };
 
 const watch = process.argv.includes("--watch");
@@ -147,10 +109,11 @@ const page: Plugin = {
     build.onEnd(async (result) => {
       await cp(join(pwd, "index.html"), join(outdir, "index.html"), { force: true });
       await writeFile(join(outdir, "_headers"), HEADERS);
-      // `--serve` turns esbuild's info logging off so its own ephemeral-port
-      // line does not precede — and contradict — the boot message below. That
-      // also costs the rebuild line, which is worth keeping, so it is reprinted
-      // here. Not for the first build: that one is announced in full.
+      // `--serve` turns esbuild's info logging down, because at `info` every
+      // rebuild reprints the whole output table and buries the one line that
+      // matters. That also costs the rebuild notice, which is worth keeping,
+      // so it is reprinted here. Not for the first build: that one is
+      // announced in full below.
       //
       // Said before the check below returns, so a build that failed says so
       // rather than going quiet exactly when the notice matters most.
@@ -198,56 +161,18 @@ if (watch || serve) {
   const ctx = await context(options);
   await ctx.watch();
   if (serve) {
-    // esbuild serves the bundle on an ephemeral port; the proxy below is what
-    // the browser talks to, so both the page and `/:repo/...` are one origin.
-    const assets = await ctx.serve({ servedir: outdir, host: "127.0.0.1", port: 0 });
-    const upstream = process.env["GIT_API"] ?? "http://127.0.0.1:8787";
-    let warned = false;
-    const port = Number(process.env["PORT"] ?? 8000);
-
-    const forward = async (
-      to: string,
-      request: Parameters<RequestListener>[0],
-      body: Uint8Array<ArrayBuffer> | undefined,
-    ) => {
-      return await fetch(new URL(request.url ?? "/", to), {
-        method: request.method,
-        headers: headersOf(request.headers),
-        body,
-      });
-    };
-
-    createServer((request, response) => {
-      void (async () => {
-        try {
-          const assetRequest = request.method === "GET" || request.method === "HEAD";
-          const body = assetRequest ? undefined : await collect(request);
-          // Static assets are necessarily GET/HEAD. Mutations go directly to
-          // the API, so their one-shot request streams are consumed exactly
-          // once. Reads still ask the bundle first and fall through on 404,
-          // avoiding a duplicated list of server routes.
-          let answer = assetRequest
-            ? await forward(`http://127.0.0.1:${String(assets.port)}`, request, body)
-            : await forward(upstream, request, body);
-          if (assetRequest && answer.status === 404) {
-            answer = await forward(upstream, request, body);
-          }
-          response.writeHead(answer.status, Object.fromEntries(answer.headers));
-          response.end(Buffer.from(await answer.arrayBuffer()));
-        } catch (cause) {
-          // Once, not per request: a dead upstream would otherwise scroll the
-          // rebuild output away entirely.
-          if (!warned) {
-            warned = true;
-            console.warn(`\n  API at ${upstream} refused the connection — showing fixtures.\n`);
-          }
-          response.writeHead(502, { "content-type": "text/plain" });
-          response.end(`git+ UI proxy could not reach ${upstream}: ${String(cause)}`);
-        }
-      })();
-    }).listen(port, () => {
-      void announce(port, upstream, assets.port);
+    // The bundle is on disk, and the server that answers `/:repo/...` can hand
+    // out a directory — so it hands out this one. No second server, and
+    // nothing forwarding between them. `--watch` above rewrites `dist/ui` on
+    // every change and the host reads it per request, so a rebuild needs no
+    // restart to be picked up.
+    const repositories = process.env["GIT_ROOT"] ?? process.cwd();
+    const host = await serveHost({
+      root: repositories,
+      port: Number(process.env["PORT"] ?? 8000),
+      ui: outdir,
     });
+    announce(host.url, repositories);
   } else {
     // Watch-only serves nothing, which is worth saying out loud: the process
     // then sits in the foreground by design, waiting for the next change.

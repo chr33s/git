@@ -382,7 +382,7 @@ const credentialHelper = Command.make(
 );
 
 /**
- * Where `ui:build` puts the bundle, found from this file rather than from the
+ * Where `build:ui` puts the bundle, found from this file rather than from the
  * working directory — `serve` is run from wherever the repositories are, not
  * from the checkout.
  */
@@ -416,13 +416,13 @@ const serveCommand = Command.make(
       // One origin, because a browser gives no choice: the page fetches
       // `/{repo}/...` with no host of its own, and a page served from
       // somewhere else has every one of those requests blocked. Serving the
-      // bundle here is what the deployed Worker does and what `ui:dev` fakes
+      // bundle here is what the deployed Worker does and what `dev:ui` fakes
       // with a proxy — see `server/Static.ts`.
       const assets = ui ? (uiDir === "" ? defaultUiDir : uiDir) : undefined;
       if (assets !== undefined && !(yield* Effect.promise(() => Static.built(assets)))) {
         return yield* new Invalid({
           field: "ui",
-          reason: `${assets} holds no built UI; run \`npm run ui:build\` first, or point --ui-dir at one`,
+          reason: `${assets} holds no built UI; run \`npm run build:ui\` first, or point --ui-dir at one`,
         });
       }
       // There is no `--secret` any more: a repository with a genesis is

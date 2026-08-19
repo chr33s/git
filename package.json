@@ -18,15 +18,14 @@
   "type": "module",
   "scripts": {
     "build:sea": "node src/cli/sea.build.ts",
+    "build:ui": "node src/ui/build.ts",
     "check": "oxfmt --check && oxlint && tsc -b --noEmit && tsc -p src/ui --noEmit",
+    "dev:ui": "node src/ui/build.ts --serve",
     "fix": "oxlint --fix && oxfmt --write",
     "postinstall": "patch-package && npx wrangler types -c wrangler.test.json && npm run fix",
     "prepare": "effect-tsgo patch",
     "test": "vitest run",
-    "ui:api": "GIT_ROOT=$(pwd) PORT=8787 node src/host/Node.ts",
-    "ui:build": "node src/ui/build.ts",
-    "ui:dev": "node src/ui/build.ts --serve",
-    "ui:verify": "node src/ui/build.ts && node src/ui/verify.ts"
+    "verify:ui": "node src/ui/build.ts && node src/ui/verify.ts"
   },
   "dependencies": {
     "effect": "4.0.0-rc.110"
