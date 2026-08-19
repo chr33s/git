@@ -144,11 +144,15 @@ export const QueueLeft = Schema.Struct({
 });
 
 /**
- * The target moved outside this queue, so the candidates built on it are stale.
+ * The chain on record was not built on what the target now holds.
  *
- * Entries survive a reset and candidates do not: what a reset invalidates is
- * the chain, not anybody's intention to land. `at` is what the target was
- * observed to hold, kept so a reader can tell one reset from the next.
+ * Usually because the target moved outside this queue, and sometimes because
+ * the chain lost a step from under the ones above it — an entry re-entering at
+ * a new head clears its own candidate and leaves everything built on top of it
+ * hanging. Either way the candidates are stale and the entries are not: what a
+ * reset invalidates is the chain, never anybody's intention to land. `at` is
+ * what the target was observed to hold, kept so a reader can tell one reset
+ * from the next.
  */
 export const QueueReset = Schema.Struct({
   type: Schema.tag("queue.reset"),

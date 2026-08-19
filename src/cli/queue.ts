@@ -332,6 +332,15 @@ interface Pass {
    */
   readonly refused: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
   readonly reset: boolean;
+  /**
+   * Whether this pass wrote anything a reader can see.
+   *
+   * A dry run moves no ref and records no event, which is what makes it safe.
+   * It does still *write objects* — a candidate has to be built to be reported,
+   * and building one writes its trees and its commit — but they are content
+   * addressed and reachable from nothing, so they cost a `gc` and change no
+   * answer. `git merge-tree` writes a tree for the same reason.
+   */
   readonly dryRun: boolean;
 }
 
@@ -434,13 +443,21 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     } satisfies Pass;
   }
 
-  // The target moved out from under the chain that was built on it. Recorded
-  // before rebuilding, so a reader can tell a rebuild from a first build.
-  const stale = state.entries.some(
-    (entry) => entry.candidate !== null && entry.candidate.onto !== from,
+  // The chain on record was not built on what the branch now holds, so the
+  // candidates in it are stale. Recorded before rebuilding, so a reader can
+  // tell a rebuild from a first build.
+  //
+  // Established positively — *no* recorded candidate sits directly on the
+  // branch tip — rather than by picking one entry and asking where it was
+  // built. A chain's foot is the only step built on the tip, and finding it by
+  // taking the first entry that has a candidate is wrong the moment an entry
+  // re-enters: its candidate is cleared in place, so the search returns a
+  // later step whose `onto` is another candidate, and the pass then recorded a
+  // reset that had not happened on a ref nothing can shorten.
+  const recorded = state.entries.flatMap((entry) =>
+    entry.candidate === null ? [] : [entry.candidate],
   );
-  const chainStart = state.entries.find((entry) => entry.candidate !== null)?.candidate?.onto;
-  let reset = stale && chainStart !== from;
+  let reset = recorded.length > 0 && !recorded.some((candidate) => candidate.onto === from);
   if (reset) {
     yield* record(
       Queue.reset({ repo: genesis.repoId, queue: state.queue, at: from, key: input.key }),
@@ -785,7 +802,7 @@ const run = Command.make(
     target: Flag.string("target").pipe(Flag.withDefault("")),
     dryRun: Flag.boolean("dry-run").pipe(
       Flag.withDefault(false),
-      Flag.withDescription("Say what one pass would do, and write nothing"),
+      Flag.withDescription("Say what one pass would do, moving no ref and recording nothing"),
     ),
     repo: repoArgument,
   },

@@ -893,6 +893,29 @@ describe("cli queue", () => {
     );
   });
 
+  it("does not record a reset the branch did not earn", async () => {
+    // A chain's foot is the only step built on the branch tip, and finding it
+    // by taking the first entry that has a candidate is wrong the moment an
+    // entry re-enters: its candidate is cleared in place, so the search returns
+    // a later step whose `onto` is another candidate — and the pass recorded a
+    // reset that had not happened, on a ref nothing can shorten.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+    await run();
+
+    const settled = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(settled.resets, 0, "a first build resets nothing");
+
+    // Nothing moves the branch; the second pass rebuilds the same chain.
+    const again = await run();
+    assert.equal(again.reset, false);
+    const after = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(after.resets, 0, "and an unchanged rebuild resets nothing either");
+  });
+
   it("leaves alone a branch under the prefix it did not put there", async () => {
     // The cleanup sweep read the queue as it stood when the pass began, so it
     // deleted whatever a keep-list did not mention — a concurrent runner's
