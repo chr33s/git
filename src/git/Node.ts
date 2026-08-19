@@ -896,7 +896,7 @@ export const retirePacksAndRemove = (root: string, remove: () => Promise<void>):
  * names — the repack that happened somewhere else.
  *
  * `delete` covers a pack this process removes. Nothing covers `git repack -ad`
- * in another process, or another `chr33s-git gc`, which is a supported thing
+ * in another process, or another `git+ gc`, which is a supported thing
  * to do to a repository this host is serving: the listing is re-read when the
  * directory's mtime changes, but the pool would go on holding the old pack's
  * descriptor, and the space the repack was asked to reclaim would never come

@@ -1,8 +1,5 @@
-> [!NOTE]
-> [artifacts](https://github.com/chr33s/git/tree/artifacts) branch tracks effect@beta / alchemy@beta rewrite, (self hostable cloudflare Artifacts)
-
 > [!WARNING]  
-> Experimental: API is unstable and not production-ready.
+> Pre-1.0 API: unstable and not recommended for production use.
 
 # @chr33s/git
 
@@ -104,8 +101,8 @@ Both hosts speak:
 Authority belongs to the repository, not to the server. There is no shared
 secret to deploy and no server flag to set: a repository with a genesis
 (`refs/meta/trust/genesis`) is guarded by its own SSH-key membership log, and
-one without is a plain git repository served as one. `chr33s-git hub init`
-gives a repository an identity; `chr33s-git credential` mints a short-lived
+one without is a plain git repository served as one. `git+ hub init`
+gives a repository an identity; `git+ credential` mints a short-lived
 credential the holder signs with their own key, which `git` presents as
 `http://<credential>@host/repo`. See `docs/hub.md`.
 
@@ -115,8 +112,8 @@ The CLI drives the same code the server runs — one `Repository`, one host, one
 client, one auth path:
 
 ```sh
-npx chr33s-git init my-repo && npx chr33s-git serve &
-npx chr33s-git clone http://127.0.0.1:8080/my-repo my-copy
+npx git+ init my-repo && npx git+ serve &
+npx git+ clone http://127.0.0.1:8080/my-repo my-copy
 ```
 
 A repository with no genesis is readable by anyone who can reach the port and
@@ -131,18 +128,18 @@ as well as `source.push` to write:
 
 ```sh
 ssh-keygen -t ed25519 -f ~/.ssh/hub -N ""
-npx chr33s-git hub init my-repo --key ~/.ssh/hub
-npx chr33s-git credential my-repo --key ~/.ssh/hub --capability repo.read,source.push
-npx chr33s-git clone --token <credential> http://127.0.0.1:8080/my-repo my-copy
+npx git+ hub init my-repo --key ~/.ssh/hub
+npx git+ credential my-repo --key ~/.ssh/hub --capability repo.read,source.push
+npx git+ clone --token <credential> http://127.0.0.1:8080/my-repo my-copy
 ```
 
 Working-tree commands take `--work`, a checkout whose repository is `.git`
 inside it, rather than the bare repositories under `--root`:
 
 ```sh
-npx chr33s-git add --work . . && npx chr33s-git status --work .
-npx chr33s-git commit --work . --message "first"
-npx chr33s-git switch --work . --create topic
+npx git+ add --work . . && npx git+ status --work .
+npx git+ commit --work . --message "first"
+npx git+ switch --work . --create topic
 ```
 
 A fleet coordinates through the repository rather than beside it. `task`
@@ -153,10 +150,10 @@ parent story are all just tasks that other tasks name, so each inherits
 claiming, closing and provenance for free.
 
 ```sh
-npx chr33s-git task open my-repo --key ~/.ssh/hub --title "v0.4 — Identity"
-npx chr33s-git task open my-repo --key ~/.ssh/hub --title "Sign events" --parent <release>
-npx chr33s-git task reparent my-repo <task> --key ~/.ssh/hub --parent <other-release>
-npx chr33s-git task list my-repo          # what nobody currently holds
+npx git+ task open my-repo --key ~/.ssh/hub --title "v0.4 — Identity"
+npx git+ task open my-repo --key ~/.ssh/hub --title "Sign events" --parent <release>
+npx git+ task reparent my-repo <task> --key ~/.ssh/hub --parent <other-release>
+npx git+ task list my-repo          # what nobody currently holds
 ```
 
 A claim is a lease and advisory: it frees itself when it expires, so an agent
@@ -170,7 +167,7 @@ when a push moves its hub refs. See [docs/agents.md](docs/agents.md).
 `diff`, `grep`, `bisect`, `files`), refs (`branch`, `tag`, `refs`, `reset`),
 rewriting (`merge`, `cherry-pick`, `rebase`), transport (`push`, `archive`),
 agents (`task`, `session`, `wake`), and maintenance (`fsck`, `gc`).
-`npx chr33s-git --help` lists them; every command takes `--help`.
+`npx git+ --help` lists them; every command takes `--help`.
 
 ## Web UI
 
@@ -194,7 +191,7 @@ fall back to its fixtures. `GIT_ROOT` defaults to the working directory.
 The same arrangement without the watcher, from a finished bundle:
 
 ```sh
-npm run build:ui && chr33s-git serve --root /path/to/repos --ui
+npm run build:ui && git+ serve --root /path/to/repos --ui
 ```
 
 `--ui-dir` points at a bundle built somewhere else. Which repository the page
@@ -211,7 +208,7 @@ executable — no `node`, no `node_modules` on the machine it runs on:
 
 ```sh
 npm run build:sea
-./dist/sea/chr33s-git --help
+./dist/sea/git+ --help
 ```
 
 esbuild folds the CLI and its dependencies into a single module, and node's
@@ -220,50 +217,42 @@ script runs on.
 
 ## Benchmarks
 
-The single binary against `git` 2.43 on the same machine (Linux x86_64
-container, node 26.7.0). Mean of 9 runs after a warmup; peak RSS is the
+The single binary against `git` 2.55 on the same machine (macOS arm64,
+node 26.7.0). Mean of 9 runs after a warmup; peak RSS is the
 child's own `ru_maxrss` via `wait4`. Work-tree and history actions run in a
 200-commit, 200-file repository, repacked — `git repack -ad`, the state `gc`
 leaves a repository in, and the one that makes both tools read objects out of
 a pack rather than off the loose object path. Clone is a bare clone over local
-smart-HTTP from `chr33s-git serve`, so both clients answer to the same host.
+smart-HTTP from `git+ serve`, so both clients answer to the same host.
 
-Two things have moved since these were taken. A build-time rewrite of
-`effect/Schema` that deferred node's `fetch` initialization was dropped — it
-made the binary a different program from the one the tests run — so the current
-binary is about 19 ms and 7 MiB heavier on every row; `src/cli/sea.build.ts`
-records why. And reading objects out of a pack now goes through the platform's
-own zlib rather than the portable decoder, which took roughly 60% off the clone
-row for both clients, since both clone from the same host.
-
-| action            | `git`   | `chr33s-git` | `git` peak RSS | `chr33s-git` peak RSS |
-| ----------------- | ------- | ------------ | -------------- | --------------------- |
-| `--version`       | 2 ms    | 97 ms        | 12 MiB         | 64 MiB                |
-| `init`            | 3 ms    | 104 ms       | 12 MiB         | 65 MiB                |
-| `status`          | 3 ms    | 276 ms       | 12 MiB         | 81 MiB                |
-| `add` (one file)  | 3 ms    | 122 ms       | 12 MiB         | 69 MiB                |
-| `commit`          | 94 ms   | 123 ms       | 27 MiB         | 69 MiB                |
-| `log -n 20`       | 2 ms    | 149 ms       | 12 MiB         | 78 MiB                |
-| `clone` over HTTP | 6684 ms | 6628 ms      | 12 MiB         | 161 MiB               |
+| action            | `git`  | `git+` | `git` peak RSS | `git+` peak RSS |
+| ----------------- | ------ | ------ | -------------- | --------------- |
+| `--version`       | 3 ms   | 48 ms  | 7 MiB          | 82 MiB          |
+| `init`            | 7 ms   | 51 ms  | 7 MiB          | 83 MiB          |
+| `status`          | 5 ms   | 96 ms  | 9 MiB          | 98 MiB          |
+| `add` (one file)  | 5 ms   | 55 ms  | 8 MiB          | 85 MiB          |
+| `commit`          | 11 ms  | 56 ms  | 9 MiB          | 85 MiB          |
+| `log -n 20`       | 4 ms   | 58 ms  | 9 MiB          | 87 MiB          |
+| `clone` over HTTP | 177 ms | 458 ms | 9 MiB          | 173 MiB         |
 
 `git` wins every local row, and the shape of the loss is fixed cost, not
-algorithm: ~97 ms of every run is the runtime coming up — 23 ms of that is
+algorithm: ~48 ms of every run is the runtime coming up — 19 ms of that is
 node itself (a hello-world SEA binary's floor here), the rest is module
 initialization, with parse/compile already paid for by the V8 code cache the
-build embeds. Peak RSS says more about the runtime the binary carries than about the
-CLI: a hello-world SEA measures 76 MiB on the same machine, more than `--version`
-here and within a few MiB of every row but `clone`, so read that column as
+build embeds. Peak RSS says more about the runtime the binary carries than
+about the CLI: a hello-world SEA measures 50 MiB on the same machine, and
+every row but `clone` sits within 50 MiB of that floor, so read the column as
 node's allocator with a workload on top rather than as the cost of the work.
-The work on top of that floor is 7–180 ms per action (commit adds ~26 ms
-against git's 94 ms total). The binary itself is 143 MiB against git's ~4 MiB,
-for the same reason.
+The work on top of that floor is 3–48 ms per local action (commit adds ~8 ms
+against git's 11 ms total). The binary itself is 139 MiB against git's
+~4 MiB, for the same reason.
 
-Clone is the row where the comparison stops being about the client. Both
-clients clone from `chr33s-git serve`, and against a packed repository the
-host — reading every object out of the pack, resolving deltas, building the
-response — costs more than either client does, which is why the two land
-within 1% of each other. Read that row as a measurement of the host, not of
-`git` against `chr33s-git`.
+Clone is the one row where both sides do real work. Both clients clone from
+`git+ serve`, so the host's half of the transfer — reading every object out
+of the pack, resolving deltas, building the response — is identical for the
+two; the gap is the client's own half, receiving the pack and writing the
+repository, and the peak RSS says the client holds far more of that transfer
+in memory than `git` does.
 
 The obvious next knob does not work: `useSnapshot`, which serializes the heap
 after module initialization instead of only the compile cache, cannot build
@@ -343,7 +332,7 @@ reasoning, module map, conventions and testing philosophy live in
 npm run check             # format, lint, and typecheck — both programs
 npm run fix               # auto-fix both
 npm test                  # unit + integration (workerd) projects
-npm run build:sea         # dist/sea/chr33s-git — self-contained CLI binary (node 26+)
+npm run build:sea         # dist/sea/git+ — self-contained CLI binary (node 26+)
 npm run build:ui          # bundle the browser UI to dist/ui
 npm run dev:ui            # watch it, and serve page + API on :8000
 npm run verify:ui         # build it, then drive it in a browser

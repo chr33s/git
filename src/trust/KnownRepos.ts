@@ -116,7 +116,7 @@ export const mismatchMessage = (url: string, expected: RepoId, presented: RepoId
     "something is answering in its place. Hub operations will fail",
     "until this is resolved:",
     "",
-    `  chr33s-git hub forget ${url}`,
+    `  git+ hub forget ${url}`,
     "",
   ].join("\n");
 

@@ -3,7 +3,7 @@
  *
  * Two steps: esbuild folds the CLI and its dependencies into one minified
  * CommonJS file, then `node --build-sea` (Node 26+) embeds it into a copy of
- * the running node binary. The result is `dist/sea/chr33s-git` — one file
+ * the running node binary. The result is `dist/sea/git+` — one file
  * that needs no `node` or `node_modules` on the machine it runs on, for the
  * platform this script runs on.
  *
@@ -76,10 +76,15 @@ await build({
   platform: "node",
   format: "cjs",
   target: "node26",
-  define: { "import.meta.main": "false" },
+  // A CJS bundle has no `import.meta`: `main` would misfire the guards in
+  // `main.ts` and `host/Node.ts`, and `dirname` is read at module scope in
+  // `session.ts` and `main.ts`, so an undefined one aborts startup. Inside
+  // the executable the module's directory is the executable's.
+  define: { "import.meta.main": "false", "import.meta.dirname": "__SEA_DIRNAME" },
+  banner: { js: 'var __SEA_DIRNAME=require("node:path").dirname(process.execPath);' },
 });
 
-const executable = path.join(out, process.platform === "win32" ? "chr33s-git.exe" : "chr33s-git");
+const executable = path.join(out, process.platform === "win32" ? "git+.exe" : "git+");
 const configuration = path.join(out, "sea.json");
 fs.writeFileSync(
   configuration,
@@ -97,4 +102,9 @@ fs.writeFileSync(
 );
 
 execFileSync(process.execPath, ["--build-sea", configuration], { stdio: "inherit" });
+// macOS kills an unsigned binary with SIGKILL before it runs a single
+// instruction; an ad-hoc signature is enough.
+if (process.platform === "darwin") {
+  execFileSync("codesign", ["--sign", "-", executable], { stdio: "inherit" });
+}
 console.log(`${executable} (${(fs.statSync(executable).size / 1024 / 1024).toFixed(0)} MiB)`);

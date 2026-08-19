@@ -1,5 +1,5 @@
 /**
- * `chr33s-git task …` — what needs doing, and who is on it.
+ * `git+ task …` — what needs doing, and who is on it.
  *
  * The fleet's working rhythm, in four verbs: a task is opened, hooks wake
  * whoever watches for one, agents race to claim it, and the lease one of them
@@ -27,7 +27,7 @@ const identityOf = Effect.fn("task.identityOf")(function* (repo: string) {
   if (stored === null) {
     return yield* new Invalid({
       field: "repo",
-      reason: `${repo} has no genesis; run \`chr33s-git hub init ${repo} --key <key>\` first`,
+      reason: `${repo} has no genesis; run \`git+ hub init ${repo} --key <key>\` first`,
     });
   }
   return stored.genesis.repoId;
@@ -298,9 +298,7 @@ const show = Command.make(
 );
 
 export const taskCommand = Command.make("task", {}, () =>
-  Console.log(
-    "chr33s-git task <open|claim|release|close|reopen|reparent|redact|list|show> — see --help",
-  ),
+  Console.log("git+ task <open|claim|release|close|reopen|reparent|redact|list|show> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record what needs doing")),

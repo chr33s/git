@@ -1,5 +1,5 @@
 /**
- * `chr33s-git session …` — recording what an agent was told, and what came
+ * `git+ session …` — recording what an agent was told, and what came
  * of it.
  *
  * Plumbing, by design: the expected caller is a harness hook — a Claude Code
@@ -40,7 +40,7 @@ const identityOf = Effect.fn("session.identityOf")(function* (repo: string) {
   if (stored === null) {
     return yield* new Invalid({
       field: "repo",
-      reason: `${repo} has no genesis; run \`chr33s-git hub init ${repo} --key <key>\` first`,
+      reason: `${repo} has no genesis; run \`git+ hub init ${repo} --key <key>\` first`,
     });
   }
   return stored.genesis.repoId;
@@ -276,7 +276,7 @@ const hookScript = (input: {
   readonly repo: string;
   readonly key: string;
 }) => `#!/usr/bin/env node
-// Written by \`chr33s-git session enable\`. Safe to edit; safe to delete.
+// Written by \`git+ session enable\`. Safe to edit; safe to delete.
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -476,9 +476,7 @@ const memoryShow = Command.make(
 );
 
 export const sessionCommand = Command.make("session", {}, () =>
-  Console.log(
-    "chr33s-git session <open|produce|show|ask|answer|redact|enable|memory> — see --help",
-  ),
+  Console.log("git+ session <open|produce|show|ask|answer|redact|enable|memory> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record who was instructed, and what they were asked")),

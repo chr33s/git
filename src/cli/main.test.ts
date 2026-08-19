@@ -562,7 +562,7 @@ describe("the bin entry", () => {
         encoding: "utf8",
         env: { ...clean, XDG_CACHE_HOME: temporary },
       });
-      assert.match(stdout, /^chr33s-git v/);
+      assert.match(stdout, /^git\+ v/);
     } finally {
       await fs.rm(temporary, { recursive: true, force: true });
     }

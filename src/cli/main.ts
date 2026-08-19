@@ -6,11 +6,11 @@
  * handler calls the same `Repository` service, host, client and auth code
  * the server runs — the CLI is not another implementation of anything.
  *
- *   chr33s-git init my-repo                      # bare repository under --root
- *   chr33s-git refs my-repo · log my-repo        # inspect it
- *   chr33s-git clone http://host/repo my-copy    # bare clone over smart HTTP
- *   chr33s-git serve --port 8080                 # the node host
- *   chr33s-git credential my-repo --key ~/.ssh/id_ed25519
+ *   git+ init my-repo                      # bare repository under --root
+ *   git+ refs my-repo · log my-repo        # inspect it
+ *   git+ clone http://host/repo my-copy    # bare clone over smart HTTP
+ *   git+ serve --port 8080                 # the node host
+ *   git+ credential my-repo --key ~/.ssh/id_ed25519
  *
  * The failure channel reaches `main`, so exit codes come from the error
  * type: a bad ref is a diagnostic and exit 1, an interrupt is 130, an
@@ -257,7 +257,7 @@ const readStdin = Effect.promise(
  * answer the same way on stdout. Configured as
  *
  *   git config credential.useHttpPath true
- *   git config credential.helper '!chr33s-git credential-helper --key ~/.ssh/id_ed25519 --root .'
+ *   git config credential.helper '!git+ credential-helper --key ~/.ssh/id_ed25519 --root .'
  *
  * git appends the operation, so `get` arrives as an argument and a push picks
  * the credential up with nothing else to remember.
@@ -454,7 +454,7 @@ const serveCommand = Command.make(
           ? "--open: repositories with no genesis accept writes from anyone who can reach the port. "
           : "repositories with no genesis are readable by anyone who can reach the port and " +
             "writable by nobody; pass --open to serve writes to them anyway. ") +
-          "run `chr33s-git hub init <repo> --key <key>` to give a repository a membership " +
+          "run `git+ hub init <repo> --key <key>` to give a repository a membership " +
           "of its own. A repository whose members hold no read capability is still public: " +
           "membership restricts, so restricting nothing restricts nobody",
       );
@@ -1105,7 +1105,7 @@ const remoteRemove = Command.make(
 );
 
 const remoteCommand = Command.make("remote", {}, () =>
-  Console.log("chr33s-git remote <add|list|rm> --server <url> — see --help"),
+  Console.log("git+ remote <add|list|rm> --server <url> — see --help"),
 ).pipe(
   Command.withSubcommands([
     remoteAdd.pipe(Command.withDescription("Register a remote on the server")),
@@ -1152,7 +1152,7 @@ const webhookRemove = Command.make(
 );
 
 const webhookCommand = Command.make("webhook", {}, () =>
-  Console.log("chr33s-git webhook <add|list|rm> --server <url> — see --help"),
+  Console.log("git+ webhook <add|list|rm> --server <url> — see --help"),
 ).pipe(
   Command.withSubcommands([
     webhookAdd.pipe(Command.withDescription("Register a webhook; the secret never comes back")),
@@ -1161,7 +1161,7 @@ const webhookCommand = Command.make("webhook", {}, () =>
   ]),
 );
 
-const git = Command.make("chr33s-git").pipe(
+const git = Command.make("git+").pipe(
   // Descriptions live here rather than beside each definition so `--help`
   // can be read as one list and checked for gaps in one place.
   Command.withSubcommands([

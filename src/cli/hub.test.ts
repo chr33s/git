@@ -634,7 +634,7 @@ describe("cli hub", () => {
             line.includes("refs/meta/presented/"),
         ).length,
         0,
-        `nothing chr33s-git manages is left: ${left.join(", ")}`,
+        `nothing git+ manages is left: ${left.join(", ")}`,
       );
 
       // Except the identity document, which is the one ref here whose removal

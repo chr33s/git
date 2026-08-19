@@ -276,7 +276,7 @@ export class GpSettings extends GitPlusElement {
                 }
                 <p class="gp-setting-hint">
                   Hub events this browser writes are signed with this key. Grant it membership with
-                  <code>chr33s-git hub grant</code> to have a repository with a genesis accept them.
+                  <code>git+ hub grant</code> to have a repository with a genesis accept them.
                 </p>
               `
         }

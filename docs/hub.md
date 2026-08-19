@@ -223,7 +223,7 @@ The exact serialization may evolve. The semantics copy SSH `known_hosts`.
 On first hub enablement:
 
 ```bash
-chr33s-git hub enable
+git+ hub enable
 ```
 
 the client retrieves the repository genesis, verifies its self-consistency, and calculates its fingerprint.
@@ -292,7 +292,7 @@ SSH server key
 versus:
 
 ```text
-chr33s-git known_repos
+git+ known_repos
 
 repository
    ↓
@@ -686,7 +686,7 @@ A request MUST prove possession of the private key corresponding to the claimed 
 There are two authentication paths, and **both are required in v1**:
 
 ```text
-native path     chr33s-git clients: SSH challenge-response
+native path     git+ clients: SSH challenge-response
 delegated path  stock git clients: short-lived signed credentials
 ```
 
@@ -803,10 +803,10 @@ A delegated credential is an SSH-signed capability attestation by a member key:
 
 encoded compactly and presented as the Basic password (or Bearer token). Verification is stateless: check the SSH signature, walk the trust graph for the signing member, intersect the attested capabilities with the member's own, check expiry. The credential can never exceed the authority of the member who minted it, and revoking the member revokes every credential they minted.
 
-`chr33s-git` mints one on demand:
+`git+` mints one on demand:
 
 ```bash
-chr33s-git credential --capability source.push --ttl 1h
+git+ credential --capability source.push --ttl 1h
 ```
 
 and can act as a `git credential` helper so stock git picks it up transparently. git does not take a password on a command line: it runs a helper and speaks a line protocol at it — `key=value` on stdin, a blank line, the answer the same way — with the operation as an argument. The helper MUST answer `get` with a freshly minted credential, and MUST succeed silently on `store` and `erase`: there is nothing to store, since the credential is minted from the key on every ask and expires by itself, and exiting non-zero there reports a failure for a push that worked. Where the caller names no repository the helper MUST take the one git is asking about, from the `path` it supplies — spelled the way the server reads it, trailing `.git` stripped, or every clone URL written the ordinary way names a repository that does not exist — so a single configured helper serves every repository on a host — which requires `credential.useHttpPath`, since git's default is to identify a credential by protocol and host alone and a credential scoped to one repository cannot be minted from that. Where neither is available the helper MUST say which of the two is missing rather than fail obscurely on every push.
@@ -913,7 +913,7 @@ A stock Git clone remains source-only by default.
 An existing clone opts into hub synchronization with:
 
 ```bash
-chr33s-git hub enable
+git+ hub enable
 ```
 
 The command adds:
@@ -934,15 +934,15 @@ The command MUST be idempotent. It SHOULD immediately fetch trust and hub refs u
 Recommended related commands:
 
 ```bash
-chr33s-git hub disable
-chr33s-git hub status
+git+ hub disable
+git+ hub status
 ```
 
-`hub disable` removes only the refspecs managed by `chr33s-git`. A client that keeps no per-remote configuration — where every fetch names its own refspecs — has no refspecs to remove, and there the same rule reads as the refs: it MUST remove exactly what `hub enable` fetches — the hub refspecs themselves, the rules file among them — plus the scratch ref a presented genesis lands in while it is still only a claim, and nothing else, never a branch or a tag. The genesis is the exception, and MUST be left where it is: `refs/meta/trust/*` matches it, and it is the one ref here whose removal fails **open**. The directory this runs against may also be one a server is pointed at — a mirror is exactly that, and it passes the pin check below because a mirror's identity is the origin's — and a served repository with no genesis reads as not hub-enabled, so it answers every request anonymously, writably where the host allows anonymous writes. Losing the log and the events leaves a repository nobody is a member of, which refuses; losing the genesis leaves one with no members to be. Dropping an identity is `hub forget`, which touches no repository. Naming the namespaces by hand instead of deriving them from the refspecs leaves the origin's branch rules behind, outliving the identity that could have changed them. Deleting those refs is the one place this client does what the policy boundary refuses a push, so it MUST be guarded by the pin: a repository this client enabled against a URL got that state from somewhere else, and one that `hub init` created has no pin naming itself. The pin is about the _URL_, and what gets deleted is a _directory_, so the two MUST also be checked against each other: the identity the directory holds has to be the one the URL was pinned as. Without that, a mistyped local name points the one command that deletes refs at somebody else's repository, and there is no undo — the trust log and every event are gone. The pin survives — dropping trust is `hub forget`, and a repository whose hub state you have stopped fetching is not one whose identity you have stopped believing.
+`hub disable` removes only the refspecs managed by `git+`. A client that keeps no per-remote configuration — where every fetch names its own refspecs — has no refspecs to remove, and there the same rule reads as the refs: it MUST remove exactly what `hub enable` fetches — the hub refspecs themselves, the rules file among them — plus the scratch ref a presented genesis lands in while it is still only a claim, and nothing else, never a branch or a tag. The genesis is the exception, and MUST be left where it is: `refs/meta/trust/*` matches it, and it is the one ref here whose removal fails **open**. The directory this runs against may also be one a server is pointed at — a mirror is exactly that, and it passes the pin check below because a mirror's identity is the origin's — and a served repository with no genesis reads as not hub-enabled, so it answers every request anonymously, writably where the host allows anonymous writes. Losing the log and the events leaves a repository nobody is a member of, which refuses; losing the genesis leaves one with no members to be. Dropping an identity is `hub forget`, which touches no repository. Naming the namespaces by hand instead of deriving them from the refspecs leaves the origin's branch rules behind, outliving the identity that could have changed them. Deleting those refs is the one place this client does what the policy boundary refuses a push, so it MUST be guarded by the pin: a repository this client enabled against a URL got that state from somewhere else, and one that `hub init` created has no pin naming itself. The pin is about the _URL_, and what gets deleted is a _directory_, so the two MUST also be checked against each other: the identity the directory holds has to be the one the URL was pinned as. Without that, a mistyped local name points the one command that deletes refs at somebody else's repository, and there is no undo — the trust log and every event are gone. The pin survives — dropping trust is `hub forget`, and a repository whose hub state you have stopped fetching is not one whose identity you have stopped believing.
 
 ### Trust establishment
 
-`chr33s-git hub enable` also establishes repository trust:
+`git+ hub enable` also establishes repository trust:
 
 ```text
 discover origin
@@ -1730,7 +1730,7 @@ fetch, push, fsck
 tests against real stock Git SHA-1 and SHA-256 repositories
 ```
 
-A repository has one primary Git object format; SHA-1 and SHA-256 objects are not mixed in one object namespace. `chr33s-git init --object-format=…` selects it; SHA-1 remains the compatibility default.
+A repository has one primary Git object format; SHA-1 and SHA-256 objects are not mixed in one object namespace. `git+ init --object-format=…` selects it; SHA-1 remains the compatibility default.
 
 Because v1 payloads are already hash-qualified, enabling SHA-256 later changes no wire or event format.
 
@@ -1755,7 +1755,7 @@ A user first connects to:
 https://git.example.com/project
 ```
 
-and `chr33s-git hub enable` displays the repository fingerprint. The user accepts it. That `RepoID` is pinned in:
+and `git+ hub enable` displays the repository fingerprint. The user accepts it. That `RepoID` is pinned in:
 
 ```text
 ~/.config/chr33s-git/known_repos
@@ -1774,7 +1774,7 @@ hub.approve
 
 recorded as a `trust.grant` in the trust log.
 
-Dave authenticates by proving possession of that SSH private key — challenge-response from `chr33s-git`, or a delegated credential he minted for stock git. The server derives authorization from the repository's Git-native trust graph rather than from a generic read/write token.
+Dave authenticates by proving possession of that SSH private key — challenge-response from `git+`, or a delegated credential he minted for stock git. The server derives authorization from the repository's Git-native trust graph rather than from a generic read/write token.
 
 Dave creates a PR: a `pr.opened` event at the root of a new event DAG under:
 

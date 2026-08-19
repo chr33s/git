@@ -9,7 +9,7 @@
  * and signs event payloads with it. The seed never leaves this origin: OPFS
  * is origin-private, and the only thing ever shown to a person is the
  * *public* half, so an operator can grant it membership with
- * `chr33s-git hub grant`.
+ * `git+ hub grant`.
  *
  * A fresh key is nobody: until it is granted, a repository with a genesis
  * refuses its events (and the UI falls back to tab-local state, saying so).

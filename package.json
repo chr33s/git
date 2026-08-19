@@ -1,11 +1,11 @@
 {
   "name": "@chr33s/git",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Universal Git smart-HTTP protocol server, browser client & nix cli",
   "license": "MIT",
   "bin": {
-    "chr33s-git": "./src/cli/bin.ts"
+    "git+": "./src/cli/bin.ts"
   },
   "files": [
     "src",

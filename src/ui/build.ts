@@ -24,7 +24,7 @@
  *   node src/ui/build.ts --debug    # unminified, for reading a stack trace
  *
  * `--serve` hands the built directory to the server itself, which is how the
- * UI is deployed and how `chr33s-git serve --ui` runs it. The page and the API
+ * UI is deployed and how `git+ serve --ui` runs it. The page and the API
  * must share an origin — a browser blocks the alternative outright, and the UI
  * silently falls back to its fixtures — and one process serving both is the
  * plainest way to have one.

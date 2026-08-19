@@ -1,5 +1,5 @@
 /**
- * `chr33s-git hub …` — the commands that create and inspect a repository's
+ * `git+ hub …` — the commands that create and inspect a repository's
  * identity, its membership, and the trust a client places in it.
  *
  * Split into two halves that happen to share a prefix. `init`, `grant`,
@@ -436,7 +436,7 @@ const mustBeEnabled = Effect.fn("hub.mustBeEnabled")(function* (repo: string) {
   if (stored === null) {
     return yield* new Invalid({
       field: "repo",
-      reason: `${repo} has no genesis; run \`chr33s-git hub init ${repo} --key <key>\` first`,
+      reason: `${repo} has no genesis; run \`git+ hub init ${repo} --key <key>\` first`,
     });
   }
   return stored;
@@ -614,7 +614,7 @@ const enable = Command.make(
  * `[remote "origin"]`. This client keeps no per-remote configuration — every
  * fetch names its refspecs — so what `enable` durably leaves behind is the
  * pinned identity and the refs it fetched, and removing "only the refspecs
- * chr33s-git manages" is removing only the refs it manages.
+ * git+ manages" is removing only the refs it manages.
  *
  * Which is `HUB_FETCH` itself, and `hub enable`'s scratch ref, and nothing
  * else. Listing the namespaces by hand instead left `refs/meta/policy` behind:
@@ -731,7 +731,7 @@ const forget = Command.make("forget", { url: Argument.string("url") }, ({ url })
 
 export const hubCommand = Command.make("hub", {}, () =>
   Console.log(
-    "chr33s-git hub <init|grant|revoke|members|whoami|enable|disable|status|forget> — see --help",
+    "git+ hub <init|grant|revoke|members|whoami|enable|disable|status|forget> — see --help",
   ),
 ).pipe(
   Command.withSubcommands([

@@ -64,7 +64,7 @@ An operator whose key holds `member.invite` (or `repo.admin`) records the
 grant in the trust log:
 
 ```sh
-npx chr33s-git hub grant my-repo --key ~/.ssh/hub \
+npx git+ hub grant my-repo --key ~/.ssh/hub \
   --subject ~/.ssh/agent-claude.pub \
   --capability repo.read,source.push,hub.create-pr,hub.comment \
   --expires-in 7776000   # 90 days
@@ -105,7 +105,7 @@ An agent authenticates by proving possession of its private key. For stock
 delegated credential signed by the agent's own key:
 
 ```sh
-TOKEN=$(npx chr33s-git credential my-repo \
+TOKEN=$(npx git+ credential my-repo \
   --key ~/.ssh/agent-claude \
   --capability repo.read,source.push \
   --ttl 3600)
@@ -140,7 +140,7 @@ actor.
 projection and the branch rules at `refs/meta/policy`:
 
 ```sh
-$ chr33s-git hub whoami --root . --key ~/.ssh/agent-claude project
+$ git+ hub whoami --root . --key ~/.ssh/agent-claude project
 {
   "repo": "SHA256:uPHtrtbp5Pi++/nNoJu5g64eYs0PgrULnh5m+T253cI",
   "subject": "SHA256:DaOBdHEQqJ4foVREyhYZaOWu3JrzvKVDLmvZMFEPudw",
@@ -239,7 +239,7 @@ With one key doing both jobs, "this commit was authored by the agent" and
 "this push was authorized for the agent" become the same statement checked
 two ways — and a revocation for compromise cuts off both at once.
 
-(`chr33s-git commit` takes its author identity from
+(`git+ commit` takes its author identity from
 `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`; commit signing is stock git's job.)
 
 ### Wiring up Claude Code
@@ -271,7 +271,7 @@ Then tell the agent what it holds, in `CLAUDE.md`:
 
 Your SSH key is ~/.ssh/agent-claude; commits are signed with it
 automatically. To push, mint a credential first:
-chr33s-git credential <repo> --key ~/.ssh/agent-claude --capability source.push --ttl 3600
+git+ credential <repo> --key ~/.ssh/agent-claude --capability source.push --ttl 3600
 and use it as the password in the remote URL. Your membership grants
 repo.read, source.push, hub.create-pr and hub.comment — nothing else.
 ```
@@ -291,17 +291,17 @@ Rotation while everything is healthy is cheap — grant the new key, then
 revoke the old one with the reason that says what happened:
 
 ```sh
-npx chr33s-git hub grant my-repo --key ~/.ssh/hub \
+npx git+ hub grant my-repo --key ~/.ssh/hub \
   --subject ~/.ssh/agent-claude-2.pub --capability repo.read,source.push \
   --expires-in 7776000
-npx chr33s-git hub revoke my-repo --key ~/.ssh/hub \
+npx git+ hub revoke my-repo --key ~/.ssh/hub \
   --subject SHA256:oldkeyfingerprint --reason rotated
 ```
 
 A leaked key is the other reason per-agent keys exist:
 
 ```sh
-npx chr33s-git hub revoke my-repo --key ~/.ssh/hub \
+npx git+ hub revoke my-repo --key ~/.ssh/hub \
   --subject SHA256:leakedfingerprint --reason compromised
 ```
 
@@ -707,8 +707,8 @@ session refs get their **own refspec**, and `hub enable` does not configure
 it by default:
 
 ```bash
-chr33s-git hub enable            # trust + PR refs
-chr33s-git hub enable --sessions # additionally +refs/hub/session/*:refs/hub/session/*
+git+ hub enable            # trust + PR refs
+git+ hub enable --sessions # additionally +refs/hub/session/*:refs/hub/session/*
 ```
 
 A replica that wants review state but not the provenance firehose is a
@@ -1074,7 +1074,7 @@ fast-forward of `refs/hub/pr/<id>`; a session append moves its session
 ref; a task claim (§20) moves a task ref. Git's own hook point sees every
 state transition there is.
 
-`chr33s-git wake` is that dispatcher, and it is **built**. Rules live in
+`git+ wake` is that dispatcher, and it is **built**. Rules live in
 `wake.json` beside the bare repository:
 
 ```json
@@ -1090,9 +1090,9 @@ state transition there is.
 ```
 
 ```sh
-chr33s-git wake --root . project             # run what is due, advance
-chr33s-git wake --root . --dry-run project   # say what would run
-chr33s-git serve --wake                      # and on every push, immediately
+git+ wake --root . project             # run what is due, advance
+git+ wake --root . --dry-run project   # say what would run
+git+ serve --wake                      # and on every push, immediately
 ```
 
 `serve --wake` is off by default, because it is the one switch that makes
@@ -1410,7 +1410,7 @@ repository accepts; the wallet is bounded elsewhere.
 ## Part III — The workflow, end to end
 
 The lifecycle Parts I and II add up to, walked once from an empty
-repository to a merged, provenanced, resumable change. Commands shown against a local `chr33s-git serve`; a
+repository to a merged, provenanced, resumable change. Commands shown against a local `git+ serve`; a
 deployed Worker is the same flow with a different URL.
 
 Not everything below exists at the same stage. Repository identity,
@@ -1428,7 +1428,7 @@ operator   a human; holds the root key(s)
 claude     a coding agent; its own key, its own membership
 codex      a second agent; likewise
 ci         a check runner; likewise
-server     chr33s-git serve --root repos  (or the Worker)
+server     git+ serve --root repos  (or the Worker)
 ```
 
 ### 1. Repository init — operator, once
@@ -1438,9 +1438,9 @@ member:
 
 ```sh
 ssh-keygen -t ed25519 -f ~/.ssh/hub -N ""
-npx chr33s-git init project
-npx chr33s-git hub init project --key ~/.ssh/hub     # genesis, RepoID; 1-of-1 seeds repo.admin
-npx chr33s-git serve &
+npx git+ init project
+npx git+ hub init project --key ~/.ssh/hub     # genesis, RepoID; 1-of-1 seeds repo.admin
+npx git+ serve &
 ```
 
 For a shared repository, `hub init --key … --key … --threshold 2` bootstraps
@@ -1466,15 +1466,15 @@ ssh-keygen -t ed25519 -f ~/.ssh/agent-claude -N "" -C "claude@agents.example.com
 ssh-keygen -t ed25519 -f ~/.ssh/agent-codex  -N "" -C "codex@agents.example.com"
 ssh-keygen -t ed25519 -f ~/.ssh/agent-ci     -N "" -C "ci@agents.example.com"
 
-npx chr33s-git hub grant project --key ~/.ssh/hub \
+npx git+ hub grant project --key ~/.ssh/hub \
   --subject ~/.ssh/agent-claude.pub \
   --capability repo.read,source.push,hub.create-pr,hub.comment,hub.session \
   --expires-in 7776000
-npx chr33s-git hub grant project --key ~/.ssh/hub \
+npx git+ hub grant project --key ~/.ssh/hub \
   --subject ~/.ssh/agent-codex.pub \
   --capability repo.read,source.push,hub.create-pr,hub.comment,hub.session \
   --expires-in 7776000
-npx chr33s-git hub grant project --key ~/.ssh/hub \
+npx git+ hub grant project --key ~/.ssh/hub \
   --subject ~/.ssh/agent-ci.pub \
   --capability repo.read,hub.check:test --expires-in 7776000
 ```
@@ -1495,7 +1495,7 @@ instructions in `CLAUDE.md` / `AGENTS.md` tell the agent what it holds and
 how to push. One addition on top of Part I:
 
 ```sh
-chr33s-git session enable --root . --key ~/.ssh/agent-claude project
+git+ session enable --root . --key ~/.ssh/agent-claude project
                                # writes .chr33s/session.mjs and the Claude
                                # Code hooks that call it
 ```
@@ -1512,9 +1512,9 @@ refused (Part I, `hub whoami`) — then records the session
 before the agent touches a file:
 
 ```sh
-chr33s-git hub whoami --root . --key ~/.ssh/agent-claude project
+git+ hub whoami --root . --key ~/.ssh/agent-claude project
     # → capabilities, expiry, and that main takes a PR + approval + test
-chr33s-git session open project --key ~/.ssh/agent-claude \
+git+ session open project --key ~/.ssh/agent-claude \
     --agent claude-code --model claude-fable-5 \
     --prompt "document how to set up agents with their own ssh key"
                                # prints the session id, S
@@ -1529,7 +1529,7 @@ Clone with a self-minted credential, work on a branch, commit with the
 session trailer:
 
 ```sh
-TOKEN=$(npx chr33s-git credential project --key ~/.ssh/agent-claude \
+TOKEN=$(npx git+ credential project --key ~/.ssh/agent-claude \
   --capability repo.read,source.push --ttl 3600)
 git clone "http://${TOKEN}@127.0.0.1:8080/project" work && cd work
 git switch -c claude/agent-keys
@@ -1544,7 +1544,7 @@ The commit is SSH-signed (step 3) and names its session (rung 1,
 provenance §2). The harness's stop hook distills what happened:
 
 ```sh
-chr33s-git session produce project --key ~/.ssh/agent-claude \
+git+ session produce project --key ~/.ssh/agent-claude \
     --session S --commit 89ab… --ref refs/heads/claude/agent-keys
 ```
 
@@ -1566,7 +1566,7 @@ CI fetches the branch, runs the suite, and signs a result it is only
 _able_ to sign for the check named in its grant:
 
 ```sh
-▹ chr33s-git check complete project --key ~/.ssh/agent-ci \
+▹ git+ check complete project --key ~/.ssh/agent-ci \
     --pr P --head sha1:89ab... --name test --status success
 ```
 
@@ -1576,7 +1576,7 @@ projection, which is the point. Their approval names the exact head
 (hub §18):
 
 ```sh
-▹ chr33s-git review approve project --key ~/.ssh/reviewer --pr P --head sha1:89ab...
+▹ git+ review approve project --key ~/.ssh/reviewer --pr P --head sha1:89ab...
 ```
 
 ### 7. Merge — policy, not trust in the room
@@ -1601,9 +1601,9 @@ The session outlived its author's sandbox because it was pushed. Codex,
 asked to finish related work, reads before it writes:
 
 ```sh
-TOKEN=$(npx chr33s-git credential project --key ~/.ssh/agent-codex \
+TOKEN=$(npx git+ credential project --key ~/.ssh/agent-codex \
   --capability repo.read,source.push --ttl 3600)
-▹ chr33s-git session resume project --key ~/.ssh/agent-codex \
+▹ git+ session resume project --key ~/.ssh/agent-codex \
     --branch claude/agent-keys       # the branch names its latest session
 ```
 
@@ -1628,7 +1628,7 @@ one account of the work, no shared platform between them.
 A prompt turns out to contain an internal hostname:
 
 ```sh
-▹ chr33s-git redact project --key ~/.ssh/hub --event <event-id>
+▹ git+ redact project --key ~/.ssh/hub --event <event-id>
 ```
 
 The tombstone replicates; the payload blob (and any transcript object) is
@@ -1638,7 +1638,7 @@ provenance §11).
 An agent key leaks:
 
 ```sh
-npx chr33s-git hub revoke project --key ~/.ssh/hub \
+npx git+ hub revoke project --key ~/.ssh/hub \
   --subject SHA256:claudefingerprint --reason compromised
 ```
 

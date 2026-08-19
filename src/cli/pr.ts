@@ -1,5 +1,5 @@
 /**
- * `chr33s-git pr …` — pull requests, from the command line.
+ * `git+ pr …` — pull requests, from the command line.
  *
  * The verb layer `hub/PullRequest.ts` has always had, finally reachable
  * without writing a program: open a pull request for a pushed branch, move
@@ -8,7 +8,7 @@
  * the projection remains the judge of what counts, on every replica alike.
  *
  * `merge` is the one composite: it performs the three-way merge the same way
- * `chr33s-git merge --into` does, and then records `pr.merged` naming what
+ * `git+ merge --into` does, and then records `pr.merged` naming what
  * was merged and what it became — the two halves the design keeps separate,
  * done in the order that keeps them honest (no event for a merge that did
  * not land).
@@ -44,7 +44,7 @@ const identityOf = Effect.fn("pr.identityOf")(function* (repo: string) {
   if (stored === null) {
     return yield* new Invalid({
       field: "repo",
-      reason: `${repo} has no genesis; run \`chr33s-git hub init ${repo} --key <key>\` first`,
+      reason: `${repo} has no genesis; run \`git+ hub init ${repo} --key <key>\` first`,
     });
   }
   return stored.genesis.repoId;
@@ -495,7 +495,7 @@ const show = Command.make(
 
 export const prCommand = Command.make("pr", {}, () =>
   Console.log(
-    "chr33s-git pr <open|update|close|reopen|review|dismiss|comment|reply|resolve|reopen-thread|check|merge|list|show> — see --help",
+    "git+ pr <open|update|close|reopen|review|dismiss|comment|reply|resolve|reopen-thread|check|merge|list|show> — see --help",
   ),
 ).pipe(
   Command.withSubcommands([

@@ -212,7 +212,7 @@ own on a random port, because esbuild cannot forward what it does not have
 between them now, and `dev:ui` runs the same code path that ships:
 
 ```bash
-npm run build:ui && npx chr33s-git serve --root /path/to/repos --ui
+npm run build:ui && npx git+ serve --root /path/to/repos --ui
 ```
 
 Deployed, it is the same shape again: the Worker serves both the page and the

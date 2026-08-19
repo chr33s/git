@@ -1,5 +1,5 @@
 /**
- * `chr33s-git wake` — run local rules for hub events since the last run.
+ * `git+ wake` — run local rules for hub events since the last run.
  *
  * The walk itself lives in `server/Wake.node.ts`, because the node host runs
  * exactly the same pass from its post-receive hook and the two must not drift:

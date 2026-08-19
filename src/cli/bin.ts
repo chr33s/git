@@ -4,7 +4,7 @@
  *
  * Nothing but a compile cache and a call into `main.ts`. Running the CLI from
  * source compiles ~380 files on every invocation — effect, its CLI, and this
- * repository — which is most of what `npx chr33s-git --version` spends its
+ * repository — which is most of what `npx git+ --version` spends its
  * time on. `enableCompileCache` hands V8's compiled output to a cache keyed by
  * node version and architecture, so every run after the first reads it back:
  * 513 ms to 359 ms for `--version`, measured on node 26.7.0.

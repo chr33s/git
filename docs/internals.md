@@ -342,7 +342,7 @@ rebase was wanted.
 has neither, a CLI has both, and a browser could have the second without the
 first.
 
-Both implementations can be pointed at the same checkout. `chr33s-git status`
+Both implementations can be pointed at the same checkout. `git+ status`
 prints git's porcelain, `git status` reads the index we wrote, and
 `git fsck --strict` accepts the history we commit.
 
@@ -367,7 +367,7 @@ which is what a scratch server wants and what a shared one should not have.
 
 Clients present one of two things. A _delegated credential_ is a short-lived
 token the holder signs with their own SSH key and `git` carries as
-`http://<credential>@host/repo` — `chr33s-git credential` mints it, and it can
+`http://<credential>@host/repo` — `git+ credential` mints it, and it can
 never carry more than the person running it already had. A _signed envelope_ is
 the native path: the server issues a nonce, the client signs the operation and
 the refs it is moving, and the signature is checked against the same log.
