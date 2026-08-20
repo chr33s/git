@@ -1,12 +1,39 @@
 # Web of Trust: a Social Graph Overlay
 
-**Status:** Proposed (revision 1)
+**Status:** Proposed (revision 2)
 **Scope:** `chr33s/git` — builds on the trust and hub design in
 [hub.md](hub.md) (`refs/meta/trust/*`, `refs/hub/*`, the policy boundary,
 delegated credentials) and the agent identity model in
 [agents.md](agents.md). Nothing here changes hub v1; every construct is an
 overlay a repository or a verifier opts into.
 **Social namespace:** `refs/social/*` (in a principal's identity repository)
+
+## Revision 2 changes
+
+Prior art from the nostr protocol ([NIPs](https://github.com/nostr-protocol/nips))
+reviewed and folded in:
+
+```text
+1. social.mirrors: self-published locations for one's own
+   identity repository — the outbox model (NIP-65).
+2. attest.repo gains lineage (earliest-unique-commit fork-family
+   key, NIP-34) and inbox (a contribution door for non-members).
+3. Follows carry petnames; verifiers build petname tables
+   (NIP-02) instead of consulting any global namespace.
+4. attest.principal gains external-identity claims with
+   bidirectional proofs (NIP-39); DNS-based names admitted as
+   attestations by a domain, never as identity (NIP-05).
+5. Shareable identifiers: typed, checksummed encodings bundling
+   an ID with location hints (NIP-19/21), and a git-remote
+   helper so stock git clones by identity (NIP-34).
+6. social.label: namespaced labels instead of a new statement
+   kind per vocabulary (NIP-32).
+7. Delegated projection for weak clients — signed, attributed,
+   explicitly chosen providers (NIP-85's mechanism, with its
+   global metrics rejected).
+8. Prior-art section (§10) recording what nostr's deployment
+   proves and what is deliberately not borrowed.
+```
 
 ---
 
@@ -93,6 +120,38 @@ PrincipalID, and the checkpoint-staleness bound (hub.md §9) bounds how
 old a view of someone's key set a verifier will accept for high-value
 decisions.
 
+### Shareable identifiers
+
+A bare `SHA256:bJd3cN8...` has no type, no checksum and no location.
+Identifiers meant for humans to share — pasted in a message, printed in
+a README, rendered as a QR code — SHOULD use a typed bech32m encoding
+that bundles the ID with up to a few URL hints, the NIP-19 pattern:
+
+```text
+gid1...     a PrincipalID, optionally with mirror hints
+grepo1...   a RepoID, optionally with clone-URL hints
+```
+
+Typed prefixes make pasting the wrong kind of thing a decode error
+rather than a lookup that half-works; the checksum catches truncation;
+and the embedded hints make the identifier self-locating. Hints are
+**bootstrap only**: resolution ends at the pinned identity (TOFU or
+introduction), and a hint is never trusted over the pin. Encoded forms
+are for display and exchange — logs and payloads store the canonical
+`SHA256:` form, exactly as NIP-19 keeps bech32 out of its core protocol.
+
+A `git-remote` helper (the mechanism NIP-34 uses to make `nostr://`
+clone URLs work with stock git) completes it:
+
+```text
+git clone git+id://grepo1...
+```
+
+resolves the RepoID through `known_repos`, the verifier's web and the
+subject's `social.mirrors` statements (§3), so a clone starts from
+_identity_ and discovers _location_ — the inversion of every hosted
+forge, where the URL is the name.
+
 ---
 
 ## 3. The social log
@@ -117,9 +176,12 @@ clients, `ref-prefix` under v2).
 
 ```text
 social.attest.repo        URL ↔ RepoID binding, with a role
-social.attest.principal   key or name ↔ PrincipalID binding
+social.attest.principal   key or external identity ↔ PrincipalID
+social.mirrors            self-published locations of one's own
+                          repositories (the outbox)
 social.vouch              delegatable, attenuated trust in a principal
-social.follow             subscription / replication hint
+social.follow             subscription / replication hint, with petname
+social.label              namespaced label on any subject
 social.revoke             withdrawal of any prior statement
 social.checkpoint         signed frontier attestation
 ```
@@ -139,6 +201,8 @@ never verify as a grant.
   "urls": ["https://git.example.com/acme/project"],
   "role": "origin",
   "forkOf": null,
+  "lineage": "sha1:a1b2c3...",
+  "inbox": "https://git.example.com/acme/project",
   "issuedAt": "2026-08-20T00:00:00Z"
 }
 ```
@@ -148,6 +212,19 @@ of `origin | mirror | fork`; a `fork` names `forkOf`. This is the
 statement that turns blind TOFU into introduction (§4) and URL moves into
 recognition, and the statement whose union across a verifier's web is a
 decentralized index of repositories, mirrors and fork graphs (§7).
+
+`lineage` is the repository's **earliest unique commit** — the root
+commit, or the first commit after a permanent fork — borrowed from
+NIP-34's `euc` tag. It is computable from any clone with no trust in
+anyone, and it answers a different question than the two identities
+above: `RepoID` says _same authority_ (same genesis quorum), `lineage`
+says _same line of code_. Discovery uses it to cluster a project's
+forks and mirrors across hosts before anyone has attested a single
+fork edge (§7).
+
+`inbox` names where a **non-member** may send a proposed change (§6) —
+the door NIP-34's "patches to the announced relays" holds open and this
+design otherwise lacks. Both fields are optional.
 
 ### `social.attest.principal` — key endorsement
 
@@ -165,6 +242,60 @@ The PGP key-signing statement, repaid in SSH: "I verified, out of band,
 that this key answers to this principal." Useful for bootstrapping a
 principal whose identity repository a verifier cannot reach yet, and for
 cross-checking one they can.
+
+A second claim kind links a principal to an **external identity**
+(NIP-39's shape), which is how the web bootstraps from social capital
+that already exists on centralized forges:
+
+```json
+{
+  "type": "social.attest.principal",
+  "subject": "principal:SHA256:9f2c...",
+  "claim": "external-identity",
+  "identity": "github:alice",
+  "proof": "https://gist.github.com/alice/...",
+  "issuedAt": "2026-08-20T00:00:00Z"
+}
+```
+
+The proof MUST be bidirectional: the named platform account publishes a
+statement naming the PrincipalID, and the attestation points at it.
+Self-attested, it is a claim anyone can check; attested by others, it is
+their word that they checked. DNS-based names (`alice@example.com`
+resolving through `/.well-known/`, NIP-05's mechanism) are admitted the
+same way — as an attestation whose author is _the current controller of
+that domain_, a rented binding displayed as such. A name is never the
+identity; nostr's deployment history is the case study in why (§10).
+
+### `social.mirrors` — the outbox
+
+```json
+{
+  "type": "social.mirrors",
+  "repo": "self",
+  "urls": [
+    { "url": "https://git.alice.dev/id", "mode": "write" },
+    { "url": "https://mirror.example.com/alice-id", "mode": "read" }
+  ],
+  "issuedAt": "2026-08-20T00:00:00Z"
+}
+```
+
+A principal's own, self-published answer to "where do I live" — the
+outbox model, nostr's censorship-resistance workhorse (NIP-65). `repo`
+is `"self"` for the identity repository or a RepoID the principal
+maintains. Resolution of anything that names this principal — a
+`principal:` grant (§5), an encoded identifier (§2), a follow — SHOULD
+follow the subject's newest `social.mirrors` statement in preference to
+any hint written by somebody else, because the subject is the one party
+with both the knowledge and the incentive to keep it current.
+
+NIP-65's operational discipline transfers with it: keep the list small
+(a few entries), and spread the statement widely — it is the one
+statement worth pushing beyond one's own mirrors, since it is how
+everything else gets found. "Newest supersedes" is expressed as a log
+entry projected to latest, never as an overwrite — the replaceable-event
+failure mode is one of the rejections in §10.
 
 ### `social.vouch` — attenuated, delegatable trust
 
@@ -207,7 +338,11 @@ no widening   nothing reachable through the web grants a capability
 ### `social.follow`
 
 ```json
-{ "type": "social.follow", "subject": "principal:SHA256:9f2c..." }
+{
+  "type": "social.follow",
+  "subject": "principal:SHA256:9f2c...",
+  "petname": "alice"
+}
 ```
 
 A follow carries **no trust at all**. It is a replication hint — "fetch
@@ -216,6 +351,34 @@ edge that makes the graph traversable for discovery. Keeping follow and
 vouch separate is deliberate: conflating subscription with endorsement is
 how social platforms turn reach into authority, and the projection rules
 below never read follows.
+
+`petname` is a display name **local to the author** (NIP-02's petname
+scheme): this design already refuses global human-readable names, and
+petnames are the constructive half of that refusal. A client renders
+principals by its own petnames first, then by names reachable through
+its web ("alice's bob"), then by the encoded identifier — so what a name
+means depends only on whose log said it, and there is no namespace to
+squat.
+
+### `social.label` — namespaced labels
+
+```json
+{
+  "type": "social.label",
+  "subject": "repo:SHA256:bJd3cN8...",
+  "namespace": "org.example.licenses",
+  "label": "MIT",
+  "issuedAt": "2026-08-20T00:00:00Z"
+}
+```
+
+The extensibility valve (NIP-32's `L`/`l` pattern): topics, licenses,
+content warnings and moderation verdicts are all "author says X about
+subject", and giving each its own statement kind means spec churn for
+every vocabulary. A label's `namespace` is reverse-domain notation, its
+meaning belongs to whoever defines that namespace, and a label counts
+for a verifier exactly as far as its author's word does under the fold —
+distributed moderation with no global moderator falls out for free.
 
 ### `social.revoke`
 
@@ -313,7 +476,11 @@ the subject granted here? The machinery this needs already exists:
 ```text
 pinning      the grant pins the PrincipalID; the identity repository
              is fetched and verified like any repository. The hint
-             is a hint — identity is the pin, never the URL.
+             is a hint — identity is the pin, never the URL — and
+             resolution prefers the subject's own newest
+             social.mirrors statement (§3) over the grant's static
+             hint, which was written once by somebody else and
+             goes stale the way all such hints do.
 
 staleness    the checkpoint-age bound (hub.md §9) applies to the
              foreign log: a high-value operation may require a
@@ -386,6 +553,21 @@ staleness bounds as every other fold it makes; self-approval exclusion
 and the capability hierarchy of hub.md §27 apply unchanged. A repository
 that never writes `externalReview` never folds it.
 
+### The inbox: contribution without membership
+
+NIP-34 lets anyone send a patch to a repository's announced relays;
+the equivalent front door here is the `inbox` a repository's
+self-attestation names (§3). A stranger with no membership pushes their
+proposed change — a branch of ordinary commits — to the inbox, where it
+lands **quarantined**: held, excluded from projection, exactly the state
+hub.md §23 already defines for events whose authorization does not yet
+resolve. A member reviews the quarantined proposal and adopts it into a
+pull request under their own signature, or a maintainer grants the
+stranger `hub.create-pr` and the proposal graduates to an ordinary
+pull request of their own. The authority model is not weakened — nothing
+quarantined counts for anything — but the drive-by patch, the workflow
+git was built for and hosted forges gated behind accounts, is back.
+
 ---
 
 ## 7. Application: discovery and replication
@@ -409,6 +591,29 @@ when the web is silent. Hosts MAY additionally run open aggregate
 indexes for search; those are caches over signed statements anyone can
 re-verify — convenience infrastructure, never authority, exactly the
 "projection caches are disposable" rule.
+
+`lineage` (§3) clusters before anyone has vouched for anything: every
+clone can compute its own earliest unique commit, so the forks and
+mirrors of one project group together even in a web that has said
+nothing about them yet, and an `attest.repo` naming a lineage the local
+clone does not compute is a discrepancy worth surfacing.
+
+### Delegated projection
+
+A phone-class client cannot fold a large web, and nostr's answer
+(NIP-85) is worth taking in mechanism while refusing in content: a
+client MAY name **projection providers** — hosts that publish signed,
+attributed snapshots of specific folds (an introduction index, a vouch
+projection from named roots) — and accept their answers in place of
+folding locally. The conditions carry over from NIP-85 and tighten:
+the provider is chosen explicitly per question (never a default), uses
+a distinct signing key per algorithm so answers are attributable and
+providers swappable, and signs the input frontier (the log heads the
+fold read) so a full client can re-run the fold and catch a lying
+provider. What providers computed for nostr — global ranks, follower
+counts — is exactly what §8 forbids; the delegation is of _work_, never
+of _rooting_: a provider answers "what does the fold from YOUR roots
+say", not "who is trustworthy".
 
 ---
 
@@ -486,7 +691,69 @@ cross-log replay         every statement carries the author's
 
 ---
 
-## 10. Implementation shape
+## 10. Prior art: nostr
+
+Nostr is the largest deployed system of signed statements flowing over
+dumb relays, and its NIPs are a field report on which decentralization
+mechanisms carry weight in practice. What its deployment proves, and
+this design leans on: **the social layer does the decentralizing**.
+Follows, self-published relay lists (outbox) and repository
+announcements are what let nostr survive relays disappearing; its trust
+primitives stayed weak, and the network held together anyway. That is
+the same division of labor drawn here — discovery and introduction in
+the social log, authority in per-repository trust logs.
+
+Borrowed, with the section that absorbed each: the outbox model
+(NIP-65 → `social.mirrors`, §3), the earliest-unique-commit lineage key
+and the git-remote-helper clone URL (NIP-34 → §3, §2), petnames
+(NIP-02 → §3), external-identity proofs (NIP-39 → §3), DNS names as
+domain attestations (NIP-05 → §3), typed shareable encodings
+(NIP-19/21 → §2), namespaced labels (NIP-32 → §3), the anyone-can-send
+contribution door (NIP-34 → §6), and delegated projection with
+attributable provider keys (NIP-85 → §7).
+
+Deliberately not borrowed:
+
+```text
+flat keypair identity    nostr's acknowledged structural weakness:
+                         key rotation never landed, so a leaked
+                         nsec is a lost identity. Identity
+                         repositories (§2) exist to not have this
+                         problem.
+
+replaceable events       kind-0/3/10002 "latest timestamp wins,
+                         delete the old one" loses history silently
+                         and makes omission invisible — the bag-of-
+                         refs failure hub.md §9 rejects. Latest-
+                         supersedes semantics here are log entries
+                         projected to latest (§3), never overwrites.
+
+global WoT metrics       NIP-85's ranks and follower counts are
+                         unrooted aggregates — Sybil bait and a
+                         centralization magnet around whoever
+                         computes them (§8). The mechanism was
+                         taken; the metrics were not.
+
+relay-honored deletion   NIP-09 deletion is a request relays MAY
+                         honor; tombstones here are policy-enforced
+                         and replicate as first-class state
+                         (hub.md §21). Stronger already; nothing to
+                         take.
+
+proof of work            NIP-13 rate-limits an open write surface.
+                         Social logs are capability-gated — you can
+                         only spam yourself (§9) — so PoW earns at
+                         most a footnote for open aggregate indexes
+                         (§7), which are caches, not authority.
+
+negentropy sync          NIP-77 rebuilds set reconciliation that
+                         git's own negotiation already provides
+                         over refs (hub.md §23).
+```
+
+---
+
+## 11. Implementation shape
 
 The point of §2–§3 reusing existing machinery is that this is mostly
 composition, in the pattern of [plan.md](plan.md):
@@ -500,6 +767,8 @@ src/social/
                      revocation windows, memoised per verifier
   Introduce.ts       known_repos v2: provenance, introduction
                      resolution, split-view surfacing
+  Encode.ts          gid1/grepo1 bech32m encodings, and the
+                     git-remote helper that resolves them (§2)
 
 src/trust/           subject: "principal:" resolution — the
                      two-log membership walk, quarantine, pinned
@@ -516,13 +785,17 @@ Phasing, each independently shippable and each useful without the next:
 
 ```text
 1  identity repositories + PrincipalID grants   (rotation story)
-2  social log + attest.repo + introduction      (TOFU story)
+2  social log + attest.repo + mirrors +
+   introduction                                 (TOFU story)
 3  vouch + rooted projection + minPaths         (the web itself)
-4  discovery commands + follow-driven fetch     (the forge story)
-5  externalReview policy                        (federation story)
+4  discovery + follows/petnames + encoded
+   identifiers + remote helper + labels         (the forge story)
+5  externalReview policy + the inbox            (federation story)
 ```
 
 Phase 1 has no social graph in it at all and is worth shipping alone;
 phase 5 is the only one that lets the overlay near an authorization
 decision, and it arrives last, behind a policy field nobody has written
-yet.
+yet. External-identity proofs and delegated projection providers slot
+into phases 2 and 4 respectively as optional extensions — neither is on
+any other phase's critical path.
