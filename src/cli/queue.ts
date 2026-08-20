@@ -359,6 +359,17 @@ const close = Command.make(
           // repository that holds no such queue answers `exists: false` rather
           // than failing, so only a ref this replica genuinely cannot walk
           // reaches the rescue.
+          //
+          // And a `StorageFailure` is not that. The other two are properties of
+          // the history — past the ceiling, or a chain the store does not hold
+          // — and asking again gives the same answer; a store that failed to
+          // answer may answer next time. Taken as unreadable, one flaky read
+          // spent the queue permanently *and* skipped the branch sweep, and
+          // since every verb refuses a closed queue, nothing could ever
+          // re-derive the branch names it left behind — each published
+          // candidate pinned out of reach of `gc` for good. It is the same rule
+          // the pass follows for a fold it could not complete: a fact about
+          // this replica writes nothing.
           const readable =
             queue === "" ||
             (yield* Queue.project(queue).pipe(
@@ -366,7 +377,6 @@ const close = Command.make(
               Effect.catchTags({
                 Invalid: () => Effect.succeed(false),
                 ObjectNotFound: () => Effect.succeed(false),
-                StorageFailure: () => Effect.succeed(false),
               }),
             ));
           if (!readable) {
