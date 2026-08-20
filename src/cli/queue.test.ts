@@ -555,6 +555,34 @@ describe("cli queue", () => {
     );
   });
 
+  it("settles an entry past the depth whose pull request has closed", async () => {
+    // How deep a pass builds is a fact about the pass; whether a pull request
+    // is still a candidate is a fact about the pull request. Read the other way
+    // round, an entry that closed while the queue was stuck ahead of it kept its
+    // place and its published branch for as long as the queue stayed stuck —
+    // and `queue enter` refuses a closed pull request, so nothing could clear
+    // it by hand either.
+    await publish(protectedRules({ requiredChecks: ["test"], queueDepth: 1 }));
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+    // The first fills the one place this branch builds and then waits on its
+    // check, so the second stays behind the depth on every pass.
+    const full = await run();
+    assert.deepEqual(
+      full.unbuilt.map((entry: { pr: string }) => entry.pr),
+      [second],
+    );
+
+    await cli(["pr", "close", "--root", root, "--key", key, "project", second]);
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { pr: string; reason: string }) => [entry.pr, entry.reason]),
+      [[second, "stale"]],
+    );
+  });
+
   it("refuses to take out a pull request that is not queued", async () => {
     const refused = await failing([
       "queue",

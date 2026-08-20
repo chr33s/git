@@ -423,6 +423,19 @@ special.
 with competing openings; the loser's entries are noise, its candidates
 ordinary branches to delete. Harmless by construction, so not refused.
 
+**Landing does not run receive hooks.** `queue run` moves the branch
+through the object store directly, so the post-receive chain — mirror
+`Sending`, webhooks, the wake dispatcher's own nudge — does not fire for
+what the queue lands. This is not new and not the queue's: every `git+`
+verb that moves a ref does the same, `git+ pr merge` included, because
+the CLI is a member operating on a repository it holds rather than a
+client pushing to one. It matters more here only because a queue lands
+unattended and often. A deployment that depends on those hooks should
+land through the boundary — run the queue against a replica it pushes
+from — rather than expect a local `queue run` to notify anything. Giving
+the CLI a real hook chain is a change to every verb, and belongs with
+whatever configures the hooks, not with the queue.
+
 ## 8. Alternatives considered
 
 **A privileged queue service** (the GitHub shape): a principal whose

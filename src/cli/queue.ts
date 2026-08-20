@@ -780,18 +780,6 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   let position = 0;
 
   for (const entry of state.entries) {
-    // Bounded by what the boundary will actually walk. Past the ceiling
-    // `candidateChain` reads a push as not a chain at all, so building beyond
-    // it publishes candidates and records that can never land — work nobody
-    // asked for on a ref that only grows.
-    if (position >= rules.queueDepth) {
-      unbuilt.push({
-        pr: entry.pr,
-        reason: `this branch takes chains ${String(rules.queueDepth)} deep, and this pass is full`,
-      });
-      continue;
-    }
-
     // Every way a read can fail, not only `Invalid` — the same rule the merge
     // below follows, and for the same reason: a fold this replica cannot
     // complete says nothing about the entry, and letting it escape aborted the
@@ -919,6 +907,28 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // returns before any of this on a branch that asks nothing of the revision
     // arriving on it, so applying them here regardless made the runner stricter
     // than the judge and stalled entries it would have landed.
+    // Bounded by what the boundary will actually walk. Past the ceiling
+    // `candidateChain` reads a push as not a chain at all, so building beyond
+    // it publishes candidates and records that can never land — work nobody
+    // asked for on a ref that only grows.
+    //
+    // Below everything that *settles* an entry, and deliberately: how deep this
+    // pass will build is a fact about the pass, and whether a pull request is
+    // still a candidate for this branch is a fact about the pull request. Asked
+    // first, an entry that closed, landed or was retargeted while `queueDepth`
+    // entries sat stuck ahead of it was never settled at all — no `queue.left`,
+    // so it kept its place and its published branch for as long as the queue
+    // stayed stuck, and `queue enter` refuses a closed pull request, so nothing
+    // could clear it either. The same failure the closed-before-moved order
+    // above exists to prevent, reached the other way round.
+    if (position >= rules.queueDepth) {
+      unbuilt.push({
+        pr: entry.pr,
+        reason: `this branch takes chains ${String(rules.queueDepth)} deep, and this pass is full`,
+      });
+      continue;
+    }
+
     const reviewed = Policy.isProtected(rules, target) && Policy.needsReview(rules);
     if (reviewed && approvals(pullRequest).length < rules.requiredApprovals) {
       unbuilt.push({
