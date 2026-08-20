@@ -1415,6 +1415,14 @@ describe("cli queue", () => {
     assert.equal(await mainAt(), base, "and the branch is where it was");
   });
 
+  it("refuses a run that names neither a queue nor a branch", async () => {
+    // A caller mistake, not a state — and one a hook makes by expanding an
+    // argument to nothing, which is exactly when a silent success stops it
+    // queueing for good.
+    const refused = await failing(["queue", "run", "--root", root, "--key", key, "project"]);
+    assert.match(refused, /name a queue with --queue/);
+  });
+
   it("refuses a second queue for a branch that already has one", async () => {
     // `refs/hub/queue/*` cannot be deleted, so a second queue for one branch is
     // a permanent split: entries divide invisibly across the two and two

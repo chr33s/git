@@ -501,6 +501,16 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // does not.
   const skip = (why: string) => ({ skipped: why, queue: input.queue, dryRun: input.dryRun });
 
+  // Naming neither is a caller mistake, not a state — and one a hook makes by
+  // expanding an argument to nothing, which is exactly when a silent success
+  // stops it queueing for good. Refused as the other verbs refuse it.
+  if (input.queue === "" && input.target === "") {
+    return yield* new Invalid({
+      field: "queue",
+      reason: "name a queue with --queue <id> or the branch it serves with --target <ref>",
+    });
+  }
+
   const found =
     input.queue === ""
       ? (yield* Queue.forTarget(targetRef(input.target))).found
