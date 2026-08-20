@@ -100,6 +100,23 @@ export const copy = (size = 13): TemplateResult =>
 export const pencil = (size = 13): TemplateResult =>
   icon(size, svg`<path d="m10.5 2.5 3 3L6 13l-3.5.5L3 10Z"></path><path d="m9 4 3 3"></path>`);
 
+/** Lucide's `diff`, scaled from its 24 grid into this set's 16. */
+export const diff = (size = 13): TemplateResult =>
+  icon(
+    size,
+    svg`<path d="M8 2v9.333"></path><path d="M3.333 6.667h9.333"></path><path d="M3.333 14h9.333"></path>`,
+  );
+
+export const close = (size = 13): TemplateResult =>
+  icon(size, svg`<path d="m3.5 3.5 9 9M12.5 3.5l-9 9"></path>`);
+
+/** Lucide's `trash`, scaled from its 24 grid into this set's 16. */
+export const trash = (size = 13): TemplateResult =>
+  icon(
+    size,
+    svg`<path d="M12.667 4v9.333a1.333 1.333 0 0 1-1.333 1.333H4.667a1.333 1.333 0 0 1-1.333-1.333V4"></path><path d="M2 4h12"></path><path d="M5.333 4V2.667a1.333 1.333 0 0 1 1.333-1.333h2.667a1.333 1.333 0 0 1 1.333 1.333V4"></path>`,
+  );
+
 export const document_ = (size = 13): TemplateResult =>
   icon(size, svg`<path d="M3 2.5h10v11H3z"></path><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"></path>`);
 

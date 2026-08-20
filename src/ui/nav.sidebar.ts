@@ -8,7 +8,7 @@
  * rail first if it was collapsed. What is typed there bubbles up as the
  * field's `search` event and the shell filters the Tasks screen with it.
  */
-import { html, type TemplateResult } from "lit";
+import { html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 
 import { GitPlusElement, navigate, type Screen } from "./base.ts";
@@ -17,12 +17,21 @@ import * as palette from "./theme.ts";
 import { ThemeChangeEvent, type Theme } from "./theme.ts";
 import { initials } from "./time.ts";
 
+/** Where the rail remembers being collapsed — `theme.ts`'s pattern. */
+const COLLAPSED_KEY = "gp-nav-collapsed";
+
 @customElement("gp-sidebar")
 export class GpSidebar extends GitPlusElement {
   /** Which screen is lit. `detail` keeps Tasks lit — it is a child of it. */
   @property({ type: String }) accessor screen: Screen = "code";
 
-  @property({ type: Boolean, reflect: true }) accessor collapsed = false;
+  /**
+   * Nobody above sets this; the rail owns it, so it also remembers it. The
+   * stored value seeds the first render and `updated` writes every change
+   * back, wherever it came from — the logo toggle or ⌘K expanding the rail.
+   */
+  @property({ type: Boolean, reflect: true }) accessor collapsed =
+    localStorage.getItem(COLLAPSED_KEY) === "true";
 
   @property({ type: String }) accessor theme: Theme = palette.current();
 
@@ -45,6 +54,10 @@ export class GpSidebar extends GitPlusElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     globalThis.removeEventListener("keydown", this.#onKeydown);
+  }
+
+  protected override updated(changed: PropertyValues): void {
+    if (changed.has("collapsed")) localStorage.setItem(COLLAPSED_KEY, String(this.collapsed));
   }
 
   /** The ⌘K the search row advertises. Ctrl+K, for keyboards without a ⌘. */
