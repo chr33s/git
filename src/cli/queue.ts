@@ -81,9 +81,18 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
    * state the design makes inevitable.
    */
   readonly ended?: "refuse" | "report";
+  /**
+   * The fold, where the caller has already taken it.
+   *
+   * `close` asks whether the ref can be read at all before it asks anything
+   * else, and the answer is the fold. Taken twice, the one command whose
+   * purpose is to rescue a ref approaching the ceiling was the one that walked
+   * it — and verified a signature per record — twice over.
+   */
+  readonly folded?: Queue.Projection | null;
 }) {
   if (input.queue !== "") {
-    const state = yield* Queue.project(input.queue);
+    const state = input.folded ?? (yield* Queue.project(input.queue));
     // A queue nobody opened is a queue nothing reads. Refused here because
     // appending anyway would *create* `refs/hub/queue/<typo>` — on a namespace
     // that cannot be deleted, holding records the projection ignores for ever,
@@ -370,16 +379,21 @@ const close = Command.make(
           // candidate pinned out of reach of `gc` for good. It is the same rule
           // the pass follows for a fold it could not complete: a fact about
           // this replica writes nothing.
-          const readable =
-            queue === "" ||
-            (yield* Queue.project(queue).pipe(
-              Effect.as(true),
-              Effect.catchTags({
-                Invalid: () => Effect.succeed(false),
-                ObjectNotFound: () => Effect.succeed(false),
-              }),
-            ));
-          if (!readable) {
+          //
+          // Kept and handed on rather than thrown away. The probe *is* the
+          // fold, and `resolve` wants the same one — taken twice, the command
+          // whose whole purpose is to rescue a ref approaching the ceiling was
+          // the one that walked it, and verified a signature per record, twice.
+          const folded =
+            queue === ""
+              ? null
+              : yield* Queue.project(queue).pipe(
+                  Effect.catchTags({
+                    Invalid: () => Effect.succeed(null),
+                    ObjectNotFound: () => Effect.succeed(null),
+                  }),
+                );
+          if (queue !== "" && folded === null) {
             yield* Queue.close({ repo: genesis.repoId, queue, reason, key: signer });
             yield* Console.error(
               `warning: ${queue} could not be read here, so the branches it published were left; delete refs/heads/queue/<target>/* by hand`,
@@ -387,7 +401,7 @@ const close = Command.make(
             // The line every close prints is printed once, by the caller below.
             return;
           }
-          const state = yield* resolve({ queue, target });
+          const state = yield* resolve({ queue, target, folded });
           // The branches it published go with it: nothing will name them again,
           // and each pins its candidate out of reach of collection. Everything
           // this queue ever held, not only what is in it now — an entry that
@@ -1221,14 +1235,27 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       // reported an empty `landed` and nothing else here read exactly like a
       // pass with nothing to do, which is the ambiguity `refused` exists to
       // remove. Said out loud, and `reset` says a record was written.
-      const now = yield* repository.resolve(target).pipe(Effect.map((oid) => oid ?? from));
-      reset = true;
+      const now = yield* repository.resolve(target);
       raced = true;
-      refused.push({
-        pr: top.pr,
-        reason: `${target} moved from ${from} to ${now} while this pass was building`,
-      });
-      yield* Queue.reset({ repo: genesis.repoId, queue: state.queue, at: now, key: input.key });
+      if (now === null) {
+        // Deleted, not moved. There is no revision to anchor a reset at, and
+        // falling back to the tip this pass started from recorded — permanently
+        // — that the branch holds what it does not hold, in the same result
+        // that reports `to: null`. Nothing is written instead: a branch that
+        // comes back is a tip no recorded candidate sits on, which is exactly
+        // what the next pass reads as a reset, at the anchor it really has.
+        refused.push({
+          pr: top.pr,
+          reason: `${target} was deleted while this pass was building`,
+        });
+      } else {
+        reset = true;
+        refused.push({
+          pr: top.pr,
+          reason: `${target} moved from ${from} to ${now} while this pass was building`,
+        });
+        yield* Queue.reset({ repo: genesis.repoId, queue: state.queue, at: now, key: input.key });
+      }
     }
   } else if (landedAt >= 0) {
     // A dry run moved nothing, so nothing landed. Reported separately rather
