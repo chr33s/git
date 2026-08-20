@@ -8,9 +8,10 @@
  * `GET /:repo/file` and renders it with `@pierre/diffs`, which brings Shiki
  * highlighting and a header that matches the design's file card.
  *
- * The pane edits as well as views. The pencil on the file card opens the blob
- * in a plain textarea, and the explorer's "+" opens the same editor over a new
- * path; committing either sends `POST /:repo/commit` with the file layered
+ * The pane edits as well as views. The pencil attaches `@pierre/diffs`'s edit
+ * mode to the rendered file — the same highlighted surface, made writable,
+ * with its own undo stack — and the explorer's "+" opens the same editor over
+ * a new path; committing either sends `POST /:repo/commit` with the file layered
  * onto the branch's current tree and `expected` pinned to the tip the editor
  * opened at — so a commit that lands mid-edit is a visible conflict, not a
  * silent overwrite. Deleting is the same request with `content: null`.
@@ -21,13 +22,15 @@
  * rather than passing stale data off as live — and read-only, since there is
  * nothing to write to.
  */
+import { Schema } from "effect";
 import { html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 import { UIDialog } from "@chr33s/base-wc/src/dialog";
 import type { MenuSelectDetail } from "@chr33s/base-wc/src/menu";
 import { FileTree, type GitStatusEntry } from "@pierre/trees";
-import type { File as DiffsFile } from "@pierre/diffs";
+import type { File as DiffsFile, FileDiff as DiffsFileDiff } from "@pierre/diffs";
+import type { Editor } from "@pierre/diffs/edit";
 
 import {
   ApiError,
@@ -48,6 +51,57 @@ import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
 import { current as currentTheme, type Theme } from "./theme.ts";
 import { ago, initials } from "./time.ts";
+
+/**
+ * Which explorer folders are open, remembered per repository.
+ *
+ * Saved from the visible rows on every tree change and restored through
+ * `initialExpandedPaths`. Visible rows are exactly the restorable state: a
+ * folder hidden under a collapsed ancestor cannot be reopened without its
+ * ancestor, so recording only what shows also guarantees the saved set never
+ * names a folder whose ancestors are closed. No entry at all is a first
+ * visit, which opens everything — by listing everything, because the tree is
+ * always built over a "closed" baseline: `resetPaths` rebuilds its store
+ * from construction options, and one baseline means construction, reset and
+ * an empty saved set all agree on what an unlisted folder does. The fixtures
+ * (`api === null`) stay out of storage entirely so a sample layout never
+ * shapes a real one.
+ */
+const expansionKey = (repo: string): string => `gp-explorer-open:${repo}`;
+
+/** Every directory a path list implies — the everything-open set. */
+const allDirectories = (paths: readonly string[]): readonly string[] => {
+  const directories = new Set<string>();
+  for (const path of paths) {
+    let at = path.indexOf("/");
+    while (at !== -1) {
+      directories.add(path.slice(0, at));
+      at = path.indexOf("/", at + 1);
+    }
+  }
+  return [...directories].sort();
+};
+
+/** The open directories as the tree shows them right now. */
+const openDirectories = (tree: FileTree): readonly string[] =>
+  tree
+    .getVisibleRows(0, tree.getVisibleCount())
+    .filter((row) => row.kind === "directory" && row.isExpanded)
+    .map((row) => row.path);
+
+const StoredExpansion = Schema.Array(Schema.String);
+
+const storedExpansion = (repo: string): readonly string[] | null => {
+  const raw = localStorage.getItem(expansionKey(repo));
+  if (raw === null) return null;
+  try {
+    return Schema.decodeUnknownSync(StoredExpansion)(JSON.parse(raw));
+  } catch {
+    // Whatever is stored is not this shape — a first visit's default beats
+    // trusting it.
+    return null;
+  }
+};
 
 /** The design's explorer, used when the server is unreachable. */
 const FALLBACK_PATHS: readonly string[] = [
@@ -158,7 +212,7 @@ export class GpCode extends GitPlusElement {
   @state() private accessor reason = "";
   @state() private accessor loading = true;
 
-  /** `edit` swaps the source pane for a textarea over the same blob. */
+  /** `edit` attaches the diffs editor to the rendered blob, in place. */
   @state() private accessor mode: "view" | "edit" = "view";
 
   /** Which side panel is open under the commit bar, if any. */
@@ -173,6 +227,10 @@ export class GpCode extends GitPlusElement {
   /** Editing a path that does not exist yet, from the explorer's "+". */
   @state() private accessor editingNew = false;
   @state() private accessor saving = false;
+  /** Reviewing a diff — the draft while editing, the last change while viewing. */
+  @state() private accessor diffing = false;
+  /** Why the diff pane shows a note instead of hunks, when it does. */
+  @state() private accessor diffNote: string | null = null;
   /** Why the last commit attempt failed, shown inside the editor. */
   @state() private accessor editError: string | null = null;
 
@@ -199,7 +257,16 @@ export class GpCode extends GitPlusElement {
 
   #tree: FileTree | null = null;
   #treeHost: HTMLElement | null = null;
+  #treeUnsubscribe: (() => void) | null = null;
   #viewer: DiffsFile | null = null;
+  /** Renders the draft-against-blob review; one instance, reused per toggle. */
+  #diffView: DiffsFileDiff | null = null;
+  /** The fetched previous version behind a view-mode diff, keyed by anchor+path. */
+  #viewDiffOld: { anchor: string; path: string; contents: string | null } | null = null;
+  /** One editor for the screen's lifetime; attached and detached per edit. */
+  #editSession: Editor<undefined> | null = null;
+  /** The detach `Editor.edit` returned — non-null exactly while attached. */
+  #detachEditor: (() => void) | null = null;
   #paths: readonly string[] = [];
   #loadGeneration = 0;
   #fileGeneration = 0;
@@ -226,10 +293,23 @@ export class GpCode extends GitPlusElement {
     super.disconnectedCallback();
     this.#loadGeneration += 1;
     this.#fileGeneration += 1;
+    this.#treeUnsubscribe?.();
+    this.#treeUnsubscribe = null;
     this.#tree?.cleanUp();
     this.#tree = null;
     this.#treeHost = null;
+    this.#detachDraft();
+    this.#editSession?.cleanUp();
+    this.#editSession = null;
+    this.#diffView?.cleanUp();
+    this.#diffView = null;
     this.#viewer = null;
+  }
+
+  /** Detach the editor — the draft dies with it, the viewer owns the pane. */
+  #detachDraft(): void {
+    this.#detachEditor?.();
+    this.#detachEditor = null;
   }
 
   /**
@@ -381,6 +461,10 @@ export class GpCode extends GitPlusElement {
     this.commitLog = null;
     this.fileLog = null;
     this.at = null;
+    this.diffing = false;
+    this.diffNote = null;
+    this.#viewDiffOld = null;
+    this.#detachDraft();
     this.#viewer = null;
     void this.#refreshSync();
   }
@@ -669,17 +753,32 @@ export class GpCode extends GitPlusElement {
   #mountTree(): void {
     const host = this.querySelector<HTMLElement>(".gp-explorer-tree");
     if (host === null) return;
+    const repo = this.offline ? null : (this.api?.repo ?? null);
 
     if (this.#tree !== null && this.#treeHost === host) {
-      this.#tree.resetPaths(this.#paths);
+      // Every render lands here, and the reset rebuilds the tree's store
+      // from its construction options — so pass what is open right *now*,
+      // or each render would snap folders back to how the tree was born.
+      this.#tree.resetPaths(this.#paths, {
+        initialExpandedPaths: openDirectories(this.#tree),
+      });
       if (this.offline) this.#tree.setGitStatus(FALLBACK_STATUS);
       return;
     }
 
+    // The first update runs before the load commits any paths. A tree
+    // mounted over none would immediately record "nothing is open" over a
+    // real record — so no tree until there is something to show.
+    if (this.#paths.length === 0) return;
+
+    this.#treeUnsubscribe?.();
+    this.#treeUnsubscribe = null;
     this.#tree?.cleanUp();
+    const stored = repo === null ? null : storedExpansion(repo);
     this.#tree = new FileTree({
       paths: this.#paths,
-      initialExpansion: "open",
+      initialExpansion: "closed",
+      initialExpandedPaths: stored ?? allDirectories(this.#paths),
       flattenEmptyDirectories: true,
       // The design's explorer header carries only "+" and "…"; repository-wide
       // search lives in the sidebar's ⌘K field, so the tree does not add a
@@ -691,6 +790,12 @@ export class GpCode extends GitPlusElement {
         if (path !== undefined) void this.#open(path);
       },
     });
+    if (repo !== null) {
+      const tree = this.#tree;
+      this.#treeUnsubscribe = tree.subscribe(() => {
+        localStorage.setItem(expansionKey(repo), JSON.stringify(openDirectories(tree)));
+      });
+    }
     this.#tree.render({ containerWrapper: host });
     this.#treeHost = host;
   }
@@ -710,6 +815,8 @@ export class GpCode extends GitPlusElement {
     this.editingNew = false;
     this.editError = null;
     this.at = null;
+    this.diffing = false;
+    this.diffNote = null;
     if (this.panel === "filelog") {
       this.panel = "none";
       this.fileLog = null;
@@ -735,6 +842,7 @@ export class GpCode extends GitPlusElement {
   /** Open the current blob in the editor. */
   #edit(): void {
     if (this.offline || this.loading || this.selected === null || this.content === null) return;
+    this.diffing = false;
     this.editingNew = false;
     this.editError = null;
     this.mode = "edit";
@@ -743,12 +851,14 @@ export class GpCode extends GitPlusElement {
   /** The explorer's "+": the same editor, over a path that does not exist. */
   #newFile(): void {
     if (this.offline || this.loading || this.api === null) return;
+    this.diffing = false;
     this.editingNew = true;
     this.editError = null;
     this.mode = "edit";
   }
 
   #cancelEdit(): void {
+    this.diffing = false;
     this.mode = "view";
     this.editingNew = false;
     this.editError = null;
@@ -773,9 +883,7 @@ export class GpCode extends GitPlusElement {
 
   /** Commit what the editor holds: the draft content at the chosen path. */
   async #save(): Promise<void> {
-    if (this.saving) return;
-    const editor = this.querySelector<HTMLTextAreaElement>(".gp-editor");
-    if (editor === null) return;
+    if (this.saving || this.#detachEditor === null) return;
     const path = this.editingNew
       ? (this.querySelector<HTMLInputElement>(".gp-editor-path")?.value ?? "").trim()
       : this.selected;
@@ -791,7 +899,8 @@ export class GpCode extends GitPlusElement {
       this.querySelector<HTMLInputElement>(".gp-editor-message")?.value ?? ""
     ).trim();
     const fallback = `${this.editingNew ? "add" : "update"} ${path}`;
-    await this.#write({ path, content: editor.value }, message === "" ? fallback : message, path);
+    const content = this.#editSession?.getText() ?? this.content ?? "";
+    await this.#write({ path, content }, message === "" ? fallback : message, path);
   }
 
   /** Remove the open file — the same commit request, with `content: null`. */
@@ -939,22 +1048,168 @@ export class GpCode extends GitPlusElement {
   protected override updated(): void {
     this.#mountTree();
     void this.#renderSource();
+    void this.#renderDiffReview();
   }
 
   /**
-   * Hand the file to `@pierre/diffs`, which owns its own shadow root.
+   * Put the caret in the editable pane, once it exists.
+   *
+   * The surface materializes through the package's own render queue, some
+   * frames after attach, and `focus()` before that is a silent no-op — so
+   * keep asking briefly. The loop ends once the caret is somewhere
+   * deliberate: in the pane means it worked, in a field means the user has
+   * already moved on, and yanking the caret back would be worse than typing
+   * one click later. (What has focus right after a toolbar click is the
+   * button itself, which is neither.) With a line, not bare: bare `focus()`
+   * moves element focus without placing a caret, and a contenteditable with
+   * no selection swallows keystrokes.
+   */
+  #focusEditor(): void {
+    const session = this.#editSession;
+    if (session === null) return;
+    const deepActive = (): Element | null => {
+      let active: Element | null = document.activeElement;
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+      return active;
+    };
+    let attempts = 0;
+    const tryFocus = (): void => {
+      if (this.#detachEditor === null || this.#editSession !== session || this.diffing) return;
+      const active = deepActive();
+      if (
+        active instanceof HTMLElement &&
+        (active.isContentEditable || active.tagName === "INPUT")
+      ) {
+        return;
+      }
+      session.focus({ lineNumber: "first-visible" });
+      if (++attempts < 30) requestAnimationFrame(tryFocus);
+    };
+    requestAnimationFrame(tryFocus);
+  }
+
+  /**
+   * The diff behind the ± toggle, in either mode.
+   *
+   * Editing, it is the draft against the blob it opened from, read straight
+   * off the attached editor — which stays alive under the hidden source
+   * pane, so toggling back loses nothing; a new file diffs against no old
+   * side at all, which renders as pure addition. Viewing, it is the change
+   * that produced the version on screen: the file at `at` (or the tip)
+   * against the previous commit that touched it, fetched once per
+   * anchor+path and cached. An old side equal to the new one renders as a
+   * note rather than a silently empty pane.
+   */
+  async #renderDiffReview(): Promise<void> {
+    if (!this.diffing) return;
+    const editing = this.mode === "edit";
+    let name: string;
+    let oldContents: string | null;
+    let newContents: string;
+    if (editing) {
+      name =
+        (this.editingNew
+          ? (this.querySelector<HTMLInputElement>(".gp-editor-path")?.value ?? "").trim() ||
+            "untitled"
+          : this.selected) ?? "untitled";
+      oldContents = this.editingNew ? null : (this.content ?? "");
+      newContents = this.#editSession?.getText() ?? "";
+    } else {
+      const api = this.api;
+      const path = this.selected;
+      const anchor = this.at ?? this.#tip;
+      if (api === null || path === null || anchor === null || this.content === null) return;
+      name = path;
+      newContents = this.content;
+      const cached = this.#viewDiffOld;
+      if (cached !== null && cached.anchor === anchor && cached.path === path) {
+        oldContents = cached.contents;
+      } else {
+        try {
+          const entries = await api.history(anchor, path, "2");
+          const previous = entries[1]?.oid;
+          oldContents = previous === undefined ? null : await api.file(previous, path);
+        } catch (error) {
+          if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+          this.diffNote = `cannot load the previous version — ${describe(error)}`;
+          return;
+        }
+        this.#viewDiffOld = { anchor, path, contents: oldContents };
+        // The screen may have moved on while the fetch was in flight.
+        if (!this.diffing || this.mode === "edit" || path !== this.selected) return;
+      }
+    }
+    const note =
+      oldContents !== null && oldContents === newContents
+        ? editing
+          ? "No changes yet — the draft matches the file."
+          : "No change to show."
+        : null;
+    if (this.diffNote !== note) this.diffNote = note;
+    if (note !== null) return;
+    const host = this.querySelector<HTMLElement>(".gp-diff-review-host");
+    if (host === null) return;
+    const { FileDiff } = await diffs();
+    if (!this.diffing) return;
+    const oldFile = oldContents === null ? null : { name, contents: oldContents };
+    const newFile = { name, contents: newContents };
+    // A fresh instance per diff session: a reused one does not repaint when
+    // only the file contents moved between sessions — even `forceRender`
+    // leaves the previous hunks on screen. An empty host is what a new
+    // session looks like, since the toggle recreates the element.
+    if (host.childElementCount === 0 && this.#diffView !== null) {
+      this.#diffView.cleanUp();
+      this.#diffView = null;
+    }
+    this.#diffView ??= new FileDiff({
+      themeType: this.theme,
+      diffStyle: "unified",
+      disableFileHeader: true,
+      overflow: "scroll",
+    });
+    this.#diffView.setThemeType(this.theme);
+    this.#diffView.render({ oldFile, newFile, containerWrapper: host });
+  }
+
+  /**
+   * Hand the file to `@pierre/diffs`, which owns its own shadow root — and,
+   * in edit mode, attach the package's editor to that same rendered surface.
    *
    * The module is fetched on first use — see `highlight.ts` — so the path and
    * content are re-read after the await in case the selection moved on while
    * the chunk was in flight.
+   *
+   * This runs on every update, which makes it the one place attach and
+   * detach both happen: while the editor holds the pane a re-render would
+   * rebuild the view from `content` and drop the draft, so it returns
+   * early; and any path that leaves edit mode — cancel, tree walk, a
+   * history look-back — lands here with `mode` back at `view`, where the
+   * detach and the fresh render below restore the pristine blob.
    */
   async #renderSource(): Promise<void> {
     const host = this.querySelector<HTMLElement>(".gp-source-host");
-    if (host === null || this.selected === null || this.content === null) return;
-    const { File } = await diffs();
-    const path = this.selected;
-    const contents = this.content;
-    if (path === null || contents === null) return;
+    if (host === null) return;
+    const { File, Editor } = await diffs();
+    let discarded = false;
+    if (this.#detachEditor !== null) {
+      if (this.mode === "edit") return;
+      this.#detachDraft();
+      discarded = true;
+    }
+    const editing = this.mode === "edit";
+    const file =
+      editing && this.editingNew
+        ? // No blob yet, and no name until the path field is committed —
+          // plain text until then, which the render after `#save` corrects.
+          { name: "untitled", contents: "" }
+        : this.selected !== null && this.content !== null
+          ? { name: this.selected, contents: this.content }
+          : null;
+    if (file === null) return;
+    // A fresh `File` appends its own `<diffs-container>` and never removes a
+    // predecessor's — without this, every discarded viewer (the OPFS client
+    // swap, a branch switch) left its pane stacked above the live one.
+    if (this.#viewer === null) host.replaceChildren();
     this.#viewer ??= new File({
       themeType: this.theme,
       disableFileHeader: true,
@@ -962,7 +1217,22 @@ export class GpCode extends GitPlusElement {
       stickyHeader: false,
     });
     this.#viewer.setThemeType(this.theme);
-    this.#viewer.render({ file: { name: path, contents }, containerWrapper: host });
+    // `forceRender` after a discarded draft: the pristine `content` string
+    // is unchanged, so a plain render would compare equal and skip — leaving
+    // the abandoned draft on screen.
+    this.#viewer.render({ file, containerWrapper: host, forceRender: discarded });
+    if (editing) {
+      this.#editSession ??= new Editor<undefined>();
+      const session = this.#editSession;
+      this.#detachEditor = session.edit(this.#viewer);
+      // A new file needs its name before its content — the caret belongs in
+      // the path field. Otherwise it belongs in the pane; see #focusEditor.
+      if (this.editingNew) {
+        this.querySelector<HTMLInputElement>(".gp-editor-path")?.focus();
+        return;
+      }
+      this.#focusEditor();
+    }
   }
 
   protected override render(): TemplateResult {
@@ -1040,48 +1310,108 @@ export class GpCode extends GitPlusElement {
                     />`
                   : html`${this.selected ?? "—"}`
               }
+              <button
+                class="gp-icon-btn"
+                type="button"
+                title="File history"
+                aria-label="File history"
+                ?data-active=${this.panel === "filelog"}
+                ?disabled=${
+                  this.offline || this.loading || this.selected === null || this.editingNew
+                }
+                @click=${() => void this.#toggleFileLog()}
+              >
+                ${icons.clock(14)}
+              </button>
+              <button
+                class="gp-icon-btn"
+                type="button"
+                data-tight
+                title=${
+                  this.diffing
+                    ? "Back to the file"
+                    : this.mode === "edit"
+                      ? "Review changes as a diff"
+                      : "Diff against the previous version"
+                }
+                aria-label="Review changes"
+                ?data-active=${this.diffing}
+                ?disabled=${
+                  this.offline ||
+                  this.loading ||
+                  this.saving ||
+                  (this.mode !== "edit" && this.selected === null)
+                }
+                @click=${() => {
+                  this.diffing = !this.diffing;
+                  this.diffNote = null;
+                  if (!this.diffing && this.mode === "edit") this.#focusEditor();
+                }}
+              >
+                ${icons.diff(14)}
+              </button>
               ${
                 this.mode === "view"
                   ? html`<button
-                        class="gp-icon-btn"
-                        type="button"
-                        title="File history"
-                        aria-label="File history"
-                        ?data-active=${this.panel === "filelog"}
-                        ?disabled=${this.offline || this.loading || this.selected === null}
-                        @click=${() => void this.#toggleFileLog()}
-                      >
-                        ${icons.clock(14)}
-                      </button>
+                      class="gp-icon-btn"
+                      type="button"
+                      data-tight
+                      title=${
+                        this.offline
+                          ? "Read-only — the git+ API is not reachable"
+                          : this.at !== null
+                            ? "Read-only — viewing an old commit"
+                            : "Edit file"
+                      }
+                      aria-label="Edit file"
+                      ?disabled=${
+                        this.offline || this.loading || this.selected === null || this.at !== null
+                      }
+                      @click=${() => this.#edit()}
+                    >
+                      ${icons.pencil(14)}
+                    </button>`
+                  : html`${
+                        this.editingNew
+                          ? nothing
+                          : html`<button
+                              class="gp-icon-btn"
+                              type="button"
+                              data-tight
+                              title="Remove this file in a new commit"
+                              aria-label="Delete file"
+                              ?disabled=${this.saving}
+                              @click=${() => void this.#delete()}
+                            >
+                              ${icons.trash(14)}
+                            </button>`
+                      }
                       <button
                         class="gp-icon-btn"
                         type="button"
                         data-tight
-                        title=${
-                          this.offline
-                            ? "Read-only — the git+ API is not reachable"
-                            : this.at !== null
-                              ? "Read-only — viewing an old commit"
-                              : "Edit file"
-                        }
-                        aria-label="Edit file"
-                        ?disabled=${
-                          this.offline || this.loading || this.selected === null || this.at !== null
-                        }
-                        @click=${() => this.#edit()}
+                        title="Cancel editing"
+                        aria-label="Cancel editing"
+                        ?disabled=${this.saving}
+                        @click=${() => this.#cancelEdit()}
                       >
-                        ${icons.pencil(14)}
+                        ${icons.close(14)}
                       </button>`
-                  : nothing
               }
             </div>
             ${this.#atBanner()}
             ${
               this.loading
                 ? html`<div class="gp-empty">Loading…</div>`
-                : this.mode === "edit"
-                  ? this.#editor()
-                  : html`<div class="gp-source-host gp-diff-host"></div>`
+                : html`<div class="gp-source-host gp-diff-host" ?hidden=${this.diffing}></div>
+                    ${
+                      this.diffing
+                        ? this.diffNote !== null
+                          ? html`<div class="gp-empty">${this.diffNote}</div>`
+                          : html`<div class="gp-diff-review-host gp-diff-host"></div>`
+                        : nothing
+                    }
+                    ${this.mode === "edit" ? this.#editorBar() : nothing}`
             }
           </div>
         </div>
@@ -1090,20 +1420,16 @@ export class GpCode extends GitPlusElement {
   }
 
   /**
-   * The editor: the blob in a textarea, and a commit bar under it.
+   * The commit bar under the editable pane: message and Commit.
    *
-   * The textarea is uncontrolled on purpose — Lit sets `.value` when the
-   * template's value changes and leaves the user's typing alone otherwise —
-   * and `#save` reads it back at commit time.
+   * The content itself lives in the source host above: `#renderSource`
+   * attaches `@pierre/diffs`'s editor to the rendered file, and `#save`
+   * reads the draft back from it at commit time. Cancel and delete sit in
+   * the card head beside the filename, where the pencil that opened the
+   * session was.
    */
-  #editor(): TemplateResult {
+  #editorBar(): TemplateResult {
     return html`
-      <textarea
-        class="gp-editor"
-        spellcheck="false"
-        aria-label="File contents"
-        .value=${this.editingNew ? "" : (this.content ?? "")}
-      ></textarea>
       ${
         this.editError === null
           ? nothing
@@ -1118,27 +1444,6 @@ export class GpCode extends GitPlusElement {
           }
           autocomplete="off"
         />
-        ${
-          this.editingNew
-            ? nothing
-            : html`<button
-                class="gp-btn-quiet"
-                type="button"
-                title="Remove this file in a new commit"
-                ?disabled=${this.saving}
-                @click=${() => void this.#delete()}
-              >
-                Delete file
-              </button>`
-        }
-        <button
-          class="gp-btn-quiet"
-          type="button"
-          ?disabled=${this.saving}
-          @click=${() => this.#cancelEdit()}
-        >
-          Cancel
-        </button>
         <button
           class="gp-btn-primary"
           type="button"

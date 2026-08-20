@@ -815,7 +815,7 @@ export class GpSettings extends GitPlusElement {
                     placeholder="test, lint"
                     .value=${rules.rules.requiredChecks.join(", ")}
                   />
-                  <label class="gp-switch-row">
+                  <label class="gp-field-label gp-switch-row">
                     <ui-switch class="gp-switch">
                       <input
                         type="checkbox"
@@ -826,7 +826,7 @@ export class GpSettings extends GitPlusElement {
                     </ui-switch>
                     Require a pull request on protected branches
                   </label>
-                  <label class="gp-switch-row">
+                  <label class="gp-field-label gp-switch-row">
                     <ui-switch class="gp-switch">
                       <input
                         type="checkbox"

@@ -12,21 +12,24 @@
  * See `build.ts` for why it is reached through an alias.
  */
 import type { File as DiffsFile, FileDiff } from "@pierre/diffs";
+import type { Editor } from "@pierre/diffs/edit";
 
 export interface Diffs {
   readonly File: typeof DiffsFile;
   readonly FileDiff: typeof FileDiff;
+  readonly Editor: typeof Editor;
 }
 
 let pending: Promise<Diffs> | null = null;
 
 export const diffs = (): Promise<Diffs> => {
   pending ??= (async (): Promise<Diffs> => {
-    const [module] = await Promise.all([
+    const [module, edit] = await Promise.all([
       import("@pierre/diffs"),
+      import("@pierre/diffs/edit"),
       import("@pierre/diffs/components/web-components"),
     ]);
-    return { File: module.File, FileDiff: module.FileDiff };
+    return { File: module.File, FileDiff: module.FileDiff, Editor: edit.Editor };
   })();
   return pending;
 };
