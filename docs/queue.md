@@ -340,7 +340,7 @@ The wake rules that close the loop, in `wake.json`:
     },
     {
       "ref": "refs/hub/queue/*",
-      "on": ["queue.entered", "queue.reset"],
+      "on": ["queue.entered", "queue.left", "queue.reset"],
       "run": [
         "git+",
         "queue",

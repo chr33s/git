@@ -58,6 +58,8 @@ describe("cli queue", () => {
   let key = "";
   /** Somebody else, because approving your own work is not review. */
   let reviewer = "";
+  /** Holds `hub.merge` and no `hub.queue`, so a pass cannot record itself. */
+  let lander = "";
   let queue = "";
   // SAFETY: `beforeEach` overwrites this with a real oid before any check runs,
   // and every check in this suite goes through it.
@@ -145,6 +147,15 @@ describe("cli queue", () => {
       "hub.approve",
     ]);
     await fs.writeFile(reviewer, opensshPrivateKey(second.member, "reviewer@example.com"), {
+      mode: 0o600,
+    });
+    lander = path.join(root, "lander");
+    const third = await grantMember(path.join(root, "project"), fixture.root, fixture.repoId, [
+      "repo.read",
+      "source.push",
+      "hub.merge",
+    ]);
+    await fs.writeFile(lander, opensshPrivateKey(third.member, "lander@example.com"), {
       mode: 0o600,
     });
 
@@ -1327,21 +1338,16 @@ describe("cli queue", () => {
     ).trim();
     assert.notEqual(fresh, queue);
 
-    const byTarget = await failing([
-      "queue",
-      "run",
-      "--root",
-      root,
-      "--key",
-      key,
-      "--queue",
-      queue,
-      "project",
-    ]);
-    assert.match(byTarget, /was closed/, "and the ended one runs nothing");
+    // Named by its exact id — the form a wake rule outlives — a run reports
+    // rather than fails. Rotation is how a queue is meant to end, so failing
+    // here pinned the bookmark on that ref against a state the design makes
+    // inevitable, replaying every other rule on it at every wake.
+    const byId = JSON.parse(
+      await cli(["queue", "run", "--root", root, "--key", key, "--queue", queue, "project"]),
+    );
+    assert.match(byId.skipped, /was closed/, "and the ended one runs nothing");
 
-    // Named by branch instead — the form a wake uses — it reports rather than
-    // fails, so the bookmark advances and the loop does not replay for ever.
+    // Named by branch instead, the same: the bookmark advances either way.
     const rotating = JSON.parse(
       await cli([
         "queue",
@@ -1582,6 +1588,48 @@ describe("cli queue", () => {
     );
     assert.match(pass.skipped, /hub\.merge/);
     assert.equal(await mainAt(), base, "and the branch is where it was");
+  });
+
+  it("does not run a pass it cannot record", async () => {
+    // `refs/hub/queue/*` is charged `hub.queue` exactly rather than the `hub.`
+    // prefix the other namespaces take, so a runner without it writes what it
+    // built, dropped and reset to this copy alone: every replica refuses the
+    // push, and the next runner elsewhere rebuilds from a queue that learned
+    // none of it.
+    await publish(protectedRules());
+    await enter(await propose("one"));
+
+    const pass = JSON.parse(
+      await cli(["queue", "run", "--root", root, "--key", lander, "--queue", queue, "project"]),
+    );
+    assert.match(pass.skipped, /hub\.queue/);
+    assert.equal(await mainAt(), base, "and the branch is where it was");
+  });
+
+  it("appends nothing when a re-entry proposes what is already queued", async () => {
+    // `Queue.project` reads a re-entry as "this proposes something new now" and
+    // clears the candidate built for it, so an append that changes nothing
+    // still costs a rebuild — and from the chain's foot, a `queue.reset` and
+    // the whole suffix with it. On the one hub ref that cannot be shortened, a
+    // hook re-entering what it entered is growth toward the ceiling for no work.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const pr = await propose("one");
+    await enter(pr);
+    await run();
+
+    const head = () =>
+      inRepo(
+        Effect.flatMap(GitRepository.Repository, (repository) =>
+          repository.resolve(Queue.refOf(queue)),
+        ),
+      );
+    const before = await head();
+    const again = await enter(pr);
+    assert.match(again, /already queued/);
+    assert.equal(await head(), before, "and the ref nothing can shorten did not grow");
+
+    const pass = await run();
+    assert.equal(pass.reset, false, "so the chain it built still stands");
   });
 
   it("is no stricter than the boundary on a branch that asks nothing", async () => {

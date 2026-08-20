@@ -72,6 +72,15 @@ const targetRef = (value: string): string => (value === "" ? value : Event.branc
 const resolve = Effect.fn("queue.resolve")(function* (input: {
   readonly queue: string;
   readonly target: string;
+  /**
+   * What a queue that has ended is.
+   *
+   * A mistake for every verb that would append to it, and an ordinary state for
+   * the one a timer fires: rotation is how a queue is meant to end, so a run
+   * that exited non-zero on a closed one pinned the wake's bookmark against a
+   * state the design makes inevitable.
+   */
+  readonly ended?: "refuse" | "report";
 }) {
   if (input.queue !== "") {
     const state = yield* Queue.project(input.queue);
@@ -87,11 +96,12 @@ const resolve = Effect.fn("queue.resolve")(function* (input: {
       });
     }
     // And a queue that has ended reads nothing further. Refused for the same
-    // reason a mistyped id is: `forTarget` hides a closed queue and `run`
-    // refuses one, so an append here is a permanent record nothing will ever
-    // act on — a pull request entered into it would simply never land, and the
-    // command would have said it was entered.
-    if (state.closed !== null) {
+    // reason a mistyped id is: an append here is a permanent record nothing
+    // will ever act on — a pull request entered into it would simply never
+    // land, and the command would have said it was entered. `run` asks for the
+    // other reading, because a closed queue is what rotation leaves behind and
+    // the verb a wake fires must report that rather than fail on it.
+    if (state.closed !== null && input.ended !== "report") {
       return yield* new Invalid({
         field: "queue",
         reason: `${input.queue} was closed (${state.closed}); open a fresh queue for its branch`,
@@ -200,7 +210,7 @@ const enter = Command.make(
   ({ key, pr, queue, repo, root, target }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      yield* withRepo(
+      const already = yield* withRepo(
         root,
         repo,
         Effect.gen(function* () {
@@ -220,6 +230,15 @@ const enter = Command.make(
               reason: `${pr} targets ${pullRequest.base}, and this queue lands on ${state.target}`,
             });
           }
+          // Already here, at this revision: nothing to say. `Queue.project`
+          // takes a re-entry as "this proposes something new now" and clears
+          // the candidate built for it, so an append that changes nothing still
+          // costs a rebuild — and where the entry was the chain's foot, a
+          // `queue.reset` and the whole suffix with it. On the one hub ref that
+          // cannot be shortened, a hook that re-enters what it already entered
+          // is then a queue that grows toward its ceiling doing no work at all.
+          const held = state.entries.find((entry) => entry.pr === pr);
+          if (held?.head === pullRequest.head) return held.head;
           yield* Queue.enter({
             repo: genesis.repoId,
             queue: state.queue,
@@ -227,9 +246,12 @@ const enter = Command.make(
             head: pullRequest.head,
             key: signer,
           });
+          return "";
         }),
       );
-      yield* Console.log(`${pr} entered`);
+      yield* Console.log(
+        already === "" ? `${pr} entered` : `${pr} is already queued at ${already}`,
+      );
     }),
 );
 
@@ -587,7 +609,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   const byTarget = input.queue === "" ? yield* Queue.forTarget(targetRef(input.target)) : null;
   const found =
     byTarget === null
-      ? yield* resolve({ queue: input.queue, target: input.target })
+      ? yield* resolve({ queue: input.queue, target: input.target, ended: "report" })
       : byTarget.found;
   if (found === null) {
     // "None here" and "I could not read one" are different answers, and this
@@ -603,6 +625,15 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   }
   const state = found;
   named = state.queue;
+  // Rotation's own leavings, and a report rather than a failure. `--target`
+  // never arrives here closed — `forTarget` hides one — but `--queue` names an
+  // exact ref, and a wake rule written against an id outlives the queue it
+  // named. Failing there pinned the bookmark on that ref for good, replaying
+  // every other rule on it at every wake, which is the failure this verb's
+  // whole "nothing to do succeeds" rule exists to prevent.
+  if (state.closed !== null) {
+    return skip(`${state.queue} was closed (${state.closed}); open a fresh queue for its branch`);
+  }
   if (state.target === null) return skip(`${state.queue} names no target branch`);
   const target = state.target;
   const rules = yield* Policy.rulesOf();
@@ -688,6 +719,18 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // than a failure: it is a mis-provisioned key, and a wake must not spin on it.
   if (!permits(principal.capabilities, "hub.merge")) {
     return skip("this key cannot record a merge: landing appends pr.merged, which needs hub.merge");
+  }
+
+  // And the same reading of the queue's own records. Every pass appends to
+  // `refs/hub/queue/*`, whose charge is `hub.queue` exactly rather than the
+  // `hub.` prefix the other namespaces take, so a runner without it writes a
+  // coordination record every replica refuses on push: what it built, what it
+  // dropped and what it reset stay on this copy alone, and the next runner
+  // elsewhere rebuilds from a queue that never learned any of it.
+  if (!permits(principal.capabilities, "hub.queue")) {
+    return skip(
+      "this key cannot record a pass: building and settling append to refs/hub/queue/*, which needs hub.queue",
+    );
   }
 
   if (rules.maxTrustAgeSeconds > 0) {
