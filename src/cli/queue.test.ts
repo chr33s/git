@@ -1435,6 +1435,109 @@ describe("cli queue", () => {
     assert.equal(state.entries.length, 1, "and it is still queued");
   });
 
+  it("does not put an unapproved entry at the head of a chain", async () => {
+    // Built anyway, it blocked every approved entry behind it for as long as it
+    // went unapproved — and when its code broke the next candidate's check, the
+    // eviction loop blamed the entry that had done nothing wrong.
+    await publish(protectedRules());
+    const unapproved = (
+      await cli([
+        "pr",
+        "open",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--title",
+        "unreviewed",
+        "--base",
+        "main",
+        "--head",
+        "one",
+        "project",
+      ])
+    ).trim();
+    const approved = await propose("two");
+    await enter(unapproved);
+    await enter(approved);
+
+    const pass = await run();
+    assert.deepEqual(pass.landed, [approved], "the approved one lands past it");
+    assert.deepEqual(
+      pass.unbuilt.map((entry: { pr: string }) => entry.pr),
+      [unapproved],
+    );
+    assert.deepEqual(pass.dropped, [], "and nothing permanent is said about it");
+  });
+
+  it("settles a pull request that closed after its head moved", async () => {
+    // The moved-head branch returned first, so such an entry was never settled
+    // at all: no record, entry stuck in the projection, candidate branch left
+    // pinning its objects — and `queue enter` refuses a closed pull request, so
+    // it could never be re-entered either.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+
+    const moved = await inRepo(
+      Effect.gen(function* () {
+        const repository = yield* GitRepository.Repository;
+        const tip = yield* write(
+          [
+            ["readme", "base"],
+            ["a.txt", "revised"],
+          ],
+          [headOf("one")],
+        );
+        yield* repository.setRef({ name: "refs/heads/one", to: tip });
+        return tip;
+      }),
+    );
+    await cli(["pr", "update", "--root", root, "--key", key, "--head", moved, "project", first]);
+    await cli(["pr", "close", "--root", root, "--key", key, "project", first]);
+
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { pr: string; reason: string }) => entry.reason),
+      ["stale"],
+    );
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.deepEqual(state.entries, []);
+  });
+
+  it("evicts an entry whose required check came back neutral", async () => {
+    // `checksPassedAt` requires success, so a neutral check can never land —
+    // and recognised as neither failing nor green it was never evicted either,
+    // stalling that step and everything behind it for good.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    const first = await propose("one");
+    await enter(first);
+    const built = await run();
+
+    await cli([
+      "pr",
+      "check",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--name",
+      "test",
+      "--status",
+      "neutral",
+      "--head",
+      built.built[0].commit,
+      "project",
+      first,
+    ]);
+
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { pr: string; reason: string }) => entry.reason),
+      ["failed"],
+    );
+  });
+
   it("refuses a run that names neither a queue nor a branch", async () => {
     // A caller mistake, not a state — and one a hook makes by expanding an
     // argument to nothing, which is exactly when a silent success stops it

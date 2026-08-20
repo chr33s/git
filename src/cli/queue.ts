@@ -24,6 +24,7 @@ import type { Oid } from "../git/Store.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Event from "../hub/Event.ts";
 import * as HubProjection from "../hub/Projection.ts";
+import { approvals } from "../hub/Projection.ts";
 import * as Queue from "../hub/Queue.ts";
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import * as Policy from "../server/Policy.ts";
@@ -741,6 +742,17 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       continue;
     }
 
+    // Closed without merging: settled, whatever its head has done since. Asked
+    // before the head check because a pull request that closed *after* its head
+    // moved was otherwise never settled at all — the moved-head branch below
+    // returns first, so no `queue.left` was ever written, the entry stayed in
+    // the projection, its candidate branch stayed on disk, and `queue enter`
+    // refuses a closed pull request so it could never be re-entered either.
+    if (pullRequest.state === "closed") {
+      yield* drop(entry.pr, "stale");
+      continue;
+    }
+
     // A moved head is a different thing, and recording it as settled made the
     // projection's own re-entry rule unreachable: `Queue.project` updates an
     // entry's head *in place*, keeping the position it already had, which is
@@ -748,7 +760,9 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // get — but only if the entry is still there when they re-enter. Dropping
     // it the moment a pass noticed the push sent them to the back instead, and
     // the faster the wake, the more certain that was.
-    if (pullRequest.head !== entry.head) {
+    // Open only. A merged pull request whose head has moved on is not waiting
+    // to be re-entered — it is finished, and the check below settles it.
+    if (pullRequest.state === "open" && pullRequest.head !== entry.head) {
       unbuilt.push({
         pr: entry.pr,
         reason: `proposes ${pullRequest.head} now and was entered at ${entry.head}; enter it again`,
@@ -803,14 +817,38 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       continue;
     }
 
-    // Closed or merged without reaching this branch: it has stopped being a
-    // candidate for it. Asked *after* containment, because a pass that wrote
-    // `pr.merged` and died before the `queue.left` beside it leaves a pull
-    // request that is merged *and* landed — and read in the other order, the
-    // recovery above became unreachable the moment it had written its first
-    // record, which is precisely the interruption it exists for.
+    // Merged without reaching this branch: it has stopped being a candidate for
+    // it. Asked *after* containment, because a pass that wrote `pr.merged` and
+    // died before the `queue.left` beside it leaves a pull request that is
+    // merged *and* landed — and read in the other order, the recovery above
+    // became unreachable the moment it had written its first record, which is
+    // precisely the interruption it exists for.
     if (pullRequest.state !== "open") {
       yield* drop(entry.pr, "stale");
+      continue;
+    }
+
+    // And an entry the branch's own rules do not yet admit is one this pass
+    // must not put at the head of a chain. Built anyway, it blocked every
+    // approved entry behind it for as long as it went unapproved — and when its
+    // code broke the next candidate's check, the eviction loop read the first
+    // failing step and wrote a permanent `queue.left(failed)` against the entry
+    // that had done nothing wrong.
+    //
+    // Only the rules that are about the *pull request*. Checks are not among
+    // them: those are about the candidate, which does not exist until this pass
+    // builds it, and deciding them here would be the runner judging what the
+    // boundary judges. This is ordering, not authorization — the boundary still
+    // refuses anything this lets through.
+    if (approvals(pullRequest).length < rules.requiredApprovals) {
+      unbuilt.push({
+        pr: entry.pr,
+        reason: `has ${String(approvals(pullRequest).length)} approvals of its current revision, and ${String(rules.requiredApprovals)} are required`,
+      });
+      continue;
+    }
+    if (rules.requireResolvedThreads && pullRequest.threads.some((thread) => !thread.resolved)) {
+      unbuilt.push({ pr: entry.pr, reason: "has unresolved review threads" });
       continue;
     }
 
@@ -1041,7 +1079,14 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       const check = step.checks.find(
         (candidate) => candidate.name === name && candidate.head === step.commit,
       );
-      if (check?.status === "failure") return name;
+      // Any completed status that is not success. `neutral` is a report, not a
+      // pass — `checksPassedAt` requires success — so an entry whose required
+      // check came back neutral could never land and, recognised as neither
+      // failing nor green, was never evicted either: it and everything behind
+      // it stalled for good. Only `started` is still waiting.
+      if (check !== undefined && check.status !== "started" && check.status !== "success") {
+        return name;
+      }
     }
     return null;
   };
