@@ -1606,6 +1606,22 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
   // the last one walked.
   steps.reverse();
 
+  // What the walk has already put behind each step. Every earlier step's commit
+  // sits on the first-parent spine below this one, and every earlier step's head
+  // is a second parent of one of those commits, so `onto` reaches all of them by
+  // construction — that is what the walk just established, and no history walk
+  // can say more. A step merging one of them merges nothing: its base is its own
+  // `theirs`, so the tree it has to hold is the tree `onto` already had.
+  //
+  // Worth the bookkeeping because that is the only chain a single approved pull
+  // request can make deep. Every step's head must be some open request's current
+  // head, so with one open request the sole shape that authorizes is that head
+  // merged over and over — and re-deriving each of those the long way is a full
+  // history walk per step, `queueDepth` of them on the push path, none of which
+  // the pair cache can absorb because every step's `onto` is different.
+  const contained = new Set<Oid>([from]);
+  let ontoTree: Oid | null = null;
+
   for (const step of steps) {
     const authorized = yield* authorizes({
       ref: input.ref,
@@ -1632,17 +1648,22 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
 
     // And now the expensive half, asked only of a step everything else allows —
     // and asked once per pair within a request, however many times a caller
-    // walks the chain.
+    // walks the chain, and not at all of a step whose shape already answers it.
     const key = `${step.onto}\u0000${step.head}`;
-    const merged =
+    const held: Oid | null = contained.has(step.head)
+      ? (ontoTree ?? (yield* read(step.onto))?.tree ?? null)
+      : null;
+    const merged: MergeOf | null =
       input.merges.get(key) ??
-      (yield* repository.mergeTree({ ours: step.onto, theirs: step.head }).pipe(
-        Effect.catchTags({
-          ObjectNotFound: () => Effect.succeed(null),
-          StorageFailure: () => Effect.succeed(null),
-          Invalid: () => Effect.succeed(null),
-        }),
-      ));
+      (held !== null
+        ? { tree: held, conflicts: [] }
+        : yield* repository.mergeTree({ ours: step.onto, theirs: step.head }).pipe(
+            Effect.catchTags({
+              ObjectNotFound: () => Effect.succeed(null),
+              StorageFailure: () => Effect.succeed(null),
+              Invalid: () => Effect.succeed(null),
+            }),
+          ));
     if (merged === null) {
       return {
         kind: "refused",
@@ -1666,6 +1687,10 @@ const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
         reason: `${step.commit} does not hold the merge of ${step.head} into ${step.onto}: its tree is ${step.tree}, and merging them gives ${merged.tree}`,
       } satisfies Chain;
     }
+
+    contained.add(step.head);
+    contained.add(step.commit);
+    ontoTree = step.tree;
   }
 
   return { kind: "verified" } satisfies Chain;

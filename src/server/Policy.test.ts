@@ -3122,6 +3122,62 @@ describe("Policy", () => {
       assert.equal(decision.ok, true, "two approved revisions land as one verified chain");
     });
 
+    /**
+     * A step whose head the chain already carries is the one deep shape a single
+     * approved pull request can build, so the boundary answers it from the walk
+     * rather than from a merge-base walk per step. These two pin that shortcut to
+     * the same verdicts the long way gives: a no-op merge holds `onto`'s tree, and
+     * nothing else does.
+     */
+    it("lands a chain step that re-merges a head it already carries", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const queue = yield* queued();
+          const again = present(
+            (yield* repository.merge({
+              ours: queue.chain.one,
+              theirs: queue.first,
+              author,
+              noFastForward: true,
+            })).commit,
+            "merge commit",
+          );
+          return yield* land(queue, again);
+        }),
+      );
+      assert.equal(
+        decision.ok,
+        true,
+        "merging a contained head lands nothing and is still a chain",
+      );
+    });
+
+    it("refuses a re-merge of a carried head that moves the tree", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const queue = yield* queued();
+          const smuggled = yield* repository.writeFiles({
+            changes: [
+              { path: "readme", content: new TextEncoder().encode("base"), mode: "100644" },
+              { path: "a.txt", content: new TextEncoder().encode("a"), mode: "100644" },
+              { path: "backdoor.txt", content: new TextEncoder().encode("x"), mode: "100644" },
+            ],
+          });
+          const forged = yield* repository.commitTree({
+            tree: smuggled,
+            parents: [queue.chain.one, queue.first],
+            message: "merge\n",
+            author,
+          });
+          return yield* land(queue, forged);
+        }),
+      );
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /does not hold the merge/);
+    });
+
     it("refuses a chain whose tree is not the merge it claims to be", async () => {
       // The whole rule. A merge commit's tree is unconstrained by git, so a
       // candidate that merely *names* two approved parents could carry anything
