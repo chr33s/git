@@ -352,7 +352,7 @@ const close = Command.make(
             yield* Console.error(
               `warning: ${queue} could not be read here, so the branches it published were left; delete refs/heads/queue/<target>/* by hand`,
             );
-            yield* Console.log(`closed: ${reason}`);
+            // The line every close prints is printed once, by the caller below.
             return;
           }
           const state = yield* resolve({ queue, target });

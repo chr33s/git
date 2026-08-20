@@ -22,6 +22,7 @@ import { Effect, Layer } from "effect";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Queue from "../hub/Queue.ts";
 import * as Policy from "../server/Policy.ts";
@@ -1665,6 +1666,35 @@ describe("cli queue", () => {
     await enter(await propose("one"));
     await run();
 
+    // Past the ceiling, which is the state this rescues and the only one that
+    // makes folding fail while appending still works. Built rather than grown:
+    // `Dag.reachable` counts the commits it turns away as well as the ones it
+    // keeps, so a hub commit naming a ceiling's worth of parents nothing holds
+    // is a walk that gives up, at the cost of one commit object.
+    await inRepo(
+      Effect.gen(function* () {
+        const repository = yield* GitRepository.Repository;
+        const head = yield* repository.resolve(Queue.refOf(queue));
+        if (head === null) throw new Error("the queue this suite opened has no ref");
+        const carrying = yield* repository.readCommit(head);
+        // SAFETY: forty hex characters is what an oid is, and these name nothing
+        // on purpose — the walk has to turn them away for the count to blow.
+        const fabricated = Array.from(
+          { length: Event.MAX_EVENTS },
+          (_, index) => index.toString(16).padStart(40, "0") as Oid,
+        );
+        // The same tree, so the commit still carries a record and the walk keeps
+        // it — a commit it turned away would end the walk instead of blowing it.
+        const fat = yield* repository.commitTree({
+          tree: carrying.tree,
+          parents: [head, ...fabricated],
+          message: "wide\n",
+          author,
+        });
+        yield* repository.setRef({ name: Queue.refOf(queue), to: fat });
+      }),
+    );
+
     const closing = await cli([
       "queue",
       "close",
@@ -1678,7 +1708,10 @@ describe("cli queue", () => {
       "rotated",
       "project",
     ]);
-    assert.match(closing, /closed: rotated/);
+    assert.match(closing, /could not be read here/);
+    // Once. The rescue returns into the same caller that prints for every close,
+    // and a second line here reads as a second close of the same queue.
+    assert.equal(closing.match(/closed: rotated/g)?.length, 1);
   });
 
   it("refuses a run that names neither a queue nor a branch", async () => {
