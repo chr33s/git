@@ -113,9 +113,10 @@ const requirementsOf = (rules: Policy.Rules): ReadonlyArray<string> => {
 const alternativesOf = (rules: Policy.Rules): ReadonlyArray<string> =>
   // And not while provenance is required, where the boundary refuses every
   // candidate for want of a session trailer and `queue run` refuses the target
-  // by name. Advertising a route nothing can take is worse than advertising
-  // none: it is the answer an agent would act on.
-  rules.queueCandidates && !rules.requireProvenance
+  // by name — nor at a depth of zero, where `candidateChain` short-circuits
+  // before it looks at anything. Advertising a route nothing can take is worse
+  // than advertising none: it is the answer an agent would act on.
+  rules.queueCandidates && rules.queueDepth > 0 && !rules.requireProvenance
     ? [`or a queue candidate, up to ${String(rules.queueDepth)} deep`]
     : [];
 

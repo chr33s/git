@@ -689,19 +689,6 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
 });
 
 /**
- * The queue for a target branch, and the queues this replica could not read.
- *
- * Both, because the two callers need opposite things from the same walk. Asking
- * "which queue do I run for this branch?", one queue this replica cannot walk
- * is one candidate missing — a history that arrived by replication was never
- * held to this host's ceiling, so failing would let whoever grew one queue
- * break every other target on the replica that copied it. Asking "may I open a
- * queue here?", the same silence is the wrong answer: opening a second queue
- * for one branch is permanent on a namespace nothing can delete, so a caller
- * about to do that has to be able to tell "there is none" from "I could not
- * tell", and fail closed on the second.
- */
-/**
  * What a queue is for, and whether it is still running — and nothing else.
  *
  * Answering "which queue serves this branch?" needs two fields, and folding a
@@ -738,6 +725,19 @@ const summary = Effect.fn("hub.Queue.summary")(function* (queue: string) {
   return { target, closed } as const;
 });
 
+/**
+ * The queue for a target branch, and the queues this replica could not read.
+ *
+ * Both, because the two callers need opposite things from the same walk. Asking
+ * "which queue do I run for this branch?", one queue this replica cannot walk
+ * is one candidate missing — a history that arrived by replication was never
+ * held to this host's ceiling, so failing would let whoever grew one queue
+ * break every other target on the replica that copied it. Asking "may I open a
+ * queue here?", the same silence is the wrong answer: opening a second queue
+ * for one branch is permanent on a namespace nothing can delete, so a caller
+ * about to do that has to be able to tell "there is none" from "I could not
+ * tell", and fail closed on the second.
+ */
 export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: string) {
   const unreadable: Array<string> = [];
   let found: Projection | null = null;
