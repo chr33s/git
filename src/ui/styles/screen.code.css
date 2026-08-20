@@ -139,20 +139,9 @@
   margin-left: 0;
 }
 
-.gp-editor {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
+/* A brand-new file renders as an empty diffs pane; give the caret room. */
+.gp-file-card:has(.gp-editor-bar) .gp-source-host {
   min-height: 340px;
-  padding: 14px 16px;
-  border: 0;
-  outline: none;
-  resize: vertical;
-  background: var(--gp-surface);
-  color: var(--gp-fg);
-  font-family: var(--gp-mono);
-  font-size: 12.5px;
-  line-height: 1.7;
 }
 
 .gp-editor-bar {
