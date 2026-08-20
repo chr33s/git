@@ -87,7 +87,18 @@ describe("cli wake", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true });
+    // Retried, because this suite starts processes that outlive the assertion
+    // they were started for: a file appearing mid-removal makes `rm` fail with
+    // ENOTEMPTY, and a teardown that fails the run for that reports a defect
+    // nobody has.
+    for (let attempt = 0; ; attempt++) {
+      const removed = await fs
+        .rm(root, { recursive: true, force: true })
+        .then(() => true)
+        .catch(() => false);
+      if (removed || attempt === 4) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   });
 
   /** A repository with an identity, a member, and one opened pull request. */
@@ -253,6 +264,22 @@ describe("cli wake", () => {
         `the push should have woken the rule: ${JSON.stringify(woken)}`,
       );
       assert.match(woken[0] ?? "", /^pr\.opened refs\/hub\/pr\//);
+
+      // The rule having run is not the pass having finished: the fork advances
+      // its bookmark afterwards, and a teardown that removed the directory in
+      // between failed with ENOTEMPTY — intermittently, which is the worst way
+      // for a suite to fail. The bookmark is the pass's last write, so waiting
+      // for it is waiting for the fork to be done.
+      const bookmark = path.join(project, "wake.cursor.json");
+      while (
+        !(await fs
+          .access(bookmark)
+          .then(() => true)
+          .catch(() => false)) &&
+        Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
     } finally {
       await server.close();
     }

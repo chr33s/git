@@ -1629,6 +1629,33 @@ describe("cli queue", () => {
     assert.equal(shown.mergeCommit, landed.built[0].commit);
   });
 
+  it("refuses to close a queue id nobody opened", async () => {
+    // Every refusal `resolve` makes is an `Invalid`, so catching one to reach
+    // the unreadable-ref rescue took that path for a mistyped id too —
+    // creating `refs/hub/queue/<typo>` on an undeletable namespace and
+    // reporting success, which is the hazard `resolve` exists to refuse.
+    const mistyped = "01920000-0000-7000-8000-0000000c105e";
+    const refused = await failing([
+      "queue",
+      "close",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      mistyped,
+      "project",
+    ]);
+    assert.match(refused, /holds no queue/);
+
+    const listed = JSON.parse(await cli(["queue", "list", "--root", root, "project"]));
+    assert.deepEqual(
+      listed.queues.map((held: { queue: string }) => held.queue),
+      [queue],
+      "the typo left no ref behind",
+    );
+  });
+
   it("closes a queue it can no longer read", async () => {
     // A ref past the ceiling is exactly the state closing exists to rescue, and
     // a close that first insisted on reading the ref could never reach it.

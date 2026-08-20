@@ -327,18 +327,35 @@ const close = Command.make(
           // Appending needs no walk — only the ref's head — so a queue named by
           // id is closed whether or not it can still be read, and only the
           // branch sweep, which needs the target, is given up.
-          const state = yield* resolve({ queue, target }).pipe(
-            Effect.catchTag("Invalid", (error) =>
-              queue === "" ? Effect.fail(error) : Effect.succeed(null),
-            ),
-          );
-          if (state === null) {
+          //
+          // Asked as "can this ref be read?" rather than by catching whatever
+          // `resolve` refused with. Every refusal it makes is an `Invalid`, so
+          // a catch took the rescue path for a *mistyped* id too — creating
+          // `refs/hub/queue/<typo>` on an undeletable namespace and reporting
+          // success, which is the hazard `resolve` exists to refuse — and for a
+          // `--target` that disagreed, and for a queue already closed. A
+          // repository that holds no such queue answers `exists: false` rather
+          // than failing, so only a ref this replica genuinely cannot walk
+          // reaches the rescue.
+          const readable =
+            queue === "" ||
+            (yield* Queue.project(queue).pipe(
+              Effect.as(true),
+              Effect.catchTags({
+                Invalid: () => Effect.succeed(false),
+                ObjectNotFound: () => Effect.succeed(false),
+                StorageFailure: () => Effect.succeed(false),
+              }),
+            ));
+          if (!readable) {
             yield* Queue.close({ repo: genesis.repoId, queue, reason, key: signer });
             yield* Console.error(
               `warning: ${queue} could not be read here, so the branches it published were left; delete refs/heads/queue/<target>/* by hand`,
             );
+            yield* Console.log(`closed: ${reason}`);
             return;
           }
+          const state = yield* resolve({ queue, target });
           yield* Queue.close({
             repo: genesis.repoId,
             queue: state.queue,
