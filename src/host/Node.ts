@@ -17,12 +17,13 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
 import { Config, Context, Effect, Layer, Predicate } from "effect";
-import { FetchHttpClient, HttpClient, HttpRouter } from "effect/unstable/http";
+import { HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
+import * as AfterPush from "../server/AfterPush.node.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
@@ -32,14 +33,9 @@ import { file as lfsFile } from "../server/Lfs.node.ts";
 import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
-import * as Remotes from "../server/Remotes.ts";
 import { collects, routeOf, settledWithin } from "../server/Route.ts";
-import * as Sending from "../server/Sending.ts";
 import { assetResponse } from "../server/Static.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
-import * as Subscribers from "../server/Subscribers.ts";
-import * as Wake from "../server/Wake.node.ts";
-import * as Webhooks from "../server/Webhooks.ts";
 
 export interface ServeOptions {
   /** Directory holding one bare repository per subdirectory. */
@@ -206,34 +202,19 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
     // What happens after a push lands: deliver to whoever subscribed, forward
     // to whoever this repository is configured to send to, and — where the
-    // operator asked for it — run its wake rules. All of them, not one:
-    // `Hooks` is a single service, so they are combined rather than chosen
-    // between.
+    // operator asked for it — run its wake rules. Built from the root and the
+    // repository name in `AfterPush`, because everything it reads lives inside
+    // the repository and the CLI needs the same chain: a ref landed by
+    // `git+ queue run` is a ref a mirror should hear about too.
     //
-    // The forwarder gets a repository built with no hooks at all. Handed the
-    // one it is installed on, a forward would be its own trigger: a push
-    // forwards, the forward is a push, and that one forwards again. A wake
-    // reads through its own no-hooks repository for the same reason.
+    // Detaching, which is this side's answer and the CLI's opposite: delivery
+    // must outlive the response rather than hold a push open behind a slow
+    // receiver, and this process is not about to exit.
     const directory = path.join(options.root, repo);
-    const afterPush = Layer.effect(
-      GitRepository.Hooks,
-      Effect.gen(function* () {
-        const subscribed = yield* Subscribers.Subscribers;
-        const client = yield* HttpClient.HttpClient;
-        const registry = yield* Remotes.Remotes;
-        return GitRepository.hooksAll([
-          Webhooks.service({ subscribers: subscribed, client }),
-          // The repository a forward pushes from is built when the push lands,
-          // not when this layer is: it cannot be a dependency of the hooks the
-          // repository itself depends on. `guardLayer` is the no-hooks one.
-          Sending.service({
-            remotes: registry,
-            using: (effect) => effect.pipe(Effect.provide(guardLayer(repo))),
-          }),
-          ...(options.wake === true ? [Wake.service(directory, repo)] : []),
-        ]);
-      }),
-    ).pipe(Layer.provide(Layer.mergeAll(subscribers, remotes, FetchHttpClient.layer)));
+    const afterPush =
+      options.wake === true
+        ? AfterPush.chain({ root: options.root, repo, wake: true })
+        : AfterPush.chain({ root: options.root, repo });
 
     const layer = GitRepository.layer.pipe(
       // Real hooks, not `hooksNoop`: this is what makes a push deliver.

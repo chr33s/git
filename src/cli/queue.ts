@@ -19,6 +19,7 @@ import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
+import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
@@ -824,6 +825,41 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // re-enters: its candidate is cleared in place, so the search returns a
   // later step whose `onto` is another candidate, and the pass then recorded a
   // reset that had not happened on a ref nothing can shorten.
+  /**
+   * The hub refs this pass may append to, and where they stood before it did.
+   *
+   * Landing goes through `receive`, so a mirror hears about the branch — but
+   * `pr.merged` and `queue.leave` are appended through `Event.appendTo`, which
+   * is a `setRef` and tells nobody. Forwarding one without the other is worse
+   * than forwarding neither: the mirror takes the code and keeps showing the
+   * pull requests that carried it as open, for ever.
+   *
+   * Read here rather than derived from what the pass turns out to write,
+   * because the writes are spread across every branch of it — a drop, a reset,
+   * a candidate, a landing — and a list assembled at each site is a list the
+   * next branch added here forgets to join. Which is also why it is read
+   * *above* the reset below rather than after it: a pass whose only hub write
+   * is that reset announced nothing at all, and one that wrote more announced a
+   * `from` the reset was already behind — a subscriber walking the range would
+   * step straight over the record saying the chain it holds is stale.
+   *
+   * The candidate branches with them, and for the same reason the records are
+   * here at all. A `queue.candidate` names the branch it published, so a
+   * receiver taking the record without the ref holds a name for something it
+   * cannot resolve — and CI told to fetch it by a mirror finds nothing there.
+   * A branch this pass then *deletes* is announced as a deletion, which is what
+   * a settled entry is on both sides.
+   */
+  const hubRefs = [
+    Queue.refOf(state.queue),
+    ...state.entries.flatMap((entry) => [
+      Event.refOf(entry.pr),
+      Queue.candidateBranch(target, entry.pr),
+    ]),
+  ];
+  const hubBefore = new Map<string, Oid | null>();
+  for (const ref of hubRefs) hubBefore.set(ref, yield* repository.resolve(ref));
+
   const recorded = state.entries.flatMap((entry) =>
     entry.candidate === null ? [] : [entry.candidate],
   );
@@ -1204,11 +1240,30 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // The value the judgement was made against travels with the write, exactly
     // as it does on the receive-pack path: a push landing in between fails the
     // swap rather than being overwritten by this one.
-    const applied = yield* repository.setRef({ name: target, to: top.commit, expected: held }).pipe(
-      Effect.as(true),
-      Effect.catchTag("RefConflict", () => Effect.succeed(false)),
-    );
-    if (applied) {
+    //
+    // And `receive` rather than `setRef`, which is what makes that "exactly"
+    // true. `receive` is the ref phase — the hook chain, then one all-or-nothing
+    // update — and `setRef` is the same compare-and-swap with the chain left
+    // out. A queue lands unattended and often, so a landing nothing hears about
+    // is a mirror that quietly stops receiving what this branch takes, and a
+    // subscriber that stops being told. Everything else is the same call: the
+    // name, the value and the `expected` the judgement was made against.
+    const received = yield* repository
+      .receive([{ name: target, value: top.commit, expected: held, reason: "queue: land" }])
+      .pipe(Effect.catchTag("HookRejected", (error) => Effect.succeed(error)));
+    if ("_tag" in received) {
+      // A hook refusing is the repository saying no. The pass has a word for
+      // that — it is the same answer the boundary gives, arriving from the
+      // other side of it — so it joins `refused` rather than failing the pass:
+      // the candidates stand and the next wake asks again.
+      //
+      // Kept out of the swap's own losing branch below, deliberately. That one
+      // is about somebody else having moved the branch, and a hook refusal
+      // moved nothing: reported there, it would send a reader looking for a
+      // push that never happened, and would append a `queue.reset` anchored at
+      // a tip that never changed.
+      refused.push({ pr: top.pr, reason: `a hook refused the landing: ${received.message}` });
+    } else if (received.at(0)?.ok === true) {
       for (const step of chain.slice(0, landedAt + 1)) {
         // Naming the revision the pull request actually proposed, which is what
         // hub.md §10 requires of a merge event; the branch holds the candidate,
@@ -1237,7 +1292,30 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       // remove. Said out loud, and `reset` says a record was written.
       const now = yield* repository.resolve(target);
       raced = true;
-      if (now === null) {
+      if (now === from) {
+        // Nobody moved it: the branch is exactly where this pass found it, so
+        // the store refused the write rather than losing a race — a stale lock
+        // file, a directory in the way, a full disk. That is a fact about this
+        // replica, and the rule everywhere here is that one writes nothing: a
+        // `queue.reset` anchored at an unchanged tip is a permanent record of
+        // nothing, appended again on every wake, on the one ref that cannot be
+        // shortened.
+        //
+        // Asked as "did it move?" rather than by reading the store's reason,
+        // which is prose and is `ref moved` where the store gave none.
+        //
+        // `receive` fills in `ref moved` where the store named no reason of its
+        // own, and this is the branch that has just established nothing moved —
+        // so that one word is dropped rather than repeated back. Wording only:
+        // what decided this was the tip, not the prose.
+        const said = received.at(0)?.reason;
+        refused.push({
+          pr: top.pr,
+          reason: `${target} could not be written: ${
+            said === undefined || said === "ref moved" ? "the store refused the update" : said
+          }`,
+        });
+      } else if (now === null) {
         // Deleted, not moved. There is no revision to anchor a reset at, and
         // falling back to the tip this pass started from recorded — permanently
         // — that the branch holds what it does not hold, in the same result
@@ -1341,6 +1419,25 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     }
   }
 
+  // And now say what was appended, to the same chain the landing went through.
+  // `postReceive` is exactly "these refs are durable now", which is what this
+  // is: `receive` builds the same call from its own results. Announced in one
+  // batch at the end rather than per append, so a mirror takes one push for the
+  // pass instead of one per record.
+  if (!input.dryRun) {
+    const appended: Array<GitRepository.ReceiveResult> = [];
+    for (const ref of hubRefs) {
+      const now = yield* repository.resolve(ref);
+      const before = hubBefore.get(ref) ?? null;
+      // `to: null` included, which is a deletion rather than nothing: a
+      // candidate branch this pass swept is one a mirror must sweep too, and
+      // left behind there it pins its objects out of reach of collection on a
+      // repository nobody is going to look at.
+      if (now !== before) appended.push({ ref, from: before, to: now, ok: true });
+    }
+    if (appended.length > 0) yield* (yield* GitRepository.Hooks).postReceive(appended);
+  }
+
   return {
     queue: state.queue,
     target,
@@ -1374,15 +1471,26 @@ const run = Command.make(
       Flag.withDefault(false),
       Flag.withDescription("Say what one pass would do, moving no ref and recording nothing"),
     ),
+    notify: Flag.boolean("notify").pipe(
+      Flag.withDefault(true),
+      Flag.withDescription(
+        "Deliver to subscribers and forward to mirrors when a batch lands (--no-notify to skip)",
+      ),
+    ),
     repo: repoArgument,
   },
-  ({ dryRun, key, queue, repo, root, target }) =>
+  ({ dryRun, key, notify, queue, repo, root, target }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
+      // Landing is the one thing a queue does that anybody outside this
+      // repository is waiting on, so the chain is on unless it is turned off.
+      // Off is for a runner whose landings something else is already
+      // announcing — a replica that pushes onward under its own name.
       const outcome = yield* withRepo(
         root,
         repo,
         pass({ repo, queue, target, key: signer, dryRun }),
+        { notify },
       );
       yield* Console.log(JSON.stringify(outcome, null, 2));
     }),

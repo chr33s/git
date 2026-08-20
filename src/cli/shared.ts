@@ -23,6 +23,7 @@ import type { Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
+import * as AfterPush from "../server/AfterPush.node.ts";
 import { isOid } from "../git/Store.ts";
 
 export const rootFlag = Flag.string("root").pipe(
@@ -73,19 +74,67 @@ export const mustResolve = (repository: Repository["Service"], rev: string) =>
     return oid;
   });
 
+export interface RepoOptions {
+  /**
+   * Whether landing a ref tells whoever the repository says to tell.
+   *
+   * On by default, and safe as a default because the chain is derived from the
+   * repository rather than configured here: a clone with no `webhooks.json` and
+   * no `remotes.json` has nothing to deliver and nothing to forward, so the
+   * cost is a list of nothing. Off is for a caller that holds the configuration
+   * and means to move a ref without acting on it.
+   *
+   * Only `Repository.receive` runs the chain — `setRef`, `commit` and `merge`
+   * move a ref and tell nobody — so today this reaches exactly the verbs that
+   * land through it.
+   */
+  readonly notify?: boolean;
+}
+
 export const withRepo = <A, E>(
   root: string,
   repo: string,
-  effect: Effect.Effect<A, E, Repository>,
-) =>
-  effect.pipe(
-    Effect.provide(
-      GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provide(stores(path.join(root, repo))),
+  effect: Effect.Effect<A, E, Repository | GitRepository.Hooks>,
+  options?: RepoOptions,
+): Effect.Effect<A, E> => {
+  // `provideMerge` for the hooks, so the verb can reach them too. A verb that
+  // writes a ref some other way than through `receive` — every hub append is an
+  // `Event.appendTo`, and that is a `setRef` — is the only thing that can say
+  // what it wrote, and saying so is the difference between a mirror that is
+  // behind and one that is wrong.
+  const under = (hooks: Layer.Layer<GitRepository.Hooks>) =>
+    effect.pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provideMerge(hooks),
+          Layer.provide(stores(path.join(root, repo))),
+        ),
       ),
-    ),
+    );
+  if (options?.notify === false) return under(GitRepository.hooksNoop);
+
+  // Started in the hook and waited for here, which is the whole difference from
+  // the server's chain. There, a hook's work is detached to outlive an HTTP
+  // response. Here the process exits when the verb is done, so a detached fork
+  // dies with it — and awaiting it *inside* the hook is worse than either: the
+  // chain runs between the ref moving and everything the caller does next, so a
+  // slow receiver would hold that window open with the ref already swapped.
+  const deliveries = AfterPush.deliveries();
+  // Held and sent once, because what a verb did is one thing that happened. A
+  // landing moves the branch through `receive` and then appends the records
+  // that say what it holds, and announced separately those are separate pushes
+  // to every mirror — separately lost, so one can arrive without the other and
+  // leave the mirror wrong rather than behind.
+  const collected = AfterPush.collected(
+    AfterPush.chain({ root, repo, background: deliveries.background }),
   );
+  return under(collected.layer).pipe(
+    // On every exit, not only success: a landing the verb then fails after is
+    // still a landing, and this process is the only one that can announce it or
+    // wait for it.
+    Effect.ensuring(collected.flush.pipe(Effect.andThen(deliveries.settle))),
+  );
+};
 
 /**
  * An SSH private key from disk.

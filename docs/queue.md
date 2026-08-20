@@ -423,18 +423,61 @@ special.
 with competing openings; the loser's entries are noise, its candidates
 ordinary branches to delete. Harmless by construction, so not refused.
 
-**Landing does not run receive hooks.** `queue run` moves the branch
-through the object store directly, so the post-receive chain — mirror
-`Sending`, webhooks, the wake dispatcher's own nudge — does not fire for
-what the queue lands. This is not new and not the queue's: every `git+`
-verb that moves a ref does the same, `git+ pr merge` included, because
-the CLI is a member operating on a repository it holds rather than a
-client pushing to one. It matters more here only because a queue lands
-unattended and often. A deployment that depends on those hooks should
-land through the boundary — run the queue against a replica it pushes
-from — rather than expect a local `queue run` to notify anything. Giving
-the CLI a real hook chain is a change to every verb, and belongs with
-whatever configures the hooks, not with the queue.
+**Landing runs the receive hooks, and waits for them.** `queue run`
+lands through `Repository.receive` — the ref phase, which is the hook
+chain and then one all-or-nothing update — rather than through
+`setRef`, which is the same compare-and-swap with the chain left out.
+So a mirror hears what the queue takes and a subscriber is told, which
+matters here more than anywhere because a queue lands unattended and
+often.
+
+The chain itself is `server/AfterPush.node.ts`, shared with the server
+and derived from the repository rather than configured at the call
+site: no `webhooks.json` is no subscriber, no `remotes.json` is no
+mirror, so it costs a list of nothing on a clone that configures
+neither. That is what makes it the default; `--no-notify` is for a
+runner whose landings something else already announces.
+
+Two things differ from the server's chain. Delivery is **started in the
+hook and waited for at the end of the verb**, rather than either
+detached or awaited in place. A server detaches, so a hook's work
+outlives the HTTP response; a CLI process exits, so a detached fork
+dies with the verb and reports a landing nobody was told about. But
+awaiting inside the hook is worse than both: `postReceive` runs inside
+`receive`, between the ref moving and everything the caller does next —
+`pr.merged` and `queue.leave` among them — so a slow receiver would
+hold open exactly the window a pass is designed to be interruptible in,
+with the branch already swapped and the queue not yet told. The wait is
+bounded, above what the receivers schedule for themselves, so a mirror
+that black-holes costs a pass rather than the queue.
+
+And **wake is left out**: a wake pass runs the repository's own verbs,
+`queue run` among them, so a verb that woke the rules that ran it is a
+cycle with only the dispatcher's bookmark to break it.
+
+A hook that _refuses_ a landing is reported in `refused`, beside the
+boundary's own refusals — the same answer arriving from the other side
+of it. The candidates stand and the next pass asks again.
+
+The records go with the branch, in the same breath. `pr.merged` and
+`queue.leave` are appended through `Event.appendTo`, which is a
+`setRef` and tells nobody, so the pass announces the hub refs it wrote
+once it has written them — and the chain holds every announcement a
+verb makes and sends them as one. Both halves matter. Forwarding the
+branch without the records would leave a mirror holding the code and
+still showing the pull request that carried it as open; forwarding them
+as two pushes would let one arrive without the other and reach the same
+place, with nothing to retry it, because a pass announces only what it
+changed and by the next pass the pull request has left the queue. What
+a verb did is one thing that happened, and a receiver hearing it as one
+thing has all of it or none. The candidate branches go in the same
+batch: a `queue.candidate` record names the branch it published, and a
+receiver holding the record without the ref has a name for something it
+cannot resolve.
+
+`git+ pr merge` still tells nobody: it moves the ref inside
+`Repository.merge`, which would need a merge-without-ref and a
+`receive` beside it. Separate work, and not the queue's.
 
 ## 8. Alternatives considered
 

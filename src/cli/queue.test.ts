@@ -12,6 +12,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -37,6 +39,17 @@ const cli = async (args: ReadonlyArray<string>): Promise<string> => {
   const result = await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" });
   return `${result.stdout}${result.stderr}`;
 };
+
+/**
+ * Only what the command *returned*, for the verbs that answer in JSON.
+ *
+ * `cli` above hands back both streams, which is what the tests that read a
+ * warning want. A reader parsing a result does not: diagnostics go to stderr
+ * precisely so they are not in front of the JSON, and concatenating them here
+ * would put them back.
+ */
+const stdoutOf = async (args: ReadonlyArray<string>): Promise<string> =>
+  (await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" })).stdout;
 
 /** The same call, for the paths that are supposed to fail. */
 const failing = (args: ReadonlyArray<string>): Promise<string> =>
@@ -239,7 +252,7 @@ describe("cli queue", () => {
 
   const run = async (extra: ReadonlyArray<string> = []) =>
     JSON.parse(
-      await cli([
+      await stdoutOf([
         "queue",
         "run",
         "--root",
@@ -252,6 +265,41 @@ describe("cli queue", () => {
         "project",
       ]),
     );
+
+  /** A subscriber this repository is configured to tell, and what it was told. */
+  const subscribe = async (
+    handler: (body: string) => void,
+    answer: (response: http.ServerResponse) => void = (response) => response.writeHead(204).end(),
+  ) => {
+    const receiver = http.createServer((request, response) => {
+      let body = "";
+      request.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
+      request.on("end", () => {
+        handler(body);
+        answer(response);
+      });
+    });
+    await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+    // SAFETY: a TCP server that has finished listening addresses an `AddressInfo`.
+    const port = (receiver.address() as AddressInfo).port;
+    await fs.writeFile(
+      path.join(root, "project", "webhooks.json"),
+      JSON.stringify([
+        {
+          id: "s1",
+          url: `http://127.0.0.1:${String(port)}/hook`,
+          secret: "shhh",
+          createdAt: new Date(0).toISOString(),
+        },
+      ]),
+    );
+    return {
+      close: async () => {
+        receiver.closeAllConnections();
+        await new Promise<void>((resolve) => receiver.close(() => resolve()));
+      },
+    };
+  };
 
   const mainAt = () =>
     inRepo(
@@ -1637,6 +1685,189 @@ describe("cli queue", () => {
     assert.deepEqual(pass.landed, [], "and nothing was landed onto it");
     assert.equal(pass.refused.length > 0, true, "the pass says why, rather than reading as idle");
     assert.equal(pass.reset, false, "and nothing anchored a reset at a tip nothing holds");
+  });
+
+  it("tells the repository's subscribers about a batch it landed", async () => {
+    // `setRef` moves a ref and tells nobody; `receive` is the ref phase with the
+    // hook chain in it. A queue lands unattended and often, so a landing nothing
+    // hears about is a mirror that quietly stops receiving what this branch
+    // takes. And it must be delivered *before the process exits*: the server
+    // forks a hook's work to outlive an HTTP response, and a detached fork in a
+    // CLI dies with the verb that started it.
+    const delivered: Array<{ event: string; refs: ReadonlyArray<{ ref: string }> }> = [];
+    const receiver = await subscribe((body) => delivered.push(JSON.parse(body)));
+    try {
+      await publish(protectedRules());
+      await enter(await propose("one"));
+      const pass = await run();
+      assert.equal(pass.landed.length, 1, "the batch landed");
+
+      // One delivery, not one per place the verb wrote. Separate pushes are
+      // separately lost, and a mirror that got the branch without the records
+      // holds the merge commit while still showing the pull request that
+      // carried it as open — wrong rather than behind, with nothing to retry it.
+      //
+      // No polling either: if this needs a wait, the delivery was detached and
+      // the verb reported a landing nobody was told about.
+      assert.equal(delivered.length, 1);
+      assert.equal(delivered[0]?.event, "push");
+      const announced = delivered.flatMap((one) => one.refs.map((ref) => ref.ref));
+      assert.equal(announced.includes("refs/heads/main"), true, "the branch it landed");
+      assert.equal(
+        announced.some((ref) => ref.startsWith("refs/hub/pr/")),
+        true,
+        "the pull request it merged",
+      );
+      assert.equal(
+        announced.some((ref) => ref.startsWith("refs/hub/queue/")),
+        true,
+        "and the queue it left",
+      );
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("announces a candidate branch it published", async () => {
+    // A `queue.candidate` record names the branch it published, so a receiver
+    // taking the record without the ref holds a name for something it cannot
+    // resolve — and CI told to fetch it from a mirror finds nothing there.
+    const delivered: Array<{ refs: ReadonlyArray<{ ref: string }> }> = [];
+    const receiver = await subscribe((body) => delivered.push(JSON.parse(body)));
+    try {
+      // Checks required, so the pass publishes a candidate and stops there:
+      // the branch stays, and it is the branch the record names.
+      await publish(protectedRules({ requiredChecks: ["test"] }));
+      const pr = await propose("one");
+      await enter(pr);
+      const pass = await run();
+      assert.equal(pass.built.length, 1, "it built one");
+
+      const announced = delivered.flatMap((one) => one.refs.map((ref) => ref.ref));
+      assert.equal(
+        announced.includes(Queue.candidateBranch("refs/heads/main", pr)),
+        true,
+        "and said where it put it",
+      );
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("announces a queue ref from where it stood before the pass touched it", async () => {
+    // The snapshot has to be taken above the reset, not below. Read after it,
+    // a pass whose only hub write *was* the reset announced nothing at all, and
+    // one that went on to rebuild announced a `before` the reset was already
+    // behind — so a subscriber walking `before..after` stepped straight over
+    // the record saying the chain it holds is stale.
+    const delivered: Array<{ refs: ReadonlyArray<{ ref: string; before: string | null }> }> = [];
+
+    // Checks required, so the first pass builds a candidate and waits.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    await enter(await propose("one"));
+    await run();
+
+    // The branch moves under the chain: no recorded candidate sits on the tip
+    // any more, which is what the next pass reads as a reset.
+    await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.setRef({ name: "refs/heads/main", to: headOf("two") }),
+      ),
+    );
+    const before = await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.resolve(Queue.refOf(queue)),
+      ),
+    );
+
+    const receiver = await subscribe((body) => delivered.push(JSON.parse(body)));
+    try {
+      const pass = await run();
+      assert.equal(pass.reset, true, "the pass did reset the chain");
+      const queueRef = delivered
+        .flatMap((one) => one.refs)
+        .find((ref) => ref.ref === Queue.refOf(queue));
+      assert.notEqual(queueRef, undefined, "and said so");
+      assert.equal(queueRef?.before, before, "from where the ref stood, reset included");
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("keeps a receiver's failure out of the result it prints", async () => {
+    // Diagnostics go to stderr because stdout is a result. The default logger
+    // writes to stdout, so one warning from a subscriber that would not answer
+    // landed in front of the JSON and whatever reads this verb got a syntax
+    // error instead of a pass — and the reader is a hook, on a wake, with the
+    // landing already done.
+    const receiver = await subscribe(
+      () => {},
+      (response) => response.writeHead(500).end("no"),
+    );
+    try {
+      await publish(protectedRules());
+      await enter(await propose("one"));
+
+      const printed = await stdoutOf([
+        "queue",
+        "run",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--queue",
+        queue,
+        "project",
+      ]);
+      const pass: { landed: ReadonlyArray<string> } = JSON.parse(printed);
+      assert.equal(pass.landed.length, 1, "the batch landed, whatever the subscriber did");
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("moves the ref and tells nobody when asked not to", async () => {
+    // The escape hatch, for a runner whose landings something else is already
+    // announcing. Same landing, no chain.
+    let hit = 0;
+    const receiver = await subscribe(() => {
+      hit += 1;
+    });
+    try {
+      await publish(protectedRules());
+      await enter(await propose("one"));
+      const pass = await run(["--no-notify"]);
+      assert.equal(pass.landed.length, 1, "the batch still landed");
+      assert.equal(hit, 0, "and nothing was told about it");
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("does not read a ref it could not write as one somebody moved", async () => {
+    // A store that refused the write and a racer that moved the branch are both
+    // "the swap did not happen", and the swap cannot tell them apart. Read as a
+    // race, a stale lock reported `main moved from X to X` and appended a
+    // `queue.reset` anchored at a tip nothing had moved — again on every wake,
+    // on the one ref that cannot be shortened.
+    await publish(protectedRules());
+    await enter(await propose("one"));
+
+    // `main` into `packed-refs` and a directory where its loose file was: the
+    // store reads the packed entry and cannot write a file over a directory,
+    // which is "cannot lock ref" with the branch readable and exactly where the
+    // pass found it.
+    const dir = path.join(root, "project");
+    const tip = await mainAt();
+    await fs.writeFile(path.join(dir, "packed-refs"), `${String(tip)} refs/heads/main\n`);
+    await fs.rm(path.join(dir, "refs", "heads", "main"));
+    await fs.mkdir(path.join(dir, "refs", "heads", "main"));
+
+    const pass = await run();
+    assert.deepEqual(pass.landed, [], "nothing landed");
+    assert.equal(pass.to, tip, "and the branch is where it was");
+    assert.match(pass.refused[0].reason, /could not be written/);
+    assert.equal(pass.reset, false, "and nothing anchored a reset at a tip nothing moved");
   });
 
   it("does not run a pass it cannot record", async () => {

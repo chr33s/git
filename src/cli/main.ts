@@ -27,7 +27,7 @@ import { pipeline } from "node:stream/promises";
 // reaches.
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Console, Effect, Predicate, Stream } from "effect";
+import { Console, Effect, Logger, Predicate, Stream } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import * as Client from "../client/Client.ts";
@@ -1248,7 +1248,16 @@ const rendered = <E>(error: E): E | Error => {
 /** Parse `process.argv` and run: the entry for both `bin` and the SEA build. */
 const run = () =>
   NodeRuntime.runMain(
-    main(process.argv.slice(2)).pipe(Effect.mapError(rendered), Effect.provide(NodeServices.layer)),
+    main(process.argv.slice(2)).pipe(
+      Effect.mapError(rendered),
+      // Diagnostics on stderr, because stdout is a result. Several verbs print
+      // JSON there and are read by something that parses it, and the default
+      // logger writes to stdout — so one warning from anything the verb touched
+      // (a webhook that would not answer, a mirror that refused) landed in front
+      // of the JSON and the reader got a syntax error instead of a result.
+      Effect.provideService(Logger.LogToStderr, true),
+      Effect.provide(NodeServices.layer),
+    ),
   );
 
 if (import.meta.main) run();
