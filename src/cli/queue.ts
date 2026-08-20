@@ -388,17 +388,20 @@ const close = Command.make(
             return;
           }
           const state = yield* resolve({ queue, target });
-          yield* Queue.close({
-            repo: genesis.repoId,
-            queue: state.queue,
-            reason,
-            key: signer,
-          });
           // The branches it published go with it: nothing will name them again,
           // and each pins its candidate out of reach of collection. Everything
           // this queue ever held, not only what is in it now — an entry that
           // left had its branch deleted by the pass that settled it, but one
           // removed by hand did not, and after the close nothing can name it.
+          //
+          // Swept *before* the record, and that order is what makes a failed
+          // close retryable. The names come from the projection, and every verb
+          // refuses a closed queue — so a sweep interrupted after the record
+          // was a set of branches nothing could ever name again, orphaned for
+          // good. Interrupted before it, the queue is simply still open and the
+          // command run again does the whole job. The other order round is
+          // harmless: a pass writes its branch unconditionally, so branches
+          // swept from a queue whose close did not land come back.
           //
           // A pass racing this close can still publish a branch after the
           // sweep, which no verb will then delete. There is no compare-and-swap
@@ -414,6 +417,12 @@ const close = Command.make(
               yield* repository.deleteRef(Queue.candidateBranch(state.target, pr));
             }
           }
+          yield* Queue.close({
+            repo: genesis.repoId,
+            queue: state.queue,
+            reason,
+            key: signer,
+          });
         }),
       );
       yield* Console.log(`closed: ${reason}`);
