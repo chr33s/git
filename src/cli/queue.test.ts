@@ -1538,6 +1538,51 @@ describe("cli queue", () => {
     );
   });
 
+  it("does not land what it cannot record as merged", async () => {
+    // The ref charge for `refs/hub/pr/*` is the `hub.` prefix alone, so a
+    // runner without `hub.merge` had its `pr.merged` accepted onto the ref and
+    // then silently dropped by the fold — leaving every pull request it landed
+    // open on every replica, for ever.
+    await publish(protectedRules());
+    await enter(await propose("one"));
+
+    // The reviewer holds hub.review and hub.approve, and no hub.merge.
+    const pass = JSON.parse(
+      await cli(["queue", "run", "--root", root, "--key", reviewer, "--queue", queue, "project"]),
+    );
+    assert.match(pass.skipped, /hub\.merge/);
+    assert.equal(await mainAt(), base, "and the branch is where it was");
+  });
+
+  it("is no stricter than the boundary on a branch that asks nothing", async () => {
+    // `protectedBranch` returns before any of its rules on a branch that asks
+    // nothing of the revision arriving on it, so applying them in the runner
+    // regardless made it stricter than the judge and stalled entries it would
+    // have landed.
+    await publish({ ...Policy.OPEN, requiredApprovals: 2, queueCandidates: true });
+    const pr = (
+      await cli([
+        "pr",
+        "open",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--title",
+        "unreviewed",
+        "--base",
+        "main",
+        "--head",
+        "one",
+        "project",
+      ])
+    ).trim();
+    await enter(pr);
+
+    const pass = await run();
+    assert.deepEqual(pass.landed, [pr], "main is not protected, so nothing was required");
+  });
+
   it("refuses a run that names neither a queue nor a branch", async () => {
     // A caller mistake, not a state — and one a hook makes by expanding an
     // argument to nothing, which is exactly when a silent success stops it

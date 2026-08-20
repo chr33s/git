@@ -27,6 +27,7 @@ import * as HubProjection from "../hub/Projection.ts";
 import { approvals } from "../hub/Projection.ts";
 import * as Queue from "../hub/Queue.ts";
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
+import { permits } from "../trust/Certificate.ts";
 import * as Policy from "../server/Policy.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
@@ -616,6 +617,16 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // than about the update. A runner that judged itself with `evaluate` alone
   // was the one writer exempt from it — landing batch after batch on a branch
   // whose every `git push` was being refused for exactly that reason.
+  // Landing writes `pr.merged`, which the fold counts only from a key holding
+  // `hub.merge`. The ref charge for `refs/hub/pr/*` is the `hub.` prefix alone,
+  // so a runner without it had its record accepted onto the ref and then
+  // silently dropped by the fold — leaving every pull request it landed open on
+  // every replica, for ever. Said before anything moves, and as a report rather
+  // than a failure: it is a mis-provisioned key, and a wake must not spin on it.
+  if (!permits(principal.capabilities, "hub.merge")) {
+    return skip("this key cannot record a merge: landing appends pr.merged, which needs hub.merge");
+  }
+
   if (rules.maxTrustAgeSeconds > 0) {
     const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
     if (!stale.ok) return skip(stale.reason);
@@ -840,14 +851,24 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // builds it, and deciding them here would be the runner judging what the
     // boundary judges. This is ordering, not authorization — the boundary still
     // refuses anything this lets through.
-    if (approvals(pullRequest).length < rules.requiredApprovals) {
+    //
+    // And only where the boundary applies them at all. `protectedBranch`
+    // returns before any of this on a branch that asks nothing of the revision
+    // arriving on it, so applying them here regardless made the runner stricter
+    // than the judge and stalled entries it would have landed.
+    const reviewed = Policy.isProtected(rules, target) && Policy.needsReview(rules);
+    if (reviewed && approvals(pullRequest).length < rules.requiredApprovals) {
       unbuilt.push({
         pr: entry.pr,
         reason: `has ${String(approvals(pullRequest).length)} approvals of its current revision, and ${String(rules.requiredApprovals)} are required`,
       });
       continue;
     }
-    if (rules.requireResolvedThreads && pullRequest.threads.some((thread) => !thread.resolved)) {
+    if (
+      reviewed &&
+      rules.requireResolvedThreads &&
+      pullRequest.threads.some((thread) => !thread.resolved)
+    ) {
       unbuilt.push({ pr: entry.pr, reason: "has unresolved review threads" });
       continue;
     }

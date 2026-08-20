@@ -701,6 +701,43 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
  * about to do that has to be able to tell "there is none" from "I could not
  * tell", and fail closed on the second.
  */
+/**
+ * What a queue is for, and whether it is still running — and nothing else.
+ *
+ * Answering "which queue serves this branch?" needs two fields, and folding a
+ * whole queue to get them verifies a signature per record. On the path a wake
+ * fires per push, across every queue a rotating repository accumulates, that is
+ * the cost — not the decoding. So this reads the same walk and verifies only
+ * the two record kinds whose signer it actually consults.
+ */
+const summary = Effect.fn("hub.Queue.summary")(function* (queue: string) {
+  const repository = yield* Repository;
+  const head = yield* repository.resolve(refOf(queue));
+  if (head === null) return { target: null, closed: null } as const;
+
+  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* Event.ceilingOf());
+  let target: string | null = null;
+  let closed: string | null = null;
+  for (const commit of Dag.topological(parents)) {
+    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
+    const record = yield* Record.read(commit, Event.RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    if (record === null) continue;
+    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    if (payload === null) continue;
+    if (payload.type !== "queue.opened" && payload.type !== "queue.closed") continue;
+    // The two the fold reads a signer for, and only these two.
+    if ((yield* signerOf(record.payload, record.signatures)) === null) continue;
+    if (payload.type === "queue.opened") target ??= payload.target;
+    else if (target !== null) closed ??= payload.reason;
+  }
+  return { target, closed } as const;
+});
+
 export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: string) {
   const unreadable: Array<string> = [];
   let found: Projection | null = null;
@@ -715,6 +752,26 @@ export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: str
   // through the race `queue open` documents — resolve to the same one on every
   // replica: the newer, which is the one somebody meant.
   for (const id of [...(yield* queues())].reverse()) {
+    // Summarised first: what this loop asks of a queue it does not want is two
+    // fields, and folding one to find out verifies a signature per record it
+    // will then discard. Only the queue that matches is folded.
+    const brief = yield* summary(id).pipe(
+      Effect.catchTags({
+        Invalid: () => Effect.succeed(null),
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+    if (brief === null) {
+      unreadable.push(id);
+      continue;
+    }
+    // A closed queue is history, and stepping aside is the whole point of
+    // ending one: the next `queue open` for this branch has to be able to
+    // succeed, and every caller asking "which queue serves this branch?" has to
+    // get the live one.
+    if (brief.target !== target || brief.closed !== null) continue;
+
     const state = yield* project(id).pipe(
       Effect.catchTags({
         Invalid: () => Effect.succeed(null),
@@ -726,14 +783,8 @@ export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: str
       unreadable.push(id);
       continue;
     }
-    // A closed queue is history, and stepping aside is the whole point of
-    // ending one: the next `queue open` for this branch has to be able to
-    // succeed, and every caller asking "which queue serves this branch?" has to
-    // get the live one.
-    if (state.exists && state.closed === null && state.target === target) {
-      found = state;
-      break;
-    }
+    found = state;
+    break;
   }
   // `unreadable` is therefore complete exactly when nothing matched, which is
   // the case its one caller — the guard in `queue open` — is asked about.
