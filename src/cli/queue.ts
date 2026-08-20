@@ -143,9 +143,9 @@ const open = Command.make(
         Effect.gen(function* () {
           // One queue per target, refused here because it cannot be undone
           // there: `refs/hub/queue/*` is append-only, so a second queue for one
-          // branch is a permanent split — `forTarget` picks between them by
-          // sorted id, entries divide invisibly across the two, and two runners
-          // delete each other's candidate branches.
+          // branch is a permanent split — `forTarget` picks the newer of them
+          // on every replica, entries divide invisibly across the two, and two
+          // runners delete each other's candidate branches.
           //
           // It catches the mistake and not the race: two `open` calls at once
           // both see nothing and both write. There is no compare-and-swap
@@ -164,9 +164,9 @@ const open = Command.make(
           // unreadable queue — on any branch — block opening a queue for every
           // other branch, for good, which is a worse permanent state than the
           // one it guards against. And the duplicate it guards against is
-          // largely inert: `forTarget` picks the first match in sorted id order
-          // on every replica, so a second queue is a ref nobody consults unless
-          // they name its id.
+          // largely inert: `forTarget` picks the newer of them on every
+          // replica, so a second queue is a ref nobody consults unless they
+          // name its id.
           if (existing.unreadable.length > 0) {
             yield* Console.error(
               `warning: ${existing.unreadable.join(", ")} cannot be read here, so this cannot tell whether one of them already serves ${targetRef(target)}`,
@@ -466,6 +466,8 @@ interface Pass {
    */
   readonly refused: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
   readonly reset: boolean;
+  /** Whether a dry run *would* have reset; `false` on a pass that did. */
+  readonly wouldReset: boolean;
   /**
    * Whether this pass wrote anything a reader can see.
    *
@@ -504,7 +506,8 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // and not a failure; a caller naming a queue that does not exist is a mistake
   // and still one, which is why `--queue` goes through `resolve` and `--target`
   // does not.
-  const skip = (why: string) => ({ skipped: why, queue: input.queue, dryRun: input.dryRun });
+  let named = input.queue;
+  const skip = (why: string) => ({ skipped: why, queue: named, dryRun: input.dryRun });
 
   // Naming neither is a caller mistake, not a state — and one a hook makes by
   // expanding an argument to nothing, which is exactly when a silent success
@@ -534,6 +537,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     );
   }
   const state = found;
+  named = state.queue;
   if (state.target === null) return skip(`${state.queue} names no target branch`);
   const target = state.target;
   const rules = yield* Policy.rulesOf();
@@ -653,6 +657,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       waiting: state.entries.map((entry) => entry.pr),
       refused: [{ pr: "", reason: `${target} does not exist, so nothing can be merged onto it` }],
       reset: false,
+      wouldReset: false,
       dryRun: input.dryRun,
     } satisfies Pass;
   }
@@ -1107,7 +1112,11 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     unbuilt,
     waiting: waiting.map((step) => step.pr),
     refused,
-    reset,
+    // What was written, and what a rehearsal would have written — the same
+    // split `landed`/`wouldLand` and `dropped`/`wouldDrop` make, for the same
+    // reason: a dry run records nothing, so nothing was reset.
+    reset: input.dryRun ? false : reset,
+    wouldReset: input.dryRun ? reset : false,
     dryRun: input.dryRun,
   } satisfies Pass;
 });

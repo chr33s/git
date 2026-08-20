@@ -315,6 +315,21 @@ describe("hub Queue", () => {
     assert.equal(state.ignored.length, 1, "said out loud rather than swallowed");
   });
 
+  it("reaches the live queue without reading the ones it replaced", async () => {
+    // Ids are UUIDv7 and the design mandates rotation, so the ended queues pile
+    // up behind the live one — and this runs on the path a wake fires per push,
+    // at a signature verification per record.
+    const found = await scenario(
+      Effect.gen(function* () {
+        const first = yield* opened("refs/heads/release");
+        yield* Queue.close({ repo: REPO, queue: first.queue, reason: "rotated", key: first.key });
+        const second = yield* opened("refs/heads/release");
+        return { matched: yield* Queue.forTarget("refs/heads/release"), live: second.queue };
+      }),
+    );
+    assert.equal(found.matched.found?.queue, found.live, "the newer one, and it stops there");
+  });
+
   it("finds a queue by the branch it serves", async () => {
     const found = await scenario(
       Effect.gen(function* () {

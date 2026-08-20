@@ -704,7 +704,17 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
 export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: string) {
   const unreadable: Array<string> = [];
   let found: Projection | null = null;
-  for (const id of yield* queues()) {
+  // Newest first, and stopping at the first live match. Folding a queue is a
+  // signature verification per record, and this runs on the path a wake fires
+  // per push — while the design *mandates* rotation, so the ended queues pile
+  // up behind the live one. Ids are UUIDv7, so newest-first reaches the queue
+  // in use immediately and leaves the history unread; scanning oldest-first
+  // read every closed queue in full before finding the one that matters.
+  //
+  // Still a total order, so two live queues for one branch — only reachable
+  // through the race `queue open` documents — resolve to the same one on every
+  // replica: the newer, which is the one somebody meant.
+  for (const id of [...(yield* queues())].reverse()) {
     const state = yield* project(id).pipe(
       Effect.catchTags({
         Invalid: () => Effect.succeed(null),
@@ -720,9 +730,12 @@ export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: str
     // ending one: the next `queue open` for this branch has to be able to
     // succeed, and every caller asking "which queue serves this branch?" has to
     // get the live one.
-    if (found === null && state.exists && state.closed === null && state.target === target) {
+    if (state.exists && state.closed === null && state.target === target) {
       found = state;
+      break;
     }
   }
+  // `unreadable` is therefore complete exactly when nothing matched, which is
+  // the case its one caller — the guard in `queue open` — is asked about.
   return { found, unreadable } as const;
 });

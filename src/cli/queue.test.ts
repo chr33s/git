@@ -1014,6 +1014,7 @@ describe("cli queue", () => {
 
     const pass = await run();
     assert.match(pass.skipped, /does not admit queue candidates/);
+    assert.equal(pass.queue, queue, "and it names the queue it resolved");
 
     const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
     assert.equal(state.entries[0].candidate, null, "and nothing was built or recorded");
