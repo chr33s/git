@@ -298,6 +298,7 @@ describe("cli queue", () => {
     assert.equal(pass.dryRun, true);
     assert.equal(pass.built.length, 1, "a dry run still computes the candidate");
     assert.deepEqual(pass.landed, [], "nothing landed, because nothing moved");
+    assert.deepEqual(pass.dropped, [], "and nothing was taken out either");
     assert.equal(pass.wouldLand.length, 1, "and what would have is said separately");
     assert.equal(await mainAt(), base, "and leaves the branch exactly where it was");
 
@@ -1413,6 +1414,24 @@ describe("cli queue", () => {
     const pass = await run();
     assert.match(pass.skipped, /checkpoint/i);
     assert.equal(await mainAt(), base, "and the branch is where it was");
+  });
+
+  it("keeps a dry run's would-be evictions out of what it evicted", async () => {
+    // The same hazard `wouldLand` was split out of `landed` to avoid: a caller
+    // gating on `dropped` would read a rehearsal as an eviction that happened.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+    await cli(["pr", "close", "--root", root, "--key", key, "project", first]);
+
+    const pass = await run(["--dry-run"]);
+    assert.deepEqual(pass.dropped, []);
+    assert.deepEqual(
+      pass.wouldDrop.map((entry: { reason: string }) => entry.reason),
+      ["stale"],
+    );
+    const state = JSON.parse(await cli(["queue", "show", "--root", root, "project", queue]));
+    assert.equal(state.entries.length, 1, "and it is still queued");
   });
 
   it("refuses a run that names neither a queue nor a branch", async () => {

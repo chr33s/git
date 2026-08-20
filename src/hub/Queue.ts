@@ -654,6 +654,16 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
         break;
 
       case "queue.reset":
+        // Held to the same two conditions as everything else on this ref. A
+        // reset landing after a close — the race `queue close` says it cannot
+        // prevent — would otherwise clear `candidate` on every entry, hiding
+        // the published branch names from a reader on a queue no verb can act
+        // on any more, which is exactly when those names are what somebody
+        // needs.
+        if (opened === null || closed !== null) {
+          ignored.push(commit);
+          break;
+        }
         // The chain is stale; the intentions behind it are not.
         resets += 1;
         for (const [pr, held] of queued) queued.set(pr, { ...held, candidate: null });

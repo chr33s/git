@@ -440,6 +440,11 @@ interface Pass {
   readonly built: ReadonlyArray<{ readonly pr: string; readonly commit: Oid }>;
   readonly dropped: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
   /**
+   * What a dry run would have taken out of the queue, and nothing on a pass
+   * that took them out; see `wouldLand` for why the two are not one field.
+   */
+  readonly wouldDrop: ReadonlyArray<{ readonly pr: string; readonly reason: string }>;
+  /**
    * Entries this runner could not build, and why.
    *
    * Distinct from `dropped`, and deliberately: what these say is that *this
@@ -511,12 +516,22 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     });
   }
 
+  const byTarget = input.queue === "" ? yield* Queue.forTarget(targetRef(input.target)) : null;
   const found =
-    input.queue === ""
-      ? (yield* Queue.forTarget(targetRef(input.target))).found
-      : yield* resolve({ queue: input.queue, target: input.target });
+    byTarget === null
+      ? yield* resolve({ queue: input.queue, target: input.target })
+      : byTarget.found;
   if (found === null) {
-    return skip(`this repository holds no open queue for ${targetRef(input.target)}`);
+    // "None here" and "I could not read one" are different answers, and this
+    // is the verb a timer fires unattended — where the second one silently
+    // reading as the first is a queue that has stopped running with nothing
+    // saying so. `open` warns and `list` reports in the same situation.
+    const blind = byTarget?.unreadable ?? [];
+    return skip(
+      blind.length === 0
+        ? `this repository holds no open queue for ${targetRef(input.target)}`
+        : `this repository holds no open queue for ${targetRef(input.target)}, and ${blind.join(", ")} cannot be read here`,
+    );
   }
   const state = found;
   if (state.target === null) return skip(`${state.queue} names no target branch`);
@@ -602,15 +617,20 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   }
 
   const dropped: Array<{ readonly pr: string; readonly reason: string }> = [];
+  /** What a dry run would have taken out of the queue; empty on a real pass. */
+  const wouldDrop: Array<{ readonly pr: string; readonly reason: string }> = [];
   const unbuilt: Array<{ readonly pr: string; readonly reason: string }> = [];
   const refused: Array<{ readonly pr: string; readonly reason: string }> = [];
   const built: Array<{ readonly pr: string; readonly commit: Oid }> = [];
   const record = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     input.dryRun ? Effect.void : Effect.asVoid(effect);
 
+  // A dry run records nothing, so nothing was dropped — said separately for the
+  // reason `wouldLand` is said separately from `landed`: a caller gating on
+  // `dropped` would otherwise read a rehearsal as an eviction that happened.
   const drop = (pr: string, reason: Queue.QueueLeft["reason"]) =>
     Effect.gen(function* () {
-      dropped.push({ pr, reason });
+      (input.dryRun ? wouldDrop : dropped).push({ pr, reason });
       yield* record(
         Queue.leave({ repo: genesis.repoId, queue: state.queue, pr, reason, key: input.key }),
       );
@@ -628,6 +648,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       wouldLand: [],
       built,
       dropped,
+      wouldDrop,
       unbuilt,
       waiting: state.entries.map((entry) => entry.pr),
       refused: [{ pr: "", reason: `${target} does not exist, so nothing can be merged onto it` }],
@@ -1054,7 +1075,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
 
   const waiting = chain
     .slice(landed.length + wouldLand.length)
-    .filter((step) => !dropped.some((entry) => entry.pr === step.pr));
+    .filter((step) => ![...dropped, ...wouldDrop].some((entry) => entry.pr === step.pr));
 
   // Candidate branches are ordinary branches, so they are cleaned up like
   // ordinary branches: a candidate whose entry this pass *settled* is one
@@ -1082,6 +1103,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     wouldLand,
     built,
     dropped,
+    wouldDrop,
     unbuilt,
     waiting: waiting.map((step) => step.pr),
     refused,
