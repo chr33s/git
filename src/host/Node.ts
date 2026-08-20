@@ -10,6 +10,7 @@
  * per repository name stands in for instance isolation.
  */
 import * as http from "node:http";
+import * as fs from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { Readable } from "node:stream";
@@ -23,6 +24,11 @@ import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
+import * as SocialLog from "../social/Log.ts";
+import { SocialWeb } from "../social/Projection.ts";
+import { readGenesis } from "../trust/Genesis.ts";
+import { Identities, principalId, type PrincipalId } from "../trust/Principal.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
@@ -86,6 +92,19 @@ export interface Server {
 interface StreamingRequestInit extends RequestInit {
   duplex?: "half";
 }
+
+/** Header dictionary accepted by Node's `ServerResponse.writeHead`. */
+interface NodeHeaders {
+  [name: string]: string;
+}
+
+const nodeHeaders = (headers: Headers): NodeHeaders => {
+  const values: NodeHeaders = {};
+  headers.forEach((value, name) => {
+    values[name] = value;
+  });
+  return values;
+};
 
 export const serve = async (options: ServeOptions): Promise<Server> => {
   const hostname = options.hostname ?? "127.0.0.1";
@@ -185,6 +204,73 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       Layer.provideMerge(stores(path.join(options.root, repo))),
     );
 
+  /**
+   * Identity repositories and social logs this host already holds.
+   *
+   * A target repository's policy cannot reach through its own `Repository`
+   * service into a sibling repository. The host owns that composition: each
+   * sibling is opened through the same no-hooks layer used by authentication,
+   * verified independently, and only then exposed to the policy fold. Missing
+   * or malformed repositories are absence (and therefore quarantine), never a
+   * reason to take the target repository down.
+   */
+  const localRepositories = Effect.fn("host.Node.localRepositories")(function* () {
+    const entries = yield* Effect.promise(() =>
+      fs.readdir(options.root, { withFileTypes: true }).catch(() => []),
+    );
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+      .slice(0, 4096);
+  });
+
+  const identityAt = Effect.fn("host.Node.identityAt")(function* (wanted: PrincipalId) {
+    for (const name of yield* localRepositories()) {
+      const resolved = yield* Effect.promise(() =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            const stored = yield* readGenesis();
+            if (stored === null || principalId(stored.genesis.repoId) !== wanted) return null;
+            const projection = yield* projectTrust(stored.genesis);
+            return { principal: wanted, projection, head: projection.head } as const;
+          }).pipe(
+            Effect.provide(guardLayer(name)),
+            Effect.catch(() => Effect.succeed(null)),
+          ),
+        ),
+      );
+      if (resolved !== null) return resolved;
+    }
+    return null;
+  });
+
+  const localSocialLogs = Effect.fn("host.Node.localSocialLogs")(function* () {
+    const logs: SocialLog.VerifiedLog[] = [];
+    for (const name of yield* localRepositories()) {
+      const verified = yield* Effect.promise(() =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            const stored = yield* readGenesis();
+            if (stored === null) return null;
+            const trust = yield* projectTrust(stored.genesis);
+            return yield* SocialLog.verified(stored.genesis, trust);
+          }).pipe(
+            Effect.provide(guardLayer(name)),
+            Effect.catch(() => Effect.succeed(null)),
+          ),
+        ),
+      );
+      if (verified !== null) logs.push(verified);
+    }
+    return logs;
+  });
+
+  const federation = Layer.merge(
+    Layer.succeed(Identities)({ resolve: identityAt }),
+    Layer.succeed(SocialWeb)({ logs: localSocialLogs() }),
+  );
+
   const stateFor = (repo: string): RepoState => {
     const cached = repos.get(repo);
     if (cached !== undefined) {
@@ -263,7 +349,10 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
       api: (request: Request, requester: Context.Context<Auth.Requester>) =>
-        router.handler(request, requester),
+        // SAFETY: the handler's generated declaration erases its remaining
+        // request-scoped service to `unknown`; this context contains exactly
+        // that `Requester` service and no value is inspected through the cast.
+        router.handler(request, requester as Context.Context<unknown>),
       disposeApi: router.dispose,
       gate: Promise.resolve(),
       delivering: new Set(),
@@ -324,7 +413,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // consumed as a stream, so nothing that would buffer it may see it first.
       const bulk = await Effect.runPromise(
         CommitPack.handle(request).pipe(
-          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites)),
+          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
         ),
       );
       if (bulk !== null) return bulk;
@@ -339,7 +428,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           Effect.catch((error) =>
             Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
           ),
-          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites)),
+          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
         ),
       );
       return matched ?? (await state.api(request, asked));
@@ -387,7 +476,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           ? null
           : await assetResponse(options.ui, new Request(url, { method: incoming.method ?? "GET" }));
       if (asset !== null) {
-        outgoing.writeHead(asset.status, Object.fromEntries(asset.headers));
+        outgoing.writeHead(asset.status, nodeHeaders(asset.headers));
         outgoing.end(Buffer.from(await asset.arrayBuffer()));
         return;
       }
@@ -444,7 +533,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // secret to configure any more, so there is nothing to leave off.
       const denied = await Effect.runPromise(
         Auth.guard(request).pipe(
-          Effect.provide(Layer.mergeAll(guardLayer(repo), nonces, openWrites)),
+          Effect.provide(Layer.mergeAll(guardLayer(repo), nonces, openWrites, federation)),
           // A repository whose identity cannot be read is not a repository
           // with no members: it is one nobody can be checked against, and the
           // honest answer is that the service is unavailable.
@@ -455,7 +544,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         ),
       );
       const deliver = async (response: Response) => {
-        outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()));
+        outgoing.writeHead(response.status, nodeHeaders(response.headers));
         if (response.body === null) {
           outgoing.end();
         } else {

@@ -11,12 +11,15 @@ import { Repository } from "../git/Repository.ts";
 import * as Event from "../hub/Event.ts";
 import { project } from "../hub/Projection.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
+import * as SocialLog from "../social/Log.ts";
+import * as Statement from "../social/Statement.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
+import { principalId } from "../trust/Principal.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
 import * as Policy from "./Policy.ts";
-import { reconcile } from "./Replication.ts";
+import { reconcile, stateFetchPasses } from "./Replication.ts";
 
 const scenario = <A, E>(effect: Effect.Effect<A, E, Repository>) =>
   Effect.runPromise(
@@ -56,6 +59,13 @@ const world = Effect.fn("test.world")(function* () {
 });
 
 describe("Replication", () => {
+  it("fetches trust and policy before social state, then hub events", () => {
+    assert.deepEqual(
+      stateFetchPasses.map((pass) => pass.map((spec) => spec.source)),
+      [["refs/meta/trust/*", "refs/meta/policy"], ["refs/social/log"], ["refs/hub/*"]],
+    );
+  });
+
   it("joins two divergent histories of one pull request", async () => {
     const outcome = await scenario(
       Effect.gen(function* () {
@@ -270,6 +280,51 @@ describe("Replication", () => {
     // The developer from `world`, plus both concurrently granted members:
     // neither grant may be lost by the join.
     assert.equal(outcome, 3);
+  });
+
+  it("joins two divergent social logs without losing either statement", async () => {
+    const outcome = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const where = yield* world();
+        const trust = yield* projectTrust(where.genesis);
+        const principal = principalId(where.genesis.repoId);
+        const context = (petname: string, socialHead: string | null) =>
+          Statement.follow({
+            author: principal,
+            subject: principal,
+            id: SocialLog.newId(),
+            socialHead,
+            trustHead: trust.head,
+            petname,
+          });
+
+        yield* SocialLog.issue(context("shared", null), where.dev);
+        const shared = yield* repository.resolve(SocialLog.LOG_REF);
+        assert.ok(shared);
+        yield* SocialLog.issue(context("ours", shared), where.dev);
+        const ours = yield* repository.resolve(SocialLog.LOG_REF);
+        assert.ok(ours);
+
+        yield* repository.setRef({ name: SocialLog.LOG_REF, to: shared, expected: ours });
+        yield* SocialLog.issue(context("theirs", shared), where.dev);
+        const theirs = yield* repository.resolve(SocialLog.LOG_REF);
+        assert.ok(theirs);
+        yield* repository.setRef({ name: SocialLog.LOG_REF, to: ours, expected: theirs });
+
+        const divergence = yield* reconcile(SocialLog.LOG_REF, theirs);
+        const log = yield* SocialLog.verified(where.genesis, trust);
+        return {
+          divergence,
+          petnames: log.statements.flatMap((entry) =>
+            entry.payload.type === "social.follow" ? [entry.payload.petname] : [],
+          ),
+        };
+      }),
+    );
+
+    assert.notEqual(outcome.divergence.joined, null);
+    assert.deepEqual([...outcome.petnames].sort(), ["ours", "shared", "theirs"]);
   });
 
   it("takes the source's rules file rather than reporting it as a divergence", async () => {

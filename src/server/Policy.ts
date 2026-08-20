@@ -43,15 +43,23 @@ import * as Event from "../hub/Event.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
 import * as Task from "../hub/Task.ts";
+import * as SocialLog from "../social/Log.ts";
+import * as Inbox from "../social/Inbox.ts";
+import * as Statement from "../social/Statement.ts";
 import {
   approvals,
   checksPassed,
   project as projectPr,
+  type Review,
   type PullRequest as PullRequestState,
 } from "../hub/Projection.ts";
+import type { VerifiedLog } from "../social/Log.ts";
+import * as SocialProjection from "../social/Projection.ts";
+import { externalReviews, type ExternalReview } from "../social/Review.ts";
 import { permits } from "../trust/Certificate.ts";
 import * as Log from "../trust/Log.ts";
 import * as Record from "../trust/Record.ts";
+import { principalOf, principalSubject, type PrincipalId } from "../trust/Principal.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Auth from "./Auth.ts";
 
@@ -62,6 +70,17 @@ import * as Auth from "./Auth.ts";
  * branch has not protected it, and inventing protection nobody asked for would
  * break every existing push.
  */
+export interface ExternalReviewRule {
+  /** Exact protected branch this opt-in applies to. */
+  readonly branch: string;
+  /** Repository-selected roots; a pusher cannot bring their own web. */
+  readonly anchors: ReadonlyArray<PrincipalId>;
+  readonly scope: "review";
+  readonly maxDepth: number;
+  readonly minPaths: number;
+  readonly maxCount: number;
+}
+
 export interface Rules {
   /**
    * Full ref names, or prefixes with a trailing `*`.
@@ -110,6 +129,8 @@ export interface Rules {
    */
   readonly maxUsageTokens: number;
   readonly usageWindowSeconds: number;
+  /** Opt-in only; omitted and `null` both mean external reviews never count. */
+  readonly externalReview?: ExternalReviewRule | null;
 }
 
 /** Re-exported where the boundary reads it; defined beside the guard. */
@@ -126,6 +147,7 @@ export const OPEN: Rules = {
   requireProvenance: false,
   maxUsageTokens: 0,
   usageWindowSeconds: 0,
+  externalReview: null,
 };
 
 /** Where a repository keeps its branch rules, if it has any. */
@@ -145,6 +167,18 @@ const RulesDocument = Schema.Struct({
   requireProvenance: Schema.optional(Schema.Boolean),
   maxUsageTokens: Schema.optional(Schema.Int),
   usageWindowSeconds: Schema.optional(Schema.Int),
+  externalReview: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        branch: Schema.String,
+        anchors: Schema.Array(Schema.String),
+        scope: Schema.Literal("review"),
+        maxDepth: Schema.Int,
+        minPaths: Schema.Int,
+        maxCount: Schema.Int,
+      }),
+    ),
+  ),
 });
 
 const decodeRules = Schema.decodeUnknownEffect(RulesDocument);
@@ -165,6 +199,13 @@ export const encodeRules = (rules: Rules): Uint8Array =>
         requireProvenance: rules.requireProvenance,
         maxUsageTokens: rules.maxUsageTokens,
         usageWindowSeconds: rules.usageWindowSeconds,
+        externalReview:
+          rules.externalReview === undefined || rules.externalReview === null
+            ? null
+            : {
+                ...rules.externalReview,
+                anchors: rules.externalReview.anchors.map(principalSubject),
+              },
       },
       null,
       2,
@@ -209,6 +250,38 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     ),
   );
 
+  let externalReview: ExternalReviewRule | null = null;
+  if (loaded.externalReview !== undefined && loaded.externalReview !== null) {
+    const anchors: PrincipalId[] = [];
+    for (const anchor of loaded.externalReview.anchors) {
+      const parsed = principalOf(anchor);
+      if (parsed === null) {
+        return yield* new Invalid({
+          field: "policy.externalReview.anchors",
+          reason: `'${anchor}' is not a principal:<PrincipalID> subject`,
+        });
+      }
+      anchors.push(parsed);
+    }
+    if (
+      !loaded.externalReview.branch.startsWith("refs/heads/") ||
+      loaded.externalReview.branch.includes("*") ||
+      anchors.length === 0 ||
+      loaded.externalReview.maxDepth < 0 ||
+      loaded.externalReview.maxDepth > 16 ||
+      loaded.externalReview.minPaths < 1 ||
+      loaded.externalReview.maxCount < 0
+    ) {
+      return yield* new Invalid({
+        field: "policy.externalReview",
+        reason:
+          "branch must be one exact refs/heads/* name, anchors must be non-empty, " +
+          "maxDepth must be 0..16, minPaths at least 1, and maxCount non-negative",
+      });
+    }
+    externalReview = { ...loaded.externalReview, anchors };
+  }
+
   return {
     protected: loaded.protected,
     requiredApprovals: loaded.requiredApprovals,
@@ -219,8 +292,38 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     requireProvenance: loaded.requireProvenance ?? false,
     maxUsageTokens: loaded.maxUsageTokens ?? 0,
     usageWindowSeconds: loaded.usageWindowSeconds ?? 0,
+    externalReview,
   };
 });
+
+/** External approvals that meet a repository-selected rooted confidence bar. */
+export const eligibleExternalApprovals = (input: {
+  readonly rule: ExternalReviewRule;
+  readonly logs: ReadonlyArray<VerifiedLog>;
+  readonly reviews: ReadonlyArray<ExternalReview>;
+  readonly internal?: ReadonlyArray<Review>;
+}): ReadonlyArray<ExternalReview> => {
+  const graph = SocialProjection.project({
+    roots: input.rule.anchors,
+    logs: input.logs,
+    maxDepth: input.rule.maxDepth,
+  });
+  const internal = new Set(
+    (input.internal ?? []).map((review) => review.principal ?? review.author),
+  );
+  return input.reviews
+    .filter(
+      (review) =>
+        !internal.has(review.principal) &&
+        SocialProjection.confidence(
+          graph,
+          review.principal,
+          input.rule.scope,
+          input.rule.maxDepth,
+        ) >= input.rule.minPaths,
+    )
+    .slice(0, input.rule.maxCount);
+};
 
 /**
  * Pull requests folded once for a batch of ref updates.
@@ -620,6 +723,18 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   ) {
     return refused(update.name, `${update.name} is not part of the trust namespace`);
   }
+  if (update.name.startsWith("refs/social/") && update.name !== Refspec.SOCIAL_LOG) {
+    return refused(update.name, `${update.name} is not part of the social namespace`);
+  }
+  if (update.name.startsWith("refs/quarantine/")) {
+    return yield* quarantineRules({
+      update,
+      current,
+      stored,
+      principal: input.principal,
+      enabled: input.genesis !== null && input.trust !== null,
+    });
+  }
 
   // Not hub-enabled: no genesis, so no members, so nobody holds `source.push`
   // — and §14 is unconditional that anonymous does not get it. A repository
@@ -636,7 +751,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // Identity is never acquired by push, whatever the host allows: whoever
     // got there first would own the repository, and its actual owner would be
     // locked out of it by a stranger.
-    if (update.name.startsWith("refs/meta/trust/")) {
+    if (update.name.startsWith("refs/meta/trust/") || update.name.startsWith("refs/social/")) {
       return refused(
         update.name,
         "a repository's identity is established by `hub init`, not by a push",
@@ -702,13 +817,15 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // holder still passes: a tombstone is the one event either namespace
     // accepts from a signer outside its own capability.
     const needed = (name: string): { exact: ReadonlyArray<string> } | { prefix: string } =>
-      Task.taskOf(name) !== null
-        ? { exact: ["hub.task", "hub.redact"] }
-        : Session.sessionOf(name) !== null
-          ? { exact: ["hub.session", "hub.redact"] }
-          : name.startsWith("refs/hub/")
-            ? { prefix: "hub." }
-            : { prefix: "member." };
+      name === Refspec.SOCIAL_LOG
+        ? { exact: ["social.write"] }
+        : Task.taskOf(name) !== null
+          ? { exact: ["hub.task", "hub.redact"] }
+          : Session.sessionOf(name) !== null
+            ? { exact: ["hub.session", "hub.redact"] }
+            : name.startsWith("refs/hub/")
+              ? { prefix: "hub." }
+              : { prefix: "member." };
     const charge = needed(update.name);
     const passes =
       "exact" in charge
@@ -757,8 +874,11 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // when they were written, but the boundary knows whose keys are revoked
   // *now*, and a signature arriving now from a key this repository has already
   // revoked is one it has no reason to take.
-  if (update.name.startsWith("refs/hub/") && update.value !== null) {
-    const refusal = yield* signedByRevoked(update.value, current, input.trust, held);
+  if (
+    (update.name.startsWith("refs/hub/") || update.name === Refspec.SOCIAL_LOG) &&
+    update.value !== null
+  ) {
+    const refusal = yield* signedByRevoked(update.name, update.value, current, input.trust, held);
     if (refusal !== null) return refused(update.name, refusal);
   }
 
@@ -783,10 +903,14 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   if (deleting) return refused(update.name, `${update.name} is protected and may not be deleted`);
   if (forced)
     return refused(update.name, `${update.name} is protected and may not be force-pushed`);
+  const protectedValue = update.value;
+  if (protectedValue === null) {
+    return refused(update.name, `${update.name} is protected and may not be deleted`);
+  }
 
   const gate = yield* protectedBranch({
     ref: update.name,
-    to: update.value!,
+    to: protectedValue,
     genesis: input.genesis,
     trust: input.trust,
     rules: input.rules,
@@ -847,7 +971,11 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   // holder could point a hub ref at any source commit at all, on a name that
   // can never be deleted, pinning whatever it reaches out of reach of `gc`
   // for good.
-  const belongs = update.name.startsWith("refs/hub/") ? Event.isHubCommit : Log.isTrustCommit;
+  const belongs = update.name.startsWith("refs/hub/")
+    ? Event.isHubCommit
+    : update.name === Refspec.SOCIAL_LOG
+      ? SocialLog.isSocialCommit
+      : Log.isTrustCommit;
   if (!(yield* belongs(update.value))) {
     return refused(update.name, `${update.value} is not part of ${update.name}'s history`);
   }
@@ -933,6 +1061,57 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   return allowed;
 });
 
+const MAX_INBOX_PROPOSALS = 4096;
+
+/** The only ref transition an unauthenticated receive-pack may perform. */
+const quarantineRules = Effect.fn("Policy.quarantineRules")(function* (input: {
+  readonly update: RefUpdate;
+  readonly current: Oid | null;
+  readonly stored: Oid | null;
+  readonly principal: Principal;
+  readonly enabled: boolean;
+}) {
+  const { update } = input;
+  if (!input.enabled) {
+    return refused(update.name, "an inbox belongs to an identified repository");
+  }
+  if (!update.name.startsWith(Inbox.PENDING_PREFIX)) {
+    return refused(update.name, `${update.name} is not an inbox proposal ref`);
+  }
+  if (!input.principal.capabilities.includes(Auth.INBOX_SUBMIT)) {
+    return refused(update.name, "the inbox may only be written by a quarantine operation");
+  }
+  const id = update.name.slice(Inbox.PENDING_PREFIX.length);
+  if (!Inbox.isProposalId(id)) {
+    return refused(update.name, "an inbox proposal ref must end in a UUIDv7");
+  }
+  if (update.value === null) {
+    return refused(update.name, "an inbox proposal may not be deleted over receive-pack");
+  }
+  if (input.current !== null || input.stored !== null) {
+    return refused(update.name, `inbox proposal '${id}' already exists`);
+  }
+  const repository = yield* Repository;
+  if ((yield* repository.resolve(`${Inbox.ADOPTED_PREFIX}${id}`)) !== null) {
+    return refused(update.name, `inbox proposal '${id}' has already been adopted`);
+  }
+  const commit = yield* repository.readCommit(update.value).pipe(
+    Effect.as(true),
+    Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+  );
+  if (!commit) return refused(update.name, "an inbox proposal must point at a commit");
+
+  let count = 0;
+  for (const [name] of yield* repository.refs) {
+    if (name.startsWith(Inbox.PENDING_PREFIX)) count++;
+  }
+  if (count >= MAX_INBOX_PROPOSALS) {
+    return refused(update.name, `this inbox already holds ${count} pending proposals`);
+  }
+  const expected = update.expected === undefined ? input.stored : update.expected;
+  return { ok: true, allowed: { update, expected } } satisfies Decision;
+});
+
 /**
  * Why an append-only ref may not hold this value, or `null`.
  *
@@ -953,6 +1132,11 @@ const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string,
     return (yield* Log.withinCeiling(to))
       ? null
       : `${name} would hold more records than a fold will walk`;
+  }
+  if (name === Refspec.SOCIAL_LOG) {
+    return (yield* SocialLog.withinCeiling(to))
+      ? null
+      : `${name} would hold more statements than a fold will walk`;
   }
 
   return null;
@@ -986,6 +1170,7 @@ const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, cur
 
   const repository = yield* Repository;
   const hub = name.startsWith("refs/hub/");
+  const social = name === Refspec.SOCIAL_LOG;
   const anchor = hub ? null : yield* repository.resolve(Refspec.TRUST_GENESIS);
   // Bounded by the *ceiling*, not by the namespace. Bounded by the namespace,
   // the walk stopped at a commit whose tree object never arrived — a state
@@ -993,7 +1178,11 @@ const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, cur
   // without a connectivity check — and everything behind it dropped out of
   // the set, so the next ordinary reconciling push met an unaccounted parent
   // and was refused for good on a ref that cannot be rewound.
-  const ceiling = hub ? yield* Event.ceilingOf() : yield* Log.ceilingOf();
+  const ceiling = hub
+    ? yield* Event.ceilingOf()
+    : social
+      ? yield* SocialLog.ceilingOf()
+      : yield* Log.ceilingOf();
 
   // Walked here rather than through `Dag.reachable` for the same tolerance in
   // the other direction: a *commit* object that never arrived is still a
@@ -1004,7 +1193,8 @@ const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, cur
   // other refusing an ordinary join for good.
   const pending: Oid[] = [current];
   while (pending.length > 0 && held.size < ceiling) {
-    const oid = pending.pop()!;
+    const oid = pending.pop();
+    if (oid === undefined) break;
     if (held.has(oid) || oid === anchor) continue;
     held.add(oid);
 
@@ -1032,6 +1222,7 @@ const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, cur
  * Only what the push adds is walked, so an ordinary push reads one commit.
  */
 const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
+  ref: string,
   to: Oid,
   current: Oid | null,
   trust: TrustProjection,
@@ -1043,8 +1234,15 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   // root and re-judged every event already on the ref. One old comment from a
   // member revoked since then made that pull request refuse its own joins for
   // good, on a namespace that cannot be rewound.
+  const social = ref === Refspec.SOCIAL_LOG;
   const reached = yield* held;
-  const parents = yield* Dag.reachable(to, current, (commit) => added(commit, reached)).pipe(
+  const parents = yield* Dag.reachable(to, current, (commit) =>
+    social
+      ? reached.has(commit)
+        ? Effect.succeed(false)
+        : SocialLog.isSocialCommit(commit)
+      : added(commit, reached),
+  ).pipe(
     // An unreadable history is not a signature claim. It is refused, or passed
     // over, by the walks that own that question.
     Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
@@ -1052,8 +1250,9 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   if (parents === null) return null;
 
   for (const oid of parents.keys()) {
-    if (!(yield* Record.carries(oid, Event.RECORD))) continue;
-    const record = yield* Record.read(oid, Event.RECORD).pipe(
+    const recordName = social ? SocialLog.RECORD : Event.RECORD;
+    if (!(yield* Record.carries(oid, recordName))) continue;
+    const record = yield* Record.read(oid, recordName).pipe(
       Effect.catchTags({
         ObjectNotFound: () => Effect.succeed(null),
         Invalid: () => Effect.succeed(null),
@@ -1061,7 +1260,15 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     );
     if (record === null) continue;
     const signed = yield* Verify.signers(record.payload, record.signatures);
-    const payload = yield* Event.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    const kind = social
+      ? yield* Statement.decode(record.payload).pipe(
+          Effect.map((payload) => payload.type),
+          Effect.orElseSucceed(() => null),
+        )
+      : yield* Event.decode(record.payload).pipe(
+          Effect.map((payload) => payload.type),
+          Effect.orElseSucceed(() => null),
+        );
 
     // Every event, without an exemption list. Three attempts at one — first
     // "grants authority", then "moves authority", then a list of families —
@@ -1081,7 +1288,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // what it cannot do is arrive by push.
     for (const signer of signed) {
       if (openWindow(trust.revoked.get(signer)) !== null) {
-        return `${signer} has been revoked and may not add a ${payload?.type ?? "event"}`;
+        return `${signer} has been revoked and may not add a ${kind ?? (social ? "statement" : "event")}`;
       }
     }
 
@@ -1109,7 +1316,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // which `Event.decode` reads as nothing at all — so this gate covered
     // `refs/hub/pr/*` and left the two namespaces whose records are prompts,
     // the ones most likely to need removing, ungated.
-    if (!(yield* Tombstone.claims(record.payload))) continue;
+    if (social || !(yield* Tombstone.claims(record.payload))) continue;
     // Expiry as well as the capability. A permanent verdict does not consult
     // expiry — it cannot, or the answer would move on a wall clock and the
     // host that acted on it would fold a history no replica agrees with — so
@@ -1158,7 +1365,8 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   // event commit off a source commit and pin everything behind it out of
   // reach of `gc` for good.
   const hub = name.startsWith("refs/hub/");
-  const belongs = hub ? Event.isHubCommit : Log.isTrustCommit;
+  const social = name === Refspec.SOCIAL_LOG;
+  const belongs = hub ? Event.isHubCommit : social ? SocialLog.isSocialCommit : Log.isTrustCommit;
   // The commit a trust log hangs off is not a record and never will be: it is
   // the genesis, the one legitimate edge out of that namespace. On every push
   // but the log's first it is already reachable from `current`; on the first
@@ -1321,10 +1529,47 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     // pull requests can propose the same revision, and refusing on the first
     // that falls short would let an unapproved duplicate block the approved
     // one purely by sorting first.
-    if (approvals(pullRequest).length < rules.requiredApprovals) {
+    const internalApprovals = approvals(pullRequest);
+    let approvalCount = internalApprovals.length;
+    const configuredExternal = rules.externalReview ?? null;
+    const externalRule = configuredExternal?.branch === input.ref ? configuredExternal : null;
+    if (
+      approvalCount < rules.requiredApprovals &&
+      externalRule !== null &&
+      externalRule.maxCount > 0
+    ) {
+      const web = yield* Effect.serviceOption(SocialProjection.SocialWeb);
+      if (Option.isSome(web)) {
+        const logs = yield* web.value.logs;
+        const external = yield* externalReviews(input.genesis, pullRequest, id, {
+          maxIdentityAgeMs: rules.maxTrustAgeSeconds * 1000,
+        });
+        const eligible = eligibleExternalApprovals({
+          rule: externalRule,
+          logs,
+          reviews: external.reviews,
+          internal: internalApprovals,
+        });
+        const graph = SocialProjection.project({
+          roots: externalRule.anchors,
+          logs,
+          maxDepth: externalRule.maxDepth,
+        });
+        const freshness =
+          rules.maxTrustAgeSeconds <= 0
+            ? ({ ok: true } as const)
+            : SocialProjection.fresh(graph, rules.maxTrustAgeSeconds * 1000);
+        if (freshness.ok) {
+          approvalCount += eligible.length;
+        } else if (eligible.length > 0) {
+          shortfall ??= refused(input.ref, `external-review web is stale: ${freshness.reason}`);
+        }
+      }
+    }
+    if (approvalCount < rules.requiredApprovals) {
       shortfall ??= refused(
         input.ref,
-        `${id} has ${approvals(pullRequest).length} approvals of its current revision, ` +
+        `${id} has ${approvalCount} approvals of its current revision, ` +
           `and ${rules.requiredApprovals} are required`,
       );
       continue;
@@ -1405,6 +1650,7 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);
+  if (who.capabilities.includes(Auth.INBOX_SUBMIT)) return null;
   const principal = { member: who.principal, capabilities: who.capabilities };
   if (principal.member === null) return "authentication required to write refs";
   return may(principal, capability) ? null : `this needs ${capability}`;
@@ -1531,6 +1777,12 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   if (ref.startsWith("refs/meta/trust/")) {
     return "a repository's identity is established by `hub init`, not over the API";
   }
+  if (ref.startsWith("refs/social/")) {
+    return `${ref} may only be appended to by a social operation`;
+  }
+  if (ref.startsWith("refs/quarantine/")) {
+    return `${ref} may only be written by a quarantine operation`;
+  }
   if (Refspec.isAppendOnly(ref)) return `${ref} may only be appended to by the hub`;
 
   const stored = yield* readGenesis();
@@ -1608,6 +1860,10 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     const trust = yield* membership(stored.genesis, who.projection);
     const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
     if (!stale.ok) return stale.reason;
+    if (who.identity !== undefined) {
+      const foreign = Verify.fresh(who.identity.projection, rules.maxTrustAgeSeconds * 1000);
+      if (!foreign.ok) return `the member's identity view is stale: ${foreign.reason}`;
+    }
   }
 
   // Refused outright, not evaluated. Every caller of this gates by ref *name*
@@ -1747,10 +2003,23 @@ export const gate = Effect.fn("Policy.gate")(function* (
   // itself: a replica serving a consistent history that stops short of a
   // revocation. Off unless a repository asks for it, because a bound nobody
   // configured would refuse every push on a repository that never checkpoints.
-  const stale =
+  const ownStale =
     trust === null || rules.maxTrustAgeSeconds <= 0
       ? null
       : Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
+  const identityStale =
+    rules.maxTrustAgeSeconds <= 0 || who.identity === undefined
+      ? null
+      : Verify.fresh(who.identity.projection, rules.maxTrustAgeSeconds * 1000);
+  const stale =
+    ownStale !== null && !ownStale.ok
+      ? ownStale
+      : identityStale !== null && !identityStale.ok
+        ? {
+            ok: false as const,
+            reason: `the member's identity view is stale: ${identityStale.reason}`,
+          }
+        : ownStale;
   // Refused per ref rather than for the batch, so the two refs that lift the
   // bound are still reachable while it holds; see `boundApplies`.
   const withheld = new Set(
@@ -1786,8 +2055,11 @@ export const gate = Effect.fn("Policy.gate")(function* (
   // session was thrown away and the branch landed with a trailer pointing at
   // a record the repository does not hold.
   const order = [...updates.keys()].sort((left, right) => {
-    const first = Session.sessionOf(updates[left]!.name) === null ? 1 : 0;
-    const second = Session.sessionOf(updates[right]!.name) === null ? 1 : 0;
+    const leftUpdate = updates[left];
+    const rightUpdate = updates[right];
+    if (leftUpdate === undefined || rightUpdate === undefined) return left - right;
+    const first = Session.sessionOf(leftUpdate.name) === null ? 1 : 0;
+    const second = Session.sessionOf(rightUpdate.name) === null ? 1 : 0;
     return first - second || left - right;
   });
 
@@ -1796,7 +2068,8 @@ export const gate = Effect.fn("Policy.gate")(function* (
   const mentions: MentionCache = new Map();
   const opening: Openings = new Set();
   for (const at of order) {
-    const update = updates[at]!;
+    const update = updates[at];
+    if (update === undefined) continue;
     // A native client signed an envelope naming the refs it was moving and
     // where to. Checking it here rather than in the guard is not a weakening:
     // the guard runs before the push body exists, so this is the first moment

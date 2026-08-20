@@ -28,6 +28,8 @@ import type { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { MAX_SIGNATURES, permits } from "./Certificate.ts";
 import * as Log from "./Log.ts";
+import * as Principal from "./Principal.ts";
+import type { PrincipalId } from "./Principal.ts";
 import { type Member, openWindow, type Projection } from "./Projection.ts";
 
 /**
@@ -63,7 +65,12 @@ export type Membership = (
 ) => Effect.Effect<boolean, Invalid | ObjectNotFound | StorageFailure, Repository>;
 
 export type Authorization =
-  | { readonly ok: true; readonly principal: Member }
+  | {
+      readonly ok: true;
+      readonly principal: Member;
+      /** Present when authority resolved through a foreign identity repository. */
+      readonly identity?: Principal.ResolvedIdentity;
+    }
   | { readonly ok: false; readonly reason: string };
 
 const denied = (reason: string): Authorization => ({ ok: false, reason });
@@ -97,15 +104,19 @@ export const signers = Effect.fn("trust.Verify.signers")(function* (
  * reason is forward-only and reaches only what the author made *after* they
  * could see it.
  */
-const reaches = Effect.fn("trust.Verify.reaches")(function* (
-  projection: Projection,
-  subject: Fingerprint,
+const reachesWindows = Effect.fn("trust.Verify.reachesWindows")(function* (
+  revocations:
+    | ReadonlyArray<{
+        readonly supersededBy: Oid | null;
+        readonly commit: Oid;
+        readonly compromisedFrom: Date | null;
+      }>
+    | undefined,
   made: Made | null,
   seen: Ancestry,
   held: Membership,
   permanent = false,
 ) {
-  const revocations = projection.revoked.get(subject);
   if (revocations === undefined || revocations.length === 0) return false;
 
   // A live request is held to the current state: revoked is revoked, and a
@@ -169,6 +180,34 @@ const reaches = Effect.fn("trust.Verify.reaches")(function* (
   return false;
 });
 
+const reaches = Effect.fn("trust.Verify.reaches")(function* (
+  projection: Projection,
+  subject: Fingerprint,
+  made: Made | null,
+  seen: Ancestry,
+  contains: Membership,
+  permanent = false,
+) {
+  return yield* reachesWindows(projection.revoked.get(subject), made, seen, contains, permanent);
+});
+
+const reachesPrincipal = Effect.fn("trust.Verify.reachesPrincipal")(function* (
+  projection: Projection,
+  subject: PrincipalId,
+  made: Made | null,
+  seen: Ancestry,
+  contains: Membership,
+  permanent = false,
+) {
+  return yield* reachesWindows(
+    projection.revokedPrincipals.get(subject),
+    made,
+    seen,
+    contains,
+    permanent,
+  );
+});
+
 /**
  * Whether the grant a member's capabilities come from was already visible.
  *
@@ -204,7 +243,8 @@ const held = Effect.fn("trust.Verify.held")(function* (
   );
   if (ancestors === null) return false;
   for (let at = member.history.length - 1; at >= 0; at--) {
-    const record = member.history[at]!;
+    const record = member.history[at];
+    if (record === undefined) continue;
     if (record.commit !== made.trustHead && !ancestors.has(record.commit)) continue;
     return permits(record.capabilities, capability);
   }
@@ -335,6 +375,67 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
     return { ok: true, principal: member } as const;
   }
 
+  // A stable principal grant is a second membership route, not authority from
+  // the social graph. The target repository granted the capabilities; the
+  // foreign identity log answers which key spoke. Stored events are judged
+  // against the target repository's own grant history and revocation windows,
+  // exactly as direct-key membership is above — otherwise granting a
+  // principal today would retroactively authorize everything that principal
+  // signed before this repository knew them.
+  for (const signer of found) {
+    if (openWindow(input.projection.revoked.get(signer)) !== null) continue;
+    const resolved = yield* Principal.resolveKeyCandidates({
+      projection: input.projection,
+      signer,
+      includeFormer: made !== null,
+    });
+    for (const match of resolved.matches) {
+      if (
+        yield* reachesPrincipal(
+          input.projection,
+          match.grant.principal,
+          made,
+          ancestry,
+          membership,
+          input.permanent === true,
+        )
+      ) {
+        closest = `${match.grant.principal} has been revoked`;
+        continue;
+      }
+      if (
+        input.permanent !== true &&
+        match.principal.expiresAt !== null &&
+        match.principal.expiresAt.getTime() <= Date.now()
+      ) {
+        closest = `${match.grant.principal}'s membership expired on ${match.principal.expiresAt.toISOString()}`;
+        continue;
+      }
+      if (made === null) {
+        if (!permits(match.principal.capabilities, input.capability)) continue;
+      } else if (
+        // A stable-identity grant did not exist in legacy hub v1. An event
+        // that names no project trust head therefore cannot prove that this
+        // repository had granted the principal when it was signed; treating
+        // `null` as today's grant would authorize old foreign signatures
+        // retroactively.
+        made.trustHead === null ||
+        !(yield* held(match.principal, input.capability, made, ancestry))
+      ) {
+        closest = `${match.grant.principal} did not hold ${input.capability} when this was signed`;
+        continue;
+      }
+      return {
+        ok: true,
+        principal: match.principal,
+        identity: match.identity,
+      } as const;
+    }
+    if (resolved.unavailable) {
+      closest = "a referenced identity repository has not been synchronized";
+    }
+  }
+
   return denied(closest);
 });
 
@@ -354,13 +455,25 @@ export const authorizeKey = Effect.fn("trust.Verify.authorizeKey")(function* (in
   }
 
   const member = input.projection.members.get(input.signer);
-  if (member === undefined) return denied(`${input.signer} is not a member of this repository`);
+  if (member === undefined) {
+    const resolved = yield* Principal.authorizeKey(input);
+    if (resolved.ok) {
+      return { ok: true, principal: resolved.principal, identity: resolved.identity } as const;
+    }
+    return resolved.quarantined
+      ? ({ ok: false, reason: resolved.reason, quarantined: true } as const)
+      : ({ ok: false, reason: resolved.reason } as const);
+  }
 
   const when = input.at ?? new Date();
   if (member.expiresAt !== null && member.expiresAt.getTime() <= when.getTime()) {
     return denied(`${input.signer}'s membership expired on ${member.expiresAt.toISOString()}`);
   }
   if (!permits(member.capabilities, input.capability)) {
+    const resolved = yield* Principal.authorizeKey(input);
+    if (resolved.ok) {
+      return { ok: true, principal: resolved.principal, identity: resolved.identity } as const;
+    }
     return denied(`${input.signer} does not hold ${input.capability}`);
   }
   return { ok: true, principal: member } as const;

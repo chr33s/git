@@ -5,7 +5,8 @@
   "description": "Universal Git smart-HTTP protocol server, browser client & nix cli",
   "license": "MIT",
   "bin": {
-    "git+": "./src/cli/bin.ts"
+    "git+": "./src/cli/bin.ts",
+    "git-remote-git+id": "./src/cli/remote-id.node.ts"
   },
   "files": [
     "src",

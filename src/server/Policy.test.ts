@@ -17,9 +17,13 @@ import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Session from "../hub/Session.ts";
 import * as Task from "../hub/Task.ts";
+import * as Inbox from "../social/Inbox.ts";
+import * as SocialLog from "../social/Log.ts";
+import * as Statement from "../social/Statement.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, GENESIS_REF, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
+import { principalId } from "../trust/Principal.ts";
 import { type Member, project as projectTrust } from "../trust/Projection.ts";
 import * as Auth from "./Auth.ts";
 import * as Policy from "./Policy.ts";
@@ -34,6 +38,9 @@ const EMPTY_PROJECTION = {
   members: new Map(),
   former: new Map(),
   revoked: new Map(),
+  principals: new Map(),
+  formerPrincipals: new Map(),
+  revokedPrincipals: new Map(),
   roots: [],
   threshold: 0,
   checkpoint: null,
@@ -259,6 +266,139 @@ describe("Policy", () => {
   });
 
   describe("namespaces", () => {
+    it("admits only the social log and charges social.write to append it", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const allowed = yield* world(["source.push", "social.write"]);
+          const allowedTrust = yield* trustOf(allowed);
+          const allowedPrincipal = principalId(allowed.genesis.repoId);
+          const allowedHead = yield* SocialLog.issue(
+            Statement.follow({
+              author: allowedPrincipal,
+              subject: allowedPrincipal,
+              id: SocialLog.newId(),
+              socialHead: null,
+              trustHead: allowedTrust.head,
+              petname: "self",
+            }),
+            allowed.dev,
+          );
+          yield* repository.deleteRef(SocialLog.LOG_REF);
+
+          const accepted = yield* judge(allowed, {
+            name: SocialLog.LOG_REF,
+            value: allowedHead,
+          });
+          const stray = yield* judge(allowed, {
+            name: "refs/social/notes",
+            value: allowedHead,
+          });
+
+          const missingCapability = yield* judge(
+            {
+              ...allowed,
+              principal: { ...allowed.principal, capabilities: ["source.push"] },
+            },
+            {
+              name: SocialLog.LOG_REF,
+              value: allowedHead,
+            },
+          );
+
+          return { accepted, stray, missingCapability };
+        }),
+      );
+
+      assert.equal(outcome.accepted.ok, true);
+      assert.equal(outcome.stray.ok, false);
+      assert.match(
+        outcome.stray.ok === false ? outcome.stray.reason : "",
+        /not part of the social namespace/,
+      );
+      assert.equal(outcome.missingCapability.ok, false);
+      assert.match(
+        outcome.missingCapability.ok === false ? outcome.missingCapability.reason : "",
+        /social\.write/,
+      );
+    });
+
+    it("refuses a newly pushed social statement signed by a revoked device", async () => {
+      const decision = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const where = yield* world(["source.push", "social.write"]);
+          const beforeRevocation = yield* trustOf(where);
+          yield* Log.issue(
+            Certificate.revoke({
+              repo: where.genesis.repoId,
+              subject: yield* fingerprint(where.dev.publicKey),
+              reason: "rotated",
+              id: Log.newId(),
+            }),
+            [where.root],
+          );
+
+          const principal = principalId(where.genesis.repoId);
+          const head = yield* SocialLog.issue(
+            Statement.follow({
+              author: principal,
+              subject: principal,
+              id: SocialLog.newId(),
+              socialHead: null,
+              trustHead: beforeRevocation.head,
+              petname: "backdated",
+            }),
+            where.dev,
+          );
+          yield* repository.deleteRef(SocialLog.LOG_REF);
+          return yield* judge(where, { name: SocialLog.LOG_REF, value: head });
+        }),
+      );
+
+      assert.equal(decision.ok, false);
+      assert.match(decision.ok === false ? decision.reason : "", /revoked.*social\.follow/);
+    });
+
+    it("keeps the inbox quarantine writable only through its dedicated operation", async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const where = yield* world(["source.push"]);
+          const { second } = yield* history("refs/heads/proposal");
+          const trust = yield* trustOf(where);
+          const id = "018bcfe5-6800-7000-8000-000000000001";
+          return {
+            push: yield* judge(where, {
+              name: "refs/quarantine/inbox/proposal",
+              value: second,
+            }),
+            api: yield* gateWriteAs(where, "refs/quarantine/inbox/proposal"),
+            inbox: yield* evaluate({
+              update: { name: `${Inbox.PENDING_PREFIX}${id}`, value: second },
+              principal: { member: null, capabilities: [Auth.INBOX_SUBMIT] },
+              genesis: where.genesis,
+              trust,
+              rules: OPEN,
+            }),
+            malformed: yield* evaluate({
+              update: { name: "refs/quarantine/inbox/proposal", value: second },
+              principal: { member: null, capabilities: [Auth.INBOX_SUBMIT] },
+              genesis: where.genesis,
+              trust,
+              rules: OPEN,
+            }),
+          };
+        }),
+      );
+
+      assert.equal(outcome.push.ok, false);
+      assert.match(outcome.push.ok ? "" : outcome.push.reason, /quarantine operation/);
+      assert.match(outcome.api ?? "", /quarantine operation/);
+      assert.equal(outcome.inbox.ok, true);
+      assert.equal(outcome.malformed.ok, false);
+      assert.match(outcome.malformed.ok ? "" : outcome.malformed.reason, /UUIDv7/);
+    });
+
     it("refuses to move the genesis", async () => {
       const decision = await scenario(
         Effect.gen(function* () {

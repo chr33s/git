@@ -28,6 +28,10 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { ObjectStore, RefStore } from "../git/Store.ts";
+import * as Introduce from "../social/Introduce.ts";
+import * as SocialLog from "../social/Log.ts";
+import * as SocialProjection from "../social/Projection.ts";
+import { localSocialWeb } from "../social/Web.node.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import type { Oid } from "../git/Store.ts";
 import {
@@ -51,6 +55,13 @@ import {
 } from "../trust/KnownRepos.ts";
 import { layer as knownRepos } from "../trust/KnownRepos.node.ts";
 import * as Log from "../trust/Log.ts";
+import {
+  principalId,
+  principalOf,
+  principalSubject,
+  type PrincipalId,
+  type PrincipalSubject,
+} from "../trust/Principal.ts";
 import * as Record from "../trust/Record.ts";
 import { openWindow, project } from "../trust/Projection.ts";
 import { reconcile } from "../server/Replication.ts";
@@ -75,6 +86,31 @@ const localRepository = (directory: string) =>
   GitRepository.layer.pipe(
     Layer.provide(GitRepository.hooksNoop),
     Layer.provideMerge(stores(directory)),
+  );
+
+/** The rooted social view used to replace blind TOFU when the user names one. */
+const verifierWeb = (root: string, identityRepo: string) =>
+  withRepo(
+    root,
+    identityRepo,
+    Effect.gen(function* () {
+      const stored = yield* readGenesis();
+      if (stored === null) {
+        return yield* new Invalid({
+          field: "identity",
+          reason: `${identityRepo} is not an identity repository`,
+        });
+      }
+      const trust = yield* project(stored.genesis);
+      const own = yield* SocialLog.verified(stored.genesis, trust);
+      const web = yield* SocialProjection.SocialWeb;
+      const held = yield* web.logs;
+      const logs = new Map([...held, own].map((log) => [`${log.principal}\u0000${log.head}`, log]));
+      return SocialProjection.project({
+        roots: [principalId(stored.genesis.repoId)],
+        logs: [...logs.values()],
+      });
+    }).pipe(Effect.provide(localSocialWeb(root))),
   );
 
 /**
@@ -182,7 +218,7 @@ const grant = Command.make(
     root: rootFlag,
     key: keyFlag,
     subject: Flag.string("subject").pipe(
-      Flag.withDescription("Path to the member's SSH public key"),
+      Flag.withDescription("Path to an SSH public key, or principal:<PrincipalID>"),
     ),
     capability: Flag.string("capability").pipe(
       Flag.withDescription("Capabilities to grant, comma-separated"),
@@ -197,26 +233,36 @@ const grant = Command.make(
   ({ capability, expires, key, repo, root, subject }) =>
     Effect.gen(function* () {
       const signers = yield* Effect.forEach(key, readPrivateKey);
-      const publicKey = yield* readPublicKey(subject);
+      const stable = principalOf(subject);
+      const publicKey = stable === null ? yield* readPublicKey(subject) : null;
 
       const granted = yield* withRepo(
         root,
         repo,
         Effect.gen(function* () {
           const stored = yield* mustBeEnabled(repo);
-          const payload = yield* Certificate.grant({
+          const capabilities = capability.split(",").map((value) => value.trim());
+          const details = {
             repo: stored.genesis.repoId,
-            publicKey,
-            capabilities: capability.split(",").map((value) => value.trim()),
+            capabilities,
             expiresAt: expires === 0 ? null : new Date(Date.now() + expires * 1000),
             id: Log.newId(),
-          });
+          } as const;
+          const payload =
+            stable === null
+              ? publicKey === null
+                ? yield* new Invalid({ field: "subject", reason: "the public key was not read" })
+                : yield* Certificate.grant({ ...details, publicKey })
+              : yield* Certificate.grantPrincipal({ ...details, principal: stable });
           const commit = yield* Log.issue(payload, signers);
-          return yield* confirmMember(stored.genesis, commit, payload.subject);
+          return stable === null
+            ? yield* confirmMember(stored.genesis, commit, payload.subject)
+            : yield* confirmPrincipalMember(stored.genesis, commit, stable);
         }),
       );
 
-      yield* Console.log(`Granted ${granted.capabilities.join(",")} to ${granted.fingerprint}`);
+      const grantedSubject = "fingerprint" in granted ? granted.fingerprint : granted.principal;
+      yield* Console.log(`Granted ${granted.capabilities.join(",")} to ${grantedSubject}`);
     }),
 );
 
@@ -226,7 +272,7 @@ const revoke = Command.make(
     root: rootFlag,
     key: keyFlag,
     subject: Flag.string("subject").pipe(
-      Flag.withDescription("The member's key fingerprint (SHA256:…)"),
+      Flag.withDescription("A key fingerprint or principal:<PrincipalID>"),
     ),
     reason: Flag.choice("reason", ["rotated", "left", "compromised", "superseded"]).pipe(
       Flag.withDefault("left"),
@@ -241,22 +287,28 @@ const revoke = Command.make(
         repo,
         Effect.gen(function* () {
           const stored = yield* mustBeEnabled(repo);
-          if (!isFingerprint(subject)) {
+          const stable = principalOf(subject);
+          let revokedSubject: Fingerprint | PrincipalSubject;
+          if (stable !== null) {
+            revokedSubject = principalSubject(stable);
+          } else if (isFingerprint(subject)) {
+            revokedSubject = subject;
+          } else {
             return yield* new Invalid({
               field: "subject",
-              reason: `'${subject}' is not a key fingerprint; \`hub members\` lists them`,
+              reason: `'${subject}' is not a key fingerprint or principal:<PrincipalID>`,
             });
           }
           const commit = yield* Log.issue(
             Certificate.revoke({
               repo: stored.genesis.repoId,
-              subject,
+              subject: revokedSubject,
               reason,
               id: Log.newId(),
             }),
             signers,
           );
-          return yield* confirmRevoked(stored.genesis, commit, subject);
+          return yield* confirmRevoked(stored.genesis, commit, revokedSubject);
         }),
       );
       yield* Console.log(`Revoked ${subject} (${reason})`);
@@ -280,6 +332,13 @@ const members = Command.make("members", { root: rootFlag, repo: repoArgument }, 
           member.expiresAt === null ? "" : ` (expires ${member.expiresAt.toISOString()})`;
         yield* Console.log(`  ${member.fingerprint}  ${member.capabilities.join(",")}${expiry}`);
       }
+      for (const member of projection.principals.values()) {
+        const expiry =
+          member.expiresAt === null ? "" : ` (expires ${member.expiresAt.toISOString()})`;
+        yield* Console.log(
+          `  principal:${member.principal}  ${member.capabilities.join(",")}${expiry}`,
+        );
+      }
       for (const windows of projection.revoked.values()) {
         // A revocation a later grant ended stays on the record — it is still
         // true about the window it covers — but the key is a member again, and
@@ -287,6 +346,11 @@ const members = Command.make("members", { root: rootFlag, repo: repoArgument }, 
         const out = openWindow(windows);
         if (out === null) continue;
         yield* Console.log(`  ${out.subject}  revoked (${out.reason})`);
+      }
+      for (const windows of projection.revokedPrincipals.values()) {
+        const out = openWindow(windows);
+        if (out === null) continue;
+        yield* Console.log(`  principal:${out.subject}  revoked (${out.reason})`);
       }
       // Said out loud rather than swallowed: a record that did not count is
       // exactly what somebody will be looking for.
@@ -346,11 +410,27 @@ const confirmMember = Effect.fn("hub.confirmMember")(function* (
   return member;
 });
 
+const confirmPrincipalMember = Effect.fn("hub.confirmPrincipalMember")(function* (
+  genesis: Genesis,
+  commit: Oid,
+  subject: PrincipalId,
+) {
+  const projection = yield* confirm(genesis, commit);
+  const member = projection.principals.get(subject);
+  if (member === undefined) {
+    return yield* new Invalid({
+      field: "trust",
+      reason: `the grant to principal:${subject} did not take effect`,
+    });
+  }
+  return member;
+});
+
 /** And for a revocation, which has to have reached the subject to have worked. */
 const confirmRevoked = Effect.fn("hub.confirmRevoked")(function* (
   genesis: Genesis,
   commit: Oid,
-  subject: Fingerprint,
+  subject: Fingerprint | PrincipalSubject,
 ) {
   const projection = yield* confirm(genesis, commit);
   // The *open* window, not merely a record. A key that was revoked, let back
@@ -358,7 +438,14 @@ const confirmRevoked = Effect.fn("hub.confirmRevoked")(function* (
   // revoked on the strength of the old, closed window — telling an operator a
   // key is out when it is still authorized, which is the one direction this
   // message must never be wrong in.
-  if (openWindow(projection.revoked.get(subject)) === null) {
+  const stable = principalOf(subject);
+  const revoked =
+    stable === null
+      ? isFingerprint(subject)
+        ? openWindow(projection.revoked.get(subject))
+        : null
+      : openWindow(projection.revokedPrincipals.get(stable));
+  if (revoked === null) {
     return yield* new Invalid({
       field: "trust",
       reason: `${subject} is still authorized; the revocation did not take effect`,
@@ -532,22 +619,30 @@ const enable = Command.make(
       Flag.withDefault("origin"),
       Flag.withDescription("Local repository directory to fetch into"),
     ),
+    identity: Flag.string("identity").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("Local identity repository whose web should evaluate first use"),
+    ),
+    minPaths: Flag.integer("min-paths").pipe(
+      Flag.withDefault(1),
+      Flag.withDescription("Independent introduction paths required from --identity"),
+    ),
     token: Flag.string("token").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Credential for a repository that requires one"),
     ),
     url: Argument.string("url"),
   },
-  ({ name, root, token, url, yes }) =>
+  ({ identity: identityRepo, minPaths, name, root, token, url, yes }) =>
     Effect.gen(function* () {
       const key = yield* canonicalUrl(url);
       const directory = `${root}/${name}`;
 
       const credential = token === "" ? undefined : token;
-      const identity = yield* presented(url, credential).pipe(
+      const presentedId = yield* presented(url, credential).pipe(
         Effect.provide(localRepository(directory)),
       );
-      const decision = yield* decide(key, identity);
+      const decision = yield* decide(key, presentedId);
 
       if (decision.kind === "changed") {
         yield* Console.error(mismatchMessage(key, decision.expected, decision.presented));
@@ -558,13 +653,58 @@ const enable = Command.make(
       }
 
       if (decision.kind === "new") {
-        yield* Console.error(firstUseMessage(key, decision.repoId, decision.alias));
+        const social =
+          identityRepo === ""
+            ? null
+            : yield* Introduce.decide({
+                projection: yield* verifierWeb(root, identityRepo),
+                url: key,
+                presented: decision.repoId,
+                minPaths,
+              });
+        if (social?.kind === "split") {
+          yield* Console.error(
+            [
+              `Split-view warning for ${key}:`,
+              `  presented ${social.presented}`,
+              ...social.claims.map(
+                (claim) =>
+                  `  your web claims ${claim.repo} through ${claim.paths} independent path(s)`,
+              ),
+            ].join("\n"),
+          );
+          return yield* new Invalid({
+            field: "url",
+            reason: "the presented repository conflicts with the verifier's web",
+          });
+        }
+        const introduction = social?.kind === "introduced" ? social : null;
+        yield* Console.error(
+          introduction === null
+            ? firstUseMessage(key, decision.repoId, decision.alias)
+            : [
+                `The authenticity of repository`,
+                `  ${key}`,
+                `is attested by ${introduction.paths} independent path(s) through your web.`,
+                "",
+                `Repository fingerprint:`,
+                `  ${decision.repoId}`,
+                "",
+              ].join("\n"),
+        );
         const accepted = yes || (yield* ask("Trust this repository? [yes/no] "));
         if (!accepted) {
           return yield* new Invalid({ field: "url", reason: "not trusted; nothing was written" });
         }
         const store = yield* KnownRepos;
-        yield* store.remember({ url: key, repoId: decision.repoId });
+        yield* store.remember({
+          url: key,
+          repoId: decision.repoId,
+          provenance:
+            introduction === null
+              ? { kind: "tofu" }
+              : { kind: "introduced", paths: introduction.paths },
+        });
       }
 
       // Trust first, then hub: an event is judged against the membership graph,
@@ -599,7 +739,7 @@ const enable = Command.make(
       }).pipe(Effect.provide(localRepository(directory)));
 
       yield* Console.log(`${key}`);
-      yield* Console.log(`  ${identity}`);
+      yield* Console.log(`  ${presentedId}`);
       yield* Console.log(`  ${fetched.all.length} hub/trust ref(s) fetched into ${directory}`);
       if (fetched.joined.length > 0) {
         yield* Console.log(`  ${fetched.joined.length} divergent ref(s) joined`);

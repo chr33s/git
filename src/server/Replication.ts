@@ -30,6 +30,7 @@ import * as Policy from "./Policy.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
+import * as SocialLog from "../social/Log.ts";
 import * as Log from "../trust/Log.ts";
 
 export interface Divergence {
@@ -60,6 +61,16 @@ export interface Outcome {
   readonly rejected: ReadonlyArray<{ readonly name: string; readonly oid: Oid }>;
 }
 
+/** Ordered state passes: authority first, then social evidence, then consumers. */
+export const stateFetchPasses: ReadonlyArray<ReadonlyArray<Refspec.Refspec>> = [
+  [
+    { force: false, source: "refs/meta/trust/*", destination: "refs/meta/trust/*" },
+    { force: false, source: "refs/meta/policy", destination: "refs/meta/policy" },
+  ],
+  [{ force: false, source: Refspec.SOCIAL_LOG, destination: Refspec.SOCIAL_LOG }],
+  [{ force: false, source: "refs/hub/*", destination: "refs/hub/*" }],
+];
+
 /**
  * Fetch trust, then hub, from one remote.
  *
@@ -80,26 +91,16 @@ export const pull = Effect.fn("Replication.pull")(function* (input: {
   // replica holding the membership but not the rules answers `OPEN` to every
   // question the policy boundary asks, so it would let through exactly the
   // pushes the origin protects.
-  const trust = yield* fetchRepository({
-    url: input.url,
-    stores: input.stores,
-    token: input.token,
-    refspecs: [
-      { force: false, source: "refs/meta/trust/*", destination: "refs/meta/trust/*" },
-      { force: false, source: "refs/meta/policy", destination: "refs/meta/policy" },
-    ],
-  });
-  fetched.push(...trust.refs.map((update) => update.name));
-  rejected.push(...trust.rejected);
-
-  const hub = yield* fetchRepository({
-    url: input.url,
-    stores: input.stores,
-    token: input.token,
-    refspecs: [{ force: false, source: "refs/hub/*", destination: "refs/hub/*" }],
-  });
-  fetched.push(...hub.refs.map((update) => update.name));
-  rejected.push(...hub.rejected);
+  for (const refspecs of stateFetchPasses) {
+    const pass = yield* fetchRepository({
+      url: input.url,
+      stores: input.stores,
+      token: input.token,
+      refspecs,
+    });
+    fetched.push(...pass.refs.map((update) => update.name));
+    rejected.push(...pass.rejected);
+  }
 
   if (input.includeSource === true) {
     const source = yield* fetchRepository({
@@ -203,7 +204,7 @@ const joinInto = Effect.fn("Replication.joinInto")(function* (
   heads: ReadonlyArray<Oid>,
 ) {
   const repository = yield* Repository;
-  const commit = yield* Log.join(heads);
+  const commit = ref === Refspec.SOCIAL_LOG ? yield* SocialLog.join(heads) : yield* Log.join(heads);
   yield* repository.setRef({ name: ref, to: commit, expected: heads[0] ?? null });
   return commit;
 });

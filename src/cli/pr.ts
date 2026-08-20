@@ -484,6 +484,7 @@ const show = Command.make(
             ...state,
             claims: undefined,
             openers: [...state.openers],
+            openerPrincipals: [...state.openerPrincipals],
             redacted: [...state.redacted],
           },
           null,

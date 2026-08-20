@@ -76,6 +76,12 @@ const seed = (directory: string, message: string) =>
   );
 
 describe("cli", () => {
+  it("exposes identity and social-web command groups", async () => {
+    const help = await cli(["--help"]);
+    assert.match(help, /\bid\b.*Stable principal identity/s);
+    assert.match(help, /\bsocial\b.*Social graph/s);
+  });
+
   it("init, refs and log against a seeded repository", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-basic-"));
     try {

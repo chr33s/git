@@ -167,6 +167,12 @@ describe("Auth", () => {
         "source.push",
         "source.delete",
       ]);
+      assert.deepEqual(
+        requiredCapability(
+          request("r/git-receive-pack", { method: "POST", headers: { "git-inbox": "1" } }),
+        ),
+        ["source.push", "source.delete", "quarantine.submit"],
+      );
     });
 
     it("lets a source.delete holder past the guard, since the guard cannot see the commands", () => {
