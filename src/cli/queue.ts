@@ -779,6 +779,26 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   let tip = from;
   let position = 0;
 
+  /**
+   * What the branch already holds, walked once for the whole pass.
+   *
+   * Every entry asks whether its revision is in the branch, and asked one at a
+   * time that is a full history walk apiece — the walk is the entire cost and
+   * none of it depends on which revision is being asked about. Settling entries
+   * past the build depth made that a walk per *entry* rather than per built
+   * step, so the queue's own length set how much history a pass re-read; one
+   * walk and a lookup each is the same answer for the price of the longest one.
+   *
+   * `null` where the store could not answer, which is a fact about this replica
+   * and settles nothing: every entry reports it and stays queued.
+   */
+  const reached =
+    state.entries.length === 0
+      ? new Set<Oid>()
+      : yield* repository
+          .ancestry([from])
+          .pipe(Effect.catchTag("StorageFailure", () => Effect.succeed(null)));
+
   for (const entry of state.entries) {
     // Every way a read can fail, not only `Invalid` — the same rule the merge
     // below follows, and for the same reason: a fold this replica cannot
@@ -837,27 +857,21 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // then built a no-op merge for each — a candidate whose tree is the tip's
     // own, which no check names and which therefore never lands, stalling the
     // whole queue behind work that was already done. Settling it here is the
-    // recovery path, and it costs one ancestry question per entry.
+    // recovery path, and it costs a lookup in the walk taken above.
     //
     // Asked *after* the head check, and that order is the whole of its safety:
     // asked before, an entry whose entered revision had landed while its pull
     // request went on to propose more was closed as merged with that new work
     // unlanded. What the question has to be about is the revision the pull
     // request proposes now, which is what the check above establishes this is.
-    const contained = yield* repository.isAncestor(entry.head, from).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        StorageFailure: () => Effect.succeed(null),
-      }),
-    );
-    if (contained === null) {
+    if (reached === null) {
       unbuilt.push({
         pr: entry.pr,
         reason: `could not tell whether ${entry.head} is in ${target}`,
       });
       continue;
     }
-    if (contained) {
+    if (reached.has(entry.head)) {
       // The record of the merge, where the interrupted pass did not get to it.
       // `head` is a revision the pull request proposed, which is what hub.md
       // §10 asks of a merge event; `mergeCommit` is what carried it in. Only

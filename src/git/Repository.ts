@@ -447,6 +447,19 @@ export class Repository extends Context.Service<
       descendant: Oid,
     ) => Effect.Effect<boolean, ObjectNotFound | StorageFailure>;
 
+    /**
+     * Every commit reachable from `roots`, the commit graph only.
+     *
+     * What `isAncestor` asks once, offered to callers with a *list* to ask
+     * about: the walk is the whole cost and it does not depend on the question,
+     * so a caller holding one revision and n candidates pays for one history
+     * rather than n. A commit the store does not hold ends its chain rather
+     * than failing the walk — a shallow clone's ordinary shape.
+     */
+    readonly ancestry: (
+      roots: ReadonlyArray<Oid>,
+    ) => Effect.Effect<ReadonlySet<Oid>, StorageFailure>;
+
     /** Every path under a tree, depth-first, with the blob each names. */
     readonly listFiles: (
       tree: Oid,
@@ -1843,6 +1856,8 @@ export const layer = Layer.effect(
         ancestor === descendant
           ? Effect.succeed(true)
           : ancestry([descendant]).pipe(Effect.map((seen) => seen.has(ancestor))),
+
+      ancestry,
 
       gc: (options) => Maintenance.gc({ objects, packs, refs }, options),
     });
