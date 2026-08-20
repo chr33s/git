@@ -23,6 +23,7 @@ import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
+import * as Queue from "../hub/Queue.ts";
 import * as Policy from "../server/Policy.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { readPrivateKey } from "./shared.ts";
@@ -1581,6 +1582,76 @@ describe("cli queue", () => {
 
     const pass = await run();
     assert.deepEqual(pass.landed, [pr], "main is not protected, so nothing was required");
+  });
+
+  it("names the commit that carried a revision into the branch", async () => {
+    // The recovery used to name the branch tip for every unsettled entry, which
+    // attributed a whole interrupted batch to its topmost step. Walked back
+    // along first parents, the step whose second parent is the revision is the
+    // candidate a queue built for it.
+    await publish(protectedRules());
+    const first = await propose("one");
+    const second = await propose("two");
+    await enter(first);
+    await enter(second);
+
+    // Land the batch, then put both entries back as an interrupted pass would
+    // have left them: the branch has the code, the queue does not know.
+    const landed = await run();
+    assert.deepEqual(landed.landed, [first, second]);
+    await inRepo(
+      Effect.gen(function* () {
+        const signer = yield* readPrivateKey(key);
+        const stored = yield* readGenesis();
+        if (stored === null) throw new Error("no genesis");
+        for (const [pr, branch] of [
+          [first, "one"],
+          [second, "two"],
+        ] as const) {
+          yield* Queue.enter({
+            repo: stored.genesis.repoId,
+            queue,
+            pr,
+            head: headOf(branch),
+            key: signer,
+          });
+        }
+      }),
+    );
+
+    const pass = await run();
+    assert.deepEqual(
+      pass.dropped.map((entry: { reason: string }) => entry.reason),
+      ["landed", "landed"],
+    );
+    // The first entry's merge names the first candidate, not the branch tip.
+    const shown = JSON.parse(await cli(["pr", "show", "--root", root, "project", first]));
+    assert.equal(shown.mergeCommit, landed.built[0].commit);
+  });
+
+  it("closes a queue it can no longer read", async () => {
+    // A ref past the ceiling is exactly the state closing exists to rescue, and
+    // a close that first insisted on reading the ref could never reach it.
+    // Appending needs only the ref's head, so the close lands and the branch
+    // sweep — which needs the target — is what is given up.
+    await publish(protectedRules({ requiredChecks: ["test"] }));
+    await enter(await propose("one"));
+    await run();
+
+    const closing = await cli([
+      "queue",
+      "close",
+      "--root",
+      root,
+      "--key",
+      key,
+      "--queue",
+      queue,
+      "--reason",
+      "rotated",
+      "project",
+    ]);
+    assert.match(closing, /closed: rotated/);
   });
 
   it("refuses a run that names neither a queue nor a branch", async () => {

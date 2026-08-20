@@ -320,7 +320,25 @@ const close = Command.make(
         repo,
         Effect.gen(function* () {
           const genesis = yield* identityOf(repo);
-          const state = yield* resolve({ queue, target });
+          // Folding the queue is how every other verb finds it, and this is the
+          // one verb that must work when folding it no longer does: a ref past
+          // the ceiling is exactly the state closing exists to rescue, and a
+          // close that first insisted on reading the ref could never reach it.
+          // Appending needs no walk — only the ref's head — so a queue named by
+          // id is closed whether or not it can still be read, and only the
+          // branch sweep, which needs the target, is given up.
+          const state = yield* resolve({ queue, target }).pipe(
+            Effect.catchTag("Invalid", (error) =>
+              queue === "" ? Effect.fail(error) : Effect.succeed(null),
+            ),
+          );
+          if (state === null) {
+            yield* Queue.close({ repo: genesis.repoId, queue, reason, key: signer });
+            yield* Console.error(
+              `warning: ${queue} could not be read here, so the branches it published were left; delete refs/heads/queue/<target>/* by hand`,
+            );
+            return;
+          }
           yield* Queue.close({
             repo: genesis.repoId,
             queue: state.queue,
@@ -420,6 +438,34 @@ const candidateSignature = Effect.fn("queue.candidateSignature")(function* (onto
     at = Math.max(at, info.committer.at.getTime());
   }
   return { ...CANDIDATE_AUTHOR, at: new Date(at), offset: 0 };
+});
+
+/**
+ * Which commit carried a revision into the branch.
+ *
+ * Walked back along first parents from the tip, looking for the step whose
+ * second parent is the revision — which is exactly the candidate a queue built
+ * for it. The tip itself is the fallback and is true but coarse: it *contains*
+ * the revision, and naming it for every entry of an interrupted batch
+ * attributed all of them to the topmost step. Bounded by the same depth a chain
+ * is, because that is how far back a queue's own landing can be.
+ */
+const carriedBy = Effect.fn("queue.carriedBy")(function* (head: Oid, tip: Oid, depth: number) {
+  const repository = yield* Repository;
+  let at = tip;
+  for (let step = 0; step < depth; step++) {
+    const info = yield* repository.readCommit(at).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+    const [first, second] = info?.parents ?? [];
+    if (info === null || first === undefined) break;
+    if (second === head) return at;
+    at = first;
+  }
+  return tip;
 });
 
 /** What one pass did, reported rather than narrated. */
@@ -819,7 +865,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
             repo: genesis.repoId,
             pr: entry.pr,
             head: entry.head,
-            mergeCommit: from,
+            mergeCommit: yield* carriedBy(entry.head, from, rules.queueDepth),
             key: input.key,
           }),
         );
