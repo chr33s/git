@@ -1590,6 +1590,55 @@ describe("cli queue", () => {
     assert.equal(await mainAt(), base, "and the branch is where it was");
   });
 
+  it("lands nothing and anchors nothing when the target vanishes mid-pass", async () => {
+    // Raced from outside the process, but not on a timer: the pass reads the
+    // tip long before it publishes anything, so a candidate branch that has
+    // appeared is a pass already past that read and not yet at its swap. That
+    // is a happens-before edge rather than a sleep, which is what makes this
+    // deterministic.
+    //
+    // What catches the deletion is the boundary, not the swap: `Policy.evaluate`
+    // reads the branch live, and a branch that is gone reads as one being
+    // *created*, which no candidate chain satisfies. So the pass refuses and
+    // never reaches its compare-and-swap. That leaves the swap's own losing
+    // branch — the one that reports a deleted target rather than a moved one —
+    // reachable only in the instants between the last `evaluate` and the
+    // `setRef` beside it, with no statement in between: a real window, and not
+    // one anything outside this process can be aimed at. What is pinned here is
+    // the property both paths owe: nothing lands, and no `queue.reset` is
+    // anchored at a revision the branch does not hold.
+    await publish(protectedRules());
+    const first = await propose("one");
+    await enter(first);
+    await enter(await propose("two"));
+
+    const running = execFileAsync(
+      process.execPath,
+      [entry, "queue", "run", "--root", root, "--key", key, "--queue", queue, "project"],
+      { encoding: "utf8" },
+    );
+
+    const at = (ref: string) =>
+      inRepo(Effect.flatMap(GitRepository.Repository, (repository) => repository.resolve(ref)));
+    const published = Queue.candidateBranch("refs/heads/main", first);
+    while ((await at(published)) === null) {
+      // Spin on the ref itself rather than on a delay: the edge is the branch
+      // appearing, and a sleep long enough to be safe on a loaded machine is a
+      // sleep that has usually missed the window on an idle one.
+    }
+    await inRepo(
+      Effect.flatMap(GitRepository.Repository, (repository) =>
+        repository.deleteRef("refs/heads/main"),
+      ),
+    );
+
+    const pass = JSON.parse((await running).stdout);
+    assert.equal(pass.to, null, "the branch is still gone");
+    assert.deepEqual(pass.landed, [], "and nothing was landed onto it");
+    assert.equal(pass.refused.length > 0, true, "the pass says why, rather than reading as idle");
+    assert.equal(pass.reset, false, "and nothing anchored a reset at a tip nothing holds");
+  });
+
   it("does not run a pass it cannot record", async () => {
     // `refs/hub/queue/*` is charged `hub.queue` exactly rather than the `hub.`
     // prefix the other namespaces take, so a runner without it writes what it
