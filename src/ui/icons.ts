@@ -1,27 +1,40 @@
 /**
- * The icon set, transcribed from the design.
+ * Phosphor Icons (regular), sized for this UI.
  *
- * Every glyph is inline SVG with `stroke="currentColor"`, which is what lets a
- * single `color` on the parent theme an icon in both palettes without a second
- * asset. Sizes are the design's own — 16px in the nav, 13–15px inline.
+ * Glyphs come from `@phosphor-icons/core` as SVG source and are inlined so a
+ * single `color` on the parent themes them in both palettes. The git+ mark is
+ * this project's own, not Phosphor's.
+ *
+ * @see https://github.com/phosphor-icons/homepage
  */
-import { html, type TemplateResult } from "lit";
-import { svg } from "lit";
+import { html, svg, type TemplateResult } from "lit";
+import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 
-const icon = (size: number, body: TemplateResult, viewBox = "0 0 16 16"): TemplateResult =>
-  html`<svg
-    width="${size}"
-    height="${size}"
-    viewBox="${viewBox}"
-    fill="none"
-    stroke="currentColor"
-    stroke-width="1.5"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-    aria-hidden="true"
-  >
-    ${body}
-  </svg>`;
+import arrowRightSvg from "@phosphor-icons/core/regular/arrow-right.svg";
+import caretDownSvg from "@phosphor-icons/core/regular/caret-down.svg";
+import caretLeftSvg from "@phosphor-icons/core/regular/caret-left.svg";
+import clockSvg from "@phosphor-icons/core/regular/clock.svg";
+import codeSvg from "@phosphor-icons/core/regular/code.svg";
+import copySvg from "@phosphor-icons/core/regular/copy.svg";
+import dotsThreeSvg from "@phosphor-icons/core/regular/dots-three.svg";
+import fileTextSvg from "@phosphor-icons/core/regular/file-text.svg";
+import gearSvg from "@phosphor-icons/core/regular/gear.svg";
+import gitBranchSvg from "@phosphor-icons/core/regular/git-branch.svg";
+import gitDiffSvg from "@phosphor-icons/core/regular/git-diff.svg";
+import magnifyingGlassSvg from "@phosphor-icons/core/regular/magnifying-glass.svg";
+import moonSvg from "@phosphor-icons/core/regular/moon.svg";
+import pencilSimpleSvg from "@phosphor-icons/core/regular/pencil-simple.svg";
+import plusSvg from "@phosphor-icons/core/regular/plus.svg";
+import pulseSvg from "@phosphor-icons/core/regular/pulse.svg";
+import sunSvg from "@phosphor-icons/core/regular/sun.svg";
+import trashSvg from "@phosphor-icons/core/regular/trash.svg";
+import treeStructureSvg from "@phosphor-icons/core/regular/tree-structure.svg";
+import xSvg from "@phosphor-icons/core/regular/x.svg";
+
+const icon = (markup: string, size: number): TemplateResult =>
+  html`${unsafeSVG(
+    markup.replace("<svg ", `<svg width="${size}" height="${size}" aria-hidden="true" `),
+  )}`;
 
 /** The git+ mark: four dots, the first in accent, the last in the text colour. */
 export const logo = (size = 15): TemplateResult =>
@@ -32,102 +45,46 @@ export const logo = (size = 15): TemplateResult =>
     <circle cx="12" cy="12" r="1.7" fill="var(--gp-fg)"></circle>`}
   </svg>`;
 
-export const search = (size = 14): TemplateResult =>
-  icon(size, svg`<circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3 3"></path>`);
+export const search = (size = 14): TemplateResult => icon(magnifyingGlassSvg, size);
 
 /** Activity: a heartbeat line. */
-export const activity = (size = 16): TemplateResult =>
-  icon(size, svg`<path d="M1.5 8h3l2-5 3 10 2-5h3"></path>`);
+export const activity = (size = 16): TemplateResult => icon(pulseSvg, size);
 
 /** Code: angle brackets. Doubles as the README "view source" affordance. */
-export const code = (size = 16): TemplateResult =>
-  icon(size, svg`<path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5"></path>`);
+export const code = (size = 16): TemplateResult => icon(codeSvg, size);
 
-/** Tasks: two nodes joined by an elbow — a hierarchy, not a checklist. */
-export const tasks = (size = 16): TemplateResult =>
-  icon(
-    size,
-    svg`<circle cx="4" cy="4" r="2"></circle><circle cx="12" cy="12" r="2"></circle>
-    <path d="M4 6v3a3 3 0 0 0 3 3h3"></path>`,
-  );
+/** Tasks: a hierarchy, not a checklist. */
+export const tasks = (size = 16): TemplateResult => icon(treeStructureSvg, size);
 
-export const settings = (size = 16): TemplateResult =>
-  icon(
-    size,
-    svg`<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-    <circle cx="12" cy="12" r="3"></circle>`,
-    "0 0 24 24",
-  );
+export const settings = (size = 16): TemplateResult => icon(gearSvg, size);
 
-export const branch = (size = 13): TemplateResult =>
-  icon(
-    size,
-    svg`<path d="M5 3v7M5 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM11 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 0v1a3 3 0 0 1-3 3H5"></path>`,
-  );
+export const branch = (size = 13): TemplateResult => icon(gitBranchSvg, size);
 
-export const chevronDown = (size = 10): TemplateResult =>
-  icon(size, svg`<path d="m4 6 4 4 4-4"></path>`);
+export const chevronDown = (size = 10): TemplateResult => icon(caretDownSvg, size);
 
-export const chevronLeft = (size = 12): TemplateResult =>
-  icon(size, svg`<path d="M10 3 5 8l5 5"></path>`);
+export const chevronLeft = (size = 12): TemplateResult => icon(caretLeftSvg, size);
 
-export const arrowRight = (size = 13): TemplateResult =>
-  icon(size, svg`<path d="M2 8h11M10 4.5 13.5 8 10 11.5"></path>`);
+export const arrowRight = (size = 13): TemplateResult => icon(arrowRightSvg, size);
 
-export const plus = (size = 15): TemplateResult =>
-  icon(size, svg`<path d="M8 3v10M3 8h10"></path>`);
+export const plus = (size = 15): TemplateResult => icon(plusSvg, size);
 
-export const ellipsis = (size = 15): TemplateResult =>
-  html`<svg
-    width="${size}"
-    height="${size}"
-    viewBox="0 0 16 16"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    ${svg`<circle cx="3" cy="8" r="1.3"></circle><circle cx="8" cy="8" r="1.3"></circle><circle cx="13" cy="8" r="1.3"></circle>`}
-  </svg>`;
+export const ellipsis = (size = 15): TemplateResult => icon(dotsThreeSvg, size);
 
-export const clock = (size = 13): TemplateResult =>
-  icon(size, svg`<circle cx="8" cy="8" r="6"></circle><path d="M8 4.5V8l2.5 1.5"></path>`);
+export const clock = (size = 13): TemplateResult => icon(clockSvg, size);
 
-export const copy = (size = 13): TemplateResult =>
-  icon(
-    size,
-    svg`<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"></rect><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"></path>`,
-  );
+export const copy = (size = 13): TemplateResult => icon(copySvg, size);
 
-export const pencil = (size = 13): TemplateResult =>
-  icon(size, svg`<path d="m10.5 2.5 3 3L6 13l-3.5.5L3 10Z"></path><path d="m9 4 3 3"></path>`);
+export const pencil = (size = 13): TemplateResult => icon(pencilSimpleSvg, size);
 
-/** Lucide's `diff`, scaled from its 24 grid into this set's 16. */
-export const diff = (size = 13): TemplateResult =>
-  icon(
-    size,
-    svg`<path d="M8 2v9.333"></path><path d="M3.333 6.667h9.333"></path><path d="M3.333 14h9.333"></path>`,
-  );
+export const diff = (size = 13): TemplateResult => icon(gitDiffSvg, size);
 
-export const close = (size = 13): TemplateResult =>
-  icon(size, svg`<path d="m3.5 3.5 9 9M12.5 3.5l-9 9"></path>`);
+export const close = (size = 13): TemplateResult => icon(xSvg, size);
 
-/** Lucide's `trash`, scaled from its 24 grid into this set's 16. */
-export const trash = (size = 13): TemplateResult =>
-  icon(
-    size,
-    svg`<path d="M12.667 4v9.333a1.333 1.333 0 0 1-1.333 1.333H4.667a1.333 1.333 0 0 1-1.333-1.333V4"></path><path d="M2 4h12"></path><path d="M5.333 4V2.667a1.333 1.333 0 0 1 1.333-1.333h2.667a1.333 1.333 0 0 1 1.333 1.333V4"></path>`,
-  );
+export const trash = (size = 13): TemplateResult => icon(trashSvg, size);
 
-export const document_ = (size = 13): TemplateResult =>
-  icon(size, svg`<path d="M3 2.5h10v11H3z"></path><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"></path>`);
+export const document_ = (size = 13): TemplateResult => icon(fileTextSvg, size);
 
-/** Sun and moon, for the theme toggle the design did not need but a two-palette
- * build does. */
-export const sun = (size = 14): TemplateResult =>
-  icon(
-    size,
-    svg`<circle cx="8" cy="8" r="3"></circle>
-    <path d="M8 1v1.5M8 13.5V15M15 8h-1.5M2.5 8H1M12.9 3.1l-1 1M4.1 11.9l-1 1M12.9 12.9l-1-1M4.1 4.1l-1-1"></path>`,
-  );
+/** Sun and moon, for the theme toggle. */
+export const sun = (size = 14): TemplateResult => icon(sunSvg, size);
 
-export const moon = (size = 14): TemplateResult =>
-  icon(size, svg`<path d="M13.5 9.6A5.8 5.8 0 0 1 6.4 2.5a5.8 5.8 0 1 0 7.1 7.1Z"></path>`);
+export const moon = (size = 14): TemplateResult => icon(moonSvg, size);

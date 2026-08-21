@@ -13,6 +13,17 @@
 declare module "*.css";
 
 /**
+ * SVG source imported as text.
+ *
+ * esbuild's `loader: { ".svg": "text" }` turns Phosphor assets into strings
+ * that `icons.ts` inlines. There is no React/URL default here.
+ */
+declare module "*.svg" {
+  const content: string;
+  export default content;
+}
+
+/**
  * The module that registers `<diffs-container>`.
  *
  * `@pierre/diffs@1.3.5` names `dist/components/web-components.js` in its

@@ -249,7 +249,7 @@ shape, end to end.
 | `fixtures.ts`      | The design's Task data                |
 | `store.ts`         | The mutable, observable Task store    |
 | `theme.ts`         | Palette choice and persistence        |
-| `icons.ts`         | Inline SVG icon set                   |
+| `icons.ts`         | Phosphor Icons (regular), inline SVG  |
 | `highlight.ts`     | Lazy `@pierre/diffs` loader           |
 | `nav.sidebar.ts`   | The left rail                         |
 | `screen.*.ts`      | One module per screen                 |
