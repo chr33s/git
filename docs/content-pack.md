@@ -4,7 +4,7 @@
 **Project:** `@chr33s/git`
 **Target version:** Experimental / pre-1.0
 **Last updated:** 2026-08-21
-**Spec revision:** draft-2
+**Spec revision:** draft-3
 
 ## 1. Summary
 
@@ -89,9 +89,10 @@ V1 pins, in the Repository View (§4):
 
 V1 pins, in the selector descriptor (§5.7):
 
-- selector name and version;
+- selector name, mode, and version (Appendix C);
 - task input (§5.1);
-- ranking parameters and budget;
+- ranking parameters, tie-break order, and budget (§7.12);
+- the normalized CodeGraph digest actually consumed (§5.7.1);
 - token estimator identity and version;
 - every extractor, grammar, query pack, graph rule set, and semantic enricher version that can affect output;
 - **all resource limits** (§7.9).
@@ -183,6 +184,18 @@ Every object identifier in every v1 object is an **algorithm-prefixed OID string
 
 Consumers MUST treat OID strings as opaque and compare them literally, including the prefix.
 
+### 4.1.1 Repository identity
+
+The pack's `repo` field is **not** a commit or a remote URL, both of which are mutable or ambiguous across mirrors. It is:
+
+```
+repo = sha256( "git+repo:v1\n" + <object-format> + "\n" + <root-commit-oid> + "\n" )
+```
+
+where `object-format` is `sha1` or `sha256` and `root-commit-oid` is the OID of the repository's **earliest reachable root commit** under that format, selected as the lexicographically smallest root-commit OID when history has multiple roots.
+
+This is stable across clones, mirrors, and renames, and distinguishes unrelated repositories that happen to share a name. A repository converted between object formats has two identities; implementations MUST NOT treat packs across formats as comparable. Repositories with no commits have no identity and cannot produce packs.
+
 ### 4.2 Dirty worktrees and overlay trees
 
 The most valuable moment for context is usually mid-edit. V1 therefore supports uncommitted state through an **overlay tree** rather than refusing.
@@ -234,13 +247,14 @@ A Context Pack is the canonical selected-evidence manifest.
   },
   "task": {
     "digest": "sha256:...",
-    "terms": ["provenance", "branch-policy"]
+    "termCount": 2
   },
   "selector": {
     "name": "context-v1",
     "version": "1.0.0",
     "config": "sha256:...",
-    "configBlob": "sha256:..."
+    "configBlob": "sha256:...",
+    "graph": "sha256:..."
   },
   "budget": {
     "unit": "estimated-tokens",
@@ -255,12 +269,14 @@ A Context Pack is the canonical selected-evidence manifest.
       "blob": "sha256:...",
       "range": [4210, 6844],
       "cost": 658,
+      "score": "0.7310",
       "reasons": [
         {
           "kind": "reference",
           "from": "symbol:sha256:...:1204-1899",
           "resolution": "semantic"
-        }
+        },
+        { "kind": "task-term", "term": 0 }
       ]
     }
   ],
@@ -270,15 +286,32 @@ A Context Pack is the canonical selected-evidence manifest.
 
 ### 5.1 Task binding
 
-The pack stores a digest of the task rather than duplicating prompt text; the session already owns prompt storage, secret scanning, and redaction.
+**A persisted Context Pack contains no prose.** No prompt text, no task terms, no generated summaries, no comment bodies — only references, digests, and integers. This is a structural rule, not a preference, and it exists because §8 makes the pack a content-addressed, reachable tree entry: anything inside it is immutable, so anything inside it can never be redacted. Prose that must be redactable therefore cannot live in the pack.
 
-This has a consequence that MUST be stated plainly:
+The pack stores:
 
-> A pack that stores only `task.digest` cannot be regenerated from itself. Reproduction requires the original task text from the session. If that session event is redacted (§9.4), the pack becomes verifiable-by-digest but not reproducible.
+- `task.digest` — a digest over the **canonical normalized task input**, not raw prompt bytes. The normalization rule is part of the selector configuration.
+- `task.termCount` — the number of entries in the session's term list.
 
-To keep `context why` and `context refresh` useful after redaction, the pack MUST also store `task.terms`: the normalized, deduplicated, deterministically ordered selection terms actually derived from the task. `task.terms` is derived from prompt text and is therefore subject to the same redaction lifecycle as any other derived prose (§9.4).
+#### 5.1.1 Term slots
 
-`task.digest` is computed over the canonical normalized task input, not raw prompt bytes; the normalization rule is part of the selector configuration.
+The session event owns the normalized selection term list: the deduplicated, deterministically ordered terms derived from the task. The session already owns prompt storage, secret scanning, and redaction, so terms inherit that lifecycle by construction.
+
+The pack refers to terms only by **slot index** into that list:
+
+```json
+{ "kind": "task-term", "term": 0 }
+```
+
+Slot indices are stable for the life of the pack. The session term list is append-only within a session; a term is never renumbered. Redaction blanks a slot's content, never its index.
+
+Consequences, stated plainly:
+
+- The pack alone is verifiable by digest but **not reproducible**; reproduction requires the session's term list and the original task input.
+- When the session is available, `context why` renders term text. When it is redacted or absent, `why` renders the slot (`task-term #0`) and states that the text is unavailable (§10.2). Explainability degrades to structure; it never breaks, and immutability is never violated.
+- `task.digest` still proves that a given task input produced this pack, even after every term is redacted.
+
+An implementation MAY hold the term list in a side-store rather than the session event, but that store MUST share the session's redaction lifecycle and MUST NOT be reachable from any ref that outlives it.
 
 ### 5.2 Item identity
 
@@ -288,7 +321,15 @@ Exact source evidence is identified by:
 blob OID + byte range
 ```
 
-Paths and symbol names are presentation metadata, not immutable identity. Ranges are half-open byte offsets `[start, end)` into the blob's exact bytes, before any line-ending or encoding transformation.
+Paths and symbol names are presentation metadata, not immutable identity.
+
+Range constraints:
+
+1. Ranges are **half-open byte offsets** `[start, end)` into the blob's exact bytes, before any line-ending, filter, or encoding transformation.
+2. `0 ≤ start < end ≤ blobSize`. Empty ranges are invalid; whole-blob items omit `range` rather than spanning it.
+3. For blobs that decode as UTF-8, both offsets MUST fall on a **UTF-8 codepoint boundary**, so a renderer never slices mid-codepoint. A selector whose candidate boundary lands mid-sequence MUST widen outward to the nearest boundaries.
+4. For blobs that are not valid UTF-8, ranges are permitted only when the item is explicitly anchored, and the item MUST be rendered as bytes, never as decoded text.
+5. Ranges MUST NOT overlap within a single `(blob)` in one pack; overlapping candidates are merged before packing, and the merged item carries the union of their reasons.
 
 ### 5.3 Item kinds
 
@@ -347,10 +388,11 @@ Every item MUST have a non-empty `reasons` array. Each reason is:
 | `kind` | yes | one of the reason kinds below |
 | `from` | when the reason is relational | normalized CodeGraph node id (§7.2) of the anchor |
 | `target` | when unresolved | textual target that could not be resolved to a node |
+| `term` | for `task-term` | slot index into the session term list (§5.1.1) |
 | `resolution` | for graph-derived reasons | `syntax` \| `local` \| `semantic` |
-| `weight` | no | selector-assigned contribution, deterministic |
+| `weight` | no | selector-assigned contribution, as a fixed-decimal string (§7.12) |
 
-Reason kinds:
+Core reason kinds:
 
 ```
 explicit-path      explicit-symbol   task-term
@@ -360,7 +402,17 @@ config             history           memory
 policy             instruction       neighbor
 ```
 
-Reasons are sorted deterministically by `(kind, from, target, resolution)`.
+Reasons are sorted deterministically by `(kind, from, target, term, resolution)`.
+
+#### 5.4.1 Unknown enum members
+
+§7.1 permits namespaced CodeGraph node and edge kinds, so the same rule applies symmetrically to reason kinds. Across `reason.kind`, `CodeEdge.kind`, `CodeNode.kind`, `CodeNode.symbolKind`, and `omission.reason`:
+
+1. Core members are the unnamespaced identifiers listed in this document. Extensions MUST be namespaced `vendor/name` and MUST NOT collide with the core vocabulary.
+2. A consumer encountering an unknown **namespaced** member MUST ignore it for behavior — never rank, filter, or grant authority on it — and MUST preserve it byte-for-byte when re-emitting (§5.6).
+3. A consumer encountering an unknown **unnamespaced** member MUST reject the pack. An unnamespaced member it does not know means the pack was written against a core vocabulary it does not implement, and silently ignoring it would change selection semantics invisibly.
+4. Adding a core member is therefore a `version` bump. Adding a namespaced member is not.
+5. An `instruction` reason kind can never arrive via extension: authority comes only from §5.3.1's verified chain.
 
 ### 5.5 Omissions
 
@@ -401,7 +453,7 @@ A `non-deterministic` omission makes the pack non-reproducible by definition; co
 Context Pack bytes are protocol surface because the Git object ID depends on them. This is normative, not deferred:
 
 1. Serialization is **JSON Canonicalization Scheme, RFC 8785 (JCS)**: UTF-8, no insignificant whitespace, object members sorted by UTF-16 code unit, JSON numbers in ECMAScript `Number::toString` form.
-2. All numbers MUST be integers within the safe-integer range, except `weight`, which is serialized as a string decimal with exactly 4 fractional digits to avoid float divergence.
+2. All JSON numbers MUST be integers within the safe-integer range. Ranking quantities (`score`, `weight`) are never JSON numbers; they are serialized as **string decimals with exactly 4 fractional digits**, and the values they encode are computed in fixed-point integer arithmetic (§7.12), not floats.
 3. The canonical bytes are terminated by **exactly one** `\n`. The trailing newline is inside the hashed bytes.
 4. Array order is selector-defined but MUST be deterministic; `items` sort by `(path, blob, range[0], kind)` and `omissions` by `(rank, path)`.
 5. Optional fields with no value are **omitted**, never emitted as `null` — except `view.overlay`, which is always present and explicitly `null` when clean.
@@ -409,8 +461,9 @@ Context Pack bytes are protocol surface because the Git object ID depends on the
 **Extensibility.** `version` is a single integer.
 
 - A consumer encountering a `version` it does not implement MUST reject the pack.
-- Within a known `version`, unknown fields MUST be ignored for reading and MUST be preserved byte-for-byte when re-emitting. Because canonical bytes determine identity, a consumer that cannot preserve unknown fields MUST NOT re-emit the pack.
-- New required semantics require a `version` bump. New optional fields do not.
+- Within a known `version`, unknown fields MUST be ignored for reading and MUST be preserved byte-for-byte when re-emitting. Because canonical bytes determine identity, a consumer that cannot preserve unknown fields or unknown enum members MUST NOT re-emit the pack.
+- Unknown **enum members** follow §5.4.1: namespaced members are ignored-and-preserved, unnamespaced members are rejected.
+- New required semantics or new core enum members require a `version` bump. New optional fields and namespaced enum members do not.
 
 ### 5.7 Selector descriptor
 
@@ -419,13 +472,27 @@ Context Pack bytes are protocol surface because the Git object ID depends on the
   "name": "context-v1",
   "version": "1.0.0",
   "config": "sha256:...",
-  "configBlob": "sha256:..."
+  "configBlob": "sha256:...",
+  "graph": "sha256:..."
 }
 ```
 
 `config` is the digest of the canonicalized selector configuration, which MUST enumerate everything listed in §3.2, including all resource limits.
 
 `configBlob` is the OID of a Git blob containing those exact canonical bytes. It SHOULD be present, and MUST be present for any pack that is durably attached (§8). A bare digest is unverifiable: `context why` and `context refresh` cannot re-run selection against a configuration they cannot read. When both are present, `config` MUST equal the digest of `configBlob`'s contents.
+
+#### 5.7.1 Pinned graph digest
+
+`config` pins **version strings**, and a version string is not behavior. A grammar rebuilt against a different Tree-sitter ABI, a query pack patched without a version bump, or an enricher whose upstream index changed all keep their declared version and silently change extraction output. Version pinning alone therefore cannot support §10.5(1).
+
+`selector.graph` closes this: it is the digest of the **canonicalized normalized CodeGraph** actually consumed by the selector, computed after §7.7 normalization and sorting, over nodes and edges only (no timing, no extractor internals, no paths outside the pinned view).
+
+Rules:
+
+- `graph` MUST be present in every pack.
+- A verifier re-running extraction against the same view and configuration MUST obtain the same `graph` digest; a mismatch is a **reproducibility failure**, reported as such, and MUST NOT be papered over as an ordinary `changed` result.
+- `context refresh` compares `graph` digests before comparing items: an unchanged view with a changed graph digest means the toolchain moved, not the repository, and the delta MUST say so.
+- The graph itself is derived and disposable (§3.5). Only its digest is pinned. A consumer that cannot rebuild the graph can still validate the pack's structure, and simply cannot verify reproducibility.
 
 ---
 
@@ -661,6 +728,32 @@ Exceeding a counter MUST produce a bounded partial result with an explicit omiss
 
 An implementation MUST NOT rely on wall-clock as its primary bound, and MUST NOT allow a timeout to silently truncate a pack that claims reproducibility.
 
+#### 7.9.1 Bounds on `why` and `refresh`
+
+`why` and `refresh` are not free reads, and `refresh` is the largest denial-of-service surface in the system: it re-extracts blobs, maps diffs, and may re-run selection across an entire view, on input a caller chooses. Both MUST be bounded.
+
+`why` is bounded by:
+
+```
+reasonChainDepth        how far a chain is walked before truncation
+reasonChainBranches     alternative chains rendered per item
+```
+
+Truncating a chain MUST be visible in the output, never silent.
+
+`refresh` is bounded by the §7.9 counters for its re-selection pass, **plus** counters governing re-anchoring (§10.3):
+
+```
+itemsReanchored         items attempted before bailing out
+blobsReExtracted        distinct blobs re-parsed for symbol re-match
+diffBytesMapped         total diff volume walked for hunk mapping
+renameDetectionFiles    files considered by rename detection
+```
+
+These counters are pinned in `selector.config` like every other limit. Exceeding one MUST produce a bounded partial delta in which the unprocessed items are reported as `invalidated` with an `extractor-limit` omission — never as `unchanged`, which would falsely assert that the implementation checked them.
+
+An implementation MAY additionally refuse `refresh` between views whose diff exceeds a configured size, and MUST say so rather than returning a partial delta that looks complete.
+
 ### 7.10 History and Memory
 
 V1 MAY use bounded Git co-change/history signals. The history horizon is a pinned counter (`historyCommitsScanned`) and a pinned commit boundary, not "recent". The selector SHOULD consult the pinned bounded Memory projection instead of scanning the complete session corpus.
@@ -676,6 +769,30 @@ Selection operates under an explicit budget with a declared unit and estimator:
 `chars4-v1` is `ceil(codepoints / 4)` over the rendered UTF-8 text. It is a stable, model-independent estimator and a poor one: it understates CJK, Devanagari, and other non-Latin scripts by roughly 2–4×, and understates dense punctuation. Implementations serving such repositories SHOULD register a better estimator; the estimator identity is pinned, so packs remain comparable only within the same estimator.
 
 Item `cost` values are in the declared unit and MUST sum to `budget.used`. Harnesses MAY compute exact model-specific tokens when rendering; that does not change the pack.
+
+### 7.12 Deterministic ranking and total order
+
+Byte-identical output requires that ranking be reproducible and that ties be broken by rule rather than by whatever order the candidates happened to arrive in.
+
+**Arithmetic.** Ranking is computed in **fixed-point integer arithmetic**: scores and weights are integers scaled by 10⁴, and all combination is integer addition and multiplication with a defined rounding mode (half-away-from-zero) at each step. Implementations MUST NOT use IEEE-754 floats anywhere in ranking. Floats reorder ties across platforms, compilers, and summation orders, which is exactly the failure §10.5(1) is meant to exclude.
+
+**Total order.** Candidates are ordered by descending score, then by the following tie-break sequence, which is total because the last key is unique per candidate:
+
+```
+1. score                      descending
+2. anchor class               explicit > graph-connected > lexical > history > neighbor
+3. resolution class           semantic > local > syntax
+4. blob OID                   ascending, bytewise on the hex string
+5. range start byte           ascending
+6. range end byte             ascending
+7. path                       ascending, bytewise on UTF-8 bytes
+```
+
+Path is last because it is presentation metadata (§5.2); `(blob, range)` is identity, so keys 4–6 already resolve every distinct candidate. Path appears only to order whole-blob items that a single blob reaches by two paths.
+
+**Budget packing** consumes candidates in this order and is greedy: an item that does not fit is recorded as a `budget` omission and packing continues, so a single oversized item cannot truncate the tail. Packing MUST NOT reorder to improve fit, because a knapsack optimum is not stable under small input changes.
+
+**Ranking parameters** — every weight, boost, decay, and class multiplier — are part of `selector.config` (§3.2). A selector that reads a ranking parameter from anywhere else is non-conforming.
 
 ---
 
@@ -744,13 +861,24 @@ Parser, query, and TSG inputs are repository-controlled. Extractors MUST obey §
 
 ### 9.4 Secret duplication and redaction
 
-Context Packs SHOULD reference existing evidence rather than duplicate source or session prose.
+A persisted pack is a content-addressed, reachable tree entry (§8). It is immutable. Nothing inside it can be redacted without rewriting history, so **redaction is solved by exclusion, not by removal**:
 
-Prose derived from a session event — including `task.terms` and any `derived` item — MUST become unavailable under the same redaction lifecycle as its source. A redacted pack:
+> A persisted Context Pack MUST contain no prose. Only references, digests, and integers.
 
-- retains `task.digest`, `view`, `selector`, item identities, and reasons;
-- loses `task.terms` and `derived` item bodies, replaced by `redacted` omissions;
-- is no longer reproducible, and MUST be reported as such by `context refresh`.
+Concretely, a persisted pack MUST NOT contain prompt text, task terms, comment or doc bodies, generated summaries, or any other prose extracted from evidence or sessions. It carries `task.digest`, `task.termCount`, `view`, `selector`, item identities (`blob` + `range`), reasons, costs, and omissions — none of which is redactable content.
+
+Redactable content lives where redaction works:
+
+| Content | Owner | Pack holds |
+|---|---|---|
+| Prompt text | session event | `task.digest` |
+| Selection terms | session term list (§5.1.1) | slot indices |
+| Evidence bodies | source blobs | `blob` + `range` |
+| Summaries, labels | derived cache | `derived` item reference |
+
+When redacted content is unavailable, rendering degrades and structure survives: `why` shows term slots instead of term text, a `derived` item renders as a reference with no body, and evidence whose blob is gone renders as a `content-unavailable` omission. The pack's OID never changes, its digests remain verifiable, and `refresh` MUST report it as non-reproducible rather than treating missing prose as a repository change.
+
+`derived` items are references into a disposable derived cache, never inline bodies; a `derived` item whose cache entry is gone is a cache miss, not corruption (§9.5).
 
 ### 9.5 Derived indexes are untrusted accelerators
 
@@ -792,12 +920,20 @@ Explains the path or rule that caused an item to be selected, by replaying the r
 src/trust/Projection.ts#capabilitiesAt
 
 Included because:
-  task term "provenance"
+  task term #0 "provenance"
     → Policy.checkBranchPolicy      (reference, semantic)
     → capabilitiesAt                (call, syntax)
 ```
 
-Explainability is part of the product, not debugging polish. If `configBlob` is unavailable, `why` MUST report the recorded reasons and explicitly state that they could not be re-derived.
+When the session term list is unavailable or redacted, the same chain renders structurally:
+
+```
+  task term #0 (text unavailable — session redacted)
+    → Policy.checkBranchPolicy      (reference, semantic)
+    → capabilitiesAt                (call, syntax)
+```
+
+Explainability is part of the product, not debugging polish. It degrades to structure; it does not break. If `configBlob` is unavailable, `why` MUST report the recorded reasons and explicitly state that they could not be re-derived. Chains truncated by the §7.9.1 bounds MUST be marked truncated.
 
 ### 10.3 `context refresh`
 
@@ -821,7 +957,9 @@ newly relevant selected under the new view, absent from the old pack
 removed        no longer selected under the new view
 ```
 
-Refresh emits a **new pack** plus a delta; it never mutates the old pack. It MUST refuse to compare packs whose `selector.config` differs, and MUST report — rather than silently absorb — a pack that is non-reproducible (§7.9, §9.4).
+**Order of checks.** Refresh compares `selector.config`, then `selector.graph` (§5.7.1), then `view`, then items. A changed graph digest under an unchanged view means the toolchain moved, not the repository, and the delta MUST report toolchain drift rather than attributing it to source changes.
+
+Refresh emits a **new pack** plus a delta; it never mutates the old pack. It MUST refuse to compare packs whose `selector.config` differs, MUST report — rather than silently absorb — a pack that is non-reproducible (§7.9, §9.4), and MUST obey the re-anchoring bounds in §7.9.1, reporting bail-outs as `invalidated` rather than `unchanged`.
 
 ### 10.4 V1 boundary
 
@@ -831,7 +969,9 @@ language-agnostic CodeGraph
 Tree-sitter queries as default syntactic extraction
 optional tree-sitter-graph adapter
 optional semantic enrichers
-deterministic selector with pinned limits
+deterministic selector with pinned limits and total order
+pinned CodeGraph digest
+no prose in persisted packs
 no embeddings required
 pinned source/policy/instructions/memory
 blob/range evidence
@@ -854,11 +994,16 @@ V1 is successful when:
 7. syntax-only edges remain distinguishable from semantically resolved edges;
 8. pathological source/query/TSG inputs remain within configured counters, and any wall-clock fallback is visibly marked non-reproducible;
 9. deleting all derived indexes and the unattached pack cache does not corrupt canonical repository state;
-10. retrieval-poisoning fixtures cannot trivially displace all graph-connected implementation evidence;
+10. under the standard decoy fixture — 50 decoy files whose names and contents match the task's top 5 terms, added to a repository whose known-required set is graph-connected — **graph-connected implementation evidence retains ≥70% of the budget, required-file recall drops by ≤10 percentage points against the decoy-free baseline, and no decoy file ranks above any required file**;
 11. an overlay-based pack is reproducible while its overlay objects exist and is refused durable attachment otherwise;
 12. an `instruction` item whose authority chain does not resolve is downgraded to `narrative` by a conforming consumer;
 13. a receipt lifted out of its enclosing session event fails verification;
-14. refresh re-anchors moved symbols, and reports `invalidated` rather than guessing when re-anchoring is ambiguous.
+14. refresh re-anchors moved symbols, and reports `invalidated` rather than guessing when re-anchoring is ambiguous;
+15. a persisted pack contains no prose: an automated check over the canonical bytes finds only references, digests, and integers;
+16. redacting a session leaves the pack's OID and digests unchanged, and `why` degrades to term slots rather than failing;
+17. rebuilding a grammar against a different parser ABI, with all declared versions unchanged, is detected as a `selector.graph` mismatch and reported as a reproducibility failure;
+18. equal-scored candidates pack in the §7.12 total order across platforms, and no ranking path uses floating-point arithmetic;
+19. `why` and `refresh` remain within their §7.9.1 counters on an adversarially large view, and report truncation rather than returning a partial result that appears complete.
 
 The system should also be benchmarked against historical repository tasks (Appendix D).
 
@@ -928,7 +1073,26 @@ A global invalidation MAY rebuild the full normalized graph. Correctness is pref
 
 Embeddings or LLM rerankers MAY improve candidate ordering later. They are optional disposable caches, not canonical truth.
 
-A deterministic non-semantic selector MUST remain available. A pack produced by a non-reproducible ranker MUST declare that fact (§5.5, `non-deterministic`) rather than presenting itself as a determinism fixture — otherwise §10.5.1 is untestable. The Context Pack still records what was selected.
+**Two selector modes, named in the artifact.** §10.5(1) and a non-reproducible reranker cannot both be unqualified, so the distinction is carried in `selector.name`:
+
+```
+canonical   deterministic, fixed-point ranking (§7.12), reproducible
+            byte-identical under identical pinned inputs
+            selector.name has no "+" suffix
+
+advisory    canonical candidate generation, non-deterministic reranking
+            selector.name MUST carry a "+<reranker>" suffix, e.g. "context-v1+rerank"
+            pack MUST carry a "non-deterministic" omission (§5.5)
+```
+
+Rules:
+
+- A deterministic canonical selector MUST remain available and MUST be the default.
+- §10.5(1) applies to canonical packs only. Advisory packs are excluded from determinism fixtures by name, not by inspection.
+- An advisory selector MUST use canonical candidate generation and MUST reorder only within the candidate set — it may not introduce evidence the canonical selector would not have considered, which keeps the security properties of §9.2 intact.
+- `refresh` MUST refuse to compute an `unchanged`/`changed` delta between a canonical and an advisory pack, since the comparison would attribute reranker noise to the repository.
+
+Either way, the pack records what was selected and why.
 
 ---
 
@@ -949,6 +1113,16 @@ manifest size
 ```
 
 Adversarial fixtures SHOULD include lexical decoys, pathological extractor inputs, and rename/refactor histories that stress re-anchoring.
+
+**Standard decoy fixture** (referenced by §10.5(10)): take a task with a known-required, graph-connected evidence set; extract the task's top 5 normalized terms; add 50 files whose paths and contents match those terms but which no required symbol references. Measure against the decoy-free baseline:
+
+```
+budget share retained by graph-connected implementation evidence   ≥ 70%
+required-file recall drop                                          ≤ 10 pp
+highest-ranked decoy vs. lowest-ranked required file               decoy MUST rank lower
+```
+
+Fixture parameters (term count, decoy count) are pinned alongside the selector configuration so results are comparable across implementations.
 
 A handoff benchmark SHOULD compare:
 
