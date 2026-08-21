@@ -27,7 +27,12 @@ import type { Repository } from "../git/Repository.ts";
 import * as SocialLog from "../social/Log.ts";
 import { SocialWeb } from "../social/Projection.ts";
 import { readGenesis } from "../trust/Genesis.ts";
-import { Identities, principalId, type PrincipalId } from "../trust/Principal.ts";
+import {
+  Identities,
+  principalId,
+  type PrincipalId,
+  type ResolvedIdentity,
+} from "../trust/Principal.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
@@ -225,50 +230,98 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       .slice(0, 4096);
   });
 
-  const identityAt = Effect.fn("host.Node.identityAt")(function* (wanted: PrincipalId) {
-    for (const name of yield* localRepositories()) {
-      const resolved = yield* Effect.promise(() =>
-        Effect.runPromise(
-          Effect.gen(function* () {
-            const stored = yield* readGenesis();
-            if (stored === null || principalId(stored.genesis.repoId) !== wanted) return null;
-            const projection = yield* projectTrust(stored.genesis);
-            return { principal: wanted, projection, head: projection.head } as const;
-          }).pipe(
-            Effect.provide(guardLayer(name)),
-            Effect.catch(() => Effect.succeed(null)),
-          ),
+  interface FederationSnapshot {
+    readonly identities: ReadonlyMap<PrincipalId, ResolvedIdentity>;
+    readonly logs: ReadonlyArray<SocialLog.VerifiedLog>;
+  }
+
+  /** Read one sibling once; both federation consumers share this result. */
+  const federationEntry = Effect.fn("host.Node.federationEntry")(function* (name: string) {
+    return yield* Effect.promise(() =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const stored = yield* readGenesis();
+          if (stored === null) return null;
+          const projection = yield* projectTrust(stored.genesis);
+          const principal = principalId(stored.genesis.repoId);
+          return {
+            identity: { principal, projection, head: projection.head } satisfies ResolvedIdentity,
+            log: yield* SocialLog.verified(stored.genesis, projection),
+          };
+        }).pipe(
+          Effect.provide(guardLayer(name)),
+          Effect.catch(() => Effect.succeed(null)),
         ),
-      );
-      if (resolved !== null) return resolved;
-    }
-    return null;
+      ),
+    );
   });
 
-  const localSocialLogs = Effect.fn("host.Node.localSocialLogs")(function* () {
+  const loadFederation = Effect.fn("host.Node.loadFederation")(function* () {
+    const entries = yield* Effect.forEach(yield* localRepositories(), federationEntry, {
+      concurrency: 16,
+    });
+    const identities = new Map<PrincipalId, ResolvedIdentity>();
     const logs: SocialLog.VerifiedLog[] = [];
-    for (const name of yield* localRepositories()) {
-      const verified = yield* Effect.promise(() =>
-        Effect.runPromise(
-          Effect.gen(function* () {
-            const stored = yield* readGenesis();
-            if (stored === null) return null;
-            const trust = yield* projectTrust(stored.genesis);
-            return yield* SocialLog.verified(stored.genesis, trust);
-          }).pipe(
-            Effect.provide(guardLayer(name)),
-            Effect.catch(() => Effect.succeed(null)),
-          ),
-        ),
-      );
-      if (verified !== null) logs.push(verified);
+    for (const entry of entries) {
+      if (entry === null) continue;
+      // Preserve the resolver's existing first-directory-wins behavior for a
+      // duplicate identity without dropping either log from the social view.
+      if (!identities.has(entry.identity.principal)) {
+        identities.set(entry.identity.principal, entry.identity);
+      }
+      logs.push(entry.log);
     }
-    return logs;
+    return { identities, logs } satisfies FederationSnapshot;
   });
+
+  let federationEpoch = 0;
+  let cachedFederation: { readonly epoch: number; readonly value: FederationSnapshot } | null =
+    null;
+  let loadingFederation: {
+    readonly epoch: number;
+    readonly value: Promise<FederationSnapshot>;
+  } | null = null;
+
+  /**
+   * One shared, immutable index for all requests until a mutating request
+   * completes. It replaces repeated sibling scans during authentication and
+   * policy evaluation while keeping subsequent writes immediately visible.
+   */
+  const federationSnapshot = Effect.fn("host.Node.federationSnapshot")(function* () {
+    const epoch = federationEpoch;
+    if (cachedFederation?.epoch === epoch) return cachedFederation.value;
+    if (loadingFederation?.epoch === epoch)
+      return yield* Effect.promise(() => loadingFederation!.value);
+
+    const loading = Effect.runPromise(loadFederation());
+    loadingFederation = { epoch, value: loading };
+    const value = yield* Effect.promise(async () => {
+      try {
+        const loaded = await loading;
+        if (federationEpoch === epoch) cachedFederation = { epoch, value: loaded };
+        return loaded;
+      } finally {
+        if (loadingFederation?.value === loading) loadingFederation = null;
+      }
+    });
+    return value;
+  });
+
+  const invalidateFederation = () => {
+    federationEpoch++;
+    cachedFederation = null;
+  };
 
   const federation = Layer.merge(
-    Layer.succeed(Identities)({ resolve: identityAt }),
-    Layer.succeed(SocialWeb)({ logs: localSocialLogs() }),
+    Layer.succeed(Identities)({
+      resolve: (wanted) =>
+        federationSnapshot().pipe(
+          Effect.map((snapshot) => snapshot.identities.get(wanted) ?? null),
+        ),
+    }),
+    Layer.succeed(SocialWeb)({
+      logs: federationSnapshot().pipe(Effect.map((snapshot) => snapshot.logs)),
+    }),
   );
 
   const stateFor = (repo: string): RepoState => {
@@ -443,6 +496,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     let response: Response;
     try {
       response = await answered;
+      // Git writes and JSON mutations are POST/PUT/PATCH/DELETE requests.
+      // Invalidating after any non-safe request is deliberately conservative:
+      // read-only POST endpoints merely refresh the index next time, while a
+      // ref update is visible to every following request immediately.
+      if (request.method !== "GET" && request.method !== "HEAD") invalidateFederation();
     } finally {
       state.active -= 1;
     }

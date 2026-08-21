@@ -33,6 +33,14 @@ const keyFlag = Flag.string("key").pipe(
   Flag.withDescription("Path to the identity device private key"),
 );
 
+type SyncTarget =
+  | { readonly subject: PrincipalId; readonly location: null }
+  | {
+      readonly subject: PrincipalId;
+      readonly location: string;
+      readonly outcome: Sync.SyncOutcome;
+    };
+
 const principal = (value: string): Effect.Effect<PrincipalId, Invalid> =>
   isPrincipalId(value)
     ? Effect.succeed(value)
@@ -513,24 +521,37 @@ const sync = Command.make(
         for (let hop = 0; hop < depth && frontier.size > 0; hop++) {
           const { graph } = yield* graphOf(repo);
           const next = new Set<PrincipalId>();
+          const targets: PrincipalId[] = [];
           for (const subject of Sync.followedBy(graph, frontier)) {
             if (visited.has(subject)) continue;
             visited.add(subject);
             next.add(subject);
-            const location = Sync.locationOf(graph, subject, pins);
-            if (location === null) {
-              yield* Console.error(`! ${subject}: no pinned, mirrored, or attested location`);
+            targets.push(subject);
+          }
+          const outcomes = yield* Effect.forEach(
+            targets,
+            (subject) => {
+              const location = Sync.locationOf(graph, subject, pins);
+              if (location === null) return Effect.succeed<SyncTarget>({ subject, location: null });
+              return Sync.syncIdentity({
+                root,
+                principal: subject,
+                url: location,
+                token: token === "" ? undefined : token,
+              }).pipe(Effect.map((outcome): SyncTarget => ({ subject, location, outcome })));
+            },
+            { concurrency: 8 },
+          );
+          for (const outcome of outcomes) {
+            if (outcome.location === null) {
+              yield* Console.error(
+                `! ${outcome.subject}: no pinned, mirrored, or attested location`,
+              );
               continue;
             }
-            const outcome = yield* Sync.syncIdentity({
-              root,
-              principal: subject,
-              url: location,
-              token: token === "" ? undefined : token,
-            });
             synchronized++;
             yield* Console.log(
-              `${subject}\t${location}\t${outcome.fetched.length} fetched, ${outcome.joined.length} joined`,
+              `${outcome.subject}\t${outcome.location}\t${outcome.outcome.fetched.length} fetched, ${outcome.outcome.joined.length} joined`,
             );
           }
           frontier = next;

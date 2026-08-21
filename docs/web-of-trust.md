@@ -532,10 +532,7 @@ reverse. In `refs/meta/policy`:
   "branch": "refs/heads/main",
   "requiredApprovals": 2,
   "externalReview": {
-    "anchors": [
-      "principal:SHA256:maintainer1...",
-      "principal:SHA256:maintainer2..."
-    ],
+    "anchors": ["principal:SHA256:maintainer1...", "principal:SHA256:maintainer2..."],
     "scope": "review",
     "maxDepth": 1,
     "minPaths": 2,
