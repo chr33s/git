@@ -4,7 +4,7 @@
 **Project:** `@chr33s/git`  
 **Target version:** Experimental / pre-1.0  
 **Last updated:** 2026-08-21  
-**Spec revision:** draft-4
+**Spec revision:** draft-5
 
 ## 1. Summary
 
@@ -95,7 +95,9 @@ V1 MUST make it possible to:
 3. record the exact repository-context rendering supplied to a model invocation;
 4. bind that exposure to signed session history;
 5. audit stale, missing, or contradictory repository context after an agent operation;
-6. validate a pack without reproducing the retrieval implementation that created it.
+6. validate a pack without reproducing the retrieval implementation that created it;
+7. record lightweight selector identity and coarse omission diagnostics without turning them into selection-consensus inputs;
+8. preserve verifiable repository provenance for context that a producer claims was authoritative instruction.
 
 ### 3.2 Non-goals
 
@@ -113,7 +115,7 @@ V1 does **not** standardize:
 - selector configuration digests;
 - task normalization digests;
 - deterministic tie-breaking;
-- omission ranking;
+- exhaustive omission ranking or candidate logs;
 - byte-identical manifests produced independently by different implementations.
 
 Implementations MAY use any of those techniques internally.
@@ -210,6 +212,8 @@ A Context Pack describes exposure, not authority.
 Selecting a file, comment, documentation fragment, memory entry, or generated summary MUST NOT cause it to become an instruction merely because it appears in context.
 
 Instruction authority is enforced by the harness or session policy outside this specification.
+
+When a producer claims that a repository item was supplied with instruction authority, it SHOULD record verifiable instruction provenance using `authority` (§6.8). That annotation proves where the claimed instruction came from in the recorded repository view; it does **not** itself grant authority.
 
 ### 4.7 Derived indexes are disposable
 
@@ -378,19 +382,42 @@ For each item, a verifier SHOULD confirm that:
 
 A path mismatch does not change the blob's bytes, but it is an audit failure because the manifest claims that evidence was selected from that repository view at that path.
 
-### 6.4 Descriptive metadata
+### 6.4 Selector identity
 
-A producer MAY include metadata such as:
+A producer MAY record the selector implementation that produced the pack:
+
+```json
+{
+  "selector": {
+    "name": "repo-context",
+    "version": "2.3.1"
+  }
+}
+```
+
+`selector.name` and `selector.version` are diagnostic metadata.
+
+They are useful for answering questions such as:
+
+```text
+Did the missing context start after a selector release?
+Did two incidents use different retrieval implementations?
+Which implementation should be evaluated against this historical failure?
+```
+
+They MUST NOT be treated as a selector configuration digest, a reproducibility claim, or an input required to validate pack evidence.
+
+A verifier MUST NOT reject a pack because selector identity is absent or unknown.
+
+### 6.5 Descriptive item metadata
+
+A producer MAY include item metadata such as:
 
 ```json
 {
   "role": "implementation",
   "reason": "reference",
-  "symbol": "Policy.checkBranchPolicy",
-  "selector": {
-    "name": "repo-context",
-    "version": "2.3.1"
-  }
+  "symbol": "Policy.checkBranchPolicy"
 }
 ```
 
@@ -400,7 +427,7 @@ A consumer MUST NOT require it to validate the underlying evidence.
 
 No ranking score, fixed-point representation, graph digest, token estimate, or selector configuration digest is required by V1.
 
-### 6.5 Reasons
+### 6.6 Reasons
 
 Reasons are optional and descriptive.
 
@@ -431,15 +458,90 @@ A reason answers:
 
 It does not prove that an independent selector would make the same choice.
 
-### 6.6 No omission ledger
+### 6.7 Omission diagnostics
 
-V1 does not require recording high-ranked evidence that was not selected.
+A producer MAY include a top-level `omissions` array containing coarse diagnostics for evidence that the retrieval pipeline discovered or attempted to include but that was not present in the final exposure.
 
-An auditor can establish that evidence was absent from a model invocation by inspecting the Context Pack and rendered exposure for that invocation.
+Example:
 
-Retrieval implementations MAY maintain richer candidate, score, omission, or explanation logs as diagnostics outside the protocol.
+```json
+{
+  "omissions": [
+    {
+      "path": "tests/auth.test.ts",
+      "reason": "budget"
+    },
+    {
+      "path": "config/private.json",
+      "reason": "filtered"
+    }
+  ]
+}
+```
 
-### 6.7 Encoding and identity
+Recommended core omission reasons are:
+
+```text
+budget
+unavailable
+filtered
+error
+other
+```
+
+An implementation MAY use additional namespaced reasons.
+
+Omission diagnostics are deliberately **non-exhaustive and non-ranked**:
+
+- they MUST NOT contain or imply a canonical selector score;
+- their order MUST NOT imply candidate rank;
+- absence from `omissions` MUST NOT be interpreted as proof that an item was never considered or did not exist;
+- an omission record is a producer diagnostic claim, not independently reproducible selection evidence.
+
+When an omitted item has a known Git blob OID, the producer MAY record `blob` in addition to `path`. A verifier MAY validate that blob against `view.tree` when possible.
+
+The purpose is to distinguish useful operational failure classes such as:
+
+```text
+retrieval surfaced the evidence but the context budget dropped it
+access or availability prevented inclusion
+host policy filtered it
+retrieval failed while handling it
+```
+
+without restoring deterministic ranking machinery.
+
+If evidence is absent from both `items` and `omissions`, the protocol deliberately does not distinguish "never discovered" from "not recorded as an omission".
+
+### 6.8 Verifiable instruction provenance
+
+A producer MAY annotate an item with the repository source from which it claims instruction authority was derived:
+
+```json
+{
+  "path": "AGENTS.md",
+  "blob": "sha256:333ccc...",
+  "role": "instruction",
+  "authority": {
+    "source": "repository-instructions",
+    "root": "sha256:def456...",
+    "path": "AGENTS.md"
+  }
+}
+```
+
+For V1:
+
+1. `authority.root` MUST equal `view.tree`;
+2. `authority.path` MUST resolve under that tree to the recorded item `blob`;
+3. `authority.source` is descriptive and identifies the producer's authority class, such as `repository-instructions` or `repository-policy`;
+4. a verifier SHOULD surface an invalid authority annotation as an **unverified instruction claim** while continuing to treat the item itself as ordinary Git-grounded context evidence.
+
+If a producer uses `role: "instruction"` to claim that an item was supplied with instruction authority, it SHOULD include `authority`.
+
+A valid `authority` annotation proves only the repository provenance of the claimed instruction source. Whether that source actually has authority for the invocation remains a decision of the harness or session policy (§4.6).
+
+### 6.9 Encoding and identity
 
 A Context Pack is ordinary UTF-8 JSON.
 
@@ -684,6 +786,8 @@ Generates a Context Pack using the implementation's current retrieval strategy.
 
 It MAY display ranking, scores, graph paths, or token estimates as diagnostics, but none are required fields in the persisted pack.
 
+It SHOULD record selector `name` and `version` when known. It MAY record coarse `omissions` when doing so helps distinguish retrieval, budget, availability, filtering, or retrieval-error failures.
+
 The command answers:
 
 > **What repository evidence would this implementation supply?**
@@ -703,6 +807,10 @@ Reason recorded by selector:
   reference
 ```
 
+If the selector identity or omission diagnostics are present, `why` SHOULD display them when relevant to the selected item or investigation.
+
+If an item carries `authority`, `why` SHOULD report whether its repository provenance verifies against `view.tree`.
+
 If the selector stored richer diagnostics elsewhere, `why` MAY display them.
 
 It MUST distinguish recorded facts from recomputed or inferred explanations.
@@ -720,6 +828,9 @@ Context Pack OID
 render digest
 whether rendered bytes are still available
 whether each pack item resolves under the recorded tree
+selector name/version, when recorded
+coarse omission diagnostics, when recorded
+whether any instruction-authority annotations verify against the recorded tree
 whether the following operation is correctly bound to the exposure
 ```
 
@@ -826,14 +937,17 @@ V1 is successful when:
     - missing exposure-to-operation binding;
 12. selecting content as context does not grant it instruction authority;
 13. deleting derived indexes does not corrupt persisted audit provenance;
-14. a Context Pack never claims that its selector is reproducible unless an implementation-specific extension explicitly provides that stronger guarantee;
-15. no V1 validation rule depends on deterministic ranking, graph hashing, token estimation, or cross-platform numeric behavior.
+14. selector name/version, when present, remains diagnostic metadata and does not imply reproducibility;
+15. omission diagnostics, when present, can distinguish coarse causes such as budget, filtering, unavailability, and retrieval error without implying candidate rank;
+16. an instruction-authority annotation can be verified against `view.tree`, and a failed annotation does not invalidate the underlying evidence item;
+17. a Context Pack never claims that its selector is reproducible unless an implementation-specific extension explicitly provides that stronger guarantee;
+18. no V1 validation rule depends on deterministic ranking, graph hashing, token estimation, or cross-platform numeric behavior.
 
 ---
 
 # Appendix A — Optional retrieval diagnostics
 
-Implementations may keep richer diagnostics without putting them into the core protocol.
+V1 permits lightweight selector identity and coarse omission diagnostics in the pack. Implementations may keep richer diagnostics outside the core protocol.
 
 Examples include:
 
@@ -845,7 +959,7 @@ graph paths
 Tree-sitter captures
 symbol resolution quality
 token cost
-omission reasons
+exhaustive candidate and omission logs
 retrieval latency
 resource counters
 reranker identity
@@ -930,4 +1044,4 @@ fresh agent + Context Pack + exact exposure record
 
 ## Final invariant
 
-> **A Context Pack is an immutable manifest of Git-grounded repository evidence for an exact repository tree. A Context Exposure Event commits to the exact repository-context bytes supplied to a model invocation and is bound to that invocation through signed session history. Retrieval and ranking are replaceable implementation details. Neither object proves cognition or causation.**
+> **A Context Pack is an immutable manifest of Git-grounded repository evidence for an exact repository tree. A Context Exposure Event commits to the exact repository-context bytes supplied to a model invocation and is bound to that invocation through signed session history. Selector identity, coarse omissions, and instruction provenance may improve diagnosis without making retrieval reproducible or granting instruction authority. Retrieval and ranking remain replaceable implementation details. Neither object proves cognition or causation.**
