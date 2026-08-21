@@ -68,7 +68,7 @@ export const cherryPickCommand = Command.make(
         const input = {
           commit: yield* mustResolve(repository, commit),
           onto: yield* mustResolve(repository, onto),
-          author: cliSignature(),
+          author: yield* cliSignature(),
         };
         const outcome = yield* into._tag === "Some"
           ? cherryPick({ ...input, into: refNameOf(into.value) })

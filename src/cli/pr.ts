@@ -391,7 +391,7 @@ const merge = Command.make(
           const merged = yield* repository.merge({
             ours: into,
             theirs: state.head,
-            author: cliSignature(),
+            author: yield* cliSignature(),
             strategy,
             into,
           });

@@ -13,7 +13,7 @@
  * pretending a lease is a lock. What it does inherit is the namespace's
  * append-only rules — a task is closed by saying so, never by deletion.
  */
-import { Effect, Schema } from "effect";
+import { DateTime, Effect, Schema } from "effect";
 
 import {
   type Fingerprint,
@@ -155,7 +155,7 @@ export const TaskPayload = Schema.Union([
   TaskReparented,
   RecordRedacted,
 ]);
-export type TaskPayload = (typeof TaskPayload)["Type"];
+export type TaskPayload = typeof TaskPayload.Type;
 
 const decodePayload = Schema.decodeUnknownEffect(TaskPayload);
 const encoder = new TextEncoder();
@@ -190,7 +190,7 @@ export const context = Effect.fn("hub.Task.context")(function* (repo: string, ta
     repo,
     task,
     id: newId(),
-    issuedAt: new Date().toISOString(),
+    issuedAt: DateTime.formatIso(yield* DateTime.now),
     trustHead,
   } as const;
 });

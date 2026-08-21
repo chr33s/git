@@ -354,7 +354,7 @@ export type ReviewDismissed = (typeof ReviewDismissed)["Type"];
 export type CommentCreated = (typeof CommentCreated)["Type"];
 export type CheckCompleted = (typeof CheckCompleted)["Type"];
 export type EventRedacted = (typeof EventRedacted)["Type"];
-export type HubPayload = (typeof HubPayload)["Type"];
+export type HubPayload = typeof HubPayload.Type;
 
 const decodePayload = Schema.decodeUnknownEffect(HubPayload);
 

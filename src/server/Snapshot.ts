@@ -29,7 +29,7 @@
  * window exists for any CDN-cached pack anywhere; a client that hits it
  * retries against a server that has already converged.
  */
-import { Effect, Layer, Result, Schema } from "effect";
+import { DateTime, Effect, Layer, Result, Schema } from "effect";
 
 import type { GitError, Invalid } from "../git/Error.ts";
 import { StorageFailure } from "../git/Error.ts";
@@ -125,7 +125,7 @@ export const capture = Effect.fn("Snapshot.capture")(function* (previous?: Publi
       : yield* readability();
   return {
     version: 1 as const,
-    publishedAt: new Date().toISOString(),
+    publishedAt: DateTime.formatIso(yield* DateTime.now),
     head,
     anonymousRead,
     refs,
@@ -287,14 +287,13 @@ export const entryOf = (
  * choice, and an empty one is the honest starting point: restoration is a
  * statement about what was, not a merge with what is.
  */
-export const restore = (
+export const restore = Effect.fn("Snapshot.restore")(function* (
   entry: JournalEntry,
-): Effect.Effect<void, StorageFailure | Invalid, RefStore> =>
-  Effect.gen(function* () {
-    const refs = yield* RefStore;
-    const updates = entry.refs.flatMap((ref) =>
-      isOid(ref.oid) ? [{ name: ref.name, value: ref.oid, reason: "journal restore" }] : [],
-    );
-    yield* refs.apply(updates);
-    yield* refs.setHead(entry.head);
-  });
+): Effect.fn.Return<void, StorageFailure | Invalid, RefStore> {
+  const refs = yield* RefStore;
+  const updates = entry.refs.flatMap((ref) =>
+    isOid(ref.oid) ? [{ name: ref.name, value: ref.oid, reason: "journal restore" }] : [],
+  );
+  yield* refs.apply(updates);
+  yield* refs.setHead(entry.head);
+});

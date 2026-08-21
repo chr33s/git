@@ -207,7 +207,7 @@ export type Grant = (typeof Grant)["Type"];
 export type Revoke = (typeof Revoke)["Type"];
 export type RootChange = (typeof RootChange)["Type"];
 export type Checkpoint = (typeof Checkpoint)["Type"];
-export type TrustPayload = (typeof TrustPayload)["Type"];
+export type TrustPayload = typeof TrustPayload.Type;
 
 const decodePayload = Schema.decodeUnknownEffect(TrustPayload);
 

@@ -516,62 +516,59 @@ export const createDelta = (
  * Thin packs work for free: a ref-delta whose base is not in the pack reads
  * it from the store, and fails with `ObjectNotFound` if it is nowhere at all.
  */
-export const unpack = <E>(
-  input: Stream.Stream<Uint8Array, E>,
-): Effect.Effect<ReadonlyArray<Oid>, PackCorrupt | ObjectNotFound | StorageFailure, ObjectStore> =>
-  Effect.gen(function* () {
-    const store = yield* ObjectStore;
-    const source = new Source(Stream.toAsyncIterable(input));
-    const step = <A>(run: () => Promise<A>) =>
-      Effect.tryPromise({
-        try: run,
-        catch: (cause) =>
-          Schema.is(PackCorrupt)(cause) ? cause : new PackCorrupt({ reason: String(cause) }),
+export const unpack = Effect.fn("Pack.unpack")(function* <E>(input: Stream.Stream<Uint8Array, E>) {
+  const store = yield* ObjectStore;
+  const source = new Source(Stream.toAsyncIterable(input));
+  const step = <A>(run: () => Promise<A>) =>
+    Effect.tryPromise({
+      try: run,
+      catch: (cause) =>
+        Schema.is(PackCorrupt)(cause) ? cause : new PackCorrupt({ reason: String(cause) }),
+    });
+
+  const count = yield* step(() => source.header());
+  /** Object boundaries seen so far, for resolving ofs-delta bases. */
+  const oidAt = new Map<number, Oid>();
+  const oids: Oid[] = [];
+
+  for (let index = 0; index < count; index++) {
+    const start = source.offset;
+    const header = yield* step(() => source.objectHeader());
+    // Bounded by what the header declared: the size check below happens
+    // after the stream is inflated, so without this a few megabytes of pack
+    // can expand to gigabytes before anything compares them.
+    const data = yield* step(() => source.inflate(header.size + 1));
+    if (data.length !== header.size) {
+      return yield* new PackCorrupt({
+        reason: `object ${index}: header says ${header.size} bytes, inflated to ${data.length}`,
+        offset: start,
       });
+    }
 
-    const count = yield* step(() => source.header());
-    /** Object boundaries seen so far, for resolving ofs-delta bases. */
-    const oidAt = new Map<number, Oid>();
-    const oids: Oid[] = [];
-
-    for (let index = 0; index < count; index++) {
-      const start = source.offset;
-      const header = yield* step(() => source.objectHeader());
-      // Bounded by what the header declared: the size check below happens
-      // after the stream is inflated, so without this a few megabytes of pack
-      // can expand to gigabytes before anything compares them.
-      const data = yield* step(() => source.inflate(header.size + 1));
-      if (data.length !== header.size) {
+    let object: RawObject;
+    if (header.kind === "full") {
+      object = { type: header.type, data };
+    } else {
+      const baseOid = header.kind === "ref" ? header.base : oidAt.get(start - header.distance);
+      if (baseOid === undefined) {
         return yield* new PackCorrupt({
-          reason: `object ${index}: header says ${header.size} bytes, inflated to ${data.length}`,
+          reason: `object ${index}: ofs-delta base is not an object boundary`,
           offset: start,
         });
       }
-
-      let object: RawObject;
-      if (header.kind === "full") {
-        object = { type: header.type, data };
-      } else {
-        const baseOid = header.kind === "ref" ? header.base : oidAt.get(start - header.distance);
-        if (baseOid === undefined) {
-          return yield* new PackCorrupt({
-            reason: `object ${index}: ofs-delta base is not an object boundary`,
-            offset: start,
-          });
-        }
-        const base = yield* store.read(baseOid);
-        const resolved = yield* Effect.fromResult(applyDelta(base.data, data));
-        object = { type: base.type, data: resolved };
-      }
-
-      const oid = yield* store.write(object);
-      oidAt.set(start, oid);
-      oids.push(oid);
+      const base = yield* store.read(baseOid);
+      const resolved = yield* Effect.fromResult(applyDelta(base.data, data));
+      object = { type: base.type, data: resolved };
     }
 
-    yield* step(() => source.trailer());
-    return oids;
-  });
+    const oid = yield* store.write(object);
+    oidAt.set(start, oid);
+    oids.push(oid);
+  }
+
+  yield* step(() => source.trailer());
+  return oids;
+});
 
 /** The two thresholds `ingest` decides retention by; see its doc. */
 export interface IngestOptions {
@@ -616,67 +613,62 @@ const asCorrupt = (cause: unknown): PackCorrupt =>
  * for the same memory reason `unpack` gives. CPU is bought once at push
  * time; writes are saved forever after.
  */
-export const ingest = <E>(
+export const ingest = Effect.fn("Pack.ingest")(function* <E>(
   input: Stream.Stream<Uint8Array, E>,
   options?: IngestOptions,
-): Effect.Effect<
-  ReadonlyArray<Oid>,
-  PackCorrupt | ObjectNotFound | StorageFailure,
-  ObjectStore | PackStore
-> =>
-  Effect.gen(function* () {
-    const atLeast = options?.retainAtLeast ?? RETAIN_AT_LEAST;
-    const upTo = options?.retainUpTo ?? RETAIN_UP_TO;
+) {
+  const atLeast = options?.retainAtLeast ?? RETAIN_AT_LEAST;
+  const upTo = options?.retainUpTo ?? RETAIN_UP_TO;
 
-    // Buffer up to the cap. The iterator is held so that a pack too large
-    // to retain continues, un-rewound, into the streaming path below.
-    const iterator = Stream.toAsyncIterable(input)[Symbol.asyncIterator]();
-    const buffered: Uint8Array[] = [];
-    let total = 0;
-    let ended = false;
-    yield* Effect.tryPromise({
-      try: async () => {
-        while (total <= upTo) {
-          const next = await iterator.next();
-          if (next.done === true) {
-            ended = true;
-            return;
-          }
-          buffered.push(next.value);
-          total += next.value.length;
+  // Buffer up to the cap. The iterator is held so that a pack too large
+  // to retain continues, un-rewound, into the streaming path below.
+  const iterator = Stream.toAsyncIterable(input)[Symbol.asyncIterator]();
+  const buffered: Uint8Array[] = [];
+  let total = 0;
+  let ended = false;
+  yield* Effect.tryPromise({
+    try: async () => {
+      while (total <= upTo) {
+        const next = await iterator.next();
+        if (next.done === true) {
+          ended = true;
+          return;
         }
-      },
-      catch: asCorrupt,
-    });
-
-    if (!ended) {
-      // Too large to hold: replay what was buffered, then the live tail.
-      const replay = async function* (): AsyncIterable<Uint8Array> {
-        yield* buffered;
-        for (;;) {
-          const next = await iterator.next();
-          if (next.done === true) return;
-          yield next.value;
-        }
-      };
-      return yield* unpack(Stream.fromAsyncIterable(replay(), asCorrupt));
-    }
-
-    const bytes = concat(buffered);
-    // The object count sits in the header; a pack too small to say so is
-    // `unpack`'s to refuse with its own words.
-    const count = bytes.length >= 12 ? readU32(bytes, 8) : 0;
-    if (bytes.length < 32 || count < atLeast) {
-      return yield* unpack(Stream.make(bytes));
-    }
-
-    return yield* retain(bytes).pipe(
-      // The pack store said no — absent, full, or briefly unreachable. The
-      // push still lands the way every push always has; only the shape of
-      // the storage degrades.
-      Effect.catchTag("StorageFailure", () => unpack(Stream.make(bytes))),
-    );
+        buffered.push(next.value);
+        total += next.value.length;
+      }
+    },
+    catch: asCorrupt,
   });
+
+  if (!ended) {
+    // Too large to hold: replay what was buffered, then the live tail.
+    const replay = async function* (): AsyncIterable<Uint8Array> {
+      yield* buffered;
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done === true) return;
+        yield next.value;
+      }
+    };
+    return yield* unpack(Stream.fromAsyncIterable(replay(), asCorrupt));
+  }
+
+  const bytes = concat(buffered);
+  // The object count sits in the header; a pack too small to say so is
+  // `unpack`'s to refuse with its own words.
+  const count = bytes.length >= 12 ? readU32(bytes, 8) : 0;
+  if (bytes.length < 32 || count < atLeast) {
+    return yield* unpack(Stream.make(bytes));
+  }
+
+  return yield* retain(bytes).pipe(
+    // The pack store said no — absent, full, or briefly unreachable. The
+    // push still lands the way every push always has; only the shape of
+    // the storage degrades.
+    Effect.catchTag("StorageFailure", () => unpack(Stream.make(bytes))),
+  );
+});
 
 /**
  * Keep one fully-buffered pack: verify it, index it, register it.
@@ -851,138 +843,138 @@ export const encodeOfsDistance = (distance: number): Uint8Array => {
 /** Below this a delta cannot beat its own header overhead. */
 const MIN_DELTA_TARGET = 64;
 
+const encodePack = Effect.fn("Pack.pack")(function* (
+  oids: ReadonlyArray<Oid>,
+  options?: PackOptions,
+) {
+  const store = yield* ObjectStore;
+  const hash = new Sha1();
+  const emit = (bytes: Uint8Array): Uint8Array => {
+    hash.update(bytes);
+    return bytes;
+  };
+
+  const header = new Uint8Array(12);
+  header.set([0x50, 0x41, 0x43, 0x4b]); // "PACK"
+  header[7] = 2; // version
+  header[8] = (oids.length >>> 24) & 0xff;
+  header[9] = (oids.length >>> 16) & 0xff;
+  header[10] = (oids.length >>> 8) & 0xff;
+  header[11] = oids.length & 0xff;
+
+  // Where the next object starts, which only the writer knows — and
+  // which is exactly what an `.idx` records. Reporting it as the pack is
+  // produced is what lets a repack build the index without a second pass
+  // over bytes it would otherwise have to keep.
+  let offset = header.length;
+
+  const deltify = options?.deltify;
+  const windowSize = deltify?.window ?? 10;
+  const maxSize = deltify?.maxSize ?? 1024 * 1024;
+  const maxDepth = deltify?.maxDepth ?? 50;
+
+  /**
+   * The window: recent objects kept raw with their block index built
+   * once on admission, the offset a delta against them will name, and
+   * the chain depth one would inherit. Bases must already be in the
+   * pack — an ofs-delta points backwards — so candidacy and emission
+   * order agree by construction. Objects too small to ever be a delta
+   * target are also kept out as bases: they would only evict candidates
+   * that can actually win.
+   */
+  interface Candidate {
+    readonly type: ObjectType;
+    readonly data: Uint8Array;
+    readonly index: DeltaIndex;
+    readonly offset: number;
+    readonly depth: number;
+  }
+  const window: Candidate[] = [];
+
+  const spell = async (
+    object: RawObject,
+  ): Promise<{ readonly bytes: Uint8Array; readonly depth: number }> => {
+    if (
+      deltify !== undefined &&
+      object.data.length >= MIN_DELTA_TARGET &&
+      object.data.length <= maxSize
+    ) {
+      let best: { readonly delta: Uint8Array; readonly base: Candidate } | null = null;
+      // Newest first, and each candidate is capped by the best delta
+      // found so far: a later candidate that cannot beat it aborts its
+      // scan early instead of completing a delta only to be discarded.
+      // The half-of-target cap is the acceptance rule — a delta that
+      // wins by less keeps a base resolution on every future read for
+      // very little saved.
+      for (let at = window.length - 1; at >= 0; at--) {
+        const base = window[at]!;
+        if (base.type !== object.type || base.depth >= maxDepth) continue;
+        const delta = createDelta(base.data, object.data, {
+          index: base.index,
+          limit: Math.min(
+            Math.floor(object.data.length / 2),
+            (best?.delta.length ?? Number.MAX_SAFE_INTEGER) - 1,
+          ),
+        });
+        if (delta === null) continue;
+        best = { delta, base };
+      }
+      if (best !== null) {
+        return {
+          bytes: concat([
+            encodeObjectHeader(OFS_DELTA, best.delta.length),
+            encodeOfsDistance(offset - best.base.offset),
+            await deflate(best.delta),
+          ]),
+          depth: best.base.depth + 1,
+        };
+      }
+    }
+    return {
+      bytes: concat([
+        encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
+        await deflate(object.data),
+      ]),
+      depth: 0,
+    };
+  };
+
+  const objects = Stream.fromIterable(oids).pipe(
+    Stream.mapEffect((oid) =>
+      store.read(oid).pipe(
+        Effect.flatMap((object) =>
+          Effect.promise(async () => {
+            const { bytes, depth } = await spell(object);
+            options?.onObject?.({ oid, offset, crc32: crc32(bytes) });
+            if (
+              deltify !== undefined &&
+              object.data.length >= MIN_DELTA_TARGET &&
+              object.data.length <= maxSize
+            ) {
+              window.push({
+                type: object.type,
+                data: object.data,
+                index: indexBase(object.data),
+                offset,
+                depth,
+              });
+              if (window.length > windowSize) window.shift();
+            }
+            offset += bytes.length;
+            return emit(bytes);
+          }),
+        ),
+      ),
+    ),
+  );
+
+  const trailer = Stream.fromEffect(Effect.sync(() => Uint8Array.from(hash.digest())));
+
+  return Stream.fromIterable([emit(header)]).pipe(Stream.concat(objects), Stream.concat(trailer));
+});
+
 export const pack = (
   oids: ReadonlyArray<Oid>,
   options?: PackOptions,
 ): Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure, ObjectStore> =>
-  Stream.unwrap(
-    Effect.gen(function* () {
-      const store = yield* ObjectStore;
-      const hash = new Sha1();
-      const emit = (bytes: Uint8Array): Uint8Array => {
-        hash.update(bytes);
-        return bytes;
-      };
-
-      const header = new Uint8Array(12);
-      header.set([0x50, 0x41, 0x43, 0x4b]); // "PACK"
-      header[7] = 2; // version
-      header[8] = (oids.length >>> 24) & 0xff;
-      header[9] = (oids.length >>> 16) & 0xff;
-      header[10] = (oids.length >>> 8) & 0xff;
-      header[11] = oids.length & 0xff;
-
-      // Where the next object starts, which only the writer knows — and
-      // which is exactly what an `.idx` records. Reporting it as the pack is
-      // produced is what lets a repack build the index without a second pass
-      // over bytes it would otherwise have to keep.
-      let offset = header.length;
-
-      const deltify = options?.deltify;
-      const windowSize = deltify?.window ?? 10;
-      const maxSize = deltify?.maxSize ?? 1024 * 1024;
-      const maxDepth = deltify?.maxDepth ?? 50;
-
-      /**
-       * The window: recent objects kept raw with their block index built
-       * once on admission, the offset a delta against them will name, and
-       * the chain depth one would inherit. Bases must already be in the
-       * pack — an ofs-delta points backwards — so candidacy and emission
-       * order agree by construction. Objects too small to ever be a delta
-       * target are also kept out as bases: they would only evict candidates
-       * that can actually win.
-       */
-      interface Candidate {
-        readonly type: ObjectType;
-        readonly data: Uint8Array;
-        readonly index: DeltaIndex;
-        readonly offset: number;
-        readonly depth: number;
-      }
-      const window: Candidate[] = [];
-
-      const spell = async (
-        object: RawObject,
-      ): Promise<{ readonly bytes: Uint8Array; readonly depth: number }> => {
-        if (
-          deltify !== undefined &&
-          object.data.length >= MIN_DELTA_TARGET &&
-          object.data.length <= maxSize
-        ) {
-          let best: { readonly delta: Uint8Array; readonly base: Candidate } | null = null;
-          // Newest first, and each candidate is capped by the best delta
-          // found so far: a later candidate that cannot beat it aborts its
-          // scan early instead of completing a delta only to be discarded.
-          // The half-of-target cap is the acceptance rule — a delta that
-          // wins by less keeps a base resolution on every future read for
-          // very little saved.
-          for (let at = window.length - 1; at >= 0; at--) {
-            const base = window[at]!;
-            if (base.type !== object.type || base.depth >= maxDepth) continue;
-            const delta = createDelta(base.data, object.data, {
-              index: base.index,
-              limit: Math.min(
-                Math.floor(object.data.length / 2),
-                (best?.delta.length ?? Number.MAX_SAFE_INTEGER) - 1,
-              ),
-            });
-            if (delta === null) continue;
-            best = { delta, base };
-          }
-          if (best !== null) {
-            return {
-              bytes: concat([
-                encodeObjectHeader(OFS_DELTA, best.delta.length),
-                encodeOfsDistance(offset - best.base.offset),
-                await deflate(best.delta),
-              ]),
-              depth: best.base.depth + 1,
-            };
-          }
-        }
-        return {
-          bytes: concat([
-            encodeObjectHeader(TYPE_CODES[object.type], object.data.length),
-            await deflate(object.data),
-          ]),
-          depth: 0,
-        };
-      };
-
-      const objects = Stream.fromIterable(oids).pipe(
-        Stream.mapEffect((oid) =>
-          store.read(oid).pipe(
-            Effect.flatMap((object) =>
-              Effect.promise(async () => {
-                const { bytes, depth } = await spell(object);
-                options?.onObject?.({ oid, offset, crc32: crc32(bytes) });
-                if (
-                  deltify !== undefined &&
-                  object.data.length >= MIN_DELTA_TARGET &&
-                  object.data.length <= maxSize
-                ) {
-                  window.push({
-                    type: object.type,
-                    data: object.data,
-                    index: indexBase(object.data),
-                    offset,
-                    depth,
-                  });
-                  if (window.length > windowSize) window.shift();
-                }
-                offset += bytes.length;
-                return emit(bytes);
-              }),
-            ),
-          ),
-        ),
-      );
-
-      const trailer = Stream.fromEffect(Effect.sync(() => Uint8Array.from(hash.digest())));
-
-      return Stream.fromIterable([emit(header)]).pipe(
-        Stream.concat(objects),
-        Stream.concat(trailer),
-      );
-    }),
-  );
+  Stream.unwrap(encodePack(oids, options));

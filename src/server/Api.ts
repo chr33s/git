@@ -141,8 +141,9 @@ const SignatureWire = Schema.Struct({
   at: Schema.optional(Schema.String),
   offset: Schema.optional(Schema.Finite),
 });
+type SignatureWire = (typeof SignatureWire)["Type"];
 
-const signatureFrom = (author: (typeof SignatureWire)["Type"] | undefined): Signature => ({
+const signatureFrom = (author: SignatureWire | undefined): Signature => ({
   name: author?.name ?? "Anonymous",
   email: author?.email ?? "anonymous@example.com",
   at: author?.at === undefined ? new Date() : new Date(author.at),
@@ -417,7 +418,7 @@ const gateOne = Effect.fn("Api.gateOne")(function* (update: RefUpdate) {
   return judged.updates.at(0) ?? update;
 });
 
-const changesOf = (files: ReadonlyArray<(typeof FileWrite)["Type"]>): ReadonlyArray<FileChange> =>
+const changesOf = (files: ReadonlyArray<FileWrite>): ReadonlyArray<FileChange> =>
   files.map((file) => {
     const content = file.content === null ? null : decodeContent(file.content, file.encoding);
     return file.mode === undefined
@@ -429,7 +430,7 @@ const changesOf = (files: ReadonlyArray<(typeof FileWrite)["Type"]>): ReadonlyAr
 const writeFilesOf = (
   repository: Repository["Service"],
   base: Oid | undefined,
-  files: ReadonlyArray<(typeof FileWrite)["Type"]>,
+  files: ReadonlyArray<FileWrite>,
 ) => {
   const changes = changesOf(files);
   return base === undefined
@@ -524,7 +525,7 @@ const treeFor = (
   branch: string,
   payload: {
     readonly tree?: Oid | undefined;
-    readonly files?: ReadonlyArray<(typeof FileWrite)["Type"]> | undefined;
+    readonly files?: ReadonlyArray<FileWrite> | undefined;
   },
 ) =>
   Effect.gen(function* () {

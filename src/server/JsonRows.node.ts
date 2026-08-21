@@ -15,20 +15,24 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { Result, Schema } from "effect";
+
+const Rows = Schema.fromJsonString(Schema.Array(Schema.Unknown));
+
 /** Rows as they are stored, revived into the shape the caller works in. */
 export const readRows = <Row, Stored>(
   file: string,
   revive: (stored: Stored) => Row,
 ): ReadonlyArray<Row> => {
   if (!fs.existsSync(file)) return [];
-  const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+  const parsed = Schema.decodeResult(Rows)(fs.readFileSync(file, "utf8"));
   // A file somebody edited into a shape this does not understand is an empty
   // list rather than a crash on every request that touches it.
-  if (!Array.isArray(parsed)) return [];
+  if (Result.isFailure(parsed)) return [];
   // SAFETY: this file is written only by `writeRows`, which serialises `Stored`
   // rows; a hand-edited file that lies about them surfaces at `revive`, not as
   // corruption here.
-  return (parsed as ReadonlyArray<Stored>).map(revive);
+  return parsed.success.map((row) => revive(row as Stored));
 };
 
 /** Temp-and-rename, so a reader never sees a half-written list. */

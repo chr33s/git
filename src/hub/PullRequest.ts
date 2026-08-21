@@ -13,7 +13,7 @@
  * the same verdict. Refusing early here as well would be a second copy of the
  * rule, and the two would eventually disagree.
  */
-import { Effect } from "effect";
+import { DateTime, Effect } from "effect";
 
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
@@ -42,7 +42,7 @@ const context = Effect.fn("hub.PullRequest.context")(function* (repo: RepoId, pr
     repo,
     pr,
     id: Event.newId(),
-    issuedAt: new Date().toISOString(),
+    issuedAt: DateTime.formatIso(yield* DateTime.now),
     trustHead,
   } as const;
 });

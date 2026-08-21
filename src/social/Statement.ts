@@ -122,7 +122,7 @@ export type Follow = (typeof Follow)["Type"];
 export type Label = (typeof Label)["Type"];
 export type Revoke = (typeof Revoke)["Type"];
 export type Checkpoint = (typeof Checkpoint)["Type"];
-export type SocialStatement = (typeof SocialStatement)["Type"];
+export type SocialStatement = typeof SocialStatement.Type;
 
 const decodeStatement = Schema.decodeUnknownEffect(SocialStatement);
 

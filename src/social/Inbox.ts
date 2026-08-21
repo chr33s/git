@@ -1,5 +1,5 @@
 /** A host-local quarantine for contributions from callers without membership. */
-import { Effect, Schema } from "effect";
+import { DateTime, Effect, Schema } from "effect";
 
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
@@ -148,7 +148,7 @@ export const submit = Effect.fn("social.Inbox.submit")(function* (input: {
     base,
     title: input.title,
     description: input.description ?? "",
-    submittedAt: new Date().toISOString(),
+    submittedAt: DateTime.formatIso(yield* DateTime.now),
   };
   const commit = yield* Record.write({
     name: RECORD,

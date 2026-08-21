@@ -533,7 +533,11 @@ const tag = Command.make(
           const input = { name, target, force };
           const created = yield* message === ""
             ? repository.tag(input)
-            : repository.tag({ ...input, message: `${message}\n`, tagger: cliSignature() });
+            : repository.tag({
+                ...input,
+                message: `${message}\n`,
+                tagger: yield* cliSignature(),
+              });
           return yield* Console.log(`${created.oid}\t${created.ref}`);
         }
 
@@ -673,7 +677,7 @@ const merge = Command.make(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const input = { ours, theirs, author: cliSignature(), strategy };
+        const input = { ours, theirs, author: yield* cliSignature(), strategy };
         const outcome = yield* into === ""
           ? repository.merge(input)
           : repository.merge({ ...input, into });

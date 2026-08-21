@@ -177,7 +177,7 @@ export const commitCommand = Command.make(
     withWork(
       work,
       Effect.gen(function* () {
-        const made = yield* Checkout.commit({ message, author: cliSignature() });
+        const made = yield* Checkout.commit({ message, author: yield* cliSignature() });
         yield* Console.log(`${made.oid} ${made.files} file(s)`);
       }),
     ),

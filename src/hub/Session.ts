@@ -19,7 +19,7 @@
  * dumps are the highest secret-leak content class in the system and belong
  * nowhere that replicates append-only (docs/agents.md §6).
  */
-import { Effect, Schema } from "effect";
+import { DateTime, Effect, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import { Repository } from "../git/Repository.ts";
@@ -193,7 +193,7 @@ export const SessionPayload = Schema.Union([
   DecisionResolved,
   RecordRedacted,
 ]);
-export type SessionPayload = (typeof SessionPayload)["Type"];
+export type SessionPayload = typeof SessionPayload.Type;
 
 const decodePayload = Schema.decodeUnknownEffect(SessionPayload);
 const encoder = new TextEncoder();
@@ -252,7 +252,7 @@ export const context = Effect.fn("hub.Session.context")(function* (repo: string,
     repo,
     session,
     id: newId(),
-    issuedAt: new Date().toISOString(),
+    issuedAt: DateTime.formatIso(yield* DateTime.now),
     trustHead,
   } as const;
 });

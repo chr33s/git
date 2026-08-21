@@ -116,24 +116,26 @@ const symrefHead = (capabilities: ReadonlySet<string>): string | null => {
 const authorization = (token: string | undefined): Record<string, string> =>
   token === undefined ? {} : { authorization: `Bearer ${token}` };
 
-const advertisement = (
-  url: string,
-  options?: { readonly token?: string | undefined; readonly authorize?: Authorize | undefined },
-): Effect.Effect<Advertisement, Invalid> =>
-  Effect.tryPromise({
-    try: async () => {
-      const target = `${url}/info/refs?service=git-upload-pack`;
-      const response = await fetchAuthorized(
-        target,
-        { headers: authorization(options?.token) },
-        { operation: operationOf("GET", target), commands: [] },
-        options?.authorize,
-      );
-      if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
-      return advertisedRefs(response.body);
-    },
-    catch: (cause) => unreachable(String(cause)),
-  });
+const advertisement = Effect.fn("Fetch.advertisement")(
+  (
+    url: string,
+    options?: { readonly token?: string | undefined; readonly authorize?: Authorize | undefined },
+  ) =>
+    Effect.tryPromise({
+      try: async () => {
+        const target = `${url}/info/refs?service=git-upload-pack`;
+        const response = await fetchAuthorized(
+          target,
+          { headers: authorization(options?.token) },
+          { operation: operationOf("GET", target), commands: [] },
+          options?.authorize,
+        );
+        if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
+        return advertisedRefs(response.body);
+      },
+      catch: (cause) => unreachable(String(cause)),
+    }),
+);
 
 /**
  * Protocol v2's `ls-refs`, for the refs a v0 advertisement does not carry.
@@ -146,74 +148,77 @@ const advertisement = (
  * Only reached when a refspec names one of those namespaces, so an ordinary
  * clone still makes exactly the requests it always did.
  */
-const lsRefsV2 = (
-  url: string,
-  prefixes: ReadonlyArray<string>,
-  token: string | undefined,
-  authorize?: Authorize,
-): Effect.Effect<ReadonlyArray<RemoteRef>, Invalid> =>
-  Effect.tryPromise({
-    try: async () => {
-      const lines = [
-        pktLine("command=ls-refs\n"),
-        "0001",
-        ...prefixes.map((prefix) => pktLine(`ref-prefix ${prefix}\n`)),
-        "0000",
-      ].join("");
+const lsRefsV2 = Effect.fn("Fetch.lsRefsV2")(
+  (
+    url: string,
+    prefixes: ReadonlyArray<string>,
+    token: string | undefined,
+    authorize?: Authorize,
+  ) =>
+    Effect.tryPromise({
+      try: async () => {
+        const lines = [
+          pktLine("command=ls-refs\n"),
+          "0001",
+          ...prefixes.map((prefix) => pktLine(`ref-prefix ${prefix}\n`)),
+          "0000",
+        ].join("");
 
-      const response = await fetchAuthorized(
-        `${url}/git-upload-pack`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/x-git-upload-pack-request",
-            // The version travels in a header, not the body: the server has to
-            // know which conversation this is before it reads a pkt-line.
-            "git-protocol": "version=2",
-            ...authorization(token),
+        const response = await fetchAuthorized(
+          `${url}/git-upload-pack`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-git-upload-pack-request",
+              // The version travels in a header, not the body: the server has to
+              // know which conversation this is before it reads a pkt-line.
+              "git-protocol": "version=2",
+              ...authorization(token),
+            },
+            body: lines,
           },
-          body: lines,
-        },
-        { operation: "git-upload-pack", commands: [] },
-        authorize,
-      );
-      // A server with no v2 to offer answers 404 or 501, and has no hub state
-      // either. Anything else is a failure the caller has to see, or a
-      // replication run reports success having fetched nothing, revocations
-      // included — and this is only ever called when the caller *needs* the
-      // hidden namespaces, which no other request can reach.
-      //
-      // 400 is not on that list, deliberately. It is what this project's own
-      // upload-pack answers when the `Git-Protocol` header did not arrive —
-      // a proxy that strips unknown headers is the ordinary cause — so reading
-      // it as "no v2 here" turned the one misconfiguration that breaks hub
-      // replication into a silent success.
-      if (response.status === 404 || response.status === 501) return [];
-      if (!response.ok) throw new Error(`ls-refs returned ${response.status}`);
-      if (response.body === null) return [];
+          { operation: "git-upload-pack", commands: [] },
+          authorize,
+        );
+        // A server with no v2 to offer answers 404 or 501, and has no hub state
+        // either. Anything else is a failure the caller has to see, or a
+        // replication run reports success having fetched nothing, revocations
+        // included — and this is only ever called when the caller *needs* the
+        // hidden namespaces, which no other request can reach.
+        //
+        // 400 is not on that list, deliberately. It is what this project's own
+        // upload-pack answers when the `Git-Protocol` header did not arrive —
+        // a proxy that strips unknown headers is the ordinary cause — so reading
+        // it as "no v2 here" turned the one misconfiguration that breaks hub
+        // replication into a silent success.
+        if (response.status === 404 || response.status === 501) return [];
+        if (!response.ok) throw new Error(`ls-refs returned ${response.status}`);
+        if (response.body === null) return [];
 
-      const refs: RemoteRef[] = [];
-      const reader = new PktReader(chunks(response.body));
-      for (;;) {
-        const item = await reader.next();
-        if (item === "eof" || item === "flush" || item === "end") break;
-        if (item === "delim") continue;
-        // `<oid> <name>` and, for HEAD, a trailing `symref-target:` this
-        // caller has no use for.
-        const [oid = "", name = ""] = decoder.decode(item).replace(/\n$/, "").split(" ");
-        if (isOid(oid) && name.length > 0) refs.push({ oid, name });
-      }
-      return refs;
-    },
-    catch: (cause) => unreachable(String(cause)),
-  });
+        const refs: RemoteRef[] = [];
+        const reader = new PktReader(chunks(response.body));
+        for (;;) {
+          const item = await reader.next();
+          if (item === "eof" || item === "flush" || item === "end") break;
+          if (item === "delim") continue;
+          // `<oid> <name>` and, for HEAD, a trailing `symref-target:` this
+          // caller has no use for.
+          const [oid = "", name = ""] = decoder.decode(item).replace(/\n$/, "").split(" ");
+          if (isOid(oid) && name.length > 0) refs.push({ oid, name });
+        }
+        return refs;
+      },
+      catch: (cause) => unreachable(String(cause)),
+    }),
+);
 
 /** The refs a remote advertises for fetching, `HEAD` included. */
-export const lsRemote = (
+export const lsRemote = Effect.fn("Fetch.lsRemote")(function* (
   url: string,
   options?: { readonly token?: string | undefined },
-): Effect.Effect<ReadonlyArray<RemoteRef>, Invalid> =>
-  advertisement(url, options).pipe(Effect.map((advertised) => advertised.refs));
+) {
+  return (yield* advertisement(url, options)).refs;
+});
 
 export interface FetchResult {
   readonly refs: ReadonlyArray<RefUpdate>;
@@ -511,44 +516,46 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
  * arrive in the prelude and are consumed with the acknowledgments, since the
  * callers keep no shallow list to record them in.
  */
-export const requestPack = (input: {
-  readonly url: string;
-  readonly token?: string | undefined;
-  readonly wants: ReadonlyArray<Oid>;
-  readonly haves: ReadonlyArray<Oid>;
-  readonly depth?: number | undefined;
-  readonly capabilities?: ReadonlyArray<string> | undefined;
-  readonly authorize?: Authorize | undefined;
-}): Effect.Effect<AsyncIterable<Uint8Array>, Invalid> =>
-  Effect.tryPromise({
-    try: async () => {
-      const body = await uploadPack(
-        input.url,
-        input.token,
-        // The one place `undefined` becomes "request nothing": callers like
-        // `server/Sync.ts` fetch in a single done round and never negotiate
-        // capabilities at all.
-        negotiation({
-          wants: input.wants,
-          haves: input.haves,
-          done: true,
-          depth: input.depth,
-          capabilities: input.capabilities ?? [],
-        }),
-        input.authorize,
-      );
-      const { rest } = await prelude(body);
-      return rest;
-    },
-    catch: (cause) => unreachable(String(cause)),
-  });
+export const requestPack = Effect.fn("Fetch.requestPack")(
+  (input: {
+    readonly url: string;
+    readonly token?: string | undefined;
+    readonly wants: ReadonlyArray<Oid>;
+    readonly haves: ReadonlyArray<Oid>;
+    readonly depth?: number | undefined;
+    readonly capabilities?: ReadonlyArray<string> | undefined;
+    readonly authorize?: Authorize | undefined;
+  }) =>
+    Effect.tryPromise({
+      try: async () => {
+        const body = await uploadPack(
+          input.url,
+          input.token,
+          // The one place `undefined` becomes "request nothing": callers like
+          // `server/Sync.ts` fetch in a single done round and never negotiate
+          // capabilities at all.
+          negotiation({
+            wants: input.wants,
+            haves: input.haves,
+            done: true,
+            depth: input.depth,
+            capabilities: input.capabilities ?? [],
+          }),
+          input.authorize,
+        );
+        const { rest } = await prelude(body);
+        return rest;
+      },
+      catch: (cause) => unreachable(String(cause)),
+    }),
+);
 
 /**
  * Fetch everything reachable from the remote's branches (or one `branch`)
  * into the given stores and set the refs. A missing branch fails with
  * `Invalid` on the `branch` field; an unreachable remote on `remote`.
  */
-export const fetchRepository = (options: {
+export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (options: {
   readonly url: string;
   readonly branch?: string | undefined;
   readonly token?: string | undefined;
@@ -564,136 +571,135 @@ export const fetchRepository = (options: {
   readonly refspecs?: ReadonlyArray<Refspec.Refspec> | undefined;
   /** How to answer a `Hub-SSH-v1` challenge; absent, a 401 stays a 401. */
   readonly authorize?: Authorize | undefined;
-}): Effect.Effect<FetchResult, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> =>
-  Effect.gen(function* () {
-    const { authorize, branch, stores, token, url } = options;
-    const advertised = yield* advertisement(url, { token, authorize });
-    const capabilities = requestedCapabilities(advertised.capabilities);
+}): Effect.fn.Return<FetchResult, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> {
+  const { authorize, branch, stores, token, url } = options;
+  const advertised = yield* advertisement(url, { token, authorize });
+  const capabilities = requestedCapabilities(advertised.capabilities);
 
-    const specs =
-      options.refspecs ??
-      (branch === undefined
-        ? Refspec.DEFAULT_FETCH
-        : [
-            {
-              force: false,
-              source: `refs/heads/${branch}`,
-              destination: `refs/heads/${branch}`,
-            },
-          ]);
+  const specs =
+    options.refspecs ??
+    (branch === undefined
+      ? Refspec.DEFAULT_FETCH
+      : [
+          {
+            force: false,
+            source: `refs/heads/${branch}`,
+            destination: `refs/heads/${branch}`,
+          },
+        ]);
 
-    const head = advertised.refs.find((ref) => ref.name === "HEAD")?.oid;
+  const head = advertised.refs.find((ref) => ref.name === "HEAD")?.oid;
 
-    // Refspecs that reach into a namespace the v0 advertisement withholds
-    // need a second, explicit ask. Anything already advertised wins, so a ref
-    // that appears in both is taken once.
-    const hidden = [...new Set(specs.flatMap(Refspec.probes))];
-    // Not swallowed: `lsRefsV2` already answers with an empty list for a
-    // remote that has no v2 to offer, so a *failure* here is a real one and
-    // reporting success without it would be reporting a replication that did
-    // not happen.
-    const extra = hidden.length === 0 ? [] : yield* lsRefsV2(url, hidden, token, authorize);
+  // Refspecs that reach into a namespace the v0 advertisement withholds
+  // need a second, explicit ask. Anything already advertised wins, so a ref
+  // that appears in both is taken once.
+  const hidden = [...new Set(specs.flatMap(Refspec.probes))];
+  // Not swallowed: `lsRefsV2` already answers with an empty list for a
+  // remote that has no v2 to offer, so a *failure* here is a real one and
+  // reporting success without it would be reporting a replication that did
+  // not happen.
+  const extra = hidden.length === 0 ? [] : yield* lsRefsV2(url, hidden, token, authorize);
 
-    const seen = new Set(advertised.refs.map((ref) => ref.name));
-    const available = [...advertised.refs, ...extra.filter((ref) => !seen.has(ref.name))];
+  const seen = new Set(advertised.refs.map((ref) => ref.name));
+  const available = [...advertised.refs, ...extra.filter((ref) => !seen.has(ref.name))];
 
-    const picked: Array<{
-      readonly name: string;
-      readonly oid: Oid;
-      readonly destination: string;
-      readonly force: boolean;
-    }> = [];
-    for (const ref of available) {
-      // `refs/tags/v1^{}` is what an annotated tag *points at*, advertised
-      // beside the tag itself. It is a value, not a ref: `^` is not a legal
-      // ref name, so writing it is a name no store will accept and no client
-      // asked for.
-      if (ref.name === "HEAD" || ref.name.endsWith("^{}")) continue;
-      const resolved = Refspec.resolve(specs, ref.name);
-      if (resolved === null) continue;
-      // One update per *destination*, not per source. Two refspecs can name
-      // the same local ref from different remote ones, and both updates then
-      // go into a single `apply` batch judged against the value the ref held
-      // before either — so the store takes both, the second silently wins,
-      // and nothing is reported as rejected. Whichever the caller listed
-      // first is the one that lands, which is the rule a refspec list already
-      // implies.
-      if (picked.some((held) => held.destination === resolved.destination)) continue;
-      picked.push({
-        name: ref.name,
-        oid: ref.oid,
-        destination: resolved.destination,
-        force: resolved.spec.force,
-      });
-    }
-    if (picked.length === 0) {
-      if (branch !== undefined) {
-        return yield* new Invalid({ field: "branch", reason: `remote has no branch '${branch}'` });
-      }
-      return { refs: [], rejected: [], defaultBranch: undefined };
-    }
-
-    const wants = [...new Set(picked.map((ref) => ref.oid))];
-
-    // Empty target, empty offer: the clone case sends `done` straight away
-    // rather than a round that could only say "I have nothing".
-    const haves = yield* localHaves(stores);
-    const offered = yield* negotiate({ url, token, wants, haves, capabilities, authorize });
-
-    const packBody = yield* requestPack({
-      url,
-      token,
-      wants,
-      haves: haves.slice(0, offered),
-      capabilities,
-      authorize,
+  const picked: Array<{
+    readonly name: string;
+    readonly oid: Oid;
+    readonly destination: string;
+    readonly force: boolean;
+  }> = [];
+  for (const ref of available) {
+    // `refs/tags/v1^{}` is what an annotated tag *points at*, advertised
+    // beside the tag itself. It is a value, not a ref: `^` is not a legal
+    // ref name, so writing it is a name no store will accept and no client
+    // asked for.
+    if (ref.name === "HEAD" || ref.name.endsWith("^{}")) continue;
+    const resolved = Refspec.resolve(specs, ref.name);
+    if (resolved === null) continue;
+    // One update per *destination*, not per source. Two refspecs can name
+    // the same local ref from different remote ones, and both updates then
+    // go into a single `apply` batch judged against the value the ref held
+    // before either — so the store takes both, the second silently wins,
+    // and nothing is reported as rejected. Whichever the caller listed
+    // first is the one that lands, which is the rule a refspec list already
+    // implies.
+    if (picked.some((held) => held.destination === resolved.destination)) continue;
+    picked.push({
+      name: ref.name,
+      oid: ref.oid,
+      destination: resolved.destination,
+      force: resolved.spec.force,
     });
-
-    yield* Pack.unpack(
-      Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),
-    ).pipe(Effect.provideService(ObjectStoreTag, stores.objects));
-
-    // A branch this repository already has is only moved when the move keeps
-    // its commits: `git fetch` refuses a non-fast-forward without `--force`,
-    // and overwriting one here would leave the local commits unreachable for
-    // the next `gc` to delete.
-    const repository = yield* Effect.provide(Repository, localRepository(stores));
-    const updates: RefUpdate[] = [];
-    const rejected: Array<{ name: string; oid: Oid }> = [];
-    for (const ref of picked) {
-      const current = yield* stores.refs.read(ref.destination);
-      if (current !== null && current !== ref.oid) {
-        // Three rules, because there are three kinds of ref here. A tag is a
-        // name that does not move: re-pointing one rewrites what this
-        // repository has already published under it. Hub and trust refs only
-        // grow, so a move that drops history is refused even when the refspec
-        // said `+` — append-only is a property of the namespace, not a
-        // preference of whoever wrote the config. A branch moves when the move
-        // keeps its commits, or whenever the refspec forces it.
-        const appendOnly = Refspec.isAppendOnly(ref.destination);
-        const forward = ref.destination.startsWith("refs/tags/")
-          ? false
-          : ref.force && !appendOnly
-            ? true
-            : yield* repository
-                .isAncestor(current, ref.oid)
-                .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)));
-        if (!forward) {
-          rejected.push({ name: ref.destination, oid: ref.oid });
-          continue;
-        }
-      }
-      updates.push({ name: ref.destination, value: ref.oid, reason: "fetch" });
+  }
+  if (picked.length === 0) {
+    if (branch !== undefined) {
+      return yield* new Invalid({ field: "branch", reason: `remote has no branch '${branch}'` });
     }
-    yield* stores.refs.apply(updates);
+    return { refs: [], rejected: [], defaultBranch: undefined };
+  }
 
-    // What the remote said, and only then what its oids suggest: a server too
-    // old to advertise the symref, or one this client reached through a proxy
-    // that dropped the capability line, still gets an answer.
-    const named = symrefHead(advertised.capabilities);
-    const stated = named !== null && named.startsWith("refs/heads/") ? named.slice(11) : null;
-    const guessed = picked
-      .find((ref) => ref.name.startsWith("refs/heads/") && ref.oid === head)
-      ?.name.slice("refs/heads/".length);
-    return { refs: updates, rejected, defaultBranch: branch ?? stated ?? guessed };
+  const wants = [...new Set(picked.map((ref) => ref.oid))];
+
+  // Empty target, empty offer: the clone case sends `done` straight away
+  // rather than a round that could only say "I have nothing".
+  const haves = yield* localHaves(stores);
+  const offered = yield* negotiate({ url, token, wants, haves, capabilities, authorize });
+
+  const packBody = yield* requestPack({
+    url,
+    token,
+    wants,
+    haves: haves.slice(0, offered),
+    capabilities,
+    authorize,
   });
+
+  yield* Pack.unpack(
+    Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),
+  ).pipe(Effect.provideService(ObjectStoreTag, stores.objects));
+
+  // A branch this repository already has is only moved when the move keeps
+  // its commits: `git fetch` refuses a non-fast-forward without `--force`,
+  // and overwriting one here would leave the local commits unreachable for
+  // the next `gc` to delete.
+  const repository = yield* Effect.provide(Repository, localRepository(stores));
+  const updates: RefUpdate[] = [];
+  const rejected: Array<{ name: string; oid: Oid }> = [];
+  for (const ref of picked) {
+    const current = yield* stores.refs.read(ref.destination);
+    if (current !== null && current !== ref.oid) {
+      // Three rules, because there are three kinds of ref here. A tag is a
+      // name that does not move: re-pointing one rewrites what this
+      // repository has already published under it. Hub and trust refs only
+      // grow, so a move that drops history is refused even when the refspec
+      // said `+` — append-only is a property of the namespace, not a
+      // preference of whoever wrote the config. A branch moves when the move
+      // keeps its commits, or whenever the refspec forces it.
+      const appendOnly = Refspec.isAppendOnly(ref.destination);
+      const forward = ref.destination.startsWith("refs/tags/")
+        ? false
+        : ref.force && !appendOnly
+          ? true
+          : yield* repository
+              .isAncestor(current, ref.oid)
+              .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)));
+      if (!forward) {
+        rejected.push({ name: ref.destination, oid: ref.oid });
+        continue;
+      }
+    }
+    updates.push({ name: ref.destination, value: ref.oid, reason: "fetch" });
+  }
+  yield* stores.refs.apply(updates);
+
+  // What the remote said, and only then what its oids suggest: a server too
+  // old to advertise the symref, or one this client reached through a proxy
+  // that dropped the capability line, still gets an answer.
+  const named = symrefHead(advertised.capabilities);
+  const stated = named !== null && named.startsWith("refs/heads/") ? named.slice(11) : null;
+  const guessed = picked
+    .find((ref) => ref.name.startsWith("refs/heads/") && ref.oid === head)
+    ?.name.slice("refs/heads/".length);
+  return { refs: updates, rejected, defaultBranch: branch ?? stated ?? guessed };
+});

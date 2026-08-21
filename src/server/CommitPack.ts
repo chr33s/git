@@ -32,7 +32,7 @@
  * written before a rejection stay in the object store, unreachable, for `gc` —
  * git's own push does the same, and the alternative is buffering the commit.
  */
-import { Data, Effect, Predicate, Stream } from "effect";
+import { Effect, Predicate, Schema, Stream } from "effect";
 
 import type { Invalid, ObjectNotFound, RefConflict, StorageFailure } from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
@@ -51,10 +51,10 @@ const MAX_LINE = 8 * 1024 * 1024;
 const MAX_FILE = 64 * 1024 * 1024;
 
 /** The only failure this module raises, carrying the status it becomes. */
-class Rejected extends Data.TaggedError("Rejected")<{
-  readonly status: number;
-  readonly message: string;
-}> {}
+class Rejected extends Schema.TaggedError<Rejected>()("Rejected", {
+  status: Schema.Int,
+  message: Schema.String,
+}) {}
 
 /** Every body this endpoint answers: the commit it made, or why it would not. */
 type Reply =

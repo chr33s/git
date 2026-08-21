@@ -40,37 +40,41 @@ export interface HubFixture {
  * do, and a three-key threshold would only add signatures to every setup
  * without changing a single assertion.
  */
+const enableHubEffect = Effect.fn("testing.Hub.enableHub")(function* (
+  capabilities: ReadonlyArray<string>,
+) {
+  const root = yield* generate("root@example.com");
+  const member = yield* generate("member@example.com");
+
+  const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+  yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+
+  yield* Log.issue(
+    yield* Certificate.grant({
+      repo: genesis.repoId,
+      publicKey: formatPublicKey(member.publicKey),
+      capabilities,
+      id: Log.newId(),
+    }),
+    [root],
+  );
+
+  const credential = yield* mintDelegation({
+    key: member,
+    repo: genesis.repoId,
+    capabilities,
+    ttlSeconds: 300,
+  });
+
+  return { repoId: genesis.repoId, root, member, credential };
+});
+
 export const enableHub = (
   directory: string,
   capabilities: ReadonlyArray<string>,
 ): Promise<HubFixture> =>
   Effect.runPromise(
-    Effect.gen(function* () {
-      const root = yield* generate("root@example.com");
-      const member = yield* generate("member@example.com");
-
-      const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
-      yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
-
-      yield* Log.issue(
-        yield* Certificate.grant({
-          repo: genesis.repoId,
-          publicKey: formatPublicKey(member.publicKey),
-          capabilities,
-          id: Log.newId(),
-        }),
-        [root],
-      );
-
-      const credential = yield* mintDelegation({
-        key: member,
-        repo: genesis.repoId,
-        capabilities,
-        ttlSeconds: 300,
-      });
-
-      return { repoId: genesis.repoId, root, member, credential };
-    }).pipe(
+    enableHubEffect(capabilities).pipe(
       Effect.provide(
         GitRepository.layer.pipe(
           Layer.provide(GitRepository.hooksNoop),
@@ -94,6 +98,33 @@ export const enableHubUnder = (
  * second time is refused, which is the point of it — so a suite that needs a
  * reader *and* a writer grants the second one here.
  */
+const grantMemberEffect = Effect.fn("testing.Hub.grantMember")(function* (
+  root: PrivateKey,
+  repoId: RepoId,
+  capabilities: ReadonlyArray<string>,
+) {
+  const member = yield* generate("member@example.com");
+
+  yield* Log.issue(
+    yield* Certificate.grant({
+      repo: repoId,
+      publicKey: formatPublicKey(member.publicKey),
+      capabilities,
+      id: Log.newId(),
+    }),
+    [root],
+  );
+
+  const credential = yield* mintDelegation({
+    key: member,
+    repo: repoId,
+    capabilities,
+    ttlSeconds: 300,
+  });
+
+  return { repoId, root, member, credential };
+});
+
 export const grantMember = (
   directory: string,
   root: PrivateKey,
@@ -101,28 +132,7 @@ export const grantMember = (
   capabilities: ReadonlyArray<string>,
 ): Promise<HubFixture> =>
   Effect.runPromise(
-    Effect.gen(function* () {
-      const member = yield* generate("member@example.com");
-
-      yield* Log.issue(
-        yield* Certificate.grant({
-          repo: repoId,
-          publicKey: formatPublicKey(member.publicKey),
-          capabilities,
-          id: Log.newId(),
-        }),
-        [root],
-      );
-
-      const credential = yield* mintDelegation({
-        key: member,
-        repo: repoId,
-        capabilities,
-        ttlSeconds: 300,
-      });
-
-      return { repoId, root, member, credential };
-    }).pipe(
+    grantMemberEffect(root, repoId, capabilities).pipe(
       Effect.provide(
         GitRepository.layer.pipe(
           Layer.provide(GitRepository.hooksNoop),
@@ -207,17 +217,19 @@ export const writeKeyPair = async (location: string, comment: string): Promise<P
  * stands in for is a *remote* serving such a document — the thing a client
  * meeting a repository for the first time has to refuse.
  */
+const shortOfQuorumEffect = Effect.fn("testing.Hub.shortOfQuorum")(function* () {
+  const first = yield* generate("first@example.com");
+  const second = yield* generate("second@example.com");
+  const genesis = yield* create(
+    [formatPublicKey(first.publicKey), formatPublicKey(second.publicKey)],
+    2,
+  );
+  yield* writeGenesis(genesis, [yield* signGenesis(genesis, first)]);
+});
+
 export const shortOfQuorum = (directory: string): Promise<void> =>
   Effect.runPromise(
-    Effect.gen(function* () {
-      const first = yield* generate("first@example.com");
-      const second = yield* generate("second@example.com");
-      const genesis = yield* create(
-        [formatPublicKey(first.publicKey), formatPublicKey(second.publicKey)],
-        2,
-      );
-      yield* writeGenesis(genesis, [yield* signGenesis(genesis, first)]);
-    }).pipe(
+    shortOfQuorumEffect().pipe(
       Effect.asVoid,
       Effect.provide(
         GitRepository.layer.pipe(

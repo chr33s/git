@@ -30,7 +30,7 @@
  * record claiming to be a tombstone reads here as one unreadable record rather
  * than as a removal that never happens.
  */
-import { Effect, Schema } from "effect";
+import { DateTime, Effect, Schema } from "effect";
 
 import {
   type Fingerprint,
@@ -206,7 +206,7 @@ export const QueuePayload = Schema.Union([
   QueueReset,
   QueueClosed,
 ]);
-export type QueuePayload = (typeof QueuePayload)["Type"];
+export type QueuePayload = typeof QueuePayload.Type;
 
 const decodePayload = Schema.decodeUnknownEffect(QueuePayload);
 const encoder = new TextEncoder();
@@ -246,7 +246,7 @@ export const context = Effect.fn("hub.Queue.context")(function* (repo: string, q
     repo,
     queue,
     id: newId(),
-    issuedAt: new Date().toISOString(),
+    issuedAt: DateTime.formatIso(yield* DateTime.now),
     trustHead,
   } as const;
 });

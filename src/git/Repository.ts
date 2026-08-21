@@ -152,18 +152,17 @@ export interface FetchPlan {
  * refs — but what an oid *means* as a tree is one question, and both edges
  * were answering it with their own copy.
  */
-export const treeAt = (
+export const treeAt = Effect.fn("Repository.treeAt")(function* (
   repository: Repository["Service"],
   oid: Oid,
-): Effect.Effect<Oid, ObjectNotFound | StorageFailure> =>
-  Effect.gen(function* () {
-    const object = yield* repository.readObject(oid);
-    if (object.type === "tree") return oid;
-    if (object.type === "tag") {
-      return (yield* repository.readCommit((yield* repository.readTag(oid)).object)).tree;
-    }
-    return (yield* repository.readCommit(oid)).tree;
-  });
+) {
+  const object = yield* repository.readObject(oid);
+  if (object.type === "tree") return oid;
+  if (object.type === "tag") {
+    return (yield* repository.readCommit((yield* repository.readTag(oid)).object)).tree;
+  }
+  return (yield* repository.readCommit(oid)).tree;
+});
 
 export class Repository extends Context.Service<
   Repository,
@@ -622,37 +621,38 @@ export const layer = Layer.effect(
     const storeTree = (entries: ReadonlyArray<TreeEntry>) =>
       objects.write({ type: "tree", data: encodeTree(entries) });
 
-    const writeTree = (entries: ReadonlyArray<TreeEntry>) =>
-      Effect.gen(function* () {
-        // `writeFiles` validates the paths it is given; this is the other way
-        // in — the JSON tree endpoint hands entries straight here — and a
-        // tree naming `.git`, `..` or two entries with one name is one git
-        // will fetch and then refuse to check out.
-        const seen = new Set<string>();
-        for (const entry of entries) {
-          if (entry.name === "" || entry.name.includes("/")) {
-            return yield* new Invalid({ field: "name", reason: `bad tree entry '${entry.name}'` });
-          }
-          if (entry.name === "." || entry.name === ".." || entry.name.toLowerCase() === ".git") {
-            return yield* new Invalid({ field: "name", reason: `'${entry.name}' is not content` });
-          }
-          // Judged on the bytes that will be written, not on the decode: two
-          // names whose bytes differ are two entries, even when both decode
-          // to the same U+FFFD spelling.
-          const key = entry.raw === undefined ? entry.name : String.fromCharCode(...entry.raw);
-          if (seen.has(key)) {
-            return yield* new Invalid({ field: "name", reason: `duplicate entry '${entry.name}'` });
-          }
-          seen.add(key);
-          if (!isTree(entry.mode) && !isFileMode(entry.mode)) {
-            return yield* new Invalid({
-              field: "mode",
-              reason: `unsupported mode '${entry.mode}'`,
-            });
-          }
+    const writeTree = Effect.fn("Repository.writeTree")(function* (
+      entries: ReadonlyArray<TreeEntry>,
+    ) {
+      // `writeFiles` validates the paths it is given; this is the other way
+      // in — the JSON tree endpoint hands entries straight here — and a
+      // tree naming `.git`, `..` or two entries with one name is one git
+      // will fetch and then refuse to check out.
+      const seen = new Set<string>();
+      for (const entry of entries) {
+        if (entry.name === "" || entry.name.includes("/")) {
+          return yield* new Invalid({ field: "name", reason: `bad tree entry '${entry.name}'` });
         }
-        return yield* storeTree(entries);
-      });
+        if (entry.name === "." || entry.name === ".." || entry.name.toLowerCase() === ".git") {
+          return yield* new Invalid({ field: "name", reason: `'${entry.name}' is not content` });
+        }
+        // Judged on the bytes that will be written, not on the decode: two
+        // names whose bytes differ are two entries, even when both decode
+        // to the same U+FFFD spelling.
+        const key = entry.raw === undefined ? entry.name : String.fromCharCode(...entry.raw);
+        if (seen.has(key)) {
+          return yield* new Invalid({ field: "name", reason: `duplicate entry '${entry.name}'` });
+        }
+        seen.add(key);
+        if (!isTree(entry.mode) && !isFileMode(entry.mode)) {
+          return yield* new Invalid({
+            field: "mode",
+            reason: `unsupported mode '${entry.mode}'`,
+          });
+        }
+      }
+      return yield* storeTree(entries);
+    });
 
     /** `a/b/c.txt` -> `["a","b","c.txt"]`, or a failure naming the path. */
     const segmentsOf = (path: string) =>

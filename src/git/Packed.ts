@@ -108,66 +108,67 @@ export const packed = (
    * The fanout table makes this a binary search per pack rather than a scan,
    * which is the entire reason the `.idx` format exists.
    */
-  const locate = (oid: Oid) =>
-    Effect.gen(function* () {
-      // Owned first, borrowed second: a fork that has its own copy uses it.
-      // Both are listed per lookup on purpose — a repack replaces the packs
-      // through the store directly, so anything remembered here could point
-      // at a pack that has since been deleted. Backends that can tell when
-      // their pack directory changed cache it there instead, where the
-      // invalidation is real.
-      const own = yield* packs.list;
-      const borrowed = packs.borrowed === undefined ? [] : yield* packs.borrowed;
-      for (const handle of [...own, ...borrowed]) {
-        const found = findInPackIndex(handle.index, oid);
-        if (found._tag === "Failure") {
-          return yield* new StorageFailure({
-            operation: "packs.lookup",
-            path: handle.name,
-            cause: found.failure,
-          });
-        }
-        if (found.success !== null) return { handle, entry: found.success };
+  const locate = Effect.fn("Packed.locate")(function* (oid: Oid) {
+    // Owned first, borrowed second: a fork that has its own copy uses it.
+    // Both are listed per lookup on purpose — a repack replaces the packs
+    // through the store directly, so anything remembered here could point
+    // at a pack that has since been deleted. Backends that can tell when
+    // their pack directory changed cache it there instead, where the
+    // invalidation is real.
+    const own = yield* packs.list;
+    const borrowed = packs.borrowed === undefined ? [] : yield* packs.borrowed;
+    for (const handle of [...own, ...borrowed]) {
+      const found = findInPackIndex(handle.index, oid);
+      if (found._tag === "Failure") {
+        return yield* new StorageFailure({
+          operation: "packs.lookup",
+          path: handle.name,
+          cause: found.failure,
+        });
       }
-      return null;
-    });
+      if (found.success !== null) return { handle, entry: found.success };
+    }
+    return null;
+  });
 
-  const fromPack = (oid: Oid, depth = 0): Effect.Effect<RawObject | null, StorageFailure> =>
-    Effect.gen(function* () {
-      const located = yield* locate(oid);
-      if (located === null) return null;
-      const context = yield* Effect.context<never>();
+  const fromPack = Effect.fn("Packed.fromPack")(
+    (oid: Oid, depth = 0): Effect.Effect<RawObject | null, StorageFailure> =>
+      Effect.gen(function* () {
+        const located = yield* locate(oid);
+        if (located === null) return null;
+        const context = yield* Effect.context<never>();
 
-      return yield* Effect.tryPromise({
-        try: () =>
-          readAt(
-            located.handle.source,
-            located.entry.offset,
-            (base, at) =>
-              // A ref-delta whose base is not in this pack: look everywhere
-              // else this store can see, which is what makes a thin pack
-              // readable once it has been stored. `at` carries the chain
-              // depth across that hop, so a cycle is caught rather than
-              // recursed into forever.
-              // A failure to *read* is not an absence. Answering `null` for one
-              // made `readAt` report "delta base is nowhere" — a `PackCorrupt`
-              // — for what was a transient storage error, which is the worst
-              // diagnosis available: it names the pack as damaged and invites
-              // an operator to throw it away. Left to reject, it comes back
-              // through `catch` below as the `StorageFailure` it is, and a
-              // retry can succeed.
-              Effect.runPromiseWith(context)(
-                loose.read(base).pipe(
-                  Effect.map((object): RawObject | null => object),
-                  Effect.catchTag("ObjectNotFound", () => fromPack(base, at)),
+        return yield* Effect.tryPromise({
+          try: () =>
+            readAt(
+              located.handle.source,
+              located.entry.offset,
+              (base, at) =>
+                // A ref-delta whose base is not in this pack: look everywhere
+                // else this store can see, which is what makes a thin pack
+                // readable once it has been stored. `at` carries the chain
+                // depth across that hop, so a cycle is caught rather than
+                // recursed into forever.
+                // A failure to *read* is not an absence. Answering `null` for one
+                // made `readAt` report "delta base is nowhere" — a `PackCorrupt`
+                // — for what was a transient storage error, which is the worst
+                // diagnosis available: it names the pack as damaged and invites
+                // an operator to throw it away. Left to reject, it comes back
+                // through `catch` below as the `StorageFailure` it is, and a
+                // retry can succeed.
+                Effect.runPromiseWith(context)(
+                  loose.read(base).pipe(
+                    Effect.map((object): RawObject | null => object),
+                    Effect.catchTag("ObjectNotFound", () => fromPack(base, at)),
+                  ),
                 ),
-              ),
-            depth,
-            packs.inflate,
-          ),
-        catch: failed("packs.read", located.handle.name),
-      });
-    });
+              depth,
+              packs.inflate,
+            ),
+          catch: failed("packs.read", located.handle.name),
+        });
+      }),
+  );
 
   const read = (oid: Oid): Effect.Effect<RawObject, ObjectNotFound | StorageFailure> =>
     loose

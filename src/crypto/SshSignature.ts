@@ -707,46 +707,48 @@ export const generate = (comment: string): Effect.Effect<PrivateKey> =>
  * whether the two ever belonged together, instead of signing with one key
  * while advertising another — signatures that could never verify.
  */
-export const fromSeed = (seed: Uint8Array, comment: string): Effect.Effect<PrivateKey, Invalid> =>
-  Effect.gen(function* () {
-    if (seed.length !== SEED_BYTES) {
-      return yield* new Invalid({ field: "seed", reason: "an Ed25519 seed is thirty-two bytes" });
-    }
-    const point = yield* Effect.tryPromise({
-      try: async () => {
-        const pkcs8 = concatBytes([PKCS8_ED25519_PREFIX, seed]);
-        const imported = await crypto.subtle.importKey(
-          "pkcs8",
-          pkcs8.slice().buffer,
-          { name: "Ed25519" },
-          true,
-          ["sign"],
-        );
-        const jwk = await crypto.subtle.exportKey("jwk", imported);
-        if (jwk.x === undefined) throw new Error("the JWK export carries no public point");
-        // JWK uses unpadded base64url; the decoder below wants standard base64.
-        const standard = jwk.x.replace(/-/g, "+").replace(/_/g, "/");
-        const padded = standard + "=".repeat((4 - (standard.length % 4)) % 4);
-        const decoded = fromBase64(padded);
-        if (decoded === null || decoded.length !== 32) {
-          throw new Error("the JWK public point did not decode to thirty-two bytes");
-        }
-        return decoded;
-      },
-      catch: (cause) =>
-        new Invalid({
-          field: "seed",
-          reason: `the seed's public key could not be derived: ${String(cause)}`,
-        }),
-    });
-    return {
-      publicKey: {
-        algorithm: ED25519,
-        blob: concatBytes([writeText(ED25519), writeString(point)]),
-        point,
-        application: null,
-        comment,
-      },
-      seed,
-    };
+export const fromSeed = Effect.fn("SshSignature.fromSeed")(function* (
+  seed: Uint8Array,
+  comment: string,
+): Effect.fn.Return<PrivateKey, Invalid> {
+  if (seed.length !== SEED_BYTES) {
+    return yield* new Invalid({ field: "seed", reason: "an Ed25519 seed is thirty-two bytes" });
+  }
+  const point = yield* Effect.tryPromise({
+    try: async () => {
+      const pkcs8 = concatBytes([PKCS8_ED25519_PREFIX, seed]);
+      const imported = await crypto.subtle.importKey(
+        "pkcs8",
+        pkcs8.slice().buffer,
+        { name: "Ed25519" },
+        true,
+        ["sign"],
+      );
+      const jwk = await crypto.subtle.exportKey("jwk", imported);
+      if (jwk.x === undefined) throw new Error("the JWK export carries no public point");
+      // JWK uses unpadded base64url; the decoder below wants standard base64.
+      const standard = jwk.x.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = standard + "=".repeat((4 - (standard.length % 4)) % 4);
+      const decoded = fromBase64(padded);
+      if (decoded === null || decoded.length !== 32) {
+        throw new Error("the JWK public point did not decode to thirty-two bytes");
+      }
+      return decoded;
+    },
+    catch: (cause) =>
+      new Invalid({
+        field: "seed",
+        reason: `the seed's public key could not be derived: ${String(cause)}`,
+      }),
   });
+  return {
+    publicKey: {
+      algorithm: ED25519,
+      blob: concatBytes([writeText(ED25519), writeString(point)]),
+      point,
+      application: null,
+      comment,
+    },
+    seed,
+  };
+});

@@ -27,7 +27,7 @@ import {
   type ReadWriteNamespaceClient,
   type RepoClient,
 } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
-import { Context, Effect, Layer, Stream } from "effect";
+import { Context, Effect, Layer, Result, Schema, Stream } from "effect";
 
 import { realpathSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -183,12 +183,16 @@ const saveJson = async (target: string, value: PersistedDocument) => {
   await fs.rename(temporary, target);
 };
 
+const Persisted = Schema.fromJsonString(Schema.Unknown);
+
 const loadJson = async <A>(target: string): Promise<A | null> => {
   try {
+    const parsed = Schema.decodeResult(Persisted)(await fs.readFile(target, "utf8"));
+    if (Result.isFailure(parsed)) return null;
     // SAFETY: these files are written only by `saveJson`, so a successful
     // parse yields the caller's persisted shape; anything unreadable lands in
     // the catch and reads as an empty store.
-    return JSON.parse(await fs.readFile(target, "utf8")) as A;
+    return parsed.success as A;
   } catch {
     return null;
   }
