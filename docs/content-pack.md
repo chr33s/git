@@ -3,8 +3,8 @@
 **Status:** Draft specification  
 **Project:** `@chr33s/git`  
 **Target version:** Experimental / pre-1.0  
-**Last updated:** 2026-08-21  
-**Spec revision:** draft-7
+**Last updated:** 2026-08-22  
+**Spec revision:** draft-8
 
 ## 1. Summary
 
@@ -12,24 +12,26 @@ This specification defines a small Git-native audit primitive for repository con
 
 The problem is not to standardize how an agent retrieves or ranks code. The problem is to make it possible to answer, after an agent operation:
 
-> **What repository state and repository evidence were available to the agent at that point?**
+> **What repository state and repository evidence crossed the harness context boundary for the model invocation that preceded this operation?**
 
 V1 defines three concepts:
 
-1. **Repository View** — the exact repository snapshot from which context was drawn.
-2. **Context Pack** — an immutable manifest of repository evidence associated with one model invocation or agent operation.
-3. **Context Exposure Event** — a signed session record binding a Context Pack, and the exact ContextRender bytes that crossed the harness context-to-invocation boundary, to a point in agent history.
+1. **Repository View** — the exact repository snapshot from which repository evidence may be selected.
+2. **Context Pack** — an immutable manifest of Git-grounded repository evidence associated with one auditable exposure.
+3. **Context Exposure Event** — a signed audit-trace record binding a Context Pack and an exact, semantically framed ContextRender artifact to one model invocation.
 
 The model is:
 
 ```text
 Repository View
       ↓
-any retrieval implementation
+replaceable retrieval
       ↓
  Context Pack
       ↓
    renderer
+      ↓
+ ContextRender
       ↓
 Context Exposure Event
       ↓
@@ -47,65 +49,38 @@ Retrieval quality
         is separate from
 
 Context provenance
-  "Can we audit what context was actually supplied?"
+  "Can we audit what repository context crossed the harness boundary?"
 ```
 
 V1 standardizes **context provenance**, not retrieval quality.
 
-Runtime conditions surrounding the invocation—model/provider identity, token usage, context-window limits, retries, context compaction or truncation, tool diagnostics, and workspace transitions—are specified separately in [invocation-telemetry.md](invocation-telemetry.md). Invocation telemetry MUST NOT affect Context Pack identity or the verification of Git-grounded evidence.
+Runtime conditions such as model/provider identity, token usage, retries, context pressure, compaction, tool diagnostics, and workspace transitions are specified separately in [invocation-telemetry.md](invocation-telemetry.md). Product integration and UI guidance live in [telemetry-integration.md](telemetry-integration.md). The broader Capture → Retention → Recall objective is described in [knowledge-durability.md](knowledge-durability.md).
 
-A Context Pack does not prove that a model read, understood, remembered, or used any item. A Context Exposure Event does not prove causation. Together with signed session history, they provide a tamper-evident record of the repository context that the harness claims crossed its context-to-invocation audit boundary for a model invocation.
-
----
-
-## 2. Problem
-
-Coding agents can fail because repository context is missing, stale, truncated, or hallucinated.
-
-Typical failures include:
-
-- an agent edits code without seeing a relevant implementation;
-- an agent reasons from a stale version of a file;
-- an agent never sees the tests or configuration that constrain a change;
-- a context window drops repository evidence that was available earlier;
-- a retrieval implementation silently changes behavior;
-- an agent claims a repository fact that was never present in its supplied context.
-
-Today these failures are difficult to investigate because repository retrieval is often transient and weakly connected to the agent operation that follows.
-
-For auditability, the useful questions are:
-
-```text
-Which repository snapshot was active?
-Which exact blobs or byte ranges were selected?
-Which exact repository-context bytes crossed the harness context-to-invocation boundary?
-Which model invocation and agent operation followed that exposure?
-```
-
-The selector's internal score, graph traversal, embedding model, parser implementation, or token estimator is secondary evidence. It is not required to answer those questions.
+A Context Pack does not prove that a model read, understood, remembered, or used any item. A Context Exposure Event does not prove causation. They provide tamper-evident evidence of what the harness claims crossed its repository-context boundary.
 
 ---
 
-## 3. Goals and non-goals
+## 2. Goals and non-goals
 
-### 3.1 Goals
+### 2.1 Goals
 
 V1 MUST make it possible to:
 
-1. identify the exact repository snapshot used for context;
-2. resolve selected source evidence to immutable Git bytes;
-3. record the exact ContextRender bytes handed to the model-invocation subsystem for a model invocation;
-4. bind that exposure to signed session history;
-5. audit stale, missing, or contradictory repository context after an agent operation;
-6. validate a pack without reproducing the retrieval implementation that created it;
-7. record lightweight selector identity and coarse omission diagnostics without turning them into selection-consensus inputs;
-8. preserve verifiable repository provenance for context that a producer claims was authoritative instruction.
+1. identify the exact repository snapshot used for retrieval;
+2. resolve selected source evidence to immutable Git objects;
+3. distinguish ordinary blob evidence from submodule gitlinks;
+4. record optional byte ranges for blob evidence;
+5. bind repository-context bytes **and their logical placement** to one exposure;
+6. preserve the repository view through real Git reachability, not only OIDs embedded in JSON;
+7. validate pack evidence without reproducing the selector;
+8. record lightweight selector identity, coarse omission diagnostics, and verifiable instruction provenance without making them consensus inputs;
+9. bind later invocation/telemetry records to exposures by immutable trace-record identity.
 
-### 3.2 Non-goals
+### 2.2 Non-goals
 
 V1 does **not** standardize:
 
-- a deterministic selector;
+- deterministic retrieval;
 - ranking weights or scoring arithmetic;
 - fixed-point math;
 - token estimators;
@@ -116,118 +91,78 @@ V1 does **not** standardize:
 - graph digests;
 - selector configuration digests;
 - task normalization digests;
-- deterministic tie-breaking;
-- exhaustive omission ranking or candidate logs;
-- byte-identical manifests produced independently by different implementations.
-
-Implementations MAY use any of those techniques internally.
-
-They are not required to validate Context Pack provenance.
-
-### 3.3 Selection is not cognition
-
-A Context Pack records repository evidence associated with an invocation. A Context Exposure Event records a harness claim that a particular ContextRender crossed the harness context-to-invocation audit boundary.
-
-Neither proves that the model:
-
-- attended to an item;
-- understood it;
-- retained it across turns;
-- based an action on it;
-- had sufficient context to act correctly.
-
-This specification uses **exposed** and **available**, not **read**, **understood**, or **used**.
+- exhaustive candidate or omission logs;
+- byte-identical pack serialization across independent producers;
+- provider request serialization;
+- model attention, cognition, memory, or causation.
 
 ---
 
-## 4. Core principles
+## 3. Core principles
 
-### 4.1 Retrieval is replaceable
+### 3.1 Retrieval is replaceable
 
-The protocol MUST NOT depend on one retrieval architecture.
-
-A producer MAY select repository context using:
-
-- explicit file reads;
-- grep or lexical search;
-- Tree-sitter;
-- `tree-sitter-graph`;
-- compiler APIs;
-- LSP;
-- SCIP;
-- embeddings;
-- an LLM reranker;
-- an agent recursively opening files;
-- repository-specific indexes;
-- any combination of the above.
-
-The durable boundary begins when that machinery produces references to repository evidence.
+A producer MAY use grep, Tree-sitter, compiler APIs, LSP, SCIP, embeddings, an LLM reranker, explicit file reads, recursive tool use, or any combination.
 
 > **Retrieval may be probabilistic. Evidence identity must not be.**
 
-### 4.2 Evidence is Git-grounded
+### 3.2 Evidence is Git-grounded
 
-Repository evidence is identified by Git object identity and, when needed, a byte range.
-
-For source evidence, the durable identity is:
+V1 has two core repository evidence item kinds:
 
 ```text
-blob OID + optional byte range
+blob
+  path + blob OID + optional byte range
+
+gitlink
+  path + submodule commit OID
 ```
 
-Paths, symbol names, ranking scores, and parser node handles are not immutable evidence identity.
+A path proves membership in the recorded repository tree. The object OID identifies the immutable object at that path.
 
-### 4.3 The effective repository tree is authoritative
+### 3.3 The effective repository tree is authoritative
 
-A pack MUST name the exact tree against which its evidence is interpreted.
+`view.tree` is the exact root tree visible to retrieval. Dirty worktrees MUST be represented by an overlay tree; `HEAD` MUST NOT be recorded when the model was supplied different worktree bytes.
 
-This includes dirty-worktree operation. A producer MUST NOT record `HEAD` as the effective view while supplying different worktree bytes to the model.
+### 3.4 Exposure binds bytes and placement
 
-### 4.4 Rendered exposure matters
+Repository-derived bytes can have materially different meaning depending on whether the harness places them in a system/developer instruction channel, a user/request channel, or a tool-result channel.
 
-A manifest of selected evidence is not sufficient to audit what reached the model.
+Therefore a ContextRender is not merely a concatenated byte string. It is an ordered sequence of **segments**, each binding:
 
-Rendering may:
+```text
+logical placement
+media type
+exact bytes
+```
 
-- truncate evidence;
-- add line numbers;
-- omit ranges;
-- insert summaries;
-- reorder items;
-- apply a context-window limit;
-- accidentally render stale bytes.
+Provider JSON, SDK serialization, HTTP framing, and transport details remain outside the digest boundary.
 
-Therefore every auditable model invocation MUST construct a **ContextRender** artifact containing the exact repository-context bytes handed from the context subsystem to the model-invocation subsystem, and MUST record a digest of that artifact. Provider-specific request serialization is outside this digest boundary (§7.2).
+### 3.5 Durable evidence requires real Git edges
 
-### 4.5 Session history provides ordering
+An OID written inside JSON is not a Git reachability edge.
 
-Context exposure is historical provenance. It belongs in the signed session/event history.
+A durable exposure MUST make `view.tree` reachable through the Git object graph from the audit record or another retained provenance root. This rule applies to both clean and dirty views.
 
-A Context Exposure Event MUST occur before the model invocation or agent operation whose repository context it describes. The following operation MUST reference that exposure event, or the surrounding session protocol MUST otherwise bind the operation to it unambiguously.
+### 3.6 High-frequency audit provenance is not policy-critical session history
 
-The exposure event MUST NOT contain a self-reference to its own event identifier.
+The existing session DAG is the distilled record used by provenance and policy. Per-invocation Context Exposure Events belong in the sibling signed audit trace described by [invocation-telemetry.md](invocation-telemetry.md), normally:
 
-### 4.6 Context does not grant instruction authority
+```text
+refs/hub/trace/<session-id>
+```
 
-A Context Pack describes exposure, not authority.
+The trace MUST NOT be consulted to authorize pushes, merges, membership, or protected-branch policy.
 
-Selecting a file, comment, documentation fragment, memory entry, or generated summary MUST NOT cause it to become an instruction merely because it appears in context.
+### 3.7 Context does not grant instruction authority
 
-Instruction authority is enforced by the harness or session policy outside this specification.
-
-When a producer claims that a repository item was supplied with instruction authority, it SHOULD record verifiable instruction provenance using `authority` (§6.8). That annotation proves where the claimed instruction came from in the recorded repository view; it does **not** itself grant authority.
-
-### 4.7 Derived indexes are disposable
-
-Parsers, syntax trees, graphs, embeddings, symbol indexes, and summaries are accelerators.
-
-Deleting them MUST NOT corrupt a persisted Context Pack or prevent verification of its Git-grounded evidence.
+Selecting a file, comment, memory entry, summary, or tool result MUST NOT make it an instruction merely because it appears in context. `authority` metadata records provenance of an instruction claim; actual authority remains harness/session policy.
 
 ---
 
-## 5. Repository View
+## 4. Repository View
 
-A Repository View names the exact source snapshot from which repository evidence may be selected.
+A Repository View names the exact source snapshot from which repository evidence may be selected:
 
 ```json
 {
@@ -236,20 +171,13 @@ A Repository View names the exact source snapshot from which repository evidence
 }
 ```
 
-### 5.1 `base`
+### 4.1 `base`
 
-`base` is the commit OID that anchors committed history for the operation.
+`base` is the commit OID anchoring committed history for the operation.
 
-It is useful for:
+### 4.2 `tree`
 
-- human inspection;
-- ancestry checks;
-- linking the operation to normal Git history;
-- explaining whether context came from committed or edited state.
-
-### 5.2 `tree`
-
-`tree` is the root tree OID of the **effective repository snapshot** visible to context retrieval.
+`tree` is the root tree OID of the **effective repository snapshot** visible to retrieval.
 
 For a clean worktree:
 
@@ -257,28 +185,11 @@ For a clean worktree:
 view.tree == root tree of view.base
 ```
 
-For a dirty worktree, the implementation MUST construct an overlay tree containing the exact repository bytes that retrieval is allowed to inspect.
+For a dirty worktree, the implementation MUST construct an overlay tree representing every repository path retrieval is allowed to inspect.
 
-The selector MUST select repository evidence from `view.tree`, not directly from mutable filesystem state after the view has been captured.
+The selector MUST resolve evidence from `view.tree`, not from mutable filesystem state after the view has been captured.
 
-This makes the tree, rather than the host worktree, the audit boundary.
-
-### 5.3 Dirty worktrees
-
-To capture a dirty worktree, an implementation MAY:
-
-1. hash modified or newly included files as Git blobs;
-2. apply additions, modifications, and deletions over the base tree;
-3. write an overlay tree;
-4. record that tree as `view.tree`.
-
-The exact construction mechanism is implementation-defined.
-
-The resulting tree MUST represent every repository path from which the retrieval implementation is allowed to select evidence for that invocation.
-
-A dirty view intended for durable audit MUST keep the overlay tree and referenced blobs reachable for as long as the corresponding session provenance is retained.
-
-### 5.4 Object identifiers
+### 4.3 Object identifiers
 
 Git object identifiers are encoded as:
 
@@ -288,26 +199,13 @@ Git object identifiers are encoded as:
 
 where `algorithm` matches the repository object format, currently `sha1` or `sha256`.
 
-Consumers MUST treat Git OIDs as opaque strings and MUST NOT assume SHA-1 length.
-
-V1 does not define a separate repository-family identity. `view.base` and `view.tree` identify the repository state required for this audit primitive.
-
-### 5.5 Paths, symlinks, submodules, and unavailable content
-
-Evidence resolution follows the recorded tree.
-
-- **Paths** are required tree locators for repository evidence items. Each item path MUST resolve under `view.tree` to the recorded blob. Blob identity remains authoritative for the bytes, while the path proves membership in the claimed repository view.
-- **Symlinks** are evidence as link blobs and MUST NOT be silently followed when resolving an item.
-- **Submodules** are gitlinks. V1 MAY record the gitlink but does not require traversal into the submodule.
-- **Missing partial-clone/LFS content** MUST be reported as unavailable rather than silently replaced with different bytes.
+Consumers MUST treat Git OIDs as opaque and MUST NOT assume SHA-1 length.
 
 ---
 
-## 6. Context Pack
+## 5. Context Pack
 
-A Context Pack is an immutable manifest of repository evidence associated with one auditable context exposure.
-
-Minimal example:
+A Context Pack is an immutable manifest of repository evidence associated with one auditable exposure.
 
 ```json
 {
@@ -316,8 +214,13 @@ Minimal example:
     "base": "sha256:abc123...",
     "tree": "sha256:def456..."
   },
+  "selector": {
+    "name": "repo-context",
+    "version": "2.3.1"
+  },
   "items": [
     {
+      "kind": "blob",
       "path": "src/auth.ts",
       "blob": "sha256:111aaa...",
       "range": [1200, 1840],
@@ -325,124 +228,69 @@ Minimal example:
       "reason": "reference"
     },
     {
-      "path": "tests/auth.test.ts",
-      "blob": "sha256:222bbb...",
-      "range": [400, 920],
-      "role": "test",
-      "reason": "test"
+      "kind": "gitlink",
+      "path": "vendor/policy-engine",
+      "commit": "sha1:222bbb...",
+      "role": "dependency"
     }
   ]
 }
 ```
 
-Only `version`, `view`, `items[].path`, `items[].blob`, and sufficient information to resolve an item's bytes are protocol-critical.
+### 5.1 Blob items
 
-`role`, `reason`, symbols, selector metadata, and other annotations are descriptive metadata.
-
-### 6.1 Item identity
-
-A repository evidence item contains:
+A blob item is:
 
 ```json
 {
+  "kind": "blob",
   "path": "src/auth.ts",
   "blob": "sha256:...",
   "range": [1200, 1840]
 }
 ```
 
-`blob` is required.
+Rules:
 
-`range` is optional. When absent, the item refers to the whole blob.
+1. `kind` MUST equal `blob`;
+2. `path` MUST resolve under `view.tree` to a non-gitlink tree entry;
+3. the resolved object OID MUST equal `blob`;
+4. `range`, when present, is a half-open byte range `[start, end)` into the exact blob bytes;
+5. `0 ≤ start < end ≤ blobSize`;
+6. a UTF-8 renderer MUST NOT slice through a codepoint boundary.
 
-`path` is required. It is the verifiable tree locator that binds the item to `view.tree`. It does not define the immutable byte identity of the evidence; `blob` does that.
+A floating blob that exists in the object database but does not resolve from `view.tree` is not verified repository evidence for that view.
 
-A conforming repository evidence item MUST therefore satisfy both:
+### 5.2 Gitlink items
 
-```text
-view.tree + path -> blob
-blob + optional range -> exact evidence bytes
+A gitlink item is:
+
+```json
+{
+  "kind": "gitlink",
+  "path": "vendor/policy-engine",
+  "commit": "sha1:..."
+}
 ```
-
-V1 does not permit a floating evidence blob that exists in the object database but cannot be resolved from the recorded `view.tree`. Future item types MAY define a different verifiable locator, but such types require an extension to this specification.
-
-### 6.2 Byte ranges
-
-Ranges are half-open byte offsets:
-
-```text
-[start, end)
-```
-
-into the exact blob bytes before line-ending or encoding transformation.
 
 Rules:
 
-1. `0 ≤ start < end ≤ blobSize`;
-2. whole-blob items SHOULD omit `range`;
-3. a UTF-8 text renderer MUST NOT slice through a codepoint boundary;
-4. a consumer MUST verify that the blob exists and that the range is valid before rendering it as verified evidence.
+1. `kind` MUST equal `gitlink`;
+2. `path` MUST resolve under `view.tree` to Git mode `160000`;
+3. the gitlink target OID MUST equal `commit`;
+4. `range` and `blob` MUST NOT appear on a gitlink item.
 
-### 6.3 Resolution against the view
+A gitlink proves only that the recorded repository view pointed at that submodule commit. It does **not** prove the contents of the submodule repository were available to the model. Traversing and auditing submodule contents requires a separately identified repository view or a future extension.
 
-For each item, a verifier MUST confirm that:
+### 5.3 Symlinks
 
-1. `view.tree` exists;
-2. `path` resolves under `view.tree` to the recorded `blob`; and
-3. `range`, when present, is valid for that blob.
+Symlinks are blob items containing the link bytes. Verification MUST NOT silently follow the symlink target.
 
-If the path is absent, does not resolve, or resolves to a different object, the item is not verified repository evidence for that view. A path mismatch does not change the blob's bytes, but it is an audit failure because the manifest claims that evidence was selected from that repository view at that path.
+### 5.4 Descriptive metadata
 
-### 6.4 Selector identity
+Fields such as `role`, `reason`, `symbol`, and selector metadata are descriptive. A verifier MUST NOT require them to validate repository evidence.
 
-A producer MAY record the selector implementation that produced the pack:
-
-```json
-{
-  "selector": {
-    "name": "repo-context",
-    "version": "2.3.1"
-  }
-}
-```
-
-`selector.name` and `selector.version` are diagnostic metadata.
-
-They are useful for answering questions such as:
-
-```text
-Did the missing context start after a selector release?
-Did two incidents use different retrieval implementations?
-Which implementation should be evaluated against this historical failure?
-```
-
-They MUST NOT be treated as a selector configuration digest, a reproducibility claim, or an input required to validate pack evidence.
-
-A verifier MUST NOT reject a pack because selector identity is absent or unknown.
-
-### 6.5 Descriptive item metadata
-
-A producer MAY include item metadata such as:
-
-```json
-{
-  "role": "implementation",
-  "reason": "reference",
-  "symbol": "Policy.checkBranchPolicy"
-}
-```
-
-Such metadata exists for debugging and explanation.
-
-A consumer MUST NOT require it to validate the underlying evidence.
-
-No ranking score, fixed-point representation, graph digest, token estimate, or selector configuration digest is required by V1.
-
-### 6.6 Reasons
-
-Reasons are optional and descriptive.
-
-Recommended core reason labels are:
+Recommended `reason` labels include:
 
 ```text
 explicit
@@ -461,36 +309,35 @@ neighbor
 other
 ```
 
-An implementation MAY use additional namespaced labels.
+### 5.5 Selector identity
 
-A reason answers:
+A producer MAY record:
 
-> "Why did this retrieval implementation include the item?"
+```json
+{
+  "selector": {
+    "name": "repo-context",
+    "version": "2.3.1"
+  }
+}
+```
 
-It does not prove that an independent selector would make the same choice.
+This identifies the implementation for diagnosis and evaluation. It MUST NOT be interpreted as a reproducibility claim or selector configuration digest.
 
-### 6.7 Omission diagnostics
+### 5.6 Omission diagnostics
 
-A producer MAY include a top-level `omissions` array containing coarse diagnostics for evidence that the retrieval pipeline discovered or attempted to include but that was not present in the final exposure.
-
-Example:
+A producer MAY record coarse non-exhaustive omissions:
 
 ```json
 {
   "omissions": [
-    {
-      "path": "tests/auth.test.ts",
-      "reason": "budget"
-    },
-    {
-      "path": "config/private.json",
-      "reason": "filtered"
-    }
+    { "path": "tests/auth.test.ts", "reason": "budget" },
+    { "reason": "filtered", "count": 3 }
   ]
 }
 ```
 
-Recommended core omission reasons are:
+Recommended core reasons are:
 
 ```text
 budget
@@ -500,36 +347,23 @@ error
 other
 ```
 
-An implementation MAY use additional namespaced reasons.
+Rules:
 
-Omission diagnostics are deliberately **non-exhaustive and non-ranked**:
+- omission order MUST NOT imply rank;
+- omissions MUST NOT contain or imply canonical selector scores;
+- absence from `omissions` MUST NOT prove an item was never considered;
+- omission diagnostics are producer claims, not reproducible selection evidence;
+- omission diagnostics MUST obey the same visibility policy as the consumer that may read them.
 
-- they MUST NOT contain or imply a canonical selector score;
-- their order MUST NOT imply candidate rank;
-- absence from `omissions` MUST NOT be interpreted as proof that an item was never considered or did not exist;
-- an omission record is a producer diagnostic claim, not independently reproducible selection evidence.
+If naming a filtered path or OID would reveal a resource the consumer is not authorized to know exists, the producer MUST omit that identifier and MAY record only an aggregate or opaque diagnostic.
 
-When an omitted item has a known Git blob OID, the producer MAY record `blob` in addition to `path`. A verifier MAY validate that blob against `view.tree` when possible.
+### 5.7 Verifiable instruction provenance
 
-The purpose is to distinguish useful operational failure classes such as:
-
-```text
-retrieval surfaced the evidence but the context budget dropped it
-access or availability prevented inclusion
-host policy filtered it
-retrieval failed while handling it
-```
-
-without restoring deterministic ranking machinery.
-
-If evidence is absent from both `items` and `omissions`, the protocol deliberately does not distinguish "never discovered" from "not recorded as an omission".
-
-### 6.8 Verifiable instruction provenance
-
-A producer MAY annotate an item with the repository source from which it claims instruction authority was derived:
+A blob item MAY carry:
 
 ```json
 {
+  "kind": "blob",
   "path": "AGENTS.md",
   "blob": "sha256:333ccc...",
   "role": "instruction",
@@ -544,525 +378,257 @@ A producer MAY annotate an item with the repository source from which it claims 
 For V1:
 
 1. `authority.root` MUST equal `view.tree`;
-2. `authority.path` MUST resolve under that tree to the recorded item `blob`;
-3. `authority.source` is descriptive and identifies the producer's authority class, such as `repository-instructions` or `repository-policy`;
-4. a verifier SHOULD surface an invalid authority annotation as an **unverified instruction claim** while continuing to treat the item itself as ordinary Git-grounded context evidence.
+2. `authority.path` MUST resolve under that tree to the same blob;
+3. `authority.source` is descriptive;
+4. a failed annotation SHOULD be surfaced as an **unverified instruction claim** without invalidating the underlying blob evidence.
 
-If a producer uses `role: "instruction"` to claim that an item was supplied with instruction authority, it SHOULD include `authority`.
+A valid annotation proves provenance of the claimed instruction source, not that the source actually had authority.
 
-A valid `authority` annotation proves only the repository provenance of the claimed instruction source. Whether that source actually has authority for the invocation remains a decision of the harness or session policy (§4.6).
+### 5.8 Encoding and identity
 
-### 6.9 Encoding and identity
+A Context Pack is ordinary UTF-8 JSON. V1 does not require JCS or byte-identical serialization across producers.
 
-A Context Pack is ordinary UTF-8 JSON.
+When persisted as a Git blob, the pack identity is the Git OID of the **actual bytes persisted**. Semantically equivalent serializations MAY have different OIDs.
 
-V1 does not require RFC 8785/JCS or byte-identical serialization across independent producers.
+---
 
-When persisted as a Git blob, the pack's identity is simply the Git blob OID of the **actual bytes persisted**.
+## 6. ContextRender
 
-Two semantically equivalent JSON serializations MAY therefore have different blob OIDs. That is acceptable: the audit question is which record existed, not whether another producer could independently recreate its bytes.
+### 6.1 Logical segments
 
-A consumer MUST NOT claim that reserialized bytes have the original pack OID.
+A ContextRender is an ordered sequence of segments:
+
+```text
+segment 0
+  placement = developer
+  media     = text/plain; charset=utf-8
+  bytes     = ...
+
+segment 1
+  placement = tool
+  media     = text/plain; charset=utf-8
+  bytes     = ...
+```
+
+Core logical placement values are:
+
+```text
+system
+developer
+user
+tool
+other
+```
+
+A producer MAY use a namespaced placement when a harness has semantics that cannot be faithfully represented by the core set.
+
+`placement` records the harness-level semantic channel. It does not itself grant instruction authority.
+
+### 6.2 Framing
+
+`renderDigest` MUST bind segment order, placement, media type, and exact bytes without depending on JSON canonicalization.
+
+V1 encodes the ContextRender digest artifact as:
+
+```text
+ASCII "git+ContextRender\0v1\0"
+for each segment, in order:
+  u32be placementByteLength
+  placement UTF-8 bytes
+  u32be mediaByteLength
+  media UTF-8 bytes
+  u64be bodyByteLength
+  exact body bytes
+```
+
+Integers are unsigned big-endian. Lengths count bytes, not characters.
+
+The digest is:
+
+```text
+sha256(<framed ContextRender artifact>)
+```
+
+This deliberately standardizes only the tiny framing required to make the commitment unambiguous.
+
+### 6.3 Provider mapping
+
+Provider JSON envelopes, SDK serialization, message IDs, HTTP framing, transport compression, and provider-added fields remain outside the digest boundary.
+
+A provider adapter MUST map each ContextRender segment into an equivalent provider field without changing:
+
+```text
+segment order
+logical placement semantics
+segment body bytes
+```
+
+If it must transform, truncate, summarize, reorder, or change placement, the harness MUST construct and hash a new final ContextRender.
+
+The adapter MUST NOT inject additional repository-derived content outside ContextRender.
 
 ---
 
 ## 7. Context Exposure Event
 
-A Context Exposure Event binds a Context Pack to the exact ContextRender artifact handed from the context subsystem to the model-invocation subsystem for one invocation.
-
-Example event payload:
+A Context Exposure Event is a signed audit-trace record:
 
 ```json
 {
   "type": "context-exposure",
   "pack": "sha256:8d7ad4...",
+  "renderFormat": "git+context-render/v1",
   "renderDigest": "sha256:6e91f2..."
 }
 ```
 
-### 7.1 Meaning
+It means:
 
-The event means:
+> The harness claims that `pack` describes the repository evidence for this invocation and that the final semantically framed ContextRender hashed to `renderDigest`.
 
-> The harness claims that the Context Pack identified by `pack` describes repository evidence for this invocation, and that the final ContextRender bytes handed from the context subsystem to the model-invocation subsystem hashed to `renderDigest`.
+The record derives authorship and ordering from the signed audit trace. It does not carry a second signature system.
 
-The event derives trust from the signed session event that contains it.
+### 7.1 Immutable event references
 
-It does not carry a separate signature.
+Later invocation or telemetry records MUST reference an exposure by the **qualified Git commit OID of the trace record that contains it**, not merely by a UUID-like event ID.
 
-### 7.2 ContextRender and render digest
+Human-friendly event IDs MAY exist for display/search, but they are not sufficient immutable references when multiple records could claim the same identifier.
 
-A **ContextRender** is the single ordered byte string produced by the context renderer and handed to the model-invocation subsystem as repository-derived context for one invocation.
+The exposure itself MUST NOT contain its own commit OID.
 
-`renderDigest` is:
+### 7.2 One exposure per auditable invocation
 
-```text
-sha256(<ContextRender bytes>)
-```
-
-The ContextRender bytes are hashed exactly as handed across that boundary, including ordering, labels, line numbers, truncation markers, summaries, separators, and text encoding.
-
-The digest boundary is deliberately **before provider-specific request serialization**. JSON envelopes, HTTP framing, SDK serialization, message IDs, transport compression, provider-added fields, and other adapter details are not part of ContextRender. This avoids making provider wire formats part of the protocol.
-
-A provider adapter MAY wrap the ContextRender in messages or structured request fields, but it MUST NOT silently alter the repository-derived bytes after `renderDigest` is computed. All repository-derived content intentionally supplied through the adapter MUST be represented in ContextRender. The adapter MUST NOT inject additional repository-derived content outside that artifact. If the adapter must transform, truncate, reorder, summarize, or otherwise change repository context, the transformed bytes constitute a new ContextRender and the harness MUST compute the digest over those final bytes instead.
-
-A ContextRender MAY represent repository context that is distributed across multiple provider message or content fields. In that case the harness MUST first construct one deterministic ordered ContextRender byte artifact for the repository-derived portions, then map those bytes into provider fields without changing their content. The provider envelope itself remains outside the digest boundary.
-
-This digest is intentionally over the **rendered repository-context artifact**, not the pack JSON and not the complete provider API request.
-
-### 7.3 Render storage and redaction
-
-The exact ContextRender bytes SHOULD be retained by the session system when policy permits, because they are the strongest evidence of what repository-derived context crossed the harness audit boundary for the invocation.
-
-Rendered context may contain source or other sensitive text, so it MUST follow the session's normal retention, secret-handling, access-control, and redaction lifecycle rather than being embedded permanently in the Context Pack.
-
-If rendered bytes remain available, a verifier MUST be able to recompute `renderDigest`.
-
-If rendered bytes have been redacted or expired, `renderDigest` remains a commitment to the prior exposure, but the exact rendering can no longer be independently inspected.
-
-### 7.4 Binding to the agent operation
-
-A Context Exposure Event MUST be bound unambiguously to the model invocation it describes.
-
-The preferred history shape is:
-
-```text
-signed context-exposure event
-        ↓
-model invocation event
-        ↓
-agent/tool operation event(s)
-```
-
-The subsequent model invocation SHOULD reference the exposure event explicitly. If the session protocol already provides an unambiguous parent/sequence relationship, that relationship MAY provide the binding.
-
-The exposure event MUST NOT include its own event identifier. This avoids circular content addressing.
-
-### 7.5 One exposure per auditable invocation
-
-For strongest auditability, each model invocation capable of producing repository-affecting agent actions SHOULD have one Context Exposure Event describing the repository context for that invocation.
-
-If repository context changes between model calls, a new exposure event MUST be recorded.
-
-This includes context acquired through interactive tool use when that tool output becomes part of a later model invocation.
-
-The Context Pack for a later invocation SHOULD describe the repository evidence present in that later invocation, rather than relying on an auditor to reconstruct context-window retention from old turns.
+For strongest auditability, each repository-affecting model invocation SHOULD have one exposure. If repository context changes between invocations, a new exposure MUST be recorded.
 
 ---
 
-## 8. Retrieval and rendering
+## 8. Durable storage and reachability
 
-### 8.1 Retrieval is outside the protocol
+### 8.1 Required reachability shape
 
-A conforming producer may use any method to construct `items`.
-
-There is no canonical V1 selector.
-
-Therefore these are implementation concerns, not protocol invariants:
-
-```text
-ranking
-scoring
-fixed-point arithmetic
-tie-breaking
-CodeGraph construction
-lexical-vs-semantic weighting
-embedding models
-token estimation
-candidate limits
-history windows
-resource counters
-reranking
-```
-
-A producer MAY record those details for diagnostics.
-
-A verifier MUST NOT require them to validate the pack's repository evidence.
-
-### 8.2 Resource safety remains an implementation requirement
-
-Removing deterministic resource limits from the protocol does not remove the need to bound attacker-controlled work.
-
-Retrieval implementations MUST still defend against unbounded:
-
-- source parsing;
-- graph expansion;
-- history scans;
-- candidate generation;
-- rendered context size;
-- memory use;
-- wall-clock execution.
-
-The exact limits are host policy and need not be serialized into every Context Pack.
-
-### 8.3 Rendering
-
-A renderer transforms a pack and related session context into a ContextRender byte artifact.
-
-Rendering is allowed to be implementation-specific.
-
-The audit invariant is not that another renderer can reproduce the same bytes from the pack. The invariant is that the producer records `renderDigest` over the final ContextRender bytes handed to the model-invocation subsystem, before provider-specific envelope serialization.
-
-The provider adapter MUST preserve those repository-derived bytes. If it changes them, the changed artifact becomes the ContextRender and MUST be hashed instead (§7.2).
-
-This distinction allows renderers and provider adapters to evolve without changing Context Pack validity or making provider wire formats protocol-critical.
-
----
-
-## 9. Storage and reachability
-
-### 9.1 Persistent exposure
-
-A persisted Context Pack intended to support durable audit MUST be reachable from the signed session history that references it.
+For a durable exposure, the audit record MUST create a real Git reachability path to both the pack and the captured repository view.
 
 One valid layout is:
 
 ```text
-session event commit
+trace record commit
 └── tree
     ├── event.json
     ├── event.sig
-    └── context.json
+    └── context/
+        ├── pack.json
+        └── view/          mode 040000 → exact view.tree
 ```
 
-`context.json` is the exact Context Pack blob referenced by the event.
+`context/view` is a tree entry whose OID is exactly `view.tree`.
 
-The event payload MAY duplicate its blob OID for validation.
+This preserves the entire recorded tree through ordinary Git reachability, including selected evidence, even if source branches move, are deleted, or history is rewritten.
 
-### 9.2 Repository evidence
+Embedding `view.tree` only as text inside `pack.json` is insufficient for durable audit.
 
-Evidence blobs inside the pack remain normal Git references.
+### 8.2 Clean and dirty views
 
-A provenance replica MAY replicate the session record without automatically replicating the entire repository history, but an auditor cannot fully resolve evidence until the referenced Git objects are available.
+The reachability rule applies equally to clean and dirty views. Dirty overlay trees are not a special case; both can otherwise become unreachable.
 
-### 9.3 Dirty-view reachability
+### 8.3 ContextRender retention
 
-If `view.tree` is an overlay tree that is not reachable from ordinary source history, durable audit requires preserving that tree and every blob needed to resolve its selected evidence.
+Exact ContextRender bodies SHOULD be retained when policy permits, but they may contain sensitive source. They follow the session/trace retention and redaction lifecycle.
 
-An implementation MUST NOT persist an audit record that claims an exact dirty view while allowing the only copy of that view to be immediately garbage-collected.
-
-### 9.4 Generation may remain read-only
-
-A context-selection command MAY compute a transient pack without writing durable Git objects.
-
-Durable objects are required only when the pack is attached to a session exposure that the system intends to preserve.
+If bytes remain available, a verifier MUST be able to recompute `renderDigest`. If the body expires, the digest remains a commitment but the rendering is no longer independently inspectable.
 
 ---
 
-## 10. Security and trust
+## 9. Audit trace relationship
 
-### 10.1 Prompt injection
+Per-invocation exposure is historical audit evidence, but it is not merge authorization or branch policy state.
 
-Context selection does not create instruction authority.
+A conforming implementation SHOULD place exposure records in the sibling trace namespace described by [invocation-telemetry.md](invocation-telemetry.md):
 
-A comment, README, generated summary, retrieved memory, or source string does not become an instruction because it appears in a Context Pack.
+```text
+refs/hub/session/<session>   distilled provenance / policy-visible
+refs/hub/trace/<session>     detailed signed audit trace / policy-invisible
+```
 
-The harness MUST apply its normal trusted-instruction policy independently of pack relevance.
+The trace event envelope MUST bind the repository and session identity.
 
-### 10.2 Retrieval poisoning
-
-A malicious repository may manipulate lexical search, graph structure, comments, filenames, or generated files to influence retrieval.
-
-V1 does not attempt to prove that retrieval was good.
-
-Implementations SHOULD mitigate poisoning through host policy, tests, retrieval heuristics, path policy, and evaluation. Those mechanisms may evolve without changing the audit format.
-
-### 10.3 Extractor and parser safety
-
-Repository-controlled source can trigger expensive parser or index behavior.
-
-Extractors and analyzers MUST be bounded and sandboxed according to host security policy.
-
-A Context Pack does not make derived analyzer output trusted repository truth.
-
-### 10.4 Sensitive rendered context
-
-The Context Pack SHOULD prefer references to repository evidence over duplicated bodies.
-
-The exact ContextRender belongs to the session's sensitive-content lifecycle because it may duplicate source, secrets, prompts, or derived text.
-
-`renderDigest` MAY remain after render-body redaction because the digest is an integrity commitment, not sufficient by itself to recover the rendered content.
-
-### 10.5 Visibility boundaries
-
-A producer MUST NOT place evidence into a Context Pack that the corresponding model invocation was not authorized to receive.
-
-Auditing context exposure does not bypass repository, path, tenant, or secret access controls.
+An implementation MUST NOT make protected-branch validation depend on folding the high-frequency trace.
 
 ---
 
-## 11. Product surface
+## 10. Product surface
 
-A minimal V1 product surface is:
+A minimal product surface is:
 
 ```text
 git+ context for --task "..."
 git+ context why <pack> [item]
-git+ context audit <operation-or-session-event>
+git+ context audit <operation-or-trace-record>
 ```
 
-### 11.1 `context for`
-
-Generates a Context Pack using the implementation's current retrieval strategy.
-
-It MAY display ranking, scores, graph paths, or token estimates as diagnostics, but none are required fields in the persisted pack.
-
-It SHOULD record selector `name` and `version` when known. It MAY record coarse `omissions` when doing so helps distinguish retrieval, budget, availability, filtering, or retrieval-error failures.
-
-The command answers:
-
-> **What repository evidence would this implementation supply?**
-
-### 11.2 `context why`
-
-Explains a pack using recorded evidence and optional descriptive metadata.
-
-Example:
+`context audit` SHOULD report:
 
 ```text
-src/auth.ts bytes 1200-1840
-blob: sha256:111aaa...
-view: sha256:def456...
-
-Reason recorded by selector:
-  reference
+base commit
+effective tree
+whether the view tree is durably reachable
+pack OID
+blob/gitlink verification
+ContextRender format and digest
+retained render availability
+segment placements
+selector identity / omissions when available
+instruction provenance verification
+exposure → invocation binding
 ```
-
-If the selector identity or omission diagnostics are present, `why` SHOULD display them when relevant to the selected item or investigation.
-
-If an item carries `authority`, `why` SHOULD report whether its repository provenance verifies against `view.tree`.
-
-If the selector stored richer diagnostics elsewhere, `why` MAY display them.
-
-It MUST distinguish recorded facts from recomputed or inferred explanations.
-
-### 11.3 `context audit`
-
-Audits the repository context bound to an agent operation or model invocation.
-
-It SHOULD report:
-
-```text
-repository base commit
-repository effective tree
-Context Pack OID
-render digest
-whether ContextRender bytes are still available
-whether each pack item resolves under the recorded tree
-selector name/version, when recorded
-coarse omission diagnostics, when recorded
-whether any instruction-authority annotations verify against the recorded tree
-whether the following operation is correctly bound to the exposure
-```
-
-When ContextRender bytes are available, it SHOULD additionally make it easy to inspect or diff the exact repository context that crossed the harness context-to-invocation boundary.
-
-This is the primary V1 audit command.
-
-### 11.4 `context refresh`
-
-A selector MAY offer a `context refresh` convenience that generates a new pack for a newer view and compares it with an old pack.
-
-Refresh behavior is not normative in V1.
-
-Implementations may use symbol rematching, diffs, graphs, embeddings, or full reselection. A refresh result MUST NOT be presented as proof that the old selector's ranking was reproducible.
 
 ---
 
-## 12. Audit examples
+## 11. Audit examples
 
-### 12.1 Missing context
+### 11.1 Missing evidence
 
-An agent changes authentication behavior incorrectly.
+A pack lacks `tests/policy.test.ts`. The audit can state that the test was absent from the recorded repository context. It cannot prove that the absence caused an incorrect edit.
 
-Audit finds:
+### 11.2 Stale evidence
 
-```text
-view.base: commit A
-view.tree: tree A
+`view.tree` resolves `src/policy.ts` to blob NEW, while the pack records blob OLD. The item fails repository-view verification.
 
-Context Pack:
-  src/login.ts
-  src/session.ts
+### 11.3 Semantic placement mismatch
 
-Not exposed:
-  src/policy.ts
-  tests/policy.test.ts
-```
+The recorded ContextRender says `AGENTS.md` was in a `developer` segment, but the provider adapter placed those bytes in a `user` field. The adapter did not faithfully map the recorded artifact; the exposure is not a valid account of the provider-bound context.
 
-The audit can state that the policy implementation and test were absent from the recorded repository context for that invocation.
+### 11.4 Submodule pointer
 
-It cannot prove that their absence caused the incorrect change.
+A gitlink item proves `vendor/policy-engine` pointed at commit X in the parent repository. It does not prove files inside that submodule commit were exposed.
 
-### 12.2 Stale context
+### 11.5 Reachability failure
 
-An agent claims `validate()` returns `boolean`, but the active repository returns `ValidationResult`.
-
-Audit finds:
-
-```text
-operation view.tree: tree NEW
-pack item blob: blob OLD
-path resolution under tree NEW: mismatch
-```
-
-The exposure record demonstrates that stale repository evidence was supplied or that the pack was constructed incorrectly.
-
-### 12.3 Rendering bug
-
-A pack contains the correct range, but the renderer truncates the final branch of a function.
-
-Audit finds:
-
-```text
-pack item: bytes 1200-1840
-recorded render: contains bytes 1200-1660 only
-renderDigest: valid
-```
-
-The retrieval manifest was correct; the exposure bug occurred during rendering.
-
-### 12.4 Hallucinated repository fact
-
-An agent claims a configuration flag exists.
-
-Audit finds no item or rendered repository context containing that flag for the relevant invocation.
-
-The audit can report:
-
-> The recorded repository context does not support this claim.
-
-It cannot distinguish hallucination from knowledge acquired through some unrecorded external channel unless the rest of the session/tool history is also audited.
+A pack names historical tree A only inside JSON. After branch deletion, tree A is garbage-collected. The pack bytes survive but the repository evidence does not. This is a durable-audit failure. A conforming persisted exposure prevents it through a real `context/view` tree edge.
 
 ---
 
-## 13. Acceptance criteria
+## 12. Acceptance criteria
 
 V1 is successful when:
 
-1. every auditable model invocation can be associated with one exact Repository View;
-2. every Context Pack item has a required path that resolves under `view.tree` to its exact Git blob, with an optional byte range identifying the exposed subset;
-3. dirty-worktree context is represented by an exact effective tree rather than mislabeled as `HEAD`;
-4. every repository-affecting model invocation records a Context Exposure Event before the operation it informs;
-5. the exposure event records a digest of the exact ContextRender bytes handed from the context subsystem to the model-invocation subsystem;
-6. when ContextRender bytes are retained, recomputing their digest matches `renderDigest`;
-7. the pack and any required dirty-view objects survive normal Git reachability and GC rules for the intended audit-retention period;
-8. a verifier can validate pack evidence without Tree-sitter, a CodeGraph, embeddings, selector configuration, ranking weights, or fixed-point math;
-9. replacing the retrieval implementation does not change the meaning of an already-persisted pack;
-10. replacing the renderer or provider adapter does not invalidate an old exposure because the old event commits to the ContextRender bytes that crossed the audit boundary at that time;
-11. an auditor can distinguish at least these failure classes:
-    - missing repository context;
-    - stale repository context;
-    - invalid blob/path/range provenance;
-    - rendering mismatch or truncation;
-    - missing exposure-to-operation binding;
-12. selecting content as context does not grant it instruction authority;
-13. deleting derived indexes does not corrupt persisted audit provenance;
-14. selector name/version, when present, remains diagnostic metadata and does not imply reproducibility;
-15. omission diagnostics, when present, can distinguish coarse causes such as budget, filtering, unavailability, and retrieval error without implying candidate rank;
-16. an instruction-authority annotation can be verified against `view.tree`, and a failed annotation does not invalidate the underlying evidence item;
-17. a Context Pack never claims that its selector is reproducible unless an implementation-specific extension explicitly provides that stronger guarantee;
-18. no V1 validation rule depends on deterministic ranking, graph hashing, token estimation, or cross-platform numeric behavior.
-
----
-
-# Appendix A — Optional retrieval diagnostics
-
-V1 permits lightweight selector identity and coarse omission diagnostics in the pack. Implementations may keep richer diagnostics outside the core protocol.
-
-Examples include:
-
-```text
-candidate scores
-rank position
-semantic search similarity
-graph paths
-Tree-sitter captures
-symbol resolution quality
-token cost
-exhaustive candidate and omission logs
-retrieval latency
-resource counters
-reranker identity
-```
-
-These are useful for improving retrieval quality and explaining implementation behavior.
-
-They are deliberately not required to establish what repository evidence was exposed.
-
----
-
-# Appendix B — Optional selector-specific reproducibility
-
-A selector implementation MAY define a stronger reproducibility profile outside V1.
-
-Such a profile may pin:
-
-```text
-extractor versions
-query packs
-CodeGraph representation
-graph digest
-ranking formula
-fixed-point arithmetic
-resource counters
-token estimator
-total ordering
-selector configuration
-```
-
-If implemented, that profile answers a different question:
-
-> **Could another conforming selector recreate this same evidence selection?**
-
-The core Context Pack answers only:
-
-> **What evidence was associated with this invocation, and can its repository provenance be verified?**
-
-The two guarantees SHOULD remain separate so that retrieval experimentation does not require changing the audit protocol.
-
----
-
-# Appendix C — Evaluation
-
-Evaluate the system on historical agent failures and handoff tasks.
-
-Auditability metrics SHOULD include:
-
-```text
-percentage of repository-affecting invocations with valid exposure records
-percentage of pack items that resolve under the recorded tree
-stale-context detection rate
-render-mismatch detection rate
-missing-context investigation time
-manifest size
-exposure-record overhead
-```
-
-Retrieval-quality metrics MAY separately include:
-
-```text
-required-file recall
-required-symbol recall
-test recall
-configuration recall
-irrelevant-context ratio
-generation latency
-```
-
-The two groups SHOULD be reported separately. A retrieval system may have poor recall while still producing excellent provenance, or excellent recall while producing weak audit records.
-
-A useful handoff benchmark remains:
-
-```text
-fresh agent + no recorded context
-fresh agent + prose summary
-fresh agent + Context Pack
-fresh agent + Context Pack + exact exposure record
-```
+1. every auditable exposure identifies one exact Repository View;
+2. every blob item resolves from `view.tree` to the recorded blob;
+3. every gitlink item resolves from `view.tree` as mode `160000` to the recorded commit;
+4. dirty views use exact overlay trees;
+5. ContextRender binds exact bytes, order, media type, and logical placement;
+6. provider envelopes remain outside the digest without permitting unrecorded repository-derived content;
+7. later events reference exposures by immutable trace-record commit identity;
+8. persisted exposures create real Git reachability to `view.tree` and the pack;
+9. clean and dirty historical views survive ordinary GC for the intended retention period;
+10. selector identity and omission diagnostics remain non-consensus diagnostics;
+11. omission metadata does not leak hidden resources;
+12. instruction provenance can be verified without turning relevance into authority;
+13. validation requires no deterministic ranking, graph hashing, token estimator, or cross-platform numeric convention;
+14. high-frequency exposure records are not required on the policy-critical session DAG;
+15. no object claims model cognition or causation.
 
 ---
 
 ## Final invariant
 
-> **A Context Pack is an immutable manifest of Git-grounded repository evidence whose required paths resolve under an exact repository tree. A Context Exposure Event commits to the exact ContextRender bytes that crossed the harness context-to-invocation audit boundary and is bound to that invocation through signed session history. Provider-specific request serialization is outside that digest boundary and MUST NOT introduce unrecorded repository-derived context. Selector identity, coarse omissions, and instruction provenance may improve diagnosis without making retrieval reproducible or granting instruction authority. Retrieval and ranking remain replaceable implementation details. Neither object proves cognition or causation.**
+> **A Context Pack is an immutable manifest of Git-grounded blob and gitlink evidence under an exact repository tree. A durable exposure keeps that tree reachable through real Git edges. A Context Exposure Event commits to an ordered, semantically placed ContextRender at the harness boundary and is referenced later by immutable trace-record identity. Retrieval and ranking remain replaceable; provider serialization, runtime telemetry, cognition, and causation remain outside the Context Pack guarantee.**
