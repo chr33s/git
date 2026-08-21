@@ -26,7 +26,13 @@ import { isRepoId, type RepoId } from "./Genesis.ts";
 export interface KnownRepo {
   readonly url: string;
   readonly repoId: RepoId;
+  /** Absent only for a legacy two-column entry, which means implicit TOFU. */
+  readonly provenance?: Provenance;
 }
+
+export type Provenance =
+  | { readonly kind: "tofu" }
+  | { readonly kind: "introduced"; readonly paths: number };
 
 export class KnownRepos extends Context.Service<
   KnownRepos,
@@ -146,12 +152,34 @@ export const parseLine = (line: string): KnownRepo | null => {
   const trimmed = line.trim();
   if (trimmed === "" || trimmed.startsWith("#")) return null;
 
-  const [url, repoId] = trimmed.split(/\s+/);
+  const [url, repoId, encodedProvenance] = trimmed.split(/\s+/);
   if (url === undefined || repoId === undefined) return null;
-  return isRepoId(repoId) ? { url, repoId } : null;
+  if (!isRepoId(repoId)) return null;
+
+  if (encodedProvenance === "tofu") return { url, repoId, provenance: { kind: "tofu" } };
+  const introduced = /^introduced:([1-9][0-9]*)$/.exec(encodedProvenance ?? "");
+  if (introduced !== null) {
+    return {
+      url,
+      repoId,
+      provenance: { kind: "introduced", paths: Number(introduced[1]) },
+    };
+  }
+  // A missing column is the v1 format and means TOFU. An unrecognised future
+  // column is kept implicit too: forgetting the whole line would forget the
+  // pin and turn an identity change into a first-use prompt.
+  return { url, repoId };
 };
 
-export const formatLine = (entry: KnownRepo): string => `${entry.url} ${entry.repoId}`;
+export const formatLine = (entry: KnownRepo): string => {
+  const provenance =
+    entry.provenance === undefined
+      ? ""
+      : entry.provenance.kind === "tofu"
+        ? " tofu"
+        : ` introduced:${entry.provenance.paths}`;
+  return `${entry.url} ${entry.repoId}${provenance}`;
+};
 
 export const parseFile = (contents: string): ReadonlyArray<KnownRepo> => {
   const entries: KnownRepo[] = [];

@@ -29,6 +29,7 @@ import * as Certificate from "./Certificate.ts";
 import { MAX_SIGNATURES } from "./Certificate.ts";
 import { type Genesis, type RepoId, type RootKey } from "./Genesis.ts";
 import * as Log from "./Log.ts";
+import { principalOf, type PrincipalId } from "./Principal.ts";
 
 const decoder = new TextDecoder();
 
@@ -73,6 +74,25 @@ export interface Member {
 export interface GrantRecord {
   readonly commit: Oid;
   readonly capabilities: ReadonlyArray<string>;
+}
+
+/** A repository membership grant held by an identity repository. */
+export interface PrincipalMember {
+  readonly principal: PrincipalId;
+  readonly hints: ReadonlyArray<string>;
+  readonly capabilities: ReadonlyArray<string>;
+  readonly grantedAt: Date;
+  readonly expiresAt: Date | null;
+  readonly grant: Oid;
+  readonly history: ReadonlyArray<GrantRecord>;
+}
+
+export interface PrincipalRevocation {
+  readonly subject: PrincipalId;
+  readonly reason: Certificate.Revoke["reason"];
+  readonly compromisedFrom: Date | null;
+  readonly commit: Oid;
+  readonly supersededBy: Oid | null;
 }
 
 export interface Revocation {
@@ -122,9 +142,9 @@ const earliest = (left: Date | null, right: Date | null): Date | null => {
  * right now", and every earlier window stays on the record because it is still
  * true about its own interval.
  */
-export const openWindow = (
-  revocations: ReadonlyArray<Revocation> | undefined,
-): Revocation | null => {
+export const openWindow = <A extends { readonly supersededBy: Oid | null }>(
+  revocations: ReadonlyArray<A> | undefined,
+): A | null => {
   const last = revocations?.at(-1);
   return last !== undefined && last.supersededBy === null ? last : null;
 };
@@ -145,6 +165,8 @@ export interface Projection {
   /** The log head this state was folded from; `null` when the log is empty. */
   readonly head: Oid | null;
   readonly members: ReadonlyMap<Fingerprint, Member>;
+  /** Membership granted to stable identities rather than individual keys. */
+  readonly principals: ReadonlyMap<PrincipalId, PrincipalMember>;
   /**
    * What revoked members held before they were revoked.
    *
@@ -155,6 +177,7 @@ export interface Projection {
    * every past event by anyone who ever left.
    */
   readonly former: ReadonlyMap<Fingerprint, Member>;
+  readonly formerPrincipals: ReadonlyMap<PrincipalId, PrincipalMember>;
   /**
    * Every window each key has been out on, oldest first.
    *
@@ -166,6 +189,7 @@ export interface Projection {
    * every signature they made during the compromise was authorized again.
    */
   readonly revoked: ReadonlyMap<Fingerprint, ReadonlyArray<Revocation>>;
+  readonly revokedPrincipals: ReadonlyMap<PrincipalId, ReadonlyArray<PrincipalRevocation>>;
   readonly roots: ReadonlyArray<RootKey>;
   readonly threshold: number;
   /** The most recent checkpoint, for callers that only want to show one. */
@@ -283,8 +307,11 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
   const head = yield* repository.resolve(Log.LOG_REF);
 
   const members = new Map<Fingerprint, Member>();
+  const principals = new Map<PrincipalId, PrincipalMember>();
   const former = new Map<Fingerprint, Member>();
+  const formerPrincipals = new Map<PrincipalId, PrincipalMember>();
   const revoked = new Map<Fingerprint, ReadonlyArray<Revocation>>();
+  const revokedPrincipals = new Map<PrincipalId, ReadonlyArray<PrincipalRevocation>>();
   const rejected: Rejected[] = [];
 
   let roots: ReadonlyArray<RootKey> = genesis.roots;
@@ -377,8 +404,48 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
         }
       }
 
-      // SAFETY: `Certificate.validate` has checked that `subject` is the
-      // fingerprint of `publicKey`, which is what a `Fingerprint` names.
+      const principal = principalOf(payload.subject);
+
+      if (principal !== null) {
+        const windows = revokedPrincipals.get(principal) ?? [];
+        if (
+          openWindow(windows) !== null &&
+          !quorum &&
+          holds(members, revoked, signers, "member.revoke", claimedAt) === null
+        ) {
+          rejected.push({
+            commit: entry.commit,
+            reason: `issuer may not re-instate ${payload.subject}; that needs member.revoke`,
+          });
+          continue;
+        }
+
+        const previous = principals.get(principal) ?? formerPrincipals.get(principal);
+        principals.set(principal, {
+          principal,
+          hints: payload.identityRepo?.hint ?? [],
+          capabilities: payload.capabilities,
+          grantedAt: new Date(payload.issuedAt),
+          expiresAt: payload.expiresAt === null ? null : new Date(payload.expiresAt),
+          grant: entry.commit,
+          history: [
+            ...(previous?.history ?? []),
+            { commit: entry.commit, capabilities: payload.capabilities },
+          ],
+        });
+        const ending = openWindow(windows);
+        if (ending !== null) {
+          revokedPrincipals.set(principal, [
+            ...windows.slice(0, -1),
+            { ...ending, supersededBy: entry.commit },
+          ]);
+        }
+        formerPrincipals.delete(principal);
+        continue;
+      }
+
+      // SAFETY: `Certificate.validate` has checked that a non-principal
+      // `subject` is the fingerprint of the public key carried beside it.
       const subject = payload.subject as Fingerprint;
 
       // A grant over a revocation re-instates — rotating a key back in is an
@@ -405,9 +472,14 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
       // a fresh start, and the events signed under the old grant were
       // authorized when they were made.
       const previous = members.get(subject) ?? former.get(subject);
+      const publicKey = payload.publicKey;
+      if (publicKey === undefined) {
+        rejected.push({ commit: entry.commit, reason: `${subject} carries no public key` });
+        continue;
+      }
       members.set(subject, {
         fingerprint: subject,
-        publicKey: payload.publicKey,
+        publicKey,
         capabilities: payload.capabilities,
         grantedAt: new Date(payload.issuedAt),
         expiresAt: payload.expiresAt === null ? null : new Date(payload.expiresAt),
@@ -442,7 +514,39 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
         rejected.push({ commit: entry.commit, reason: "issuer may not revoke members" });
         continue;
       }
-      // SAFETY: `Certificate.validate` has checked the subject is a fingerprint.
+      const principal = principalOf(payload.subject);
+      if (principal !== null) {
+        const compromised = payload.reason === "compromised";
+        const from = !compromised
+          ? null
+          : payload.compromisedAt !== null
+            ? new Date(payload.compromisedAt)
+            : ((principals.get(principal) ?? formerPrincipals.get(principal))?.grantedAt ??
+              new Date(0));
+        const windows = revokedPrincipals.get(principal) ?? [];
+        const already = openWindow(windows);
+        const record: PrincipalRevocation = {
+          subject: principal,
+          supersededBy: null,
+          reason:
+            already?.reason === "compromised" || payload.reason === "compromised"
+              ? "compromised"
+              : payload.reason,
+          compromisedFrom: earliest(already?.compromisedFrom ?? null, from),
+          commit: already?.commit ?? entry.commit,
+        };
+        revokedPrincipals.set(
+          principal,
+          already === null ? [...windows, record] : [...windows.slice(0, -1), record],
+        );
+        const held = principals.get(principal);
+        if (held !== undefined) formerPrincipals.set(principal, held);
+        principals.delete(principal);
+        continue;
+      }
+
+      // SAFETY: `Certificate.validate` has checked a non-principal subject is
+      // a fingerprint.
       const subject = payload.subject as Fingerprint;
       const compromised = payload.reason === "compromised";
       const from = !compromised
@@ -533,8 +637,11 @@ export const project = Effect.fn("trust.Projection.project")(function* (genesis:
     repoId: genesis.repoId,
     head,
     members,
+    principals,
     former,
+    formerPrincipals,
     revoked,
+    revokedPrincipals,
     roots,
     threshold,
     checkpoint: retained[0] ?? null,

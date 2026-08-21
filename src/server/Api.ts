@@ -1891,6 +1891,9 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // Clamped by the same rule that reads the file back, so what this
           // answers with is what the repository will enforce.
           queueDepth: Policy.clampDepth(payload.queueDepth ?? held.queueDepth),
+          // Absent from the HTTP document for the same reason `queueCandidates`
+          // once was: a client that does not know the field must not turn it off.
+          externalReview: held.externalReview ?? null,
         };
         const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
         const tree = yield* repository.writeTree([
@@ -2853,7 +2856,10 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
           // The same retry discipline `Event.appendTo` applies: a lost race
           // re-reads the head and re-judges, because adding an event does not
           // change what it says.
-          Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }),
+          Effect.retry({
+            times: 3,
+            while: (error) => error._tag === "RefConflict",
+          }),
         );
         return { ref: target.ref, commit };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
@@ -3010,7 +3016,12 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
           }
           yield* repository.setRef({ name: ref, to: record, expected: prHead });
           return { pr: params.id, base: pull.base, commit: payload.head, event: record };
-        }).pipe(Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }));
+        }).pipe(
+          Effect.retry({
+            times: 3,
+            while: (error) => error._tag === "RefConflict",
+          }),
+        );
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     ),
 );

@@ -23,6 +23,12 @@ import {
 } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
 import type { RepoId } from "./Genesis.ts";
+import {
+  principalOf,
+  principalSubject,
+  type PrincipalId,
+  type PrincipalSubject,
+} from "./Principal.ts";
 
 /**
  * The capabilities this version knows, minus the scoped ones.
@@ -57,6 +63,7 @@ export const CAPABILITIES = [
   "hub.session",
   "hub.task",
   "hub.queue",
+  "social.write",
   "member.invite",
   "member.revoke",
   "policy.write",
@@ -73,6 +80,15 @@ export const isCapability = (value: string): boolean => {
   if (!value.startsWith(CHECK_PREFIX)) return false;
   const name = value.slice(CHECK_PREFIX.length);
   return name.length > 0 && !name.includes(" ");
+};
+
+const isHttpUrl = (value: string): boolean => {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -124,13 +140,20 @@ const envelope = {
   issuedAt: Timestamp,
 };
 
+export const IdentityRepo = Schema.Struct({
+  pin: Schema.String,
+  hint: Schema.Array(Schema.String),
+});
+
 export const Grant = Schema.Struct({
   type: Schema.tag("trust.grant"),
   ...envelope,
-  /** The subject key's fingerprint: what every later record names it by. */
+  /** A key fingerprint, or `principal:<PrincipalID>`. */
   subject: Schema.String,
-  /** The `authorized_keys` line, so a verifier needs nothing else to check it. */
-  publicKey: Schema.String,
+  /** Present for a key grant and absent for a principal grant. */
+  publicKey: Schema.optional(Schema.String),
+  /** Present for a principal grant and absent for a key grant. */
+  identityRepo: Schema.optional(IdentityRepo),
   capabilities: Schema.Array(Schema.String),
   /** `null` never expires; collaborative repositories should set one. */
   expiresAt: Schema.NullOr(Timestamp),
@@ -233,7 +256,9 @@ export const encode = (payload: TrustPayload): Uint8Array => {
       ? {
           ...common,
           subject: payload.subject,
-          publicKey: payload.publicKey,
+          ...(payload.publicKey === undefined
+            ? { identityRepo: payload.identityRepo }
+            : { publicKey: payload.publicKey }),
           capabilities: payload.capabilities,
           expiresAt: payload.expiresAt,
         }
@@ -305,9 +330,46 @@ export const grant = Effect.fn("Certificate.grant")(function* (input: {
   } satisfies Grant;
 });
 
+/** Build a grant whose subject is an identity repository, not one key. */
+export const grantPrincipal = Effect.fn("Certificate.grantPrincipal")(function* (input: {
+  readonly repo: RepoId;
+  readonly principal: PrincipalId;
+  readonly hints?: ReadonlyArray<string>;
+  readonly capabilities: ReadonlyArray<string>;
+  readonly expiresAt?: Date | null;
+  readonly id: string;
+  readonly at?: Date;
+}) {
+  for (const capability of input.capabilities) {
+    if (!isCapability(capability)) {
+      return yield* new Invalid({
+        field: "capabilities",
+        reason: `unknown capability '${capability}'`,
+      });
+    }
+  }
+  const hints = input.hints ?? [];
+  for (const hint of hints) {
+    if (!isHttpUrl(hint)) {
+      return yield* new Invalid({ field: "identityRepo", reason: `'${hint}' is not a URL` });
+    }
+  }
+  return {
+    type: "trust.grant",
+    version: 1,
+    repo: input.repo,
+    id: input.id,
+    issuedAt: (input.at ?? new Date()).toISOString(),
+    subject: principalSubject(input.principal),
+    identityRepo: { pin: input.principal, hint: hints },
+    capabilities: input.capabilities,
+    expiresAt: input.expiresAt?.toISOString() ?? null,
+  } satisfies Grant;
+});
+
 export const revoke = (input: {
   readonly repo: RepoId;
-  readonly subject: Fingerprint;
+  readonly subject: Fingerprint | PrincipalSubject;
   readonly reason: Revoke["reason"];
   readonly compromisedAt?: Date | null;
   readonly id: string;
@@ -379,16 +441,41 @@ export const validate = Effect.fn("Certificate.validate")(function* (
   }
 
   if (payload.type === "trust.grant") {
-    const key = parsePublicKey(payload.publicKey);
-    if (Result.isFailure(key)) {
-      return yield* new Invalid({ field: "publicKey", reason: key.failure.reason });
-    }
-    const print = yield* fingerprint(key.success);
-    if (print !== payload.subject) {
-      return yield* new Invalid({
-        field: "subject",
-        reason: `subject ${payload.subject} is not the fingerprint of the key given (${print})`,
-      });
+    const principal = principalOf(payload.subject);
+    if (principal === null) {
+      if (payload.publicKey === undefined || payload.identityRepo !== undefined) {
+        return yield* new Invalid({
+          field: "publicKey",
+          reason: "a key grant carries a public key and no identity repository",
+        });
+      }
+      const key = parsePublicKey(payload.publicKey);
+      if (Result.isFailure(key)) {
+        return yield* new Invalid({ field: "publicKey", reason: key.failure.reason });
+      }
+      const print = yield* fingerprint(key.success);
+      if (print !== payload.subject) {
+        return yield* new Invalid({
+          field: "subject",
+          reason: `subject ${payload.subject} is not the fingerprint of the key given (${print})`,
+        });
+      }
+    } else {
+      if (
+        payload.publicKey !== undefined ||
+        payload.identityRepo === undefined ||
+        payload.identityRepo.pin !== principal
+      ) {
+        return yield* new Invalid({
+          field: "identityRepo",
+          reason: "a principal grant must pin the PrincipalID named by its subject",
+        });
+      }
+      for (const hint of payload.identityRepo.hint) {
+        if (!isHttpUrl(hint)) {
+          return yield* new Invalid({ field: "identityRepo", reason: `'${hint}' is not a URL` });
+        }
+      }
     }
     for (const capability of payload.capabilities) {
       if (!isCapability(capability)) {
@@ -408,10 +495,10 @@ export const validate = Effect.fn("Certificate.validate")(function* (
   }
 
   if (payload.type === "trust.revoke") {
-    if (!isFingerprint(payload.subject)) {
+    if (!isFingerprint(payload.subject) && principalOf(payload.subject) === null) {
       return yield* new Invalid({
         field: "subject",
-        reason: `not a fingerprint: '${payload.subject}'`,
+        reason: `not a fingerprint or principal: '${payload.subject}'`,
       });
     }
     if (payload.compromisedAt !== null && Number.isNaN(Date.parse(payload.compromisedAt))) {

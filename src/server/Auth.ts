@@ -47,6 +47,7 @@ import { Repository } from "../git/Repository.ts";
 import { type Oid, storageOf } from "../git/Store.ts";
 import { type Genesis, readGenesis, type RepoId } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
+import type { ResolvedIdentity } from "../trust/Principal.ts";
 import { type Member, project, type Projection } from "../trust/Projection.ts";
 import { CAPABILITIES, permits } from "../trust/Certificate.ts";
 import * as Verify from "../trust/Verify.ts";
@@ -70,14 +71,17 @@ const decoder = new TextDecoder();
  * written to admit.
  */
 const WRITE = ["source.push", "source.delete"];
+/** Pre-auth receive-pack access; policy permits only a quarantine create. */
+export const INBOX_SUBMIT = "quarantine.submit";
 
 export const requiredCapability = (request: Request): ReadonlyArray<string> => {
   const url = new URL(request.url);
   const last = url.pathname.split("/").at(-1);
 
-  if (last === "git-receive-pack") return WRITE;
+  const inbox = request.headers.get("git-inbox") === "1";
+  if (last === "git-receive-pack") return inbox ? [...WRITE, INBOX_SUBMIT] : WRITE;
   if (last === "refs" && url.searchParams.get("service") === "git-receive-pack") {
-    return WRITE;
+    return inbox ? [...WRITE, INBOX_SUBMIT] : WRITE;
   }
   if (last === "git-upload-pack") return READ;
   // The LFS batch endpoint negotiates downloads as well as uploads, so method
@@ -706,6 +710,8 @@ export interface Authenticated {
   /** What this request may do — narrowed by a delegated credential's scope. */
   readonly capabilities: ReadonlyArray<string>;
   readonly projection: Projection;
+  /** Foreign identity view used when membership resolved through a PrincipalID. */
+  readonly identity?: ResolvedIdentity;
   /**
    * The envelope a native client signed, when it signed one.
    *
@@ -800,24 +806,35 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     // Anonymous reads are a repository policy question; anonymous writes never
     // are. Either way the answer carries a fresh nonce, so a native client
     // learns how to sign its retry from the rejection itself.
-    return readOnly(input.capability) && anonymousReadAllowed(projection)
+    return input.capability.includes(INBOX_SUBMIT)
       ? ({
           ok: true,
           authenticated: {
             principal: null,
             signer: null,
-            capabilities: ["repo.read"],
+            capabilities: [INBOX_SUBMIT],
             projection,
             envelope: null,
           },
         } as const)
-      : ({
-          ok: false,
-          status: 401,
-          reason: "authentication required",
-          nonce: yield* nonces.issue(300),
-          repo: projection.repoId,
-        } as const);
+      : readOnly(input.capability) && anonymousReadAllowed(projection)
+        ? ({
+            ok: true,
+            authenticated: {
+              principal: null,
+              signer: null,
+              capabilities: ["repo.read"],
+              projection,
+              envelope: null,
+            },
+          } as const)
+        : ({
+            ok: false,
+            status: 401,
+            reason: "authentication required",
+            nonce: yield* nonces.issue(300),
+            repo: projection.repoId,
+          } as const);
   }
 
   const identified =
@@ -841,24 +858,35 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     // credential presented is nonsense: `git` sends whatever a credential
     // helper has for the host, and refusing here would break clones for
     // people whose only mistake was having an unrelated entry.
-    return readOnly(input.capability) && anonymousReadAllowed(projection)
+    return input.capability.includes(INBOX_SUBMIT)
       ? ({
           ok: true,
           authenticated: {
             principal: null,
             signer: null,
-            capabilities: ["repo.read"],
+            capabilities: [INBOX_SUBMIT],
             projection,
             envelope: null,
           },
         } as const)
-      : ({
-          ok: false,
-          status: 401,
-          reason: "credential did not verify",
-          nonce: yield* nonces.issue(300),
-          repo: projection.repoId,
-        } as const);
+      : readOnly(input.capability) && anonymousReadAllowed(projection)
+        ? ({
+            ok: true,
+            authenticated: {
+              principal: null,
+              signer: null,
+              capabilities: ["repo.read"],
+              projection,
+              envelope: null,
+            },
+          } as const)
+        : ({
+            ok: false,
+            status: 401,
+            reason: "credential did not verify",
+            nonce: yield* nonces.issue(300),
+            repo: projection.repoId,
+          } as const);
   }
 
   // Any one of them: a holder of `source.delete` and a holder of
@@ -884,6 +912,18 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     // readable because a credential was presented: `git` sends one on every
     // request once it has any, and refusing here would break a clone that
     // works without it.
+    if (input.capability.includes(INBOX_SUBMIT)) {
+      return {
+        ok: true,
+        authenticated: {
+          principal: null,
+          signer: identified.signer,
+          capabilities: [INBOX_SUBMIT],
+          projection,
+          envelope: null,
+        },
+      } as const;
+    }
     if (readOnly(input.capability) && anonymousReadAllowed(projection)) {
       return {
         ok: true,
@@ -940,16 +980,18 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
     } as const;
   }
 
-  return {
-    ok: true,
-    authenticated: {
-      principal: authorized.principal,
-      signer: identified.signer,
-      capabilities: scoped,
-      projection,
-      envelope: "envelope" in identified ? identified.envelope : null,
-    },
-  } as const;
+  const baseAuthentication: Authenticated = {
+    principal: authorized.principal,
+    signer: identified.signer,
+    capabilities: scoped,
+    projection,
+    envelope: "envelope" in identified ? identified.envelope : null,
+  };
+  const authenticated: Authenticated =
+    authorized.identity === undefined
+      ? baseAuthentication
+      : { ...baseAuthentication, identity: authorized.identity };
+  return { ok: true, authenticated } as const;
 });
 
 /** The projection a repository with no genesis presents: nothing is known. */
@@ -962,6 +1004,9 @@ const EMPTY: Projection = {
   members: new Map(),
   former: new Map(),
   revoked: new Map(),
+  principals: new Map(),
+  formerPrincipals: new Map(),
+  revokedPrincipals: new Map(),
   roots: [],
   threshold: 0,
   checkpoint: null,

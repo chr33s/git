@@ -61,6 +61,7 @@ describe("Refspec", () => {
       "the policy ref must be in the hub refspecs",
     );
     assert.notEqual(Refspec.resolve(Refspec.HUB_FETCH, Refspec.TRUST_LOG), null);
+    assert.notEqual(Refspec.resolve(Refspec.HUB_FETCH, Refspec.SOCIAL_LOG), null);
     assert.notEqual(Refspec.resolve(Refspec.HUB_FETCH, "refs/hub/pr/1"), null);
     // And it is hidden from a plain advertisement, so naming it is the only
     // way it ever arrives.
@@ -70,10 +71,13 @@ describe("Refspec", () => {
   it("knows which namespaces only grow, and which are withheld from a clone", () => {
     assert.equal(Refspec.isAppendOnly("refs/hub/pr/1"), true);
     assert.equal(Refspec.isAppendOnly(Refspec.TRUST_LOG), true);
+    assert.equal(Refspec.isAppendOnly(Refspec.SOCIAL_LOG), true);
     assert.equal(Refspec.isAppendOnly("refs/heads/main"), false);
 
     assert.equal(Refspec.hiddenFromAdvertisement("refs/hub/pr/1"), true);
     assert.equal(Refspec.hiddenFromAdvertisement(Refspec.TRUST_LOG), true);
+    assert.equal(Refspec.hiddenFromAdvertisement(Refspec.SOCIAL_LOG), true);
+    assert.equal(Refspec.hiddenFromAdvertisement("refs/quarantine/inbox/1"), true);
     // Identity is never hidden: verifying it would otherwise need permission.
     assert.equal(Refspec.hiddenFromAdvertisement(Refspec.TRUST_GENESIS), false);
     assert.equal(Refspec.hiddenFromAdvertisement("refs/heads/main"), false);
@@ -91,6 +95,9 @@ describe("Refspec", () => {
     assert.equal(Refspec.namesHiddenNamespace("refs/hub/pr/1"), true);
     assert.equal(Refspec.namesHiddenNamespace("refs/meta"), true);
     assert.equal(Refspec.namesHiddenNamespace("refs/meta/trust/"), true);
+    assert.equal(Refspec.namesHiddenNamespace("refs/social"), true);
+    assert.equal(Refspec.namesHiddenNamespace("refs/social/"), true);
+    assert.equal(Refspec.namesHiddenNamespace("refs/quarantine"), true);
 
     // A prefix that merely starts the same way names nothing, and answering it
     // hands `ls-remote 'refs/h*'` the whole namespace for three characters.
@@ -113,9 +120,21 @@ describe("Refspec", () => {
     assert.deepEqual(Refspec.hiddenPrefixes("refs/hub/"), ["refs/hub/"]);
     assert.deepEqual(Refspec.hiddenPrefixes("refs/hub/pr/"), ["refs/hub/pr/"]);
     assert.deepEqual(Refspec.hiddenPrefixes("refs/meta/trust/"), ["refs/meta/trust/"]);
-    // A refspec that covers everything covers both, and has to name both.
-    assert.deepEqual(Refspec.hiddenPrefixes("refs/"), ["refs/hub/", "refs/meta/"]);
-    assert.deepEqual(Refspec.hiddenPrefixes(""), ["refs/hub/", "refs/meta/"]);
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/social/"), ["refs/social/"]);
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/quarantine/"), ["refs/quarantine/"]);
+    // A refspec that covers everything covers all three, and has to name them.
+    assert.deepEqual(Refspec.hiddenPrefixes("refs/"), [
+      "refs/hub/",
+      "refs/meta/",
+      "refs/quarantine/",
+      "refs/social/",
+    ]);
+    assert.deepEqual(Refspec.hiddenPrefixes(""), [
+      "refs/hub/",
+      "refs/meta/",
+      "refs/quarantine/",
+      "refs/social/",
+    ]);
     // And one that covers neither asks for nothing.
     assert.deepEqual(Refspec.hiddenPrefixes("refs/heads/"), []);
     assert.deepEqual(Refspec.hiddenPrefixes("refs/tags/"), []);
@@ -135,7 +154,12 @@ describe("Refspec", () => {
 
     assert.deepEqual(Refspec.probes(spec("refs/hub/*/head:refs/local/*")), ["refs/hub/"]);
     assert.deepEqual(Refspec.probes(spec("refs/hub/*:refs/hub/*")), ["refs/hub/"]);
-    assert.deepEqual(Refspec.probes(spec("refs/*:refs/*")), ["refs/hub/", "refs/meta/"]);
+    assert.deepEqual(Refspec.probes(spec("refs/*:refs/*")), [
+      "refs/hub/",
+      "refs/meta/",
+      "refs/quarantine/",
+      "refs/social/",
+    ]);
     // A source with no wildcard is its own head — and the rules file is
     // hidden from the advertisement too, so it is asked for by name.
     assert.deepEqual(Refspec.probes(spec("refs/meta/policy:refs/meta/policy")), [

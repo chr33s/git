@@ -321,15 +321,22 @@ export class GitRepo extends DurableObject<TestEnv> {
     // `gc` is the request that deletes objects a body may still be reading.
     if (collects(request)) await settledWithin(this.#delivering);
 
-    this.#api ??= HttpRouter.toWebHandler(
-      Api.layer(this.#remoteRegistry(repo)).pipe(
-        Layer.provideMerge(this.#live(repo)),
-        Layer.provideMerge(this.#registry(repo)),
-        Layer.provideMerge(this.#openWrites()),
-      ),
-      { disableLogger: true },
-    ).handler;
-    return this.#track(await this.#api(request, Auth.requesterContext(guarded.authenticated)));
+    const api = (this.#api ??= (() => {
+      const router = HttpRouter.toWebHandler(
+        Api.layer(this.#remoteRegistry(repo)).pipe(
+          Layer.provideMerge(this.#live(repo)),
+          Layer.provideMerge(this.#registry(repo)),
+          Layer.provideMerge(this.#openWrites()),
+        ),
+        { disableLogger: true },
+      );
+      return (request: Request, requester: Context.Context<Auth.Requester>) =>
+        // SAFETY: the handler's generated declaration erases its remaining
+        // request-scoped service to `unknown`; this context contains exactly
+        // that `Requester` service and no value is inspected through the cast.
+        router.handler(request, requester as Context.Context<unknown>);
+    })());
+    return this.#track(await api(request, Auth.requesterContext(guarded.authenticated)));
   }
 
   /**

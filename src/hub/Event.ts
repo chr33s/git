@@ -36,6 +36,7 @@ import { checkRefName, isOid, type Oid } from "../git/Store.ts";
 import { checkCapability } from "../trust/Certificate.ts";
 import type { RepoId } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
+import { isPrincipalId } from "../trust/Principal.ts";
 import * as Record from "../trust/Record.ts";
 
 const decoder = new TextDecoder();
@@ -228,6 +229,12 @@ export const ReviewSubmitted = Schema.Struct({
   head: Schema.String,
   decision: Schema.Literals(["approve", "reject", "comment"]),
   body: Schema.String,
+  /** Stable identity for a reviewer outside this repository's membership. */
+  principal: Schema.optional(Schema.String),
+  /** External reviews pin the destination they were made for. */
+  base: Schema.optional(Schema.String),
+  /** Exact identity-log view under which the external signing key was current. */
+  identityHead: Schema.optional(Schema.String),
 });
 
 export const ReviewDismissed = Schema.Struct({
@@ -443,6 +450,37 @@ export const validate = Effect.fn("hub.Event.validate")(function* (
     return yield* new Invalid({
       field: "trustHead",
       reason: `'${payload.trustHead}' is not an object id`,
+    });
+  }
+
+  if (payload.type === "review.submitted" && payload.principal !== undefined) {
+    if (!isPrincipalId(payload.principal)) {
+      return yield* new Invalid({
+        field: "principal",
+        reason: `'${payload.principal}' is not a PrincipalID`,
+      });
+    }
+    if (payload.base === undefined || !payload.base.startsWith("refs/heads/")) {
+      return yield* new Invalid({
+        field: "base",
+        reason: "an external review must name a full refs/heads/* destination",
+      });
+    }
+    if (payload.identityHead === undefined || !isOid(payload.identityHead)) {
+      return yield* new Invalid({
+        field: "identityHead",
+        reason: "an external review must pin an identity trust-log head",
+      });
+    }
+  }
+  if (
+    payload.type === "review.submitted" &&
+    payload.principal === undefined &&
+    payload.identityHead !== undefined
+  ) {
+    return yield* new Invalid({
+      field: "identityHead",
+      reason: "only an external review may name an identity trust-log head",
     });
   }
 

@@ -20,6 +20,7 @@ import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { readGenesis, type RepoId } from "../trust/Genesis.ts";
+import type { PrincipalId } from "../trust/Principal.ts";
 import { permits } from "../trust/Certificate.ts";
 import { openWindow, project as projectTrust } from "../trust/Projection.ts";
 import { LOG_REF } from "../trust/Log.ts";
@@ -148,16 +149,56 @@ export const review = Effect.fn("hub.PullRequest.review")(function* (input: {
   readonly head: Oid;
   readonly decision: "approve" | "reject" | "comment";
   readonly body?: string;
+  /** Present only when this is a federated review outside project membership. */
+  readonly principal?: PrincipalId;
+  /** Required with `principal`; external reviews pin their destination. */
+  readonly base?: string;
+  /** Required with `principal`; pins the identity view authorizing its device key. */
+  readonly identityHead?: Oid;
   readonly key: PrivateKey;
 }) {
+  const externalBase = input.base;
+  if (
+    input.principal !== undefined &&
+    (externalBase === undefined || input.identityHead === undefined)
+  ) {
+    return yield* new Invalid({
+      field: externalBase === undefined ? "base" : "identityHead",
+      reason:
+        externalBase === undefined
+          ? "an external review must name the branch it reviews"
+          : "an external review must pin the identity trust-log head it was signed against",
+    });
+  }
   const base = yield* context(input.repo, input.pr);
+  const payload = {
+    ...base,
+    type: "review.submitted" as const,
+    head: Event.qualify(input.head),
+    decision: input.decision,
+    body: input.body ?? "",
+  };
+  if (input.principal === undefined) {
+    if (input.identityHead !== undefined) {
+      return yield* new Invalid({
+        field: "identityHead",
+        reason: "only an external review may pin an identity trust-log head",
+      });
+    }
+    return yield* Event.issue(payload, input.key);
+  }
+  if (externalBase === undefined || input.identityHead === undefined) {
+    return yield* new Invalid({
+      field: externalBase === undefined ? "base" : "identityHead",
+      reason: "an external review must pin its branch and identity trust-log head",
+    });
+  }
   return yield* Event.issue(
     {
-      ...base,
-      type: "review.submitted",
-      head: Event.qualify(input.head),
-      decision: input.decision,
-      body: input.body ?? "",
+      ...payload,
+      principal: input.principal,
+      base: Event.branchRef(externalBase),
+      identityHead: input.identityHead,
     },
     input.key,
   );
@@ -339,7 +380,10 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
       reason: `${input.pr} has ${claimants.length} events claiming ${input.target}`,
     });
   }
-  const targetCommit = claimants[0]!;
+  const targetCommit = claimants[0];
+  if (targetCommit === undefined) {
+    return yield* new Invalid({ field: "target", reason: `${input.target} has no event commit` });
+  }
 
   const { events } = yield* Event.entries(input.pr);
   const target = events.find((entry) => entry.commit === targetCommit);

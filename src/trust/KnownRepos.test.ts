@@ -160,6 +160,32 @@ describe("KnownRepos", () => {
       ];
       assert.deepEqual(parseFile(formatFile(entries)), entries);
     });
+
+    it("records whether a pin came from TOFU or an introduction", () => {
+      const entries = [
+        {
+          url: "https://git.example.com/tofu",
+          repoId: alpha,
+          provenance: { kind: "tofu" } as const,
+        },
+        {
+          url: "https://git.example.com/introduced",
+          repoId: beta,
+          provenance: { kind: "introduced", paths: 2 } as const,
+        },
+      ];
+
+      const encoded = formatFile(entries);
+      assert.match(encoded, new RegExp(`tofu\\s*$`, "m"));
+      assert.match(encoded, new RegExp(`introduced:2\\s*$`, "m"));
+      assert.deepEqual(parseFile(encoded), entries);
+    });
+
+    it("continues to read legacy two-column pins as implicit TOFU", () => {
+      assert.deepEqual(parseFile(`https://git.example.com/legacy ${alpha}\n`), [
+        { url: "https://git.example.com/legacy", repoId: alpha },
+      ]);
+    });
   });
 
   describe("the decision", () => {

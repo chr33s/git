@@ -133,6 +133,7 @@ export const DEFAULT_FETCH: ReadonlyArray<Refspec> = [
 export const HUB_FETCH: ReadonlyArray<Refspec> = [
   { force: false, source: "refs/meta/trust/*", destination: "refs/meta/trust/*" },
   { force: false, source: "refs/meta/policy", destination: "refs/meta/policy" },
+  { force: false, source: "refs/social/log", destination: "refs/social/log" },
   { force: false, source: "refs/hub/*", destination: "refs/hub/*" },
 ];
 
@@ -152,11 +153,13 @@ export const HUB_FETCH: ReadonlyArray<Refspec> = [
  * on the object graph, for a ref no fold ever opens.
  */
 export const isAppendOnly = (ref: string): boolean =>
-  ref.startsWith("refs/hub/") || ref === TRUST_LOG;
+  ref.startsWith("refs/hub/") || ref === TRUST_LOG || ref === SOCIAL_LOG;
 
 /** The one trust ref that moves; the genesis never does. */
 export const TRUST_LOG = "refs/meta/trust/log";
 export const TRUST_GENESIS = "refs/meta/trust/genesis";
+/** The one social ref that moves; every statement is a commit in this log. */
+export const SOCIAL_LOG = "refs/social/log";
 
 /**
  * Refs a plain `git clone` should not be sent.
@@ -171,7 +174,11 @@ export const TRUST_GENESIS = "refs/meta/trust/genesis";
  * trusts. Hiding identity would make verification need permission.
  */
 export const hiddenFromAdvertisement = (ref: string): boolean =>
-  ref !== TRUST_GENESIS && (ref.startsWith("refs/hub/") || ref.startsWith("refs/meta/"));
+  ref !== TRUST_GENESIS &&
+  (ref.startsWith("refs/hub/") ||
+    ref.startsWith("refs/meta/") ||
+    ref.startsWith("refs/quarantine/") ||
+    ref.startsWith("refs/social/"));
 
 /**
  * Whether a `ref-prefix` is asking for a hidden namespace.
@@ -194,7 +201,7 @@ export const hiddenFromAdvertisement = (ref: string): boolean =>
 export const namesHiddenNamespace = (prefix: string): boolean =>
   HIDDEN.some((namespace) => prefix.startsWith(namespace) || `${prefix}/` === namespace);
 
-const HIDDEN = ["refs/hub/", "refs/meta/"];
+const HIDDEN = ["refs/hub/", "refs/meta/", "refs/quarantine/", "refs/social/"];
 
 /**
  * The prefixes a client must ask for by name to reach a hidden namespace.

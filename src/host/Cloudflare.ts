@@ -215,14 +215,19 @@ export default Repo.make(
       const api = (repo: string) => {
         const existing = routers.get(repo);
         if (existing !== undefined) return existing;
-        const built = HttpRouter.toWebHandler(
+        const router = HttpRouter.toWebHandler(
           Api.layer(remotes(repo)).pipe(
             Layer.provideMerge(live(repo)),
             Layer.provideMerge(subscribers(repo)),
             Layer.provideMerge(openWrites),
           ),
           { disableLogger: true },
-        ).handler;
+        );
+        const built = (request: Request, requester: Context.Context<Auth.Requester>) =>
+          // SAFETY: the handler's generated declaration erases its remaining
+          // request-scoped service to `unknown`; this context contains exactly
+          // that `Requester` service and no value is inspected through the cast.
+          router.handler(request, requester as Context.Context<unknown>);
         routers.set(repo, built);
         return built;
       };

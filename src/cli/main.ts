@@ -48,6 +48,7 @@ import * as Static from "../server/Static.ts";
 import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { hubCommand } from "./hub.ts";
+import { idCommand } from "./id.ts";
 import * as replay from "./replay.ts";
 import {
   cliSignature,
@@ -61,6 +62,7 @@ import {
 } from "./shared.ts";
 import { sessionCommand } from "./session.ts";
 import { queueCommand } from "./queue.ts";
+import { socialCommand } from "./social.ts";
 import { taskCommand } from "./task.ts";
 import { prCommand } from "./pr.ts";
 import { wakeCommand } from "./wake.ts";
@@ -1184,6 +1186,7 @@ const git = Command.make("git+").pipe(
     gc.pipe(Command.withDescription("Drop unreachable objects, optionally repacking")),
     grep.pipe(Command.withDescription("Search a revision's file contents")),
     hubCommand.pipe(Command.withDescription("Repository identity, membership and trust")),
+    idCommand.pipe(Command.withDescription("Stable principal identity and device rotation")),
     history.pipe(Command.withDescription("Commits that changed one path")),
     init.pipe(Command.withDescription("Create an empty bare repository")),
     log.pipe(Command.withDescription("Commit history, newest first")),
@@ -1214,6 +1217,7 @@ const git = Command.make("git+").pipe(
     sessionCommand.pipe(
       Command.withDescription("Record what an agent was told, and what came of it"),
     ),
+    socialCommand.pipe(Command.withDescription("Social graph: follows, vouches and discovery")),
     tag.pipe(Command.withDescription("List, create or delete tags")),
     taskCommand.pipe(Command.withDescription("What needs doing, and who is on it")),
     queueCommand.pipe(Command.withDescription("Land approved pull requests as one tested batch")),

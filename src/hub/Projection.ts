@@ -28,6 +28,7 @@ import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
 import { permits } from "../trust/Certificate.ts";
 import type { Genesis } from "../trust/Genesis.ts";
+import type { PrincipalId } from "../trust/Principal.ts";
 import type { Projection as TrustProjection } from "../trust/Projection.ts";
 import * as Log from "../trust/Log.ts";
 import * as Verify from "../trust/Verify.ts";
@@ -36,6 +37,8 @@ import * as Event from "./Event.ts";
 export interface Review {
   readonly id: string;
   readonly author: Fingerprint;
+  /** Stable identity behind `author`, when membership resolved through one. */
+  readonly principal: PrincipalId | null;
   /** The exact revision reviewed. An approval is of a revision, never of a PR. */
   readonly head: Oid;
   /** The branch it was reviewed *for*; retargeting the pull request stales it. */
@@ -124,6 +127,8 @@ export interface PullRequest {
    * of, whichever event you used to propose it.
    */
   readonly openers: ReadonlySet<Fingerprint>;
+  /** Stable identities that proposed a revision, across all of their devices. */
+  readonly openerPrincipals: ReadonlySet<PrincipalId>;
   /**
    * The commits whose payloads a valid tombstone reached.
    *
@@ -534,6 +539,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
    * establish.
    */
   const openers = new Set<Fingerprint>();
+  const openerPrincipals = new Set<PrincipalId>();
 
   /** Which members signed each event, for the contested-opening ranking. */
   const members = new Map<Oid, ReadonlySet<Fingerprint>>();
@@ -587,6 +593,9 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
       if (authorized.ok) {
         candidates.push(entry.commit);
         openers.add(authorized.principal.fingerprint);
+        if (authorized.identity !== undefined) {
+          openerPrincipals.add(authorized.identity.principal);
+        }
       }
     }
 
@@ -859,6 +868,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     }
 
     const signer = authorized.principal.fingerprint;
+    const stable = authorized.identity?.principal ?? null;
 
     // The claim is per *author*, not per id, and that is the whole defence.
     // An id is chosen by whoever writes the event, so a global claim let the
@@ -956,6 +966,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // approval on their own by declaring a stale head on a second
         // `pr.opened`.
         openers.add(signer);
+        if (stable !== null) openerPrincipals.add(stable);
         openings.push({ commit: entry.commit, base: Event.branchRef(payload.base) });
         if (supersedes({ commit: entry.commit, id: payload.id }, opened, ancestors)) {
           opened = { commit: entry.commit, id: payload.id };
@@ -1002,7 +1013,10 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         }
 
         const head = Event.unqualify(payload.head);
-        if (head !== null) openers.add(signer);
+        if (head !== null) {
+          openers.add(signer);
+          if (stable !== null) openerPrincipals.add(stable);
+        }
         // Whoever moved the head proposed the revision under review, which is
         // the thing `approvals` excludes. Keyed on the opening alone, a member
         // holding `hub.merge` could push a revision onto somebody else's pull
@@ -1081,6 +1095,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         reviews.set(mine, {
           id: payload.id,
           author: signer,
+          principal: stable,
           head,
           // Filled in below, from the openings this review descends from
           // rather than from whichever one the walk happened to reach first.
@@ -1342,6 +1357,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     checks: [...checks.values()],
     claims: byId,
     openers,
+    openerPrincipals,
     redacted,
     rejected,
     at,
@@ -1362,7 +1378,7 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
   // member satisfy "two approvals required" alone — and it is each author's
   // *latest* word that counts, so a later "request changes" withdraws their
   // earlier approval rather than sitting beside it.
-  const latest = new Map<Fingerprint, Review>();
+  const latest = new Map<string, Review>();
   for (const review of pullRequest.reviews) {
     if (review.stale || review.dismissed) continue;
     // Self-approval satisfies nothing. Without this, one member holding
@@ -1371,6 +1387,9 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
     // claimed opener, not merely `author`: a contested opening establishes no
     // author, and an approval from either claimant is still their own.
     if (pullRequest.openers.has(review.author)) continue;
+    if (review.principal !== null && pullRequest.openerPrincipals.has(review.principal)) {
+      continue;
+    }
     // A verdict, and only a verdict. A `comment` review takes no position —
     // it costs `hub.review` rather than `hub.approve`, which is the whole
     // difference — so letting one supersede was the lower capability
@@ -1384,7 +1403,7 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
     // order is `Dag.topological`, which is ancestry with a deterministic
     // tie-break — the same discipline `supersedes` applies for the same
     // reason, and `reviews` is built in it.
-    latest.set(review.author, review);
+    latest.set(review.principal ?? review.author, review);
   }
   return [...latest.values()].filter((review) => review.decision === "approve");
 };
