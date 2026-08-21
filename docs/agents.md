@@ -5,12 +5,10 @@ produce its code become refs beside that code, and what the whole
 lifecycle looks like run once — in three parts:
 
 - **[Part I — Agents as members](#part-i--agents-as-members)** — keys,
-  grants, credentials, introspection, signing, revocation. Everything here
-  runs today unless marked proposed.
-- **[Part II — Session provenance](#part-ii--session-provenance)** — a
-  proposed spec extending [hub.md](hub.md): sessions as
-  `refs/hub/session/*` event DAGs, plus wake-by-hooks, task claims,
-  decisions, repository memory and budgets (§19–§23).
+  grants, credentials, introspection, signing, revocation.
+- **[Part II — Session provenance](#part-ii--session-provenance)** —
+  sessions as `refs/hub/session/*` event DAGs, plus wake, tasks,
+  decisions, memory and budgets (§19–§23).
 - **[Part III — The workflow, end to end](#part-iii--the-workflow-end-to-end)**
   — the lifecycle walked once, from `hub init` to a merged, provenanced,
   resumable change.
@@ -312,9 +310,8 @@ radius the first section bought.
 
 ## Part II — Session provenance
 
-**Status:** Proposed (revision 1)
-**Recommendation:** Adopt after hub v1
-**Scope:** `chr33s/git` — extends [hub.md](hub.md); requires the trust log (hub §9), hub event DAGs (hub §16), redaction (hub §21), advertisement hygiene (hub §23) and the policy boundary (hub §26). Section references of the form "hub §N" point into that spec.
+**Status:** Implemented
+**Scope:** extends [hub.md](hub.md) — trust log (hub §9), event DAGs (hub §16), redaction (hub §21), advertisement hygiene (hub §23), policy boundary (hub §26).
 **Session namespace:** `refs/hub/session/*`
 **Task namespace:** `refs/hub/task/*` (§20)
 
@@ -892,88 +889,22 @@ canonical refs by session ID, never the refs themselves.
 
 ---
 
-### 15. Recommended modules
-
-Following the layout of hub §29:
+### 15. Modules
 
 ```text
-src/hub/
-  Session.ts        event payloads, schema, size bound
-  SessionProjection.ts
-
-src/server/
-  Policy.ts         requireProvenance (extends the existing boundary)
-
-src/cli/
-  session.ts        session enable / open / prompt / produce /
-                    resume / close / show — plumbing an agent
-                    harness drives
+src/hub/Session.ts     opened / produced / ask / answer; projection
+src/hub/Task.ts        claims as leases against the caller's clock
+src/hub/Memory.ts      note on genesis, rebuilt from cited sessions
+src/hub/Secrets.ts     scan what somebody typed, not the record
+src/server/Policy.ts   requireProvenance
+src/server/Wake.node.ts
+src/cli/{session,task,wake}.ts
 ```
 
-The CLI verbs are plumbing by design: the expected caller is a harness hook
-(a Claude Code `SessionStart`/`Stop` hook, a CI wrapper), not a human typing
-ceremonies. `session enable` is the on-ramp: it installs those hooks into
-the harness configurations it finds (`.claude/`, `.codex/`, …), so capture
-is a one-time decision rather than per-session ceremony. `session resume`
-accepts a branch as well as a session ID — the latest session whose
-`session.produced` names that branch is derivable from the refs, and "put
-me back in context for this branch" is the question an agent actually has
-on checkout (§8).
-
-#### The v0 cut
-
-The event machinery this spec leans on — append/sign/join, projection,
-redaction, the policy boundary, LFS — already exists for pull requests, so
-most of the cost is the new session-specific surface, and most of that
-surface is not where the value is. A v0 that captures, replicates, signs,
-resumes and displays — the value core — is:
-
-```text
-ship:
-  Session: trailers            zero server change; works today
-  two event kinds only         session.opened (agent + prompt),
-                               session.produced (commits, summary,
-                               usage; a note field absorbs planned
-                               and closed)
-  append by capability         any hub.session holder may append,
-                               like hub.comment — resume is just
-                               appending
-  three CLI verbs + one hook   open / produce / show (with
-                               --branch resume); session enable
-                               for one harness
-  a local wake dispatcher      §19 — post-receive plus a cursor
-                               ref; no server change, no new
-                               spec surface
-  the §8 consumption rule      normative text plus harness
-                               framing; zero code
-  the context field            §5 — one OID on session.opened
-
-defer:
-  tasks and claims             §20 — the one genuinely new
-                               primitive; wake works without it
-                               until the fleet grows
-  decisions, memory, budgets   §21–§23 — each layers on the
-                               same machinery once sessions
-                               are proven
-  requireProvenance            visibility before enforcement —
-                               the cross-ref push check is the
-                               subtlest new server work, and the
-                               rule most likely to be disabled
-                               under friction
-  the authorship/resume rules  inherited from PRs, which have
-  of §7–§8                     concurrent hostile writers;
-                               sessions are nearly single-writer
-  the scanning pipeline        tombstones already exist; layers
-                               arrive incrementally
-  transcript side objects      the harness already holds them
-  remaining harnesses,         docs warning suffices until
-  provenance remote            per-remote sync is configured
-```
-
-Nothing deferred changes a wire or event format: v0 events are v1 events,
-and each deferred item layers on without migration. The build order,
-grounded in the modules this repository already ships, is
-[plan.md](plan.md).
+CLI is plumbing for a harness hook (`session enable` writes it). `session
+show --branch` is resume: the latest `session.produced` naming that branch.
+Still open: authorship/resume finer rules (§7–§8), transcript side objects
+(§6), signer-scoped `requireProvenance` (§16).
 
 ---
 
@@ -1413,13 +1344,8 @@ The lifecycle Parts I and II add up to, walked once from an empty
 repository to a merged, provenanced, resumable change. Commands shown against a local `git+ serve`; a
 deployed Worker is the same flow with a different URL.
 
-Not everything below exists at the same stage. Repository identity,
-membership, credentials, serving, `whoami`, `wake` and the `session` verbs
-are **implemented**. Pull-request, review and check events exist as
-library code (`src/hub/`) without CLI verbs yet, and the layers Part II
-§15 defers — tasks, `requireProvenance`, decisions, memory, budgets — are
-**proposed**. Proposed commands are marked ▹; everything unmarked runs
-today.
+Commands below run today. Authorship/resume finer rules (§7–§8) remain
+harness convention.
 
 ### The cast
 
@@ -1454,7 +1380,7 @@ at `refs/meta/policy` (hub §9, §26; provenance §9):
 main:
   requiredApprovals: 1
   requiredChecks: [test]
-  requireProvenance: true     # ▹ once sessions land
+  requireProvenance: true
 ```
 
 ### 2. Agent enrollment — operator, once per agent
@@ -1557,8 +1483,12 @@ git push origin claude/agent-keys "refs/hub/session/S:refs/hub/session/S"
 ```
 
 Opening the pull request is one more signed event, a `pr.opened` at the
-root of `refs/hub/pr/P` (hub §16; ▹ as a CLI verb — the event machinery
-lives in `src/hub/` today).
+root of `refs/hub/pr/P`:
+
+```sh
+npx git+ pr open project --key ~/.ssh/agent-claude \
+  --title "…" --base main --head claude/agent-keys
+```
 
 ### 6. Review and checks — human and ci
 
@@ -1566,7 +1496,7 @@ CI fetches the branch, runs the suite, and signs a result it is only
 _able_ to sign for the check named in its grant:
 
 ```sh
-▹ git+ check complete project --key ~/.ssh/agent-ci \
+git+ pr check project --key ~/.ssh/agent-ci \
     --pr P --head sha1:89ab... --name test --status success
 ```
 
@@ -1576,7 +1506,7 @@ projection, which is the point. Their approval names the exact head
 (hub §18):
 
 ```sh
-▹ git+ review approve project --key ~/.ssh/reviewer --pr P --head sha1:89ab...
+git+ pr review project --key ~/.ssh/reviewer --pr P --decision approve --head sha1:89ab...
 ```
 
 ### 7. Merge — policy, not trust in the room
@@ -1588,7 +1518,7 @@ policy boundary (hub §26). In one evaluation:
 signer authorized?                     trust projection
 approval names current head?           hub §18
 check signed by hub.check:test?        hub §11
-every new commit provenanced?          provenance §9  ▹
+every new commit provenanced?          provenance §9
 head unchanged since evaluation?       CAS at RefStore.apply
 ```
 
@@ -1603,8 +1533,7 @@ asked to finish related work, reads before it writes:
 ```sh
 TOKEN=$(npx git+ credential project --key ~/.ssh/agent-codex \
   --capability repo.read,source.push --ttl 3600)
-▹ git+ session resume project --key ~/.ssh/agent-codex \
-    --branch claude/agent-keys       # the branch names its latest session
+git+ session show project --branch claude/agent-keys
 ```
 
 The branch is the natural key — "put me back in context for this branch"
@@ -1628,7 +1557,7 @@ one account of the work, no shared platform between them.
 A prompt turns out to contain an internal hostname:
 
 ```sh
-▹ git+ redact project --key ~/.ssh/hub --event <event-id>
+git+ session redact project --key ~/.ssh/hub --session S --target <event-id> --reason leaked
 ```
 
 The tombstone replicates; the payload blob (and any transcript object) is

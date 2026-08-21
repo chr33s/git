@@ -1,50 +1,9 @@
 # Git-Native Hub
 
-**Status:** Proposed (revision 2)
-**Recommendation:** Adopt
-**Scope:** `chr33s/git` — this spec targets the `artifacts` branch architecture (`src/git/Store.ts` `RefStore`/`ObjectStore`, `src/server/Auth.ts`, `src/server/Protocol.ts`, Effect services). The flat `src/` layout on `main` does not contain the constructs referenced here.
+**Status:** Implemented
+**Scope:** `chr33s/git` — trust log, hub event DAGs, policy boundary, delegated credentials.
 **Hub namespace:** `refs/hub/*`
 **Trust namespace:** `refs/meta/trust/*`
-
-## Revision 2 changes
-
-This revision resolves the issues raised in spec review:
-
-```text
-1. Hub events: per-event refs replaced by one append-only,
-   hash-linked event DAG per PR (ref cardinality O(PRs));
-   refs/hub/* hidden from source-only advertisement.
-2. Trust state: independent grant/revocation refs replaced by a
-   hash-linked trust log with signed checkpoints; withholding and
-   split-view attacks addressed explicitly.
-3. Revocation semantics defined (acceptance-time, non-retroactive
-   by default; retroactive "compromised" class).
-4. Membership certificates carry validity windows.
-5. Quorum-loss consequences stated explicitly.
-6. Delegated short-lived credentials promoted to a REQUIRED v1
-   component (the stock-git compatibility path).
-7. Signed request envelope binds the ref-command list, not
-   streamed body bytes; nonce lifecycle specified.
-8. Trust refs synchronize before hub refs; unresolved events
-   quarantine rather than fail permanently.
-9. Redaction tombstones added; GC and replication honor them.
-10. Merge policy mandates compare-and-swap (`expected` OID) at
-    RefStore.apply; append-only enforcement specified at the
-    policy boundary.
-11. known_repos entries keyed by URL, value RepoID only.
-12. RepoID defined over exact genesis blob bytes (no canonical
-    JSON, not a git OID).
-13. Check capability scoped per check name.
-14. Normative language fixed (MUST for required key type);
-    hardware-backed sk-ssh-ed25519 explicitly permitted.
-15. SHA-256 object-format support moved out of v1 into Future
-    work; v1 targets SHA-1 repositories with hash-qualified,
-    format-agnostic payloads.
-16. Phases reordered: trust before hub, refspec generalization
-    before hub enable, SHA-256 deferred.
-```
-
----
 
 ## 1. Core principle
 
@@ -1584,123 +1543,17 @@ signatures:  SSH
 
 ---
 
-## 29. Recommended modules
-
-Following the `artifacts` branch layout:
+## 29. Modules
 
 ```text
-src/crypto/
-  SshSignature.ts
-
-src/trust/
-  Genesis.ts
-  Certificate.ts
-  Log.ts
-  Checkpoint.ts
-  Projection.ts
-  Verify.ts
-
-src/hub/
-  Event.ts
-  PullRequest.ts
-  Projection.ts
-  Review.ts
-  Comment.ts
-  Check.ts
-  Redaction.ts
-
-src/server/
-  Auth.ts        (rewritten: challenge + delegated credentials)
-  Policy.ts
-  Replication.ts
+src/crypto/SshSignature.ts
+src/trust/{Genesis,Certificate,Log,Projection,Verify,KnownRepos,Principal}.ts
+src/hub/{Event,PullRequest,Projection,Redaction,Session,Task,Queue,Memory}.ts
+src/server/{Auth,Policy,Replication}.ts
+src/cli/{hub,pr,session,task,queue,wake}.ts
 ```
 
-`src/git/Sha1.ts` already provides streaming SHA-1. The generic repository token registry (`Tokens` in `src/artifacts/*`) and the HMAC mint/verify pair in `src/server/Auth.ts` disappear (§13).
-
----
-
-## 30. Implementation phases
-
-Ordered so that each phase's prerequisites precede it, the novel work (trust, hub) comes first, and the largest mechanical work (SHA-256) is deferred entirely.
-
-### Phase 1 — Repository trust genesis
-
-```text
-RepoID (exact-bytes definition)
-quorum genesis, 1-of-1 and N-of-M
-SSH signatures (sign/verify, namespace)
-known_repos TOFU (URL → RepoID)
-refs/meta/trust/genesis
-```
-
-### Phase 2 — Trust log and membership
-
-```text
-refs/meta/trust/log (hash-linked event DAG)
-membership grant / revocation (both classes)
-certificate validity windows
-root rotation
-checkpoints
-trust projection + capability evaluation
-```
-
-### Phase 3 — Authentication
-
-```text
-challenge-response (nonce lifecycle, signed envelope
-  over command lists)
-delegated short-lived credentials + git credential helper
-remove: HMAC mint/verify, Tokens registries,
-  generic read/write scopes
-```
-
-### Phase 4 — Generalized replication
-
-```text
-refspec-driven ref selection in client fetch/push
-arbitrary refs/** namespaces through the transfer layer
-advertisement hygiene (hide hub/trust from v0;
-  v2 ref-prefix for hub fetches)
-```
-
-### Phase 5 — `hub enable`
-
-```text
-known_repos verification / TOFU
-+refs/hub/*:refs/hub/* and trust refspecs
-multiple fetch refspecs per remote in client config
-initial trust-then-hub fetch
-hub disable
-hub status
-```
-
-### Phase 6 — Hub events
-
-```text
-per-PR append-only event DAGs
-signed PRs, reviews, comments, checks
-join commits, integrity-conflict detection
-redaction tombstones
-projection
-```
-
-### Phase 7 — Policy
-
-```text
-trust + hub projections at the common ref-update boundary
-expected-OID compare-and-swap on policy-gated applies
-append-only enforcement for hub/trust refs
-```
-
-### Phase 8 — Automatic replication
-
-```text
-hub/trust state as active-active DAG unions (trust first)
-source refs by directional / fast-forward policy
-quarantine + re-validation of unresolved events
-```
-
----
+Git-surface auth is the trust graph (§12–§13). `artifacts/Tokens` is the Artifacts binding, not repository authority.
 
 ## 31. Future work: SHA-256 object format
 

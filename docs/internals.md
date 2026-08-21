@@ -14,23 +14,22 @@ constraints the code cannot show you.
 - [Surfaces](#surfaces)
 - [Deliberately not built](#deliberately-not-built)
 - [Open questions](#open-questions)
-- [Remaining: the branch swap](#remaining-the-branch-swap)
 
 ## Pinned dependencies
 
 Both `effect` and `alchemy` are pinned betas that break between releases; the
 repo sets `save-exact=true` deliberately.
 
-| package                 | version          | why it matters                                     |
-| ----------------------- | ---------------- | -------------------------------------------------- |
-| `effect`                | `4.0.0-beta.107` | `Schema`, `HttpApi`, `Stream` and the CLI are core |
-| `alchemy`               | `2.0.0-beta.70`  | the `next` tag; v2 is "infrastructure as effects"  |
-| `@effect/platform-node` | `4.0.0-beta.107` | node `FileSystem`/`Path`/`NodeRuntime` for the CLI |
+| package                 | version         | why it matters                                               |
+| ----------------------- | --------------- | ------------------------------------------------------------ |
+| `effect`                | `4.0.0-rc.111`  | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
+| `alchemy`               | `2.0.0-beta.72` | Workers stack as effects                                     |
+| `@effect/platform-node` | `4.0.0-rc.111`  | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
+| `@effect/tsgo`          | `0.36.5`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
+| `typescript`            | `7.0.2`         | TypeScript-Go                                                |
 
-`alchemy` is installed behind a `patch-package` patch, and `effect` behind one
-that aliases `Schema.TaggedErrorClass` — the name a dependency is built
-against. The alias is not a project convention; see
-[Effect v4 in this repo](#effect-v4-in-this-repo).
+`alchemy` is behind a `patch-package` patch. Oxlint `typeCheck` and `tsc` both
+run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).
 
 ## Module map
 
@@ -72,8 +71,12 @@ against. The alias is not a project convention; see
 | `src/client/Push.ts`         | smart-HTTP push client                                               |
 | `src/client/Client.ts`       | browser client: derived JSON client, clone, local `Repository`       |
 | `src/cli/bin.ts`             | `bin`: node's compile cache on, then `main.ts`                       |
-| `src/cli/main.ts`            | CLI: 29 commands, and the `run` both entries call                    |
+| `src/cli/main.ts`            | CLI: porcelain, hub, social, queue, session, task, wake              |
 | `src/cli/sea.build.ts`       | `npm run build:sea` — the CLI as one node SEA binary (node 26+)      |
+| `src/crypto/SshSignature.ts` | SSH sign / verify                                                    |
+| `src/trust/`                 | genesis, trust log, certificates, PrincipalID, known_repos           |
+| `src/hub/`                   | event DAGs: PRs, sessions, tasks, queue, redaction, memory           |
+| `src/social/`                | identity-repo social log, introduction, inbox, external review       |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag       |
 | `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite            |
 | `src/alchemy.run.ts`         | deployment stack: bucket, DO and Worker as values, not config        |
@@ -250,11 +253,11 @@ actually bitten:
   compiler name the two that were load-bearing, and those carry a
   line-scoped diagnostic suppression _and a reason_.
 
-Three deviations are deliberate: `Schema.TaggedError` rather than
-`TaggedErrorClass` (the pinned beta exports the former); raw `fetch` in
-`client/Fetch.ts` because it is the browser transport, with Effect discipline
-kept inside the adapter; and no module-namespace re-export style, because the
-existing style is consistent already.
+Two deviations are deliberate: raw `fetch` in `client/Fetch.ts` because it is
+the browser transport, with Effect discipline kept inside the adapter; and no
+module-namespace re-export style, because the existing style is consistent
+already. Failures are `Schema.TaggedError` (or `Data.TaggedError` where the
+value is thrown, not yielded).
 
 ## Testing
 
@@ -414,63 +417,8 @@ for its bases.
 
 - **Bundle size in a Worker is unmeasured.** Effect core plus `unstable/http`
   and `unstable/httpapi` is not small, and nothing has checked it against the
-  3 MiB compressed limit. The one open question that could still force a design
-  change.
-- **Both dependencies are betas** and break between releases. Budget for churn
-  per upgrade.
-- **Delta compression on the wire** is the remaining protocol item:
-  `multi_ack_detailed` landed on both sides, deltas are written at repack, and
-  the open question is whether fetch responses should spend serve-time CPU on
-  delta search (and thin packs) for the bandwidth back. Measure before
-  building — `docs/multi-ack-delta-compression.md` holds the sketch.
-
-### Cloudflare Artifacts provider
-
-`src/artifacts/` implements alchemy's **Cloudflare Artifacts** binding locally
-— Artifacts is "git for agents", so the protocol half was already done. The
-architecture maps onto the contract almost line for line. What it needed beyond
-the git core was a namespace registry, `fork`, and an auth system; the first
-and third exist (`artifacts/Sqlite.ts`, `server/Auth.ts`).
-
-## Remaining: the branch swap
-
-This branch's work is not yet the repository default. The swap is a
-repository-settings operation, not a code change, and it needs a human.
-
-Prefer GitHub's branch **rename** over a force-push: renames retarget open PRs
-and branch-protection rules and leave a redirect notice for existing clones.
-
-**First, check that the branch being promoted carries the work.** A rename
-cannot lose history, but it can promote the wrong history — `artifacts` sat at
-a commit predating all of the gap-closing work, and renaming it would have made
-the default a repository with no LFS, no merge and no protocol v2, with nothing
-in the history to suggest anything had gone wrong.
-
-```sh
-git fetch origin artifacts
-git ls-tree --name-only origin/artifacts \
-  src/server/Lfs.ts src/git/Merge.ts src/server/Route.ts src/client/Push.ts src/git/Work.ts
-```
-
-Anything missing means the branch is not the one to promote. Then, in a quiet
-window:
-
-1. Freeze — merge or close PRs targeting `main`; announce the cutover.
-2. Rename `main` → `legacy`. Existing clones keep working. Optionally tag the
-   tip: `git tag legacy/final <sha> && git push origin legacy/final`.
-3. Rename the rewrite branch → `main`. Renaming the default makes it the
-   default automatically; otherwise set it in Settings.
-4. Re-point branch protection, required checks, and any CI triggers or
-   environments naming the old branches.
-5. Tell contributors:
-   ```sh
-   git fetch origin --prune
-   git branch -m main legacy         # if they had the legacy main checked out
-   git checkout -b main origin/main
-   ```
-6. Archive stale branches cut from the legacy `main`; new work rebases onto the
-   new `main`.
-
-Fallback without a rename: `git push origin main:legacy`, flip the default
-branch in Settings, then `git push origin <branch>:main`. Force-pushing over
-`main` without flipping the default first orphans open PRs — avoid.
+  3 MiB compressed limit.
+- **`alchemy` is still beta** and breaks between releases. Effect is on RC.
+- **Fetch-path deltas and thin packs.** Repack writes ofs-deltas; live
+  upload-pack stays full-object. Measure before spending serve-time CPU on
+  delta search.

@@ -1,12 +1,9 @@
 # Git-Native Merge Queue
 
-**Status:** Implemented (revision 2)
-**Scope:** `chr33s/git` — composes with [hub.md](hub.md) (§11 advancing a
-protected branch, §16 event DAGs, §26 merge policy) and
-[agents.md](agents.md) (§19 wake, §20 tasks and claims). Nothing here
-changes a Phase 1–4 wire or event format from [plan.md](plan.md).
+**Status:** Implemented
+**Scope:** composes with [hub.md](hub.md) (§11, §16, §26) and [agents.md](agents.md) (§19–§20).
 **Queue namespace:** `refs/hub/queue/*`
-**New capability:** `hub.queue`
+**Capability:** `hub.queue`
 
 ## 1. The problem: the serialization tax
 
@@ -502,81 +499,23 @@ either drown reviewers or need an approval-carry exception that guts the
 rule. The candidate chain leaves `H_i` — and everything reviewers said
 about it — untouched.
 
-## 9. What was built
-
-All four phases landed, each green through `npm run check` and `npm test`.
-The enforcement went first and alone, because it is the only part that
-touches the boundary and it is independently useful: a person can
-hand-build a two-pull-request candidate and land it with no queue running
-at all.
+## 9. Modules
 
 ```text
-Phase 1 — the boundary
-  src/git/Repository.ts     mergeTree: the merge decision without a
-                            commit or a ref, and `merge` rewritten in
-                            terms of it so a candidate's builder and
-                            its verifier cannot disagree
-  src/hub/Projection.ts     checksPassedAt: the revision a check ran
-                            against, separated from the pull request's
-                            head
-  src/server/Policy.ts      authorizes (the direct path's own loop,
-                            now shared) and candidateChain: parent
-                            shape, per-step rules, checks against the
-                            candidate, tree equality, queueDepth
-                            ceiling; rules fields queueCandidates and
-                            queueDepth, both optional and off
-
-Phase 2 — queue events
-  src/hub/Queue.ts          opened / entered / candidate / left /
-                            reset, and the projection over them
-  src/trust/Certificate.ts  hub.queue
-  src/server/Policy.ts      the namespace admitted, hub.queue charged,
-                            population counted as its own class
-  free rides, verified      append-only enforcement, advertisement
-                            hiding, replication join
-
-Phase 3 — the runner
-  src/cli/queue.ts          open | enter | leave | run | list | show,
-                            with --dry-run; conflicts predicted with
-                            the same merge the boundary recomputes
-  src/server/Wake.node.ts   the walk decodes an event's tag rather
-                            than the pull-request union — see below
-
-Phase 4 — surfaces
-  src/server/Whoami.ts      a branch says whether it takes candidates,
-                            and how deep
-  docs, readme              hub.md §11, the capability list, the
-                            command inventory
+src/git/Repository.ts    mergeTree — builder and verifier call the same function
+src/hub/Queue.ts         opened / entered / candidate / left / reset
+src/hub/Projection.ts    checksPassedAt (candidate, not PR head)
+src/server/Policy.ts     candidateChain; queueCandidates / queueDepth (off by default)
+src/cli/queue.ts         open | enter | leave | run | list | show
+src/server/Whoami.ts     whether a branch takes candidates, and how deep
 ```
 
-### Two things the implementation settled
+A candidate is a pure function of what it merges (constant identity;
+committer date = later parent). Wall-clock stamps made CI bind a commit
+the next pass could not reproduce. `queue run` refuses `requireProvenance`
+targets — the candidate is a commit the runner makes.
 
-**Candidates must be deterministic, and that is load-bearing.** The first
-runner stamped each candidate with a wall clock, and the queue could
-never land anything: a candidate built, published and tested in one pass
-came back with a different object id in the next, so the check bound to
-the first named nothing the second held. A candidate is therefore a pure
-function of what it merges — a constant identity, and a committer date
-taken from the later of its two parents. The second-order benefit is
-larger than the fix: two runners building the same batch now produce the
-_same commit_ rather than two commits with the same content, so a
-candidate one of them published and CI tested is the one the other lands.
-
-**`wake` could not see the namespaces it was extended to serve.** The
-dispatcher decoded every record as a pull-request payload, so a
-`task.opened` — and any `queue.entered` — read as a record this version
-"cannot read" and its rule never fired. agents.md §20's whole working
-rhythm was silently impossible. What a rule matches on is the event's
-type, and every hub envelope spells that field the same way, so the walk
-now reads the tag alone. That was a pre-existing defect this work
-uncovered rather than caused; it is fixed and covered by a test.
-
-### Not built
-
-A queue lane in the web UI. `queue list` and `queue show` answer the same
-question in JSON, and the screens are fixture-backed in places
-(`src/ui/readme.md`), so this waits for the screen work rather than
-leading it.
+Not built: a queue lane in the web UI (`queue list` / `queue show` are JSON).
 
 ## 10. What this buys
 

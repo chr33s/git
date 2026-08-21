@@ -1,41 +1,9 @@
 # Web of Trust: a Social Graph Overlay
 
-**Status:** Proposed (revision 2)
-**Scope:** `chr33s/git` — builds on the trust and hub design in
-[hub.md](hub.md) (`refs/meta/trust/*`, `refs/hub/*`, the policy boundary,
-delegated credentials) and the agent identity model in
-[agents.md](agents.md). Nothing here changes hub v1; every construct is an
-overlay a repository or a verifier opts into.
+**Status:** Implemented
+**Scope:** overlay on [hub.md](hub.md) — identity repositories, social logs,
+introduction, federated review. Does not widen a repository's own policy.
 **Social namespace:** `refs/social/*` (in a principal's identity repository)
-
-## Revision 2 changes
-
-Prior art from the nostr protocol ([NIPs](https://github.com/nostr-protocol/nips))
-reviewed and folded in:
-
-```text
-1. social.mirrors: self-published locations for one's own
-   identity repository — the outbox model (NIP-65).
-2. attest.repo gains lineage (earliest-unique-commit fork-family
-   key, NIP-34) and inbox (a contribution door for non-members).
-3. Follows carry petnames; verifiers build petname tables
-   (NIP-02) instead of consulting any global namespace.
-4. attest.principal gains external-identity claims with
-   bidirectional proofs (NIP-39); DNS-based names admitted as
-   attestations by a domain, never as identity (NIP-05).
-5. Shareable identifiers: typed, checksummed encodings bundling
-   an ID with location hints (NIP-19/21), and a git-remote
-   helper so stock git clones by identity (NIP-34).
-6. social.label: namespaced labels instead of a new statement
-   kind per vocabulary (NIP-32).
-7. Delegated projection for weak clients — signed, attributed,
-   explicitly chosen providers (NIP-85's mechanism, with its
-   global metrics rejected).
-8. Prior-art section (§10) recording what nostr's deployment
-   proves and what is deliberately not borrowed.
-```
-
----
 
 ## 1. The problem: trust is an island per repository
 
@@ -750,49 +718,24 @@ negentropy sync          NIP-77 rebuilds set reconciliation that
 
 ---
 
-## 11. Implementation shape
-
-The point of §2–§3 reusing existing machinery is that this is mostly
-composition, in the pattern of [plan.md](plan.md):
+## 11. Modules
 
 ```text
 src/social/
-  Statement.ts       payload schemas, signing (over src/crypto)
-  Log.ts             append/read (the trust Log generalized over
-                     a namespace, which §23's rules already are)
-  Projection.ts      rooted fold: attenuation, depth, minPaths,
-                     revocation windows, memoised per verifier
-  Introduce.ts       known_repos v2: provenance, introduction
-                     resolution, split-view surfacing
-  Encode.ts          gid1/grepo1 bech32m encodings, and the
-                     git-remote helper that resolves them (§2)
+  Statement.ts     payload schemas
+  Log.ts           append / read
+  Projection.ts    rooted fold (attenuation, depth, minPaths)
+  Introduce.ts     known_repos introduction
+  Encode.ts        gid1 / grepo1; git-remote-git+id
+  Inbox.ts         contribution without membership
+  Review.ts        externalReview
+  Lineage.ts       fork-family key
+  Sync.node.ts     follow-driven fetch
+  Web.node.ts      sibling identity logs
 
-src/trust/           subject: "principal:" resolution — the
-                     two-log membership walk, quarantine, pinned
-                     identity-log heads
-
-src/server/Policy.ts externalReview evaluation at the boundary
-
-src/cli/
-  id.ts              git+ id init | rotate | revoke | status
-  social.ts          git+ follow | vouch | attest | social find
+src/trust/Principal.ts     PrincipalID
+src/server/Policy.ts       externalReview at the boundary
+src/cli/id.ts              git+ id init | rotate | revoke | status
+src/cli/social.ts          follow | vouch | attest | mirrors | label |
+                           find | sync | inbox | …
 ```
-
-Phasing, each independently shippable and each useful without the next:
-
-```text
-1  identity repositories + PrincipalID grants   (rotation story)
-2  social log + attest.repo + mirrors +
-   introduction                                 (TOFU story)
-3  vouch + rooted projection + minPaths         (the web itself)
-4  discovery + follows/petnames + encoded
-   identifiers + remote helper + labels         (the forge story)
-5  externalReview policy + the inbox            (federation story)
-```
-
-Phase 1 has no social graph in it at all and is worth shipping alone;
-phase 5 is the only one that lets the overlay near an authorization
-decision, and it arrives last, behind a policy field nobody has written
-yet. External-identity proofs and delegated projection providers slot
-into phases 2 and 4 respectively as optional extensions — neither is on
-any other phase's critical path.
