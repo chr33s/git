@@ -101,7 +101,7 @@ const toApiError = (error: TaggedFailure): ApiError => {
   const message =
     error.reason ??
     (error.message === undefined || error.message === "" ? error._tag : error.message);
-  return new ApiError(error._tag, statusFor(error._tag), message);
+  return new ApiError({ tag: error._tag, status: statusFor(error._tag), message });
 };
 
 export class LocalGitApi {

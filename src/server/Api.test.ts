@@ -72,7 +72,12 @@ const dispatched = <E>(
     | HttpRouter.Request<"Requires", GitRepository.Repository>
     | HttpRouter.Request<"Requires", Subscribers.Subscribers>
   >,
-): Effect.Effect<void, E> => effect as Effect.Effect<void, E>;
+): Effect.Effect<void, E> => {
+  // SAFETY: `live` already merged Repository and Subscribers into the
+  // dispatch context; HttpApiTest cannot name that in the type.
+  // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off
+  return effect as Effect.Effect<void, E>;
+};
 
 const alice = {
   name: "Alice",

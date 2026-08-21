@@ -14,7 +14,8 @@
     "plugins": [
       {
         "name": "@effect/language-service",
-        "allowedDuplicatedPackages": ["@distilled.cloud/core"]
+        "allowedDuplicatedPackages": ["@distilled.cloud/core"],
+        "diagnostics": false
       }
     ],
     "skipLibCheck": true,

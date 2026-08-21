@@ -246,7 +246,11 @@ const decoded = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, endpoin
     const body: unknown = await response.json().catch((): undefined => undefined);
     const result = parse(body);
     if (Result.isFailure(result)) {
-      throw new ApiError("SchemaError", 502, `${endpoint} answered outside its wire contract`);
+      throw new ApiError({
+        tag: "SchemaError",
+        status: 502,
+        message: `${endpoint} answered outside its wire contract`,
+      });
     }
     return result.success;
   };
@@ -381,11 +385,11 @@ const append = async (bytes: Uint8Array, key: PrivateKey): Promise<HubEventAppen
     // SAFETY: every field is read optionally and defaulted; the shape is the
     // same loose error body `api.ts` decodes at its own boundary.
     const body_ = failure as { _tag?: string; message?: string; reason?: string } | undefined;
-    throw new ApiError(
-      body_?._tag ?? "HttpError",
-      response.status,
-      body_?.message ?? body_?.reason ?? `${response.status} ${response.statusText}`,
-    );
+    throw new ApiError({
+      tag: body_?._tag ?? "HttpError",
+      status: response.status,
+      message: body_?.message ?? body_?.reason ?? `${response.status} ${response.statusText}`,
+    });
   }
   return await decodeAppended(response);
 };
@@ -581,7 +585,11 @@ const tipOf = async (ref: string): Promise<string | null> => {
     response = (await retryAuthorized(url, {}, response)) ?? response;
   }
   if (!response.ok) {
-    throw new ApiError("HttpError", response.status, `${response.status} ${response.statusText}`);
+    throw new ApiError({
+      tag: "HttpError",
+      status: response.status,
+      message: `${response.status} ${response.statusText}`,
+    });
   }
   return (await decodeRefs(response)).refs.find((held) => held.name === ref)?.oid ?? null;
 };
@@ -631,11 +639,11 @@ export const mergePull = async (input: {
     // SAFETY: every field is read optionally and defaulted; the shape is the
     // same loose error body `ui/api.ts` decodes at its own boundary.
     const body_ = failure as { _tag?: string; message?: string; reason?: string } | undefined;
-    throw new ApiError(
-      body_?._tag ?? "HttpError",
-      response.status,
-      body_?.message ?? body_?.reason ?? `${response.status} ${response.statusText}`,
-    );
+    throw new ApiError({
+      tag: body_?._tag ?? "HttpError",
+      status: response.status,
+      message: body_?.message ?? body_?.reason ?? `${response.status} ${response.statusText}`,
+    });
   }
   return await decodeMerged(response);
 };

@@ -20,7 +20,7 @@
 import { createGunzip } from "node:zlib";
 
 import { concatBytes as concat } from "../git/Format.ts";
-import { Effect, Stream } from "effect";
+import { Effect, Schema, Stream } from "effect";
 
 import { type GitError, Invalid, PackCorrupt, type StorageFailure } from "../git/Error.ts";
 import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
@@ -269,7 +269,7 @@ const step = <A>(run: () => Promise<A>) =>
   Effect.tryPromise({
     try: run,
     catch: (cause) =>
-      cause instanceof PackCorrupt || cause instanceof Invalid
+      Schema.is(PackCorrupt)(cause) || Schema.is(Invalid)(cause)
         ? cause
         : corrupt(cause instanceof Error ? cause.message : JSON.stringify(cause)),
   });
@@ -911,7 +911,7 @@ export const receivePack = (request: Request): Effect.Effect<Response, GitError,
           Effect.catch((error) => Effect.succeed(error)),
         );
       if (unpacked !== null) {
-        const reason = unpacked instanceof PackCorrupt ? unpacked.reason : unpacked._tag;
+        const reason = Schema.is(PackCorrupt)(unpacked) ? unpacked.reason : unpacked._tag;
         // The unpacker stopped part-way, so the rest of the pack is still
         // arriving; the report only reaches the client if it is read first.
         yield* drain;

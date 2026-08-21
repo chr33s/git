@@ -12,7 +12,7 @@
  * plain text, so the file is only as private as the repository directory it
  * lives in — which is also true of the objects it protects.
  */
-import { Effect, Layer, Option } from "effect";
+import { Effect, Layer, Option, Schema } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import { readRows, writeRows } from "./JsonRows.node.ts";
@@ -80,7 +80,7 @@ export const file = (location: string): Layer.Layer<Remotes> =>
                 write(location, [...rows, remote]);
                 return remote;
               },
-              catch: (cause) => (cause instanceof Invalid ? cause : failed("remotes.add")(cause)),
+              catch: (cause) => (Schema.is(Invalid)(cause) ? cause : failed("remotes.add")(cause)),
             }),
           ),
         ),

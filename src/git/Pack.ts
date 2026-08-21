@@ -22,7 +22,7 @@
  * where the work is background and the bytes are storage. Per-object deflate
  * is `CompressionStream("deflate")`, available everywhere this runs.
  */
-import { Effect, Result, Stream } from "effect";
+import { Effect, Result, Schema, Stream } from "effect";
 
 import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
 import { bytesToHex, concatBytes as concat, hashObject } from "./Format.ts";
@@ -192,7 +192,7 @@ class Source {
       }
       return out;
     } catch (error) {
-      throw error instanceof InflateError ? this.corrupt(error.message) : error;
+      throw error instanceof InflateError ? this.corrupt(error.reason) : error;
     }
   }
 
@@ -526,7 +526,7 @@ export const unpack = <E>(
       Effect.tryPromise({
         try: run,
         catch: (cause) =>
-          cause instanceof PackCorrupt ? cause : new PackCorrupt({ reason: String(cause) }),
+          Schema.is(PackCorrupt)(cause) ? cause : new PackCorrupt({ reason: String(cause) }),
       });
 
     const count = yield* step(() => source.header());
@@ -585,7 +585,7 @@ const RETAIN_AT_LEAST = 8;
 const RETAIN_UP_TO = 64 * 1024 * 1024;
 
 const asCorrupt = (cause: unknown): PackCorrupt =>
-  cause instanceof PackCorrupt ? cause : new PackCorrupt({ reason: String(cause) });
+  Schema.is(PackCorrupt)(cause) ? cause : new PackCorrupt({ reason: String(cause) });
 
 /**
  * Ingest a packfile, keeping it *as a pack* when that is the better shape.

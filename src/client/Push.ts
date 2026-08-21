@@ -13,7 +13,7 @@
  * before spending a pack upload on a push the operator did not mean.
  */
 import { concatBytes as concat } from "../git/Format.ts";
-import { Effect, Stream } from "effect";
+import { Effect, Schema, Stream } from "effect";
 
 import { Invalid, type ObjectNotFound, PackCorrupt, type StorageFailure } from "../git/Error.ts";
 import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
@@ -65,7 +65,7 @@ const unreachable = (reason: string) => new Invalid({ field: "remote", reason })
  * a generic "remote unreachable" would report a framing bug as a network one.
  */
 const failure = (cause: unknown): Invalid | PackCorrupt =>
-  cause instanceof PackCorrupt || cause instanceof Invalid ? cause : unreachable(String(cause));
+  Schema.is(PackCorrupt)(cause) || Schema.is(Invalid)(cause) ? cause : unreachable(String(cause));
 
 /** `fetch` rejects credentials in URLs, so a token travels as a header. */
 const authorization = (token: string | undefined): Record<string, string> =>

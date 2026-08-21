@@ -15,7 +15,7 @@ import { describe, it } from "@effect/vitest";
 
 import type { Namespace as ArtifactsNamespace } from "alchemy/Cloudflare/Artifacts/Namespace";
 import { ReadWriteNamespace } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
-import type { RuntimeContext } from "alchemy/RuntimeContext";
+import { RuntimeContext } from "alchemy/RuntimeContext";
 import { Effect, Layer } from "effect";
 
 import { noPacks } from "../git/Packed.ts";
@@ -49,19 +49,18 @@ const author = {
 /**
  * A fresh provider per call: `Layer.sync` state does not leak across tests.
  * `RuntimeContext` appears in the client's signatures but the local provider
- * never touches it, so the cast discharges what nothing reads.
+ * never touches it. `RuntimeContext.phantom` discharges the requirement
+ * without inventing a runtime.
  */
 const run = <A, E>(
   effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | Tokens | RuntimeContext>,
 ): Promise<A> =>
-  // SAFETY: the local provider never reads `RuntimeContext`; alchemy's client
-  // signatures carry it only because no off-platform value can be constructed,
-  // so providing the memory layers discharges every requirement actually read.
   Effect.runPromise(
-    effect.pipe(Effect.provide(localMemory({ remoteBase: "http://git.local" }))) as Effect.Effect<
-      A,
-      E
-    >,
+    effect.pipe(
+      Effect.provide(
+        Layer.merge(localMemory({ remoteBase: "http://git.local" }), RuntimeContext.phantom),
+      ),
+    ),
   );
 
 const bound = Effect.gen(function* () {
@@ -343,12 +342,13 @@ describe("Artifacts local provider", () => {
   it("survives a provider restart when backed by the node layers", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "artifacts-durable-"));
     const provider = () => localNode({ root, remoteBase: "http://git.local" });
-    // SAFETY: as with `run` above, the local provider never reads
-    // `RuntimeContext`, so the node layers discharge every requirement
-    // actually read.
+    // As with `run` above, the local provider never reads `RuntimeContext`.
     const session = <A, E>(
       effect: Effect.Effect<A, E, ReadWriteNamespace | RepoStores | Tokens | RuntimeContext>,
-    ) => Effect.runPromise(effect.pipe(Effect.provide(provider())) as Effect.Effect<A, E>);
+    ) =>
+      Effect.runPromise(
+        effect.pipe(Effect.provide(Layer.merge(provider(), RuntimeContext.phantom))),
+      );
 
     try {
       // First life: create, seed, fork, mint.

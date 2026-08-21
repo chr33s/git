@@ -58,7 +58,7 @@ export const inflate = async (source: ByteSource, limit = MAX_INFLATED): Promise
       pulled += 1;
       want -= 1;
     }
-    if (held.length === 0) throw new InflateError("no input");
+    if (held.length === 0) throw new InflateError({ reason: "no input" });
 
     // The window a pack reader hands over is 64 KiB and most objects are a
     // few hundred bytes, so joining it to nothing costs more than the inflate
@@ -84,13 +84,14 @@ export const inflate = async (source: ByteSource, limit = MAX_INFLATED): Promise
       // far. Anything else — a bad header, a failed checksum, an object
       // larger than the caller allowed — is the stream's own fault.
       if (code !== "Z_BUF_ERROR") {
-        throw new InflateError(
-          code === "ERR_BUFFER_TOO_LARGE"
-            ? `inflated past the ${limit} byte limit`
-            : `${code ?? "zlib"}: ${String(error)}`,
-        );
+        throw new InflateError({
+          reason:
+            code === "ERR_BUFFER_TOO_LARGE"
+              ? `inflated past the ${limit} byte limit`
+              : `${code ?? "zlib"}: ${String(error)}`,
+        });
       }
-      if (drained) throw new InflateError("truncated zlib stream");
+      if (drained) throw new InflateError({ reason: "truncated zlib stream" });
     }
   }
 };

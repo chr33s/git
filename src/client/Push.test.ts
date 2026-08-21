@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect, Fiber, Layer } from "effect";
+import { Effect, Fiber, Layer, Schema } from "effect";
 
 import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
@@ -451,7 +451,7 @@ describe("Push", () => {
     await assert.rejects(
       pushFrom("byoid", "byoid", [{ local: "refs/heads/nope", remote: "refs/heads/nope" }]),
       (error) => {
-        assert.ok(error instanceof Invalid, "the rejection must be the push's own Invalid");
+        assert.ok(Schema.is(Invalid)(error), "the rejection must be the push's own Invalid");
         assert.match(error.reason, /unknown ref 'refs\/heads\/nope'/);
         return true;
       },

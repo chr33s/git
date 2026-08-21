@@ -11,6 +11,7 @@
  * Decoding is canonical-Huffman bit-by-bit (the `puff` construction):
  * verifiable, and unoptimized until a profile says otherwise.
  */
+import { Data } from "effect";
 
 export interface ByteSource {
   /** Next chunk, or `null` at end of input. */
@@ -19,12 +20,12 @@ export interface ByteSource {
   readonly pushBack: (bytes: Uint8Array) => void;
 }
 
-export class InflateError extends Error {
-  override readonly name = "InflateError";
-}
+export class InflateError extends Data.TaggedError("InflateError")<{
+  readonly reason: string;
+}> {}
 
 const corrupt = (reason: string): never => {
-  throw new InflateError(reason);
+  throw new InflateError({ reason });
 };
 
 /* Length codes 257–285 and distance codes 0–29, per RFC 1951 §3.2.5. */

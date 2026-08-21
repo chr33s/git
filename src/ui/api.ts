@@ -10,21 +10,16 @@
  * drift is an explicit `InvalidResponse` rather than an unsafe assertion.
  */
 
-import { Option, Schema } from "effect";
+import { Data, Option, Schema } from "effect";
 
 import * as Contract from "../server/ApiContract.ts";
 
 /** Thrown for any non-2xx answer, carrying the server's tagged error name. */
-export class ApiError extends Error {
-  constructor(
-    readonly tag: string,
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-
+export class ApiError extends Data.TaggedError("ApiError")<{
+  readonly tag: string;
+  readonly status: number;
+  readonly message: string;
+}> {
   /**
    * Whether nothing answered, as opposed to answering badly.
    *
@@ -276,21 +271,21 @@ export class GitApi {
         await response.json().catch((): undefined => undefined),
       );
       const body = Option.isSome(decoded) ? decoded.value : undefined;
-      throw new ApiError(
-        body?._tag ?? "HttpError",
-        response.status,
-        body?.message ?? body?.reason ?? `${response.status} ${response.statusText}`,
-      );
+      throw new ApiError({
+        tag: body?._tag ?? "HttpError",
+        status: response.status,
+        message: body?.message ?? body?.reason ?? `${response.status} ${response.statusText}`,
+      });
     }
     const body: unknown = await response.json();
     try {
       return Schema.decodeUnknownSync(schema)(body);
     } catch (cause) {
-      throw new ApiError(
-        "InvalidResponse",
-        response.status,
-        cause instanceof Error ? cause.message : String(cause),
-      );
+      throw new ApiError({
+        tag: "InvalidResponse",
+        status: response.status,
+        message: cause instanceof Error ? cause.message : String(cause),
+      });
     }
   }
 

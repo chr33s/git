@@ -120,7 +120,7 @@ const send = (request: Request): Effect.Effect<Answer, never, Repository> =>
 const inFreshRepository = (request: Request): Effect.Effect<Answer> =>
   send(request).pipe(Effect.provide(live));
 
-const run = (effect: Effect.Effect<unknown, unknown, Repository>): Effect.Effect<void> =>
+const run = <A, E>(effect: Effect.Effect<A, E, Repository>): Effect.Effect<void> =>
   effect.pipe(Effect.provide(live), Effect.orDie, Effect.asVoid);
 
 describe("CommitPack", () => {

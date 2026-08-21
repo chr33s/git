@@ -186,7 +186,7 @@ export const readAt = async (
       header.size + 1,
     );
   } catch (error) {
-    throw error instanceof InflateError ? corrupt(error.message, offset) : error;
+    throw error instanceof InflateError ? corrupt(error.reason, offset) : error;
   }
 
   if (header.code === OFS_DELTA || header.code === REF_DELTA) {
