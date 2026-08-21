@@ -101,6 +101,26 @@ const requirementsOf = (rules: Policy.Rules): ReadonlyArray<string> => {
 };
 
 /**
+ * What a branch offers *besides* a direct push of an approved revision.
+ *
+ * Kept apart from `requirementsOf` deliberately. `verdictFor` reads a non-empty
+ * requirement list as "a direct push meets none of these", which is exactly
+ * what `Policy.protectedBranch` does — it returns early when no requirement is
+ * set. Listed among them, `queueCandidates` made a branch with no review
+ * requirements at all report itself as refusing pushes the boundary allows: a
+ * setting that widens what may land, reported as though it narrowed it.
+ */
+const alternativesOf = (rules: Policy.Rules): ReadonlyArray<string> =>
+  // And not while provenance is required, where the boundary refuses every
+  // candidate for want of a session trailer and `queue run` refuses the target
+  // by name — nor at a depth of zero, where `candidateChain` short-circuits
+  // before it looks at anything. Advertising a route nothing can take is worse
+  // than advertising none: it is the answer an agent would act on.
+  rules.queueCandidates && rules.queueDepth > 0 && !rules.requireProvenance
+    ? [`or a queue candidate, up to ${String(rules.queueDepth)} deep`]
+    : [];
+
+/**
  * The standing verdict for one ref, before any particular push exists.
  *
  * A protected branch carrying requirements refuses a direct push whatever the
@@ -126,7 +146,11 @@ const verdictFor = (input: {
     ? { push: "allowed", why: ["protected: no force-push, no deletion"] }
     : {
         push: "refused",
-        why: [...requirements, "a direct push meets none of these; open a pull request"],
+        why: [
+          ...requirements,
+          "a direct push meets none of these; open a pull request",
+          ...alternativesOf(input.rules),
+        ],
       };
 };
 

@@ -1978,6 +1978,33 @@ describe("Api policy and archive", () => {
         assert.equal(after.ref, written.commit);
         assert.deepEqual(after.rules.protected, ["refs/heads/main"]);
         assert.equal(after.rules.requiredChecks[0], "test");
+
+        // Turn on something a client built before it existed knows nothing
+        // about, then write again as such a client would: without the field.
+        yield* client.repo.policyWrite({
+          params: { repo: "r" },
+          payload: { ...after.rules, queueCandidates: true, queueDepth: 3 },
+        });
+        const { queueCandidates: _on, queueDepth: _deep, ...older } = after.rules;
+        const blind = yield* client.repo.policyWrite({
+          params: { repo: "r" },
+          payload: { ...older, requiredApprovals: 1 },
+        });
+        assert.equal(
+          blind.rules.queueCandidates,
+          true,
+          "a field the client did not send keeps what the repository had",
+        );
+        assert.equal(blind.rules.queueDepth, 3);
+
+        // And what it is told is what will be enforced, clamp included.
+        const clamped = yield* client.repo.policyWrite({
+          params: { repo: "r" },
+          payload: { ...after.rules, queueDepth: 1_000_000 },
+        });
+        assert.equal(clamped.rules.queueDepth, Policy.MAX_QUEUE_DEPTH);
+        const stored = yield* client.repo.policy({ params: { repo: "r" } });
+        assert.equal(stored.rules.queueDepth, clamped.rules.queueDepth);
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );

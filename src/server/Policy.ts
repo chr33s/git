@@ -43,9 +43,10 @@ import * as Event from "../hub/Event.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
 import * as Task from "../hub/Task.ts";
+import * as Queue from "../hub/Queue.ts";
 import {
   approvals,
-  checksPassed,
+  checksPassedAt,
   project as projectPr,
   type PullRequest as PullRequestState,
 } from "../hub/Projection.ts";
@@ -110,11 +111,61 @@ export interface Rules {
    */
   readonly maxUsageTokens: number;
   readonly usageWindowSeconds: number;
+  /**
+   * Whether a protected branch may also be advanced by a queue candidate.
+   *
+   * A candidate is a chain of merge commits, each merging one approved pull
+   * request's head onto the step before it, ending at what the branch holds
+   * now. What makes one safe to accept is that this boundary *re-derives* every
+   * merge: a step counts only if its tree is exactly what `Repository.mergeTree`
+   * produces for its two parents, so the chain's content is a pure function of
+   * revisions that were reviewed, and whoever built it is trusted with nothing.
+   *
+   * Off by default. It is a second way onto a protected branch, and one an
+   * operator should turn on knowingly rather than acquire in an upgrade — the
+   * same reason `requireProvenance` is off. Left off, the walk is never
+   * attempted and this costs a boolean read.
+   *
+   * What it buys is the composition itself: required checks on a candidate name
+   * the *candidate*, so what a queue tests is the combination being landed
+   * rather than each pull request alone — which is the only evidence that two
+   * individually green changes work together.
+   */
+  readonly queueCandidates: boolean;
+  /**
+   * How many merge steps one candidate chain may carry.
+   *
+   * Every step costs a merge this boundary recomputes, synchronously, on the
+   * receive-pack path, so how deep a chain may be is how much work one push can
+   * ask for. Bounded here rather than only by whoever builds the chain, and
+   * bounded above by `MAX_QUEUE_DEPTH` besides — a rules file is written by a
+   * `policy.write` holder, and a number nobody thought about should not be able
+   * to turn one push into an unbounded walk.
+   */
+  readonly queueDepth: number;
 }
 
 /** Re-exported where the boundary reads it; defined beside the guard. */
 export const anonymousWrites = Auth.anonymousWrites;
 export type AnonymousWrites = Auth.AnonymousWrites;
+
+/**
+ * How deep a candidate chain may be where a rules file does not say.
+ *
+ * Eight is a queue depth, not a history depth: it is how many approved pull
+ * requests one landing may carry, and a queue that cannot land eight at once is
+ * not the bottleneck a queue exists to remove.
+ */
+export const QUEUE_DEPTH = 8;
+
+/**
+ * And the most any rules file may ask for.
+ *
+ * The per-step cost is a merge recomputed on the synchronous push path, so this
+ * is the same kind of bound as `Event.MAX_EVENTS`: what one request may make a
+ * host do, decided by the host rather than by the document it is serving.
+ */
+export const MAX_QUEUE_DEPTH = 64;
 
 export const OPEN: Rules = {
   protected: [],
@@ -126,6 +177,8 @@ export const OPEN: Rules = {
   requireProvenance: false,
   maxUsageTokens: 0,
   usageWindowSeconds: 0,
+  queueCandidates: false,
+  queueDepth: QUEUE_DEPTH,
 };
 
 /** Where a repository keeps its branch rules, if it has any. */
@@ -145,6 +198,9 @@ const RulesDocument = Schema.Struct({
   requireProvenance: Schema.optional(Schema.Boolean),
   maxUsageTokens: Schema.optional(Schema.Int),
   usageWindowSeconds: Schema.optional(Schema.Int),
+  /** Optional, so a rules file written before this existed still decodes. */
+  queueCandidates: Schema.optional(Schema.Boolean),
+  queueDepth: Schema.optional(Schema.Int),
 });
 
 const decodeRules = Schema.decodeUnknownEffect(RulesDocument);
@@ -165,6 +221,8 @@ export const encodeRules = (rules: Rules): Uint8Array =>
         requireProvenance: rules.requireProvenance,
         maxUsageTokens: rules.maxUsageTokens,
         usageWindowSeconds: rules.usageWindowSeconds,
+        queueCandidates: rules.queueCandidates,
+        queueDepth: rules.queueDepth,
       },
       null,
       2,
@@ -219,8 +277,27 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     requireProvenance: loaded.requireProvenance ?? false,
     maxUsageTokens: loaded.maxUsageTokens ?? 0,
     usageWindowSeconds: loaded.usageWindowSeconds ?? 0,
+    queueCandidates: loaded.queueCandidates ?? false,
+    queueDepth: clampDepth(loaded.queueDepth),
   };
 });
+
+/**
+ * The queue depth a repository actually gets, from what it asked for.
+ *
+ * Clamped rather than taken as written. What this number buys is work the host
+ * does on the synchronous push path, so the document may ask for less than the
+ * host's ceiling and never for more; a negative one reads as none, which is
+ * what a chain of no steps already is.
+ *
+ * Exported because every door that accepts rules has to clamp them the same
+ * way. The JSON verb echoed back whatever it was handed, so a caller writing
+ * `queueDepth: 1000000` was told the repository now enforced that, while the
+ * rules file it had just written would be read back clamped — two answers to
+ * one question, from one repository.
+ */
+export const clampDepth = (asked: number | undefined): number =>
+  Math.min(Math.max(asked ?? QUEUE_DEPTH, 0), MAX_QUEUE_DEPTH);
 
 /**
  * Pull requests folded once for a batch of ref updates.
@@ -239,6 +316,28 @@ export type FoldCache = Map<string, PullRequestState>;
  * the same reason `FoldCache` is.
  */
 export type MentionCache = Map<string, ReadonlySet<string>>;
+
+/**
+ * Merges one batch has already re-derived, keyed by the two commits merged.
+ *
+ * A merge is a pure function of its two sides and of objects that never change,
+ * so within one request the same pair has one answer. Shared for the reason
+ * `FoldCache` is, and it matters more here: verifying a chain of depth D asks
+ * about D merges, and a caller looking for the longest landable prefix asks
+ * about the chain once per prefix — which without this is D(D+1)/2 full
+ * three-way merges per pass, each one a merge-base walk and three whole-tree
+ * flattens, repeated on every wake while a check is pending.
+ *
+ * The caller's, not a module-level cache, and deliberately: a merged tree is a
+ * tree this wrote, and a memo outliving the request could hand back an oid that
+ * a collection in between had swept.
+ */
+export type MergeCache = Map<string, MergeOf>;
+
+interface MergeOf {
+  readonly tree: Oid;
+  readonly conflicts: ReadonlyArray<{ readonly path: string }>;
+}
 
 /**
  * The hub refs one batch has already been allowed to create.
@@ -405,7 +504,26 @@ export type Decision =
   | { readonly ok: true; readonly allowed: Allowed }
   | { readonly ok: false; readonly ref: string; readonly reason: string };
 
-const refused = (ref: string, reason: string): Decision => ({ ok: false, ref, reason });
+/** The refusing half, named so a caller holding one need not re-narrow it. */
+export type Refusal = Extract<Decision, { readonly ok: false }>;
+
+const refused = (ref: string, reason: string): Refusal => ({ ok: false, ref, reason });
+
+/**
+ * Whether a protected branch asks anything of the *revision* arriving on it.
+ *
+ * A branch can be protected and still take a direct push: "no force-push, no
+ * deletion" is protection that asks nothing of what is being pushed, and
+ * `protectedBranch` returns early there. Exported because a caller deciding
+ * whether a queue has anything to do on a branch has to ask the same question
+ * — asked as "is it protected?" alone, a runner refused to build candidates
+ * for a branch whose pushes the boundary would simply have allowed.
+ */
+export const needsReview = (rules: Rules): boolean =>
+  rules.requirePullRequest ||
+  rules.requiredApprovals > 0 ||
+  rules.requiredChecks.length > 0 ||
+  rules.requireResolvedThreads;
 
 /**
  * Whether a rule covers this ref — or, for a caller naming a namespace,
@@ -566,6 +684,8 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   readonly folds?: FoldCache;
   /** As `folds`, for the walk that decides which pull requests to fold. */
   readonly mentions?: MentionCache;
+  /** As `folds`, for the merges a candidate chain re-derives. */
+  readonly merges?: MergeCache;
   /** As `folds`, for the bounds a batch could otherwise outrun; see `Openings`. */
   readonly opening?: Openings;
 }) {
@@ -575,6 +695,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
   // direct caller outside `gate` is.
   const folds: FoldCache = input.folds ?? new Map();
   const mentions: MentionCache = input.mentions ?? new Map();
+  const merges: MergeCache = input.merges ?? new Map();
   const opening: Openings = input.opening ?? new Set();
   const current = yield* repository.resolve(update.name);
   // Two readings of "what the ref is now", and they differ for a symbolic ref.
@@ -701,14 +822,21 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // a `hub.comment` holder could open, claim and close tasks. A redaction
     // holder still passes: a tombstone is the one event either namespace
     // accepts from a signer outside its own capability.
+    //
+    // A queue ref is charged `hub.queue` and nothing else, redaction included:
+    // every field a queue record carries is an identifier, an object id or a
+    // ref name, so the namespace has no tombstone to admit a redactor for. See
+    // `hub/Queue.ts`.
     const needed = (name: string): { exact: ReadonlyArray<string> } | { prefix: string } =>
       Task.taskOf(name) !== null
         ? { exact: ["hub.task", "hub.redact"] }
         : Session.sessionOf(name) !== null
           ? { exact: ["hub.session", "hub.redact"] }
-          : name.startsWith("refs/hub/")
-            ? { prefix: "hub." }
-            : { prefix: "member." };
+          : Queue.queueOf(name) !== null
+            ? { exact: ["hub.queue"] }
+            : name.startsWith("refs/hub/")
+              ? { prefix: "hub." }
+              : { prefix: "member." };
     const charge = needed(update.name);
     const passes =
       "exact" in charge
@@ -786,12 +914,14 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
 
   const gate = yield* protectedBranch({
     ref: update.name,
+    from: current,
     to: update.value!,
     genesis: input.genesis,
     trust: input.trust,
     rules: input.rules,
     folds,
     mentions,
+    merges,
   });
   return gate ?? namespace;
 });
@@ -826,19 +956,23 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     return refused(update.name, `${update.name} is append-only and may not be deleted`);
   }
 
-  // A ref in this namespace is a pull request or a session, and nothing else.
-  // `refs/hub/` as a whole is undeletable, so a name outside those shapes is a
-  // permanent entry nothing counts, nothing folds and nothing can ever remove
-  // — one more object graph pinned into every ref listing, every
+  // A ref in this namespace is a pull request, a session, a task or a queue,
+  // and nothing else. `refs/hub/` as a whole is undeletable, so a name outside
+  // those shapes is a permanent entry nothing counts, nothing folds and nothing
+  // can ever remove — one more object graph pinned into every ref listing, every
   // advertisement, every collection root and every memo key for the life of
   // the repository.
   if (
     update.name.startsWith("refs/hub/") &&
     Event.prOf(update.name) === null &&
     Session.sessionOf(update.name) === null &&
-    Task.taskOf(update.name) === null
+    Task.taskOf(update.name) === null &&
+    Queue.queueOf(update.name) === null
   ) {
-    return refused(update.name, `${update.name} does not name a pull request, session or task`);
+    return refused(
+      update.name,
+      `${update.name} does not name a pull request, session, task or queue`,
+    );
   }
 
   // And its value is a commit of this namespace's own kind. Nothing else here
@@ -876,12 +1010,14 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // let a fleet's ordinary week exhaust what a repository's pull requests
     // are allowed, and a session ref is exactly as undeletable as a pull
     // request's.
-    const classOf = (name: string): "sessions" | "tasks" | "pull requests" =>
+    const classOf = (name: string): "sessions" | "tasks" | "queues" | "pull requests" =>
       Session.sessionOf(name) !== null
         ? "sessions"
         : Task.taskOf(name) !== null
           ? "tasks"
-          : "pull requests";
+          : Queue.queueOf(name) !== null
+            ? "queues"
+            : "pull requests";
 
     const kind = classOf(update.name);
     const held =
@@ -889,7 +1025,9 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
         ? yield* Session.sessions()
         : kind === "tasks"
           ? yield* Task.tasks()
-          : yield* Event.pullRequests();
+          : kind === "queues"
+            ? yield* Queue.queues()
+            : yield* Event.pullRequests();
     const opened = [...opening].filter((name) => classOf(name) === kind).length;
     const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
@@ -1233,15 +1371,25 @@ const contains = Effect.fn("Policy.contains")(function* (from: Oid, to: Oid) {
 });
 
 /**
- * What a protected branch demands of the revision arriving on it.
+ * Whether an open pull request for this branch authorizes landing a revision.
  *
- * `null` means nothing was refused. The pull request is found by what it
- * proposes rather than by anything the push carries: a client that could name
- * its own pull request could name one that was approved for something else.
+ * The pull request is found by what it *proposes* rather than by anything the
+ * push carries: a client that could name its own pull request could name one
+ * that was approved for something else.
+ *
+ * Two revisions, because a queue candidate separates them. `revision` is what a
+ * pull request must currently propose — the thing that was reviewed, which is
+ * the only thing an approval is ever about. `checkAt` is what required checks
+ * must have run against, which for a direct push is the same revision and for a
+ * candidate is the candidate itself: what a queue exists to test is the
+ * combination being landed, not each pull request in isolation. Everything else
+ * — the fold, the base match, the open state, self-approval, staleness — is one
+ * reading shared by both paths, so neither can drift from the other.
  */
-const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
+const authorizes = Effect.fn("Policy.authorizes")(function* (input: {
   readonly ref: string;
-  readonly to: Oid;
+  readonly revision: Oid;
+  readonly checkAt: Oid;
   readonly genesis: Genesis;
   readonly trust: TrustProjection;
   readonly rules: Rules;
@@ -1251,15 +1399,9 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
   readonly mentions: MentionCache;
 }) {
   const { rules } = input;
-  const needsReview =
-    rules.requirePullRequest ||
-    rules.requiredApprovals > 0 ||
-    rules.requiredChecks.length > 0 ||
-    rules.requireResolvedThreads;
-  if (!needsReview) return null;
 
   /** The nearest miss, reported only if nothing else satisfies the rules. */
-  let shortfall: Decision | null = null;
+  let shortfall: Refusal | null = null;
 
   for (const id of yield* Event.pullRequests()) {
     // Folded, not sniffed. An earlier version read the base straight out of
@@ -1282,7 +1424,7 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     // repository had ever had, closed and merged included, at a signature
     // verification per event.
     const cached = input.folds.get(id);
-    if (cached === undefined && !(yield* proposes(id, input.to, input.mentions))) continue;
+    if (cached === undefined && !(yield* proposes(id, input.revision, input.mentions))) continue;
 
     // One pull request this cannot read is one candidate, not a refusal of the
     // push. A history that arrived by replication is not held to the ceiling
@@ -1304,18 +1446,20 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
     // otherwise unlock direct pushes to the branch forever.
     if (pullRequest.state !== "open") continue;
 
-    // The tip has to *be* the reviewed revision. A merge commit that merely
+    // The revision has to *be* the reviewed one. A merge commit that merely
     // names it as a parent proves nothing about content — a merge's tree is
     // unconstrained, so anybody who may push could wrap whatever they liked
     // around an approved head.
     //
     // So a protected branch is advanced by *pushing the approved revision onto
-    // it*, and by nothing else: a merge commit cannot land there, and neither
-    // can the API's ref-moving verbs, which are refused on a protected ref by
-    // `gateWrite` because they name a branch and not the revision these rules
-    // are about. Whoever wants a merge commit makes one on their own branch,
-    // opens a pull request for it, and has *that* reviewed.
-    if (input.to !== pullRequest.head) continue;
+    // it*, and by nothing else: an arbitrary merge commit cannot land there,
+    // and neither can the API's ref-moving verbs, which are refused on a
+    // protected ref by `gateWrite` because they name a branch and not the
+    // revision these rules are about. A queue candidate is not an exception to
+    // that rule but an application of it — it is admitted only because its tree
+    // is re-derived rather than trusted (see `candidateChain`), and each step is
+    // still asked this question about the revision it merges.
+    if (input.revision !== pullRequest.head) continue;
 
     // Why this one did not satisfy the rules, kept rather than returned. Two
     // pull requests can propose the same revision, and refusing on the first
@@ -1329,20 +1473,268 @@ const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
       );
       continue;
     }
-    if (!checksPassed(pullRequest, rules.requiredChecks)) {
-      shortfall ??= refused(input.ref, `${id} has not passed ${rules.requiredChecks.join(", ")}`);
+    if (!checksPassedAt(pullRequest, rules.requiredChecks, input.checkAt)) {
+      shortfall ??= refused(
+        input.ref,
+        input.checkAt === input.revision
+          ? `${id} has not passed ${rules.requiredChecks.join(", ")}`
+          : `${id} has not passed ${rules.requiredChecks.join(", ")} against candidate ${input.checkAt}`,
+      );
       continue;
     }
     if (rules.requireResolvedThreads && pullRequest.threads.some((thread) => !thread.resolved)) {
       shortfall ??= refused(input.ref, `${id} has unresolved review threads`);
       continue;
     }
-    return null;
+    return { satisfied: true, shortfall: null } as const;
   }
 
-  return (
-    shortfall ?? refused(input.ref, `${input.ref} may only be moved by an approved pull request`)
-  );
+  return { satisfied: false, shortfall } as const;
+});
+
+/**
+ * What a candidate chain is, or why this push is not one.
+ *
+ * `absent` and `refused` are deliberately different answers. A push that is not
+ * shaped like a chain at all falls back to the direct path's own refusal, which
+ * is the one its author needs to read; a push that *is* a chain and fails a step
+ * gets that step's reason, which is the one a queue needs to read.
+ */
+type Chain =
+  | { readonly kind: "verified" }
+  | { readonly kind: "absent" }
+  | { readonly kind: "refused"; readonly reason: string };
+
+/**
+ * The other way a protected branch may move: a chain of re-derived merges.
+ *
+ * Walk first parents from the pushed tip back to what the branch holds. Every
+ * step must be a two-parent merge of one approved pull request's head onto the
+ * step before it, and — the rule the whole thing rests on — its tree must be
+ * *exactly* what merging those two parents produces. That last check is what
+ * makes accepting a merge commit safe here when hub.md §11 refuses one
+ * everywhere else: the tree is not taken on trust, it is recomputed, so a
+ * candidate can carry nothing beyond the composition of revisions that were
+ * each reviewed for this branch. Whoever built the chain is authorized with
+ * nothing; the boundary re-derives every claim it makes.
+ *
+ * The steps are checked cheap-first: a step's pull request and the branch's
+ * rules are settled before any merge is recomputed, so a chain nobody approved
+ * costs a fold rather than a tree walk per step.
+ *
+ * Determinism is what makes the check meaningful, and it comes from both sides
+ * calling one function: whoever builds a candidate and whoever verifies it both
+ * ask `Repository.mergeTree`, so they agree about the base and the merge by
+ * construction. A replica that cannot read the objects computes no answer and
+ * refuses, which is the safe direction.
+ *
+ * What is constrained is a candidate's **content and its ancestry** — its tree,
+ * its two parents, and the chain they form — and deliberately not its commit
+ * header. The message, author and committer are whatever the builder wrote,
+ * exactly as they are on any merge commit a member with `source.push` makes on
+ * a branch of their own: they are not code, nothing downstream parses them (a
+ * repository requiring provenance takes no candidates at all — see
+ * `cli/queue.ts`), and pinning them would bake one builder's conventions into
+ * the boundary. That last part is the point rather than an oversight: a
+ * candidate is a shape, not a tool's output, so a person can build one by hand
+ * and land it with no queue running at all, and two implementations can
+ * interoperate. `cli/queue.ts` makes its own candidates a pure function of what
+ * they merge — which is what lets a check bound to one runner's candidate name
+ * another's — but that is a convention among runners, not a rule this enforces.
+ */
+const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
+  readonly ref: string;
+  /** What the branch holds now — the foot of the chain. */
+  readonly from: Oid | null;
+  readonly to: Oid;
+  readonly genesis: Genesis;
+  readonly trust: TrustProjection;
+  readonly rules: Rules;
+  readonly folds: FoldCache;
+  readonly mentions: MentionCache;
+  readonly merges: MergeCache;
+}) {
+  const repository = yield* Repository;
+  const { rules } = input;
+  const absent: Chain = { kind: "absent" };
+
+  // A chain merges onto something. A branch being created has nothing to merge
+  // onto, and a repository that has not turned this on has no chains at all.
+  if (!rules.queueCandidates || rules.queueDepth <= 0 || input.from === null) return absent;
+  const from = input.from;
+
+  const read = (commit: Oid) =>
+    repository.readCommit(commit).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        StorageFailure: () => Effect.succeed(null),
+      }),
+    );
+
+  // First parents only, and it must arrive exactly at what the branch holds.
+  // `evaluate` has already established that the tip contains `from`, but
+  // containment says nothing about *how* — a chain is a specific shape, and
+  // anything else is not one.
+  const steps: Array<{
+    readonly commit: Oid;
+    readonly onto: Oid;
+    readonly head: Oid;
+    readonly tree: Oid;
+  }> = [];
+  let at = input.to;
+  while (at !== from) {
+    if (steps.length >= rules.queueDepth) {
+      // Both readings, because the shape alone cannot tell them apart. A
+      // well-formed chain past the ceiling and an ordinary integration branch
+      // of nine merges look identical from here, and each wants a different
+      // half of this sentence: one needs the ceiling named, the other needs to
+      // be told it is not a candidate at all and never was.
+      return {
+        kind: "refused",
+        reason: `${input.ref} may only be moved by an approved pull request; ${input.to} is not one, and it does not reach ${from} within ${String(rules.queueDepth)} merge steps to be a queue candidate either`,
+      } satisfies Chain;
+    }
+    const info = yield* read(at);
+    if (info === null) return absent;
+    const [onto, head] = info.parents;
+    if (info.parents.length !== 2 || onto === undefined || head === undefined) return absent;
+    steps.push({ commit: at, onto, head, tree: info.tree });
+    at = onto;
+  }
+  if (steps.length === 0) return absent;
+  // Oldest first, so a refusal names the earliest step that fails rather than
+  // the last one walked.
+  steps.reverse();
+
+  // What the walk has already put behind each step. Every earlier step's commit
+  // sits on the first-parent spine below this one, and every earlier step's head
+  // is a second parent of one of those commits, so `onto` reaches all of them by
+  // construction — that is what the walk just established, and no history walk
+  // can say more. A step merging one of them merges nothing: its base is its own
+  // `theirs`, so the tree it has to hold is the tree `onto` already had.
+  //
+  // Worth the bookkeeping because that is the only chain a single approved pull
+  // request can make deep. Every step's head must be some open request's current
+  // head, so with one open request the sole shape that authorizes is that head
+  // merged over and over — and re-deriving each of those the long way is a full
+  // history walk per step, `queueDepth` of them on the push path, none of which
+  // the pair cache can absorb because every step's `onto` is different.
+  const contained = new Set<Oid>([from]);
+  let ontoTree: Oid | null = null;
+
+  for (const step of steps) {
+    const authorized = yield* authorizes({
+      ref: input.ref,
+      revision: step.head,
+      // The candidate, not the head: what a required check has to have run
+      // against is the combination this step lands. A check that passed on the
+      // pull request alone says nothing about it merged with everything queued
+      // ahead of it, which is the failure a queue exists to catch.
+      checkAt: step.commit,
+      genesis: input.genesis,
+      trust: input.trust,
+      rules,
+      folds: input.folds,
+      mentions: input.mentions,
+    });
+    if (!authorized.satisfied) {
+      return {
+        kind: "refused",
+        reason:
+          authorized.shortfall?.reason ??
+          `${step.commit} merges ${step.head}, which no open pull request for ${input.ref} proposes as its head`,
+      } satisfies Chain;
+    }
+
+    // And now the expensive half, asked only of a step everything else allows —
+    // and asked once per pair within a request, however many times a caller
+    // walks the chain, and not at all of a step whose shape already answers it.
+    const key = `${step.onto}\u0000${step.head}`;
+    const held: Oid | null = contained.has(step.head)
+      ? (ontoTree ?? (yield* read(step.onto))?.tree ?? null)
+      : null;
+    const merged: MergeOf | null =
+      input.merges.get(key) ??
+      (held !== null
+        ? { tree: held, conflicts: [] }
+        : yield* repository.mergeTree({ ours: step.onto, theirs: step.head }).pipe(
+            Effect.catchTags({
+              ObjectNotFound: () => Effect.succeed(null),
+              StorageFailure: () => Effect.succeed(null),
+              Invalid: () => Effect.succeed(null),
+            }),
+          ));
+    if (merged === null) {
+      return {
+        kind: "refused",
+        reason: `${step.commit} could not be re-merged from ${step.onto} and ${step.head}`,
+      } satisfies Chain;
+    }
+    if (merged.conflicts.length > 0) {
+      return {
+        kind: "refused",
+        reason: `${step.commit} merges ${step.head} into ${step.onto}, which conflicts in ${merged.conflicts
+          .map((conflict) => conflict.path)
+          .join(", ")}`,
+      } satisfies Chain;
+    }
+    input.merges.set(key, { tree: merged.tree, conflicts: merged.conflicts });
+
+    // The one rule everything else here exists to make safe.
+    if (merged.tree !== step.tree) {
+      return {
+        kind: "refused",
+        reason: `${step.commit} does not hold the merge of ${step.head} into ${step.onto}: its tree is ${step.tree}, and merging them gives ${merged.tree}`,
+      } satisfies Chain;
+    }
+
+    contained.add(step.head);
+    contained.add(step.commit);
+    ontoTree = step.tree;
+  }
+
+  return { kind: "verified" } satisfies Chain;
+});
+
+/**
+ * What a protected branch demands of the revision arriving on it.
+ *
+ * `null` means nothing was refused. Two ways to satisfy it, asked in that
+ * order: the revision is itself an approved pull request's head, or it is a
+ * chain of merges this boundary re-derives. The direct question is asked first
+ * and costs nothing extra when it fails — a candidate's tip is a merge commit
+ * no pull request ever proposed, so the pre-filter skips every fold.
+ */
+const protectedBranch = Effect.fn("Policy.protectedBranch")(function* (input: {
+  readonly ref: string;
+  readonly from: Oid | null;
+  readonly to: Oid;
+  readonly genesis: Genesis;
+  readonly trust: TrustProjection;
+  readonly rules: Rules;
+  readonly folds: FoldCache;
+  readonly mentions: MentionCache;
+  readonly merges: MergeCache;
+}) {
+  if (!needsReview(input.rules)) return null;
+
+  const direct = yield* authorizes({ ...input, revision: input.to, checkAt: input.to });
+  if (direct.satisfied) return null;
+
+  const chain = yield* candidateChain(input);
+  if (chain.kind === "verified") return null;
+
+  // The direct path's own shortfall wins where it has one. A pull request whose
+  // head *is* a merge commit is a candidate chain by shape, so a push of it one
+  // approval short was refused for the second parent naming no pull request —
+  // true of the chain reading, and useless to somebody who has an approved pull
+  // request for exactly this revision and needs to know it is short a review.
+  // A chain's reason is the better answer only when nothing proposed the
+  // revision at all, which is what an actual candidate looks like.
+  if (direct.shortfall !== null) return direct.shortfall;
+  if (chain.kind === "refused") return refused(input.ref, chain.reason);
+
+  return refused(input.ref, `${input.ref} may only be moved by an approved pull request`);
 });
 
 /**
@@ -1794,6 +2186,12 @@ export const gate = Effect.fn("Policy.gate")(function* (
   const decisions: Decision[] = [];
   const folds: FoldCache = new Map();
   const mentions: MentionCache = new Map();
+  // The expensive one, and the one this door most needs: a push moving several
+  // protected branches re-derives a candidate chain per ref, and every step of
+  // it is a merge-base walk and three whole-tree flattens — on the synchronous
+  // receive-pack path. The runner shares one of these across its own asks;
+  // leaving it out here made the untrusted door the costly one.
+  const merges: MergeCache = new Map();
   const opening: Openings = new Set();
   for (const at of order) {
     const update = updates[at]!;
@@ -1822,6 +2220,7 @@ export const gate = Effect.fn("Policy.gate")(function* (
       sessions,
       folds,
       mentions,
+      merges,
       opening,
     });
     // The namespace rules record a create as soon as they have passed it, and

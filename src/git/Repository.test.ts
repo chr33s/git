@@ -52,6 +52,45 @@ describe("Repository", () => {
     assert.equal(commit.author.email, "alice@example.com");
   });
 
+  it("answers a whole list of revisions from one ancestry walk", async () => {
+    // What `isAncestor` asks once, offered to a caller with a list: same
+    // answers, one walk. A revision the store does not hold ends its chain
+    // rather than failing the walk, which is a shallow clone's ordinary shape.
+    const { one, two, seen, side } = await scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const one = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "one",
+          author: alice,
+        });
+        const two = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "two",
+          author: alice,
+        });
+        // Off the branch, and named as a parent nothing holds so the walk has a
+        // missing chain to step over as well.
+        // SAFETY: forty hex characters is what an oid is, and this one names
+        // nothing on purpose.
+        const absent = "0".repeat(40) as Oid;
+        const side = yield* repository.commitTree({
+          tree: EMPTY_TREE_OID,
+          parents: [absent],
+          message: "side",
+          author: alice,
+        });
+        return { one, two, side, seen: yield* repository.ancestry([two]) };
+      }),
+    );
+
+    assert.equal(seen.has(two), true);
+    assert.equal(seen.has(one), true);
+    assert.equal(seen.has(side), false);
+  });
+
   it("chains commits and walks the log newest first", async () => {
     const messages = await scenario(
       Effect.gen(function* () {

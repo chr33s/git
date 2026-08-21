@@ -578,6 +578,7 @@ hub.approve
 hub.check:<name>
 hub.merge
 hub.redact
+hub.queue
 
 member.invite
 member.revoke
@@ -597,6 +598,19 @@ on a protected ref for the same reason from the other direction: they name a
 branch and not the revision the rules are about, so at the point they are
 gated there is nothing to evaluate those rules against, and a rule that cannot
 be evaluated MUST NOT be treated as satisfied.
+
+A repository MAY additionally admit a **queue candidate** — a chain of merge
+commits, each merging one approved pull request's head onto the step before it
+and ending at what the branch already holds. This is not an exception to the
+rule above but an application of it: the boundary **re-derives** each merge and
+accepts a step only if its tree is exactly what merging its two parents
+produces, so what a candidate carries is a pure function of revisions that were
+each reviewed for this branch, and whoever built it is authorized with nothing.
+Required checks on a candidate name the **candidate**, not the pull request's
+own head, because the failure a queue exists to catch is the one that appears
+only once the changes are composed. It is off by default (`queueCandidates` in
+the branch rules) and bounded (`queueDepth`), since every step is a merge the
+host recomputes on the synchronous push path. See [queue.md](queue.md).
 
 ### What the guard charges, and what the boundary charges
 

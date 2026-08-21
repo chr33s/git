@@ -13,12 +13,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
+import * as http from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer } from "effect";
 
 import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
@@ -247,6 +249,63 @@ describe.skipIf(!hasGit)("Push, read back by the git binary", () => {
 });
 
 describe("Push", () => {
+  it("lets go of a peer that accepts and never answers", async () => {
+    // The advertisement is a `fetch`, and a `fetch` given no signal survives
+    // the interrupt of the effect around it: the promise is abandoned, the
+    // socket is not, and the event loop stays alive holding it. That is how a
+    // caller that bounded how long it would wait for a push waited on the
+    // connection anyway — a mirror that black-holes holding the process that
+    // pushed to it for as long as the peer cared to. The signal has to reach
+    // the socket, and this is what says it does.
+    const silent = http.createServer(() => {
+      /* accept the connection, answer nothing, ever */
+    });
+    // The sockets themselves, because that is the claim. Interrupting the
+    // effect always returns; what has to be true is that the connection went
+    // with it, and only the peer's side can say so.
+    const live = new Set<Socket>();
+    silent.on("connection", (socket) => {
+      live.add(socket);
+      socket.on("close", () => live.delete(socket));
+    });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    // SAFETY: a server that has finished listening addresses an `AddressInfo`.
+    const port = (silent.address() as AddressInfo).port;
+    try {
+      const oid = await commitFile("interruptible", "a.txt", "a", "one");
+      const stopped = await inLocal(
+        "interruptible",
+        Effect.gen(function* () {
+          const pushing = yield* Effect.forkDetach(
+            push({
+              url: `http://127.0.0.1:${String(port)}/silent`,
+              refs: [{ local: oid, remote: "refs/heads/main" }],
+            }),
+          );
+          // Long enough that the push is certainly waiting on the socket, and
+          // far short of anything the peer will ever do about it.
+          yield* Effect.sleep("100 millis");
+          yield* Fiber.interrupt(pushing);
+          return "let go";
+        }).pipe(Effect.timeout("10000 millis")),
+      );
+      assert.equal(stopped, "let go");
+      assert.equal(live.size > 0, true, "the push did connect, so there is something to close");
+      // The close travels over the wire, and how fast is the HTTP client's
+      // business, not this repository's: an abort that hands the connection
+      // back to a pool closes it on the pool's own idle timer. So the ceiling
+      // is generous and the loop leaves the moment it can — a passing run
+      // costs whatever the client takes, and only a failing one waits it out.
+      for (let waited = 0; waited < 500 && live.size > 0; waited += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(live.size, 0, "and the socket the push held is closed");
+    } finally {
+      silent.closeAllConnections();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
+  });
+
   it("pushes a pull request whose payload a tombstone has already removed", async () => {
     // A redacted payload is absent by design while the tree naming it
     // survives, so a strict object closure over a hub ref fails the moment

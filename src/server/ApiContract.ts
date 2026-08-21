@@ -614,8 +614,33 @@ export const PolicyRules = Schema.Struct({
   requireProvenance: Schema.Boolean,
   maxUsageTokens: Schema.Int,
   usageWindowSeconds: Schema.Int,
+  queueCandidates: Schema.Boolean,
+  queueDepth: Schema.Int,
 });
 export type PolicyRules = (typeof PolicyRules)["Type"];
+
+/**
+ * The same rules as a caller may *write* them, newer fields optional.
+ *
+ * A repository always answers with every field, because what it enforces is
+ * never partly unknown. What a client sends is a different question: a client
+ * built before a field existed does not know to send it, and requiring it turns
+ * every such client's next policy write into a rejection — for a field it was
+ * never going to have an opinion about.
+ *
+ * Absent therefore means **unchanged**, and never the default. This is a `PUT`
+ * of the whole document, so reading an absent field as the default let exactly
+ * that client silently turn off something somebody else had enabled, and be
+ * told 200 for it. (The rules *file* is the other way round — an absent field
+ * there is a document that never mentioned it — which is why the two readings
+ * are written down separately rather than shared.)
+ */
+export const PolicyRulesWrite = Schema.Struct({
+  ...PolicyRules.fields,
+  queueCandidates: Schema.optional(Schema.Boolean),
+  queueDepth: Schema.optional(Schema.Int),
+});
+export type PolicyRulesWrite = (typeof PolicyRulesWrite)["Type"];
 
 /** What the repository enforces now; `ref` is `null` on unpublished defaults. */
 export const PolicyAnswer = Schema.Struct({

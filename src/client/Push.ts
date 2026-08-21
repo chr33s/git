@@ -194,11 +194,16 @@ export const push = Effect.fn("Client.push")(function* (input: {
   const { atomic, authorize, force, refs, token, url } = input;
 
   const advertisement = yield* Effect.tryPromise({
-    try: async () => {
+    // The signal, passed through to `fetch`. Without it an interrupt abandons
+    // the *effect* and leaves the socket open — so a caller that bounded how
+    // long it would wait for a push still waited on the connection, and a
+    // mirror that accepts and never answers held the process that pushed to it
+    // for as long as the peer cared to.
+    try: async (signal) => {
       const target = `${url}/info/refs?service=git-receive-pack`;
       const response = await fetchAuthorized(
         target,
-        { headers: authorization(token) },
+        { headers: authorization(token), signal },
         { operation: operationOf("GET", target), commands: [] },
         authorize,
       );
@@ -314,7 +319,9 @@ export const push = Effect.fn("Client.push")(function* (input: {
   ]);
 
   const reported = yield* Effect.tryPromise({
-    try: async () => {
+    // As the advertisement above: interruptible only if the signal reaches the
+    // socket, and this is the half that streams a pack to a peer.
+    try: async (signal) => {
       const response = await fetchAuthorized(
         `${url}/git-receive-pack`,
         {
@@ -324,6 +331,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
             ...authorization(token),
           },
           body,
+          signal,
         },
         {
           operation: "git-receive-pack",

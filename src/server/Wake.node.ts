@@ -55,6 +55,25 @@ const decodeCursors = Schema.decodeUnknownEffect(CursorDocument);
 /** The one namespace a wake walks; see `dispatch`. */
 const HUB = "refs/hub/";
 
+/**
+ * An event's type, whichever namespace's envelope carries it.
+ *
+ * A rule matches on the type and reads nothing else, so this is the whole of
+ * what a walk needs — and reading only the tag is what lets one walk serve
+ * pull requests, sessions, tasks and queues rather than the one union it
+ * happens to import.
+ */
+const Tagged = Schema.Struct({ type: Schema.String });
+const decodeTag = Schema.decodeUnknownEffect(Tagged);
+
+const decodeTagged = Effect.fn("Wake.decodeTagged")(function* (bytes: Uint8Array) {
+  const json = yield* Effect.try({
+    try: () => JSON.parse(new TextDecoder().decode(bytes)),
+    catch: () => new Invalid({ field: "event", reason: "event payload is not JSON" }),
+  });
+  return yield* decodeTag(json);
+});
+
 const RULES_FILE = "wake.json";
 const CURSOR_FILE = "wake.cursor.json";
 
@@ -224,7 +243,17 @@ const since = Effect.fn("wake.since")(function* (ref: string, tip: Oid, cursor: 
     // the history is still worth waking for — but it is reported rather than
     // skipped in silence. A rule that never fires looks exactly like a rule
     // with nothing to do, and the operator who wrote it believes it works.
-    const payload = yield* Event.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    //
+    // The tag, not the whole payload. What a rule matches on is the event's
+    // type and nothing else, and every namespace under `refs/hub/` spells that
+    // field the same way inside its own envelope — which is what lets one walk
+    // cover all of them, exactly as `Tombstone.claims` reads one tag to gate
+    // four namespaces. Decoded as a pull request instead, a `task.opened` was
+    // read as unreadable and its rule never fired: agents.md §20's whole
+    // working rhythm — a task opening and the fleet waking for it — could not
+    // happen, and the symptom was a silent count of records this version
+    // "cannot read" on a namespace it had been extended to serve.
+    const payload = yield* decodeTagged(record.payload).pipe(Effect.orElseSucceed(() => null));
     if (payload === null) {
       unreadable.push(commit);
       continue;

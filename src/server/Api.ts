@@ -101,7 +101,7 @@ import {
   HubTaskPage,
   LogResponse,
   PolicyAnswer,
-  PolicyRules,
+  PolicyRulesWrite,
   PolicyWritten,
   ReplayResult,
   MergeResult,
@@ -918,7 +918,7 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.put("policyWrite", "/policy", {
       params: RepoParam,
-      payload: PolicyRules,
+      payload: PolicyRulesWrite,
       success: PolicyWritten,
       error: [RefConflict, ObjectNotFound, Invalid],
     }),
@@ -1872,7 +1872,27 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         yield* gateWrite(Policy.RULES_REF);
         const repository = yield* Repository;
         const current = yield* repository.resolve(Policy.RULES_REF);
-        const blob = yield* repository.writeBlob(Policy.encodeRules(payload));
+        // A field the client did not send is one it did not know about, so it
+        // keeps whatever the repository already had — never the default. This
+        // is a `PUT` of the whole document, and reading an absent field as the
+        // default let a client built before the field existed silently turn off
+        // a merge queue somebody had enabled, and be told 200 for it.
+        const held = yield* Policy.rulesOf().pipe(
+          // Unreadable rules are what `policy.write` is for repairing, and
+          // there is nothing to preserve from a document nobody can parse.
+          Effect.catchTags({
+            Invalid: () => Effect.succeed(Policy.OPEN),
+            ObjectNotFound: () => Effect.succeed(Policy.OPEN),
+          }),
+        );
+        const rules: Policy.Rules = {
+          ...payload,
+          queueCandidates: payload.queueCandidates ?? held.queueCandidates,
+          // Clamped by the same rule that reads the file back, so what this
+          // answers with is what the repository will enforce.
+          queueDepth: Policy.clampDepth(payload.queueDepth ?? held.queueDepth),
+        };
+        const blob = yield* repository.writeBlob(Policy.encodeRules(rules));
         const tree = yield* repository.writeTree([
           { mode: "100644", name: Policy.RULES_PATH, oid: blob },
         ]);
@@ -1883,7 +1903,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           author: signatureFrom(undefined),
         });
         yield* repository.setRef({ name: Policy.RULES_REF, to: commit, expected: current });
-        return { rules: payload, commit };
+        return { rules, commit };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )
     .handle("archive", ({ query }) =>

@@ -409,11 +409,56 @@ export class Repository extends Context.Service<
       right: Oid,
     ) => Effect.Effect<Oid | null, ObjectNotFound | StorageFailure>;
 
+    /**
+     * The tree a three-way merge would produce, and what it could not settle.
+     *
+     * `git merge-tree`: the merge decision without a worktree, an index, a
+     * commit or a ref. `merge` is this plus a commit and a ref move, and it is
+     * written that way round so the two can never disagree about what merging
+     * two commits *means* — which is what a caller re-deriving a merge to check
+     * somebody else's depends on.
+     *
+     * Deterministic given the same objects, which is the property that makes it
+     * checkable: the base comes from `mergeBase` and the decision from
+     * `Merge.mergeTrees`, so two replicas holding the same commits compute the
+     * same tree. A replica missing objects computes a different answer or none,
+     * and both readings are a refusal rather than an acceptance.
+     *
+     * The tree it names is *written*, as `git merge-tree` writes one: content
+     * addressing makes that a no-op where the tree already exists, and where it
+     * does not, what is written is an unreachable tree `gc` collects.
+     */
+    readonly mergeTree: (input: {
+      readonly ours: Oid;
+      readonly theirs: Oid;
+      readonly strategy?: MergeStrategy;
+    }) => Effect.Effect<
+      {
+        readonly base: Oid | null;
+        readonly tree: Oid;
+        readonly conflicts: ReadonlyArray<MergeConflict>;
+      },
+      ObjectNotFound | Invalid | StorageFailure
+    >;
+
     /** Whether `descendant` can reach `ancestor`; a fast-forward is this. */
     readonly isAncestor: (
       ancestor: Oid,
       descendant: Oid,
     ) => Effect.Effect<boolean, ObjectNotFound | StorageFailure>;
+
+    /**
+     * Every commit reachable from `roots`, the commit graph only.
+     *
+     * What `isAncestor` asks once, offered to callers with a *list* to ask
+     * about: the walk is the whole cost and it does not depend on the question,
+     * so a caller holding one revision and n candidates pays for one history
+     * rather than n. A commit the store does not hold ends its chain rather
+     * than failing the walk — a shallow clone's ordinary shape.
+     */
+    readonly ancestry: (
+      roots: ReadonlyArray<Oid>,
+    ) => Effect.Effect<ReadonlySet<Oid>, StorageFailure>;
 
     /** Every path under a tree, depth-first, with the blob each names. */
     readonly listFiles: (
@@ -924,6 +969,65 @@ export const layer = Layer.effect(
       }
 
       return shared.find((oid) => !behind.has(oid)) ?? shared[0] ?? null;
+    });
+
+    /**
+     * The merge decision itself: a base, a tree, and what could not be settled.
+     *
+     * `merge` is this plus a commit and a ref move. Written this way round
+     * because a caller that re-derives a merge to *check* one — the policy
+     * boundary judging a queue candidate — must compute the same tree the merge
+     * verb would, and two implementations of the three-way decision would drift
+     * exactly where a drift is hardest to notice.
+     *
+     * The two early returns are optimizations and not special cases: where the
+     * base is one of the sides, `Merge.mergeTrees` takes every changed path from
+     * the side that moved, whatever the strategy, which is the tree named here
+     * without flattening three trees to find out.
+     */
+    const mergeTree = Effect.fn("Repository.mergeTree")(function* (input: {
+      readonly ours: Oid;
+      readonly theirs: Oid;
+      readonly strategy?: MergeStrategy;
+    }) {
+      const base = yield* mergeBase(input.ours, input.theirs);
+      const empty: ReadonlyArray<MergeConflict> = [];
+
+      // Already contained: there is nothing of theirs we do not have.
+      if (base === input.theirs) {
+        return { base, tree: (yield* readCommit(input.ours)).tree, conflicts: empty };
+      }
+      // Ours is an ancestor of theirs, so their tree stands whole.
+      if (base === input.ours) {
+        return { base, tree: (yield* readCommit(input.theirs)).tree, conflicts: empty };
+      }
+
+      const flatten = (tree: Oid) =>
+        Effect.gen(function* () {
+          const map = new Map<string, TreeFile>();
+          for (const file of yield* listFilesOf(tree)) map.set(file.path, file);
+          return map;
+        });
+
+      const baseFiles =
+        base === null
+          ? new Map<string, TreeFile>()
+          : yield* flatten((yield* readCommit(base)).tree);
+      const ourTree = (yield* readCommit(input.ours)).tree;
+      const ourFiles = yield* flatten(ourTree);
+      const theirFiles = yield* flatten((yield* readCommit(input.theirs)).tree);
+
+      // The walk itself is `Merge.mergeTrees`, shared with `Rebase` — the
+      // treesame rules and the conflict taxonomy exist exactly once.
+      const { changes, conflicts } = yield* mergeTrees({
+        base: baseFiles,
+        ours: ourFiles,
+        theirs: theirFiles,
+        strategy: input.strategy ?? "recursive",
+        read: readBlobAt,
+      });
+
+      return { base, tree: yield* writeFiles({ base: ourTree, changes }), conflicts };
     });
 
     /**
@@ -1711,53 +1815,22 @@ export const layer = Layer.effect(
             return { kind, commit, tree, base, conflicts: [] } satisfies MergeOutcome;
           });
 
-        const base = yield* mergeBase(ours, theirs);
+        // The decision itself, shared with the boundary that re-derives one to
+        // check it; `merge` is that plus a commit and a ref move.
+        const { base, tree, conflicts } = yield* mergeTree({ ours, theirs, strategy });
 
-        // Already contained: there is nothing of theirs we do not have.
+        // Already contained: there is nothing of theirs we do not have. The
+        // tree is ours, which is what `mergeTree` named.
         if (base === theirs) {
-          return {
-            kind: "up-to-date",
-            commit: ours,
-            tree: (yield* readCommit(ours)).tree,
-            base,
-            conflicts: [],
-          };
+          return { kind: "up-to-date", commit: ours, tree, base, conflicts: [] };
         }
 
         // Ours is an ancestor of theirs, so the merge is a ref move — unless
-        // the caller wants the merge commit recorded anyway.
+        // the caller wants the merge commit recorded anyway. Either way the
+        // tree is theirs, which is again what `mergeTree` named.
         if (base === ours && input.noFastForward !== true) {
-          return yield* settled("fast-forward", theirs, (yield* readCommit(theirs)).tree, base);
+          return yield* settled("fast-forward", theirs, tree, base);
         }
-
-        const flatten = (tree: Oid) =>
-          Effect.gen(function* () {
-            const map = new Map<string, TreeFile>();
-            for (const file of yield* listFilesOf(tree)) map.set(file.path, file);
-            return map;
-          });
-
-        const baseFiles =
-          base === null
-            ? new Map<string, TreeFile>()
-            : yield* flatten((yield* readCommit(base)).tree);
-        const ourFiles = yield* flatten((yield* readCommit(ours)).tree);
-        const theirFiles = yield* flatten((yield* readCommit(theirs)).tree);
-
-        // The walk itself is `Merge.mergeTrees`, shared with `Rebase` — the
-        // treesame rules and the conflict taxonomy exist exactly once.
-        const { changes, conflicts } = yield* mergeTrees({
-          base: baseFiles,
-          ours: ourFiles,
-          theirs: theirFiles,
-          strategy,
-          read: readBlobAt,
-        });
-
-        const tree = yield* writeFiles({
-          base: (yield* readCommit(ours)).tree,
-          changes,
-        });
 
         if (conflicts.length > 0)
           return { kind: "conflicted", commit: null, tree, base, conflicts };
@@ -1778,10 +1851,13 @@ export const layer = Layer.effect(
       }),
 
       mergeBase,
+      mergeTree,
       isAncestor: (ancestor, descendant) =>
         ancestor === descendant
           ? Effect.succeed(true)
           : ancestry([descendant]).pipe(Effect.map((seen) => seen.has(ancestor))),
+
+      ancestry,
 
       gc: (options) => Maintenance.gc({ objects, packs, refs }, options),
     });
