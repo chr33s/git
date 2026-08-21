@@ -2,15 +2,14 @@
 
 **Status:** Draft architecture note  
 **Project:** `@chr33s/git`  
-**Last updated:** 2026-08-21
+**Last updated:** 2026-08-22  
+**Revision:** draft-2
 
 ## 1. Summary
 
-This document describes how [Invocation Telemetry](invocation-telemetry.md) can be captured by coding-agent harnesses, recorded by `git+`, projected by the hub, and surfaced in the product UI.
+This document describes how [Invocation Telemetry](invocation-telemetry.md) and [Context Packs](content-pack.md) can be captured by coding-agent harnesses, recorded by `git+`, projected by the hub, and surfaced in the UI.
 
-The protocol specification defines the facts worth recording. This document describes the integration shape.
-
-The intended architecture is:
+The protocol specs define the facts and identities. This document defines a non-normative implementation/product shape.
 
 ```text
 agent harness
@@ -21,11 +20,11 @@ harness-specific adapter
      │
      │ normalized event payloads
      ↓
-git+ session recorder
+git+ trace recorder
      │
      │ validate · bind · sign · append
      ↓
-refs/hub/session/<session-id>
+refs/hub/trace/<session-id>
      │
      │ server projection
      ↓
@@ -36,420 +35,276 @@ refs/hub/session/<session-id>
 Activity · Change Requests · Commits · Flight Recorder
 ```
 
-The product goal is not to build a generic observability dashboard.
-
-It is to make repository-agent failures explainable in repository terms:
+The policy-critical session DAG remains separate:
 
 ```text
-relevant test was present
-    ↓
-context pressure increased
-    ↓
-compaction occurred
-    ↓
-test disappeared from the next exposure
-    ↓
-agent edited related code
+refs/hub/session/<session-id>
+  distilled prompt / produced result / decisions / aggregate usage
+  may be consulted by provenance or policy
+
+refs/hub/trace/<session-id>
+  detailed context exposure / invocation / lifecycle / tool / workspace audit
+  never consulted for authorization or merge policy
 ```
 
-The UI should help a human answer:
-
-> **What happened to the agent's repository knowledge before this operation?**
-
-without requiring inspection of raw session JSON or provider transcripts.
+The product goal is not a generic observability dashboard. It is to explain repository-agent failures in repository terms.
 
 ---
 
-## 2. Relationship to the existing harness integration
+## 2. Harness integration modes
 
-`git+ session enable` already establishes the basic integration pattern:
+### 2.1 Embedded integration
 
-1. write an inspectable script under `.chr33s/`;
-2. install harness hooks that call it;
-3. normalize harness input into `git+ session` commands;
-4. sign resulting events with the agent's repository member key;
-5. append them to the existing session DAG.
-
-Telemetry SHOULD extend this pattern rather than introducing a separate daemon, trace service, or telemetry namespace.
-
-A checkout may therefore contain:
-
-```text
-.chr33s/
-  session.mjs
-  telemetry.mjs
-  session.id
-```
-
-An implementation MAY combine `session.mjs` and `telemetry.mjs` into one script. The conceptual split is useful because session lifecycle and fine-grained runtime capture have different availability across harnesses.
-
-The generated adapter remains ordinary local code. An operator should be able to inspect, edit, replace, or remove it.
-
----
-
-## 3. Two integration modes
-
-### 3.1 Embedded harness integration
-
-The strongest integration wraps the actual model and tool runtime.
-
-It can observe the protocol's logical boundaries directly:
+The strongest integration wraps the actual model/tool loop:
 
 ```text
 beforeInvocation
-  capture current repository view
+  capture current Repository View
   build Context Pack
-  build ContextRender
-  append Context Exposure Event
+  build semantically framed ContextRender
+  append Context Exposure trace record
 
 provider.invoke(...)
 
 afterInvocation
   capture provider/model
-  capture usage
-  capture finish status
-  capture duration
-  append Invocation Telemetry
+  capture usage and limit sources
+  capture finish status/duration
+  append Invocation Telemetry trace record
 
 beforeTool / afterTool
-  record compact tool diagnostics
+  record compact diagnostics
   mark repository mutation
 
 before next invocation
-  materialize the resulting effective tree
-  record Workspace Transition when needed
+  materialize effective tree if dirty
+  append Workspace Transition if changed
 ```
 
-This mode can provide the highest telemetry coverage because it sees individual provider invocations, retries, fallbacks, context assembly, and tool execution before vendor abstractions hide them.
+### 2.2 Vendor-hook integration
 
-An embedded integration is preferred when `git+` is part of the harness itself or when a custom orchestrator already owns the model loop.
-
-### 3.2 Vendor hook integration
-
-Many agent products expose only selected lifecycle hooks.
-
-A vendor adapter maps those hooks onto the same logical capture points:
+A vendor adapter maps whatever hooks exist to the same logical capture points:
 
 ```text
 vendor event
     ↓
 .chr33s/telemetry.mjs
+    ↓ normalize only observed values
     ↓
-normalize
-    ↓
-git+ session record
+git+ trace record
 ```
 
-The core session or telemetry protocol MUST NOT depend on names such as `PostToolUse`, `Stop`, `UserPromptSubmit`, or any equivalent vendor API.
+Vendor hook names MUST remain adapter details.
 
-Those are adapter details.
-
-A hook-based integration may have partial visibility. For example, it may observe:
-
-```text
-session start        yes
-tool completion      yes
-workspace mutation   yes
-provider token usage no
-context compaction   no
-per-model invocation no
-```
-
-Partial telemetry is valid. Missing runtime telemetry MUST NOT invalidate Context Packs, Context Exposure Events, session provenance, or resulting commits.
+A hook integration may have partial visibility. That is valid and must be surfaced honestly.
 
 ---
 
-## 4. One machine-facing recording primitive
+## 3. Machine-facing recorder
 
-Harness adapters should not need a CLI verb for every telemetry event type.
-
-A useful machine interface is:
+Use a generic trace recorder rather than one CLI verb per event kind:
 
 ```text
-git+ session record <repo> \
+git+ trace record <repo> \
   --session <session-id> \
   --key <private-key> \
   --event <event.json>
 ```
 
-Example input:
-
-```json
-{
-  "type": "invocation-telemetry",
-  "exposure": "0198f2b0-...",
-  "model": {
-    "provider": "example",
-    "id": "model-x"
-  },
-  "usage": {
-    "source": "provider",
-    "inputTokens": 118420,
-    "outputTokens": 4281,
-    "cachedInputTokens": 90210
-  },
-  "context": {
-    "renderBytes": 483921,
-    "windowLimitTokens": 200000
-  }
-}
-```
-
-The command should perform the repository-specific work the adapter should not duplicate:
+The command should:
 
 ```text
 read event
   ↓
 schema validate
   ↓
-enforce payload and secret rules
+enforce payload/secret rules
   ↓
-bind repository and session
+bind repository + session
   ↓
-sign with the member key
+sign with member key
   ↓
-append to refs/hub/session/<session-id>
+append to refs/hub/trace/<session-id>
 ```
 
-The adapter's responsibilities should remain small:
+The adapter only:
 
 ```text
-read vendor payload
-extract observable values
-label their provenance correctly
-call git+
+reads vendor payload
+extracts values it actually observes/receives
+labels evidence source correctly
+calls git+
 ```
 
-Friendly human-facing commands such as:
+### 3.1 Immutable references
+
+When the recorder appends a canonical trace event, it SHOULD print the qualified record commit OID so the adapter can bind later events:
 
 ```text
-git+ session telemetry <session>
-git+ context audit <event>
+sha1:abc123...
 ```
 
-may exist as read surfaces, but harnesses SHOULD use the stable generic recording interface.
+A later Invocation Telemetry event uses that commit OID as `exposure`. Retry/fallback records use prior invocation record OIDs.
+
+Do not use a UUID-like event ID as the only cross-record identity.
 
 ---
 
-## 5. Telemetry coverage is itself important context
+## 4. Trace volume and batching
 
-Absence of an event has two possible meanings:
+The audit trace is separate specifically so high-frequency observability does not make policy folds expensive.
+
+Even there, raw tool chatter should not produce unlimited tiny Git commits.
+
+Recommended shape:
 
 ```text
-the event did not happen
+standalone canonical records
+  Context Exposure
+  Invocation Telemetry
+  Workspace Transition when audit-relevant
+  lifecycle events when audit-relevant
 
-or
-
-the integration could not observe it
+batched/side telemetry
+  repetitive successful tool calls
+  raw tool bodies
+  provider envelopes
+  verbose execution traces
 ```
 
-Those MUST NOT be silently conflated.
+The trace implementation SHOULD have its own linear/DAG fold and resource ceiling appropriate to audit data. It MUST NOT reuse a policy-path ceiling merely for convenience.
 
-A session SHOULD therefore expose its telemetry coverage when known.
+---
 
-One possible session-level declaration is:
+## 5. Capture capability and trace health
+
+At adapter/session start, record what the integration is capable of observing:
 
 ```json
 {
-  "telemetry": {
+  "visibility": {
     "integration": "claude-code-hooks",
-    "captures": [
-      "session",
-      "tools",
-      "workspace"
-    ]
+    "capabilities": ["session", "tools", "workspace"]
   }
 }
 ```
 
-A server projection may normalize that into capabilities such as:
+This is **capability**, not proof of complete capture.
 
-```text
-contextExposure       yes
-invocationUsage       no
-contextLifecycle      no
-toolOperations        yes
-workspaceTransitions  yes
+Where possible, adapters SHOULD emit detectable trace health:
+
+```json
+{
+  "type": "trace-health",
+  "source": "claude-code-hooks",
+  "sequence": 42,
+  "dropped": 0
+}
 ```
 
-The exact wire shape may evolve, but the product semantics are important:
+The server can project each class as:
 
-> **No compaction event exists** is not equivalent to **the harness proves no compaction occurred**.
+```text
+available
+partial
+unknown
+```
 
-The UI SHOULD distinguish telemetry that is complete for a class from telemetry that is merely absent.
+Only integrations with a defined completeness mechanism should claim `complete`.
 
 ---
 
 ## 6. Event normalization
 
-Harness adapters SHOULD normalize only values they actually observe or receive.
-
-Examples:
-
-```text
-provider token count
-  provider-reported
-
-ContextRender byte length
-  harness-observed
-
-context utilization
-  derived by reader
-
-model revision
-  omitted unless provider/runtime supplied one
-```
-
 Adapters SHOULD NOT:
 
-- retokenize a provider request and label the result provider-reported;
-- infer a context-window limit from an unpinned web lookup;
-- fabricate a model revision from a model family name;
-- describe successful tool output as having reached the next invocation unless the next Context Exposure Event supports that claim;
-- convert lack of a lifecycle hook into a claim that no compaction occurred.
+- retokenize and label the result provider-reported;
+- infer a context limit from an unpinned lookup;
+- fabricate model revisions;
+- claim successful tool output entered a model invocation without exposure evidence;
+- convert lack of a compaction hook into "no compaction happened";
+- erase the distinction between total context window and effective input limit.
 
-This keeps vendor integration adapters thin and keeps evidence classes meaningful.
+For token/window fields, preserve both semantics and source:
+
+```json
+{
+  "contextWindowTokens": 200000,
+  "contextWindowSource": "provider",
+  "effectiveInputLimitTokens": 180000,
+  "effectiveInputLimitSource": "harness-config"
+}
+```
 
 ---
 
-## 7. Workspace tree capture should be lazy
+## 7. Workspace capture should be lazy
 
-Constructing an overlay Git tree after every low-level filesystem write is unnecessary and can create excessive object churn.
-
-A better implementation is boundary-driven:
+Do not write an overlay tree after every filesystem syscall.
 
 ```text
 edit tool begins
-  remember effective tree A
+  remember tree A
 
 edit tool completes
   mark workspace dirty
 
-more local filesystem writes
-  remain dirty
-
-before next model invocation
-  materialize effective tree B
-  append Workspace Transition A → B
-  use B as the next Context Pack view.tree
+before next auditable invocation
+  materialize tree B
+  append A → B
+  use B as next Context Pack view.tree
 ```
 
-Other useful materialization boundaries include:
+The invariant is:
 
-- before a commit is created;
-- after checkout;
-- after merge or rebase;
-- before another repository-affecting model invocation.
-
-The important invariant is not that every filesystem mutation has its own tree object.
-
-It is:
-
-```text
-when repository state matters for an auditable invocation,
-there is an exact effective Git tree for that boundary
-```
+> When repository state matters for an auditable invocation, there is an exact effective Git tree for that boundary.
 
 ---
 
-## 8. Token usage capture
+## 8. ContextRender capture
 
-Token telemetry SHOULD be boring.
+The harness owns the ContextRender boundary.
 
-When the provider/runtime returns:
+The renderer produces ordered segments with logical placement, media type, and exact bytes. The provider adapter maps those segments into provider fields without changing order, placement semantics, or bytes.
 
-```json
-{
-  "inputTokens": 118420,
-  "outputTokens": 4281,
-  "cachedInputTokens": 90210
-}
-```
+If an adapter changes any of those, it must request or construct a new final ContextRender and digest before invocation.
 
-`git+` records those values as provider-reported facts.
-
-It does not need to reproduce the provider tokenizer or prove the accounting.
-
-If only an estimator is available, the event labels it estimated and records the estimator identity when useful.
-
-The server or UI may later derive:
-
-```text
-inputTokens / windowLimitTokens
-```
-
-for context pressure.
-
-Derived utilization SHOULD NOT be signed protocol state when the underlying measurements are already available.
+This avoids the subtle failure where identical repository bytes are recorded but moved from a developer/system-equivalent channel into a user/tool channel.
 
 ---
 
-## 9. Retry and fallback capture
+## 9. Server projection
 
-A harness may perform several actual provider invocations before one agent response exists.
+The browser should not reconstruct session/trace DAG semantics or trust state.
 
-Those attempts remain distinct telemetry records:
+### 9.1 Session listing
 
-```text
-Invocation 8 · model A
-  timeout
-      ↓ retry
-Invocation 9 · model A
-  provider error
-      ↓ fallback
-Invocation 10 · model B
-  success
-```
-
-A final response MUST NOT cause several behaviorally or billably distinct model calls to collapse into one record.
-
-This is important both for cost analysis and for attribution of the context/model combination that actually preceded an agent operation.
-
----
-
-## 10. Server projection
-
-The browser should not reconstruct session DAG ordering or telemetry semantics itself.
-
-The hub server should project canonical session history into product-oriented read models.
-
-### 10.1 Session listing
-
-The existing session listing should remain cheap.
-
-A projected row may grow from aggregate usage into a small telemetry summary:
+Keep `/hub/sessions` cheap. It may include a derived runtime summary when trace data exists:
 
 ```json
 {
   "session": "0198f2aa-...",
-  "agent": {
-    "kind": "claude-code",
-    "model": "model-x",
-    "harness": "2.x"
-  },
+  "agent": { "kind": "claude-code", "model": "model-x", "harness": "2.x" },
   "commits": 3,
-  "pulls": ["..."],
-  "usage": {
-    "inputTokens": 118420,
-    "outputTokens": 4281
-  },
+  "usage": { "inputTokens": 118420, "outputTokens": 4281 },
   "telemetry": {
     "invocations": 18,
-    "peakContextTokens": 191200,
-    "windowLimitTokens": 200000,
+    "peakInputShare": 0.91,
+    "peakInputPressure": 0.96,
+    "peakInvocation": "sha1:abc123...",
     "compactions": 2,
     "retries": 1,
     "toolFailures": 1,
-    "warnings": 1
+    "coverage": "partial"
   }
 }
 ```
 
-The projection MAY include derived summaries such as peak context pressure, but they should remain clearly product-derived rather than signed source events.
+`peakInputPressure` should exist only when a compatible effective input limit is known. If a session changed models/limits, retain the invocation identity that produced each peak rather than pairing a session-wide token number with the wrong denominator.
 
-### 10.2 Session detail
+### 9.2 Session detail
 
-A detail endpoint should expose the projected causal timeline:
+A detail endpoint should project the session plus its sibling audit trace:
 
 ```text
 GET /hub/sessions/:id
@@ -460,116 +315,73 @@ Conceptually:
 ```json
 {
   "session": "0198f2aa-...",
-  "coverage": {
-    "contextExposure": true,
-    "invocationUsage": true,
-    "contextLifecycle": true,
-    "toolOperations": true,
-    "workspaceTransitions": true
-  },
+  "visibility": { "tools": "available", "lifecycle": "unknown" },
   "events": [
-    { "type": "session.prompted", "...": "..." },
-    { "type": "context-exposure", "...": "..." },
-    { "type": "invocation-telemetry", "...": "..." },
-    { "type": "tool-telemetry", "...": "..." },
-    { "type": "workspace-transition", "...": "..." }
+    { "type": "session.opened", "source": "session" },
+    { "type": "context-exposure", "source": "trace" },
+    { "type": "invocation-telemetry", "source": "trace" },
+    { "type": "workspace-transition", "source": "trace" },
+    { "type": "session.produced", "source": "session" }
   ]
 }
 ```
 
 The server owns:
 
-- session DAG projection;
-- ordering;
+- trust/signature verification;
+- session and trace folding;
 - redaction state;
-- trust/signature acceptance;
-- causal relationships;
-- basic joins between exposure, invocation, tools, transitions, commits, and refs.
+- causal parentage;
+- joins between exposures, invocations, tools, transitions, commits, and refs;
+- derived diagnostics.
 
-The browser owns presentation and non-authoritative derived diagnosis.
+The browser owns presentation.
 
 ---
 
-## 11. UI principle: telemetry explains repository knowledge changes
+## 10. UI principle
 
-The product SHOULD NOT lead with provider metrics.
-
-A generic dashboard such as:
-
-```text
-Tokens today
-Average latency
-Provider spend
-```
-
-may be useful operationally, but it is not the core Git+ product advantage.
-
-The stronger experience is:
-
-> **Show the chain between repository evidence, context lifecycle, runtime conditions, and code changes.**
-
-For example:
+The product SHOULD lead with repository-context transitions, not provider metrics.
 
 ```text
 tests/auth.test.ts exposed
       ↓
-96% context pressure
+input pressure reached 96%
       ↓
-context compaction
+context compaction recorded
       ↓
-tests/auth.test.ts absent
+tests/auth.test.ts absent from next exposure
       ↓
 edit to src/auth.ts
 ```
 
-That turns telemetry into an explanation of agent context loss rather than another metrics surface.
+That is more useful than a generic token dashboard.
 
 ---
 
-## 12. Level 1 UI: Activity session rows
+## 11. Activity session rows
 
-The Activity screen already has a natural Sessions section.
-
-The list should remain compact and glanceable.
-
-A healthy session might show:
+Keep the row compact:
 
 ```text
 0198f2aa  claude-code · model-x
-3 commits · 1 PR · 124k tokens · 61% peak · ✓ context
+3 commits · 124k tokens · 61% window share · ✓ context
 ```
 
-A session with relevant runtime events might show:
+When effective input pressure is known:
 
 ```text
 0198f2bb  codex · model-y
-284k tokens · 97% peak · 3 compactions · 1 retry · ⚠ context
+284k tokens · 96% input pressure · 3 compactions · 1 retry · ⚠ context
 ```
 
-The row SHOULD emphasize unusual or actionable signals rather than display every available field.
-
-Useful row-level facts include:
-
-```text
-commits / PRs
-aggregate tokens
-peak context pressure
-compaction count
-retry/fallback count
-failed tool count
-context-provenance status
-open decisions
-```
-
-If telemetry coverage is partial, the row should not render missing signals as zero.
+Missing telemetry must not render as zero.
 
 ---
 
-## 13. Level 2 UI: Session Flight Recorder
+## 12. Session Flight Recorder
 
-Clicking a session should open the primary detailed telemetry experience: a causal event timeline.
-
-Example:
+A session detail should present causal events in human terms:
 
 ```text
 Session 0198f2aa
@@ -579,87 +391,52 @@ Claude Code · model-x
 09:42  Prompt
        Fix authentication policy...
 
-09:42  Context
+09:42  Context Exposure
        tree 79ad…
-       7 files · 31 KB
-       ✓ all evidence verified
+       7 blob items · 1 gitlink · 31 KB
+       placements: developer, tool
+       ✓ evidence + render verified
 
 09:42  Invocation
        model-x
-       118k / 200k tokens   ██████░░░░ 59%
+       118k input
+       59% of total context window
        90k cached · 4.2k output
 
-09:43  Tool · read-file
-       tests/auth.test.ts
-       ✓ 9.2 KB
+09:43  Tool group
+       14 operations · 1 failure
 
-09:43  Context
-       + tests/auth.test.ts
-
-09:44  Invocation
-       157k / 200k          ████████░░ 79%
-
-09:45  Edit
+09:45  Workspace
        tree 79ad… → a130…
-       3 files changed
 
 09:46  Context compaction
        context-window · summary
 
-09:46  Context
-       tree a130…
+09:46  Context diff
        - tests/auth.test.ts
 
 09:47  Invocation
-       191k / 200k          ██████████ 96%
-       ⚠ high context pressure
+       172k / 180k effective input limit
+       ⚠ 96% input pressure
 
 09:48  Commit
        abc123 Fix auth policy
 ```
 
-This view should be understandable without knowing the session event schema.
+### 12.1 Preserve concurrency
 
-Raw event JSON can remain an advanced/debug surface.
+The session/trace history may be a DAG, not a single total causal line.
 
----
-
-## 14. Context pressure visualization
-
-When both `inputTokens` and `windowLimitTokens` exist, the UI SHOULD make context pressure visually apparent.
-
-For example:
-
-```text
-Context window
-157k / 200k
-████████░░ 79%
-```
-
-Any severity thresholds are product policy, not protocol semantics.
-
-A UI may choose rules such as:
-
-```text
-below 70%   quiet
-70–90%      visible
-above 90%   warning
-```
-
-but those labels MUST NOT be persisted back into signed telemetry as objective facts.
-
-If the window limit is unknown, display token usage without a utilization bar rather than guessing the denominator.
+When two records are concurrent or a session was resumed on diverging heads, the Flight Recorder SHOULD show lanes/branches or another explicit concurrency affordance. Wall-clock timestamps may help presentation but MUST NOT be used to invent causal parentage.
 
 ---
 
-## 15. Context Pack diffs
+## 13. Context Pack diffs
 
-Successive Context Packs make context loss directly visible.
-
-The Flight Recorder SHOULD support a context diff between adjacent exposures:
+Adjacent exposures can show:
 
 ```text
-Context #17 → Context #18
+Context #17 → #18
 
 Added
 + tests/auth.test.ts
@@ -669,62 +446,48 @@ Removed
 - docs/design.md
 ```
 
-After compaction:
-
-```text
-Context #22 → Context #23
-
-Removed
-- tests/auth.test.ts
-- config/worker.json
-
-Between exposures
-context-compaction · context-window
-```
-
-A file in the diff should open the exact Git blob/range associated with that historical Context Pack, not the current worktree version.
-
-This is one of the most important product benefits of keeping repository evidence Git-grounded.
+A clicked blob opens the exact historical blob/range. A clicked gitlink shows the recorded submodule commit pointer, not an implied submodule file view.
 
 ---
 
-## 16. Provenance status should be explicit
+## 14. Provenance status
 
-Different parts of the audit chain have different evidence strength.
-
-The UI should report them separately.
-
-For example:
+Report evidence components separately:
 
 ```text
-Git evidence      ✓ verified
-Context render    ✓ retained and digest verified
-Runtime usage     provider reported
-Tool trace        expired
-Workspace tree    ✓ verified
+Repository evidence  ✓ verified
+View reachability    ✓ retained through trace record
+Context render       ✓ retained and digest verified
+Runtime usage        provider reported
+Trace visibility     partial
+Tool body             expired
+Workspace transition ✓ matched pre-operation tree
 ```
 
-Other useful states include:
+Avoid ambiguous historical labels such as:
 
 ```text
-✓ Verified
-⚠ Pack valid, ContextRender body unavailable
+Latest repository tree ✓ current
+```
+
+A historical invocation should instead be judged against the repository/workspace tree recorded at **that invocation boundary**.
+
+Useful states:
+
+```text
+✓ verified
+⚠ body unavailable, digest retained
 ✕ path/blob mismatch
-⚠ stale tree
-⚠ telemetry coverage partial
+✕ gitlink mode/commit mismatch
+⚠ invocation used tree A after recorded A → B transition
+⚠ visibility unknown for this event class
 ```
-
-A green overall badge MUST NOT hide a weaker component, and an unavailable side trace MUST NOT make valid Git provenance appear invalid.
 
 ---
 
-## 17. Tool operations stay collapsed by default
+## 15. Tool operations
 
-The Flight Recorder should not resemble a raw agent transcript.
-
-Tool activity is high-volume and usually secondary until something fails.
-
-Default presentation:
+Collapse successful tool chatter by default:
 
 ```text
 ▸ 14 tool operations
@@ -733,258 +496,171 @@ Default presentation:
      1 failed
 ```
 
-Expanded presentation:
-
-```text
-read-file   src/auth.ts          ✓ 8.4 KB
-grep        validate             ✓ 17 hits
-read-file   config/prod.json     ✕ unavailable
-edit        src/auth.ts          ✓ tree A → B
-```
-
-Raw result bodies appear only when:
-
-- a retained side object exists;
-- access policy allows the viewer to read it;
-- the viewer explicitly requests it.
-
-The canonical UI should remain useful after raw side telemetry has expired.
+Raw bodies appear only when a retained side object exists, access policy allows it, and the viewer explicitly requests it.
 
 ---
 
-## 18. Retry and fallback visualization
+## 16. Retry/fallback visualization
 
-Retries should preserve their branching/causal meaning:
+Show distinct attempts and immutable references:
 
 ```text
-Invocation 8 · model-x
-        │
-        └─ timeout
-             ↓ retry
-        Invocation 9 · model-x
-             │
-             └─ provider error
-                  ↓ fallback
-             Invocation 10 · model-y
-                  ✓ success
+Invocation sha1:a1… · model-x
+        │ timeout
+        ↓ retry
+Invocation sha1:b2… · model-x
+        │ provider error
+        ↓ fallback
+Invocation sha1:c3… · model-y
+        ✓ success
 ```
-
-This prevents a final agent operation from being incorrectly presented as if one model invocation produced it directly.
 
 ---
 
-## 19. Audit summary card
+## 17. Audit summary
 
-The top of a session detail MAY provide a derived summary:
+A derived summary may show:
 
 ```text
 Agent session audit
 
 Context provenance      ✓ 18 / 18 verified
-Latest repository tree  ✓ current
-Peak context pressure   ⚠ 96%
+Workspace alignment     ✓ matched at recorded invocation boundaries
+Peak input pressure     ⚠ 96% · invocation sha1:c3…
 Compactions             2
 Retries                 1
 Failed tools            1
-Telemetry coverage      partial
-Knowledge continuity    ⚠ relevant test removed after compaction
+Trace visibility        partial
+Knowledge continuity    ⚠ test removed after recorded compaction
 ```
 
-The final line is a derived diagnosis and should be phrased in observable terms.
+Derived diagnosis MUST use observable language.
 
 Prefer:
 
-> `tests/auth.test.ts` was present in Exposure 17 and absent after a recorded compaction before Exposure 18.
+> `tests/auth.test.ts` was present in Exposure A and absent after a recorded compaction before Exposure B.
 
 Avoid:
 
-> The model forgot `tests/auth.test.ts`.
-
-Likewise prefer:
-
-> The read tool returned `policy.ts`, but `policy.ts` was absent from the next Context Pack.
-
-rather than:
-
-> The agent ignored `policy.ts`.
-
-The UI observes the harness and repository provenance; it does not infer model cognition.
+> The model forgot the test.
 
 ---
 
-## 20. Change Request and commit surfaces
+## 18. Commit and Change Request surfaces
 
-Telemetry should be reachable from code review and history, not only from the Activity page.
+Link repository artifacts back to the Flight Recorder.
 
-A Change Request may show:
+A commit may show telemetry only when there is a **causal binding**, not merely because an invocation timestamp was nearby.
 
-```text
-Provenance
-Claude · session 0198f2aa
-3 agent invocations
-124k tokens
-peak context 88%
-✓ final context tree current at last invocation
-
-View session
-```
-
-An individual agent-authored commit may show:
+Prefer:
 
 ```text
 Produced by session 0198f2aa
-
-Last invocation before commit
-  model-x
-  88% context pressure
-  Context Pack: 12 repository items
+Causally bound preceding invocation: sha1:c3…
+  model-y
+  96% input pressure
+  Context Pack: 12 blobs · 1 gitlink
 ```
 
-These summaries should link to the same Flight Recorder rather than duplicating a second telemetry view.
-
-The repository artifact remains the primary navigation object; telemetry explains its provenance.
+If no explicit/derivable causal binding exists, omit "last invocation before commit" rather than infer it from wall-clock ordering.
 
 ---
 
-## 21. Derived diagnostics
+## 19. Knowledge durability UI
 
-The server or UI MAY derive useful diagnostics from canonical facts.
-
-Examples include:
+Repository Memory should display cited claims and structured evidence dependencies separately:
 
 ```text
-high context pressure
-Context Pack changed after compaction
-repository item disappeared between exposures
-successful repository read absent from the next exposure
-Context Pack tree predates a recorded Workspace Transition
-retry changed provider/model
-telemetry coverage is incomplete for this failure class
+gotcha  Worker auth tests require production policy fixture
+source  session 0198f2aa
+support 2 blobs · 1 gitlink
+state   ⚠ config/policy.json changed; revalidate
 ```
 
-Derived diagnostics MUST remain distinguishable from signed event claims.
+A changed dependency is not automatic falsification.
 
-They should be reproducible from the projected facts whenever possible.
-
-The product should prefer a concrete explanation over a generic warning:
-
-```text
-better:
-  view.tree is A, but the workspace transitioned A → B before this exposure
-
-worse:
-  context may be stale
-```
+See [knowledge-durability.md](knowledge-durability.md).
 
 ---
 
-## 22. Access control, retention, and redaction
+## 20. Implementation sequence
 
-The UI must respect the same separation between canonical records and disposable side telemetry as the protocol.
+### Phase 1 — existing session summary
 
-Canonical session facts can survive indefinitely.
+Use the current aggregate `session.produced.usage` in Activity. Do not invent window pressure or trace completeness before those measurements exist.
 
-Raw provider envelopes, tool-result bodies, and transcript-like telemetry should remain subject to local retention and access policy.
-
-The UI SHOULD clearly represent an expired side object:
-
-```text
-Tool result body unavailable
-Digest retained: sha256:...
-Metadata retained: 9.2 KB · success
-```
-
-It MUST NOT treat retention expiry as repository corruption.
-
-Redacted canonical events should continue to appear structurally as redactions, according to the existing session DAG semantics.
-
----
-
-## 23. Implementation sequence
-
-A useful implementation can land incrementally.
-
-### Phase 1 — session-level runtime summary
-
-Extend the current session projection/UI with:
-
-```text
-provider-reported aggregate token usage
-known window limit
-peak context pressure
-telemetry coverage
-```
-
-No new detailed screen is required to get initial value.
-
-### Phase 2 — generic event recorder
+### Phase 2 — trace recorder
 
 Add:
 
 ```text
-git+ session record
+git+ trace record
+refs/hub/trace/<session>
 ```
 
-with schemas for:
+with schemas for exposure, invocation telemetry, lifecycle, tool summary, trace health, and workspace transitions.
 
-```text
-invocation-telemetry
-context-compaction
-context-truncation
-tool-telemetry
-workspace-transition
-```
+### Phase 3 — trace-derived summaries
 
-Extend harness adapters to use it.
+Extend `/hub/sessions` with model/window/pressure/retry/visibility summaries derived from actual trace records.
 
-### Phase 3 — session detail projection
+### Phase 4 — session detail projection
 
-Add a projected detail read model and endpoint:
+Add `GET /hub/sessions/:id` joining the small session DAG with the policy-invisible trace.
 
-```text
-GET /hub/sessions/:id
-```
+### Phase 5 — Flight Recorder and Context Pack integration
 
-including coverage and ordered telemetry events.
+Add context diffs, semantic placements, retries, tool groups, workspace transitions, reachability checks, and evidence links.
 
-### Phase 4 — Flight Recorder
-
-Add:
-
-- context pressure meters;
-- retries/fallbacks;
-- context diffs;
-- collapsed tool groups;
-- workspace transitions;
-- provenance status.
-
-### Phase 5 — Context Pack/exposure integration
-
-Once Context Pack persistence exists end-to-end, make context additions/removals and exact historical evidence first-class in the Flight Recorder.
-
-This order lets telemetry improve the current Sessions UI without waiting for every provenance primitive to be implemented simultaneously.
+This order avoids presenting UI metrics before the system can capture them.
 
 ---
 
-## 24. Acceptance criteria
+## 21. Documentation hierarchy
+
+```text
+agents.md
+  membership + existing session lifecycle
+
+knowledge-durability.md
+  Capture → Retention → Recall objective
+
+content-pack.md
+  repository + exposure protocol
+
+invocation-telemetry.md
+  runtime audit-trace protocol
+
+telemetry-integration.md
+  this harness/API/UI guidance
+```
+
+Architecture notes should link to protocol specs instead of duplicating normative wire rules.
+
+---
+
+## 22. Acceptance criteria
 
 The integration is useful when:
 
-1. a harness adapter can record telemetry without knowing Git object/ref/signature internals;
-2. unsupported hook classes appear as missing coverage rather than false zeroes;
-3. provider-reported token usage remains visibly distinct from estimated or derived values;
-4. repository-mutating sessions can expose `beforeTree → afterTree` at meaningful boundaries without writing a tree for every filesystem operation;
-5. multiple provider retries/fallbacks remain distinct in session history and UI;
-6. the server, not the browser, projects session DAG ordering and trust/redaction state;
-7. the Activity page can summarize session runtime health without becoming a telemetry dashboard;
-8. a session detail can correlate Context Packs, exposures, invocations, tools, workspace transitions, and resulting commits;
-9. successive Context Packs can be diffed to show which repository evidence appeared or disappeared;
-10. raw tool/provider bodies can expire without destroying the usefulness of canonical provenance;
-11. derived warnings use observable language and never claim model cognition;
-12. a reviewer can move from a commit or Change Request to the exact session history that explains its runtime and repository-context provenance.
+1. high-frequency telemetry never increases policy-critical session fold cost;
+2. adapters can record trace events without knowing Git signing/ref internals;
+3. cross-event joins use immutable record identity;
+4. capability is distinct from actual trace coverage/loss;
+5. token-window metrics preserve denominator semantics and source;
+6. provider-reported values remain distinct from estimates/derived values;
+7. workspace trees are captured lazily at meaningful boundaries;
+8. ContextRender placement changes cannot occur outside the recorded digest artifact;
+9. the server, not the browser, folds DAG/trust/redaction semantics;
+10. concurrent records are not falsely linearized as causal;
+11. historical tree status is judged against the recorded boundary, not today's branch tip;
+12. commits/CRs link to telemetry only through causal provenance;
+13. raw side telemetry can expire without invalidating canonical provenance;
+14. structured Memory evidence can surface "needs revalidation" without claiming truth/falsity;
+15. the UI explains repository-context change without claiming model cognition.
 
 ---
 
 ## Final principle
 
-> **Harnesses capture what they can observe; `git+` turns those observations into small signed session facts; the hub projects them beside repository provenance; and the UI uses the result to explain how an agent's repository knowledge changed before code was produced. Telemetry is most valuable when it connects context to repository operations, not when it merely counts tokens.**
+> **Harnesses capture what they can observe; `git+` stores high-frequency audit facts in a signed policy-invisible trace while keeping the session DAG distilled; the hub projects causal repository/context/runtime evidence; and the UI explains how repository knowledge changed before code was produced. Telemetry is most valuable when it connects context to repository operations, not when it merely counts tokens.**
