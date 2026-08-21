@@ -69,7 +69,7 @@ Existing retrieval systems commonly make this context:
 
 > **What should an agent know about this repository for this task, and why?**
 
-The first version deliberately does **not** try to build a universal code-intelligence platform. It defines the smallest useful Git primitive and leaves richer indexing and ranking as derived implementation details.
+The first version deliberately does **not** try to build a universal code-intelligence platform. It defines the smallest useful Git primitive and a language-agnostic graph contract. Parsing and semantic enrichment remain replaceable derived machinery.
 
 ---
 
@@ -101,7 +101,9 @@ V1 pins:
 - task digest;
 - selector version/configuration.
 
-If a future input changes deterministic selection, it MUST be added to the Repository View.
+The selector configuration MUST identify any parser, grammar, query, or graph-extractor versions that affect deterministic selection.
+
+If a future input changes deterministic selection, it MUST be pinned by the Repository View or selector configuration.
 
 ### 3.3 Evidence over prose
 
@@ -122,11 +124,31 @@ Every selected item MUST state why it was selected.
 
 ### 3.5 Derived indexes are disposable
 
-Structural indexes, embeddings, and summaries MAY accelerate selection.
+Syntax trees, structural graphs, compiler indexes, embeddings, and summaries MAY accelerate or enrich selection.
 
 Deleting them MUST NOT corrupt canonical repository state.
 
-### 3.6 Selection never creates instruction authority
+### 3.6 Language independence
+
+The Context Pack schema and selector MUST NOT depend on TypeScript, Tree-sitter, an LSP, SCIP, or any one parser ecosystem.
+
+Language-specific indexers emit a common graph. The selector consumes that graph.
+
+```text
+language source
+     ↓
+language indexer
+     ↓
+normalized CodeGraph
+     ↓
+language-agnostic selector
+     ↓
+Context Pack
+```
+
+Tree-sitter SHOULD be the default syntactic extraction substrate for languages with suitable grammars and queries, but it is not the protocol boundary.
+
+### 3.7 Selection never creates instruction authority
 
 Retrieved content does not become instruction merely because it was selected.
 
@@ -141,13 +163,13 @@ derived
 
 `instruction` is valid only when the repository/session model already grants that authority, for example standing instructions or a decision valid for the current session.
 
-### 3.7 Persistent means Git-reachable
+### 3.8 Persistent means Git-reachable
 
 An OID written inside JSON is only text. It does not create Git reachability.
 
 A Context Pack claimed to replicate and survive Git GC MUST therefore be structurally reachable from a Git ref through commits/trees.
 
-### 3.8 Bounded work
+### 3.9 Bounded work
 
 Context generation MUST bound attacker-controlled work, including candidate count, graph traversal, manifest size, history scanned, and rendered context size.
 
@@ -287,7 +309,9 @@ explicit-symbol
 task-term
 definition
 reference
+call
 import
+implementation
 test
 config
 history
@@ -380,7 +404,7 @@ A useful pipeline is:
 ```text
 1. explicit task roots
 2. deterministic lexical search
-3. structural neighbors
+3. normalized CodeGraph neighbors
 4. tests and configuration
 5. bounded history signal
 6. pinned Memory / instructions / policy
@@ -398,34 +422,230 @@ Recognize task references to:
 
 Explicit references receive highest priority.
 
-### 7.2 Structural context
+### 7.2 Language-agnostic CodeGraph
 
-The selector SHOULD use deterministic source relationships where available:
+The selector operates on a normalized graph rather than a language-specific compiler API.
 
-```text
-defines
-references
-imports
-calls
-tested-by
-configured-by
+Conceptual contract:
+
+```ts
+interface CodeGraph {
+  readonly nodes: ReadonlyArray<CodeNode>
+  readonly edges: ReadonlyArray<CodeEdge>
+}
+
+interface CodeNode {
+  readonly id: string
+  readonly kind: "file" | "module" | "symbol"
+  readonly language: string
+  readonly path: string
+  readonly blob: string
+  readonly range?: readonly [startByte: number, endByte: number]
+  readonly name?: string
+  readonly symbolKind?:
+    | "function"
+    | "method"
+    | "class"
+    | "interface"
+    | "type"
+    | "module"
+    | "variable"
+    | "field"
+    | "constant"
+    | "other"
+}
+
+interface CodeEdge {
+  readonly kind:
+    | "defines"
+    | "references"
+    | "calls"
+    | "imports"
+    | "implements"
+    | "extends"
+    | "tests"
+    | "configures"
+
+  readonly from: string
+
+  // Present when the target has been resolved to a graph node.
+  readonly to?: string
+
+  // Preserved when syntax names a target that cannot be resolved.
+  readonly target?: string
+
+  readonly resolution: "syntax" | "local" | "semantic"
+}
 ```
 
-The graph is a disposable projection, not canonical state.
+The exact in-memory TypeScript types are implementation detail. The normative idea is the normalized vocabulary and resolution semantics.
 
-### 7.3 History
+### 7.3 Language indexers
+
+Language-specific indexers translate source into `CodeGraph` fragments.
+
+Conceptually:
+
+```ts
+interface CodeIndexer {
+  readonly name: string
+  readonly version: string
+
+  index(input: {
+    readonly path: string
+    readonly blob: string
+    readonly source: Uint8Array
+    readonly language: string
+  }): CodeGraph
+}
+```
+
+A new language SHOULD require a new indexer or query pack, not a new selector or Context Pack schema.
+
+### 7.4 Tree-sitter as the default syntactic extractor
+
+For languages with suitable grammars, V1 SHOULD use Tree-sitter to produce syntax-level graph facts.
+
+Tree-sitter queries already provide a useful cross-language convention for code-navigation captures such as:
+
+```text
+@definition.class
+@definition.function
+@definition.interface
+@definition.method
+@definition.module
+@reference.call
+@reference.class
+@reference.implementation
+```
+
+An indexer maps those language-specific syntax captures into the normalized graph.
+
+Example:
+
+```text
+Tree-sitter @definition.function
+        ↓
+CodeNode(kind="symbol", symbolKind="function")
+
+Tree-sitter @reference.call
+        ↓
+CodeEdge(kind="calls", resolution="syntax")
+```
+
+Language repositories SHOULD keep their syntax extraction declarative where practical, for example:
+
+```text
+queries/tags.scm
+queries/locals.scm
+queries/context.scm   # optional git+ relationships
+```
+
+`context.scm` MAY identify additional syntactic relationships useful to selection, such as imports, exports, test declarations, routes, or configuration references.
+
+### 7.5 Syntax is not semantic resolution
+
+Tree-sitter is a parser, not a compiler or type checker.
+
+For example, syntax can reliably identify:
+
+```text
+client.get(...)
+```
+
+as a call to a member named `get`, but it cannot generally prove which declaration that member resolves to.
+
+The graph MUST preserve that distinction:
+
+```json
+{
+  "kind": "calls",
+  "from": "symbol:a",
+  "target": "client.get",
+  "resolution": "syntax"
+}
+```
+
+A semantic enricher may later resolve the same edge:
+
+```json
+{
+  "kind": "calls",
+  "from": "symbol:a",
+  "to": "symbol:b",
+  "resolution": "semantic"
+}
+```
+
+The selector MAY prefer stronger resolution, but unresolved syntax facts remain useful and explainable.
+
+### 7.6 Optional semantic enrichers
+
+A language MAY enrich the graph using:
+
+```text
+compiler APIs
+language servers
+SCIP or equivalent indexes
+build-system metadata
+framework-specific analyzers
+```
+
+These enrichers are optional.
+
+The architecture is:
+
+```text
+                    Tree-sitter
+                        │
+                        ▼
+                 syntactic graph
+                        │
+               optional enrichers
+                  ┌─────┼─────┐
+                  ▼     ▼     ▼
+              compiler LSP   SCIP
+                  └─────┼─────┘
+                        ▼
+                  enriched graph
+                        │
+                        ▼
+               Context selector
+```
+
+No semantic enricher is allowed to become required for reading or validating the canonical Context Pack.
+
+### 7.7 `tree-sitter-graph`
+
+`tree-sitter-graph` MAY be used as an implementation tool for mapping parsed syntax into graph structures.
+
+The specification MUST NOT depend on it. The stable boundary is the normalized `CodeGraph`, so implementations remain free to use:
+
+```text
+Tree-sitter queries
+tree-sitter-graph
+compiler APIs
+LSP
+SCIP
+prebuilt indexes
+custom domain parsers
+```
+
+without changing Context Pack semantics.
+
+### 7.8 History
 
 V1 MAY use bounded Git co-change/history signals.
 
 The inspected history horizon MUST be deterministic and part of selector configuration.
 
-### 7.4 Repository Memory
+### 7.9 Repository Memory
 
 The selector SHOULD consult the pinned bounded Memory projection instead of scanning the complete session corpus.
 
 This keeps v1 deterministic and prevents session availability from silently changing selection.
 
-### 7.5 Budget
+### 7.10 Budget
 
 Selection operates under an explicit context budget.
 
@@ -437,7 +657,7 @@ estimated tokens = ceil(character count / 4)
 
 Harnesses MAY compute exact model-specific tokens later when rendering.
 
-### 7.6 Retrieval poisoning
+### 7.11 Retrieval poisoning
 
 Lexical relevance is manipulable. A contributor can add decoy files or symbols matching likely task terms in an attempt to consume the context budget.
 
@@ -445,6 +665,7 @@ V1 SHOULD mitigate this with bounded and diverse selection, including:
 
 - preference for explicit roots;
 - preference for graph-connected evidence;
+- preference for resolved edges over unresolved ones when otherwise equal;
 - graph-distance limits;
 - candidate-count limits;
 - per-directory diversity;
@@ -540,7 +761,7 @@ V1 SHOULD therefore avoid embedding session prose wherever an object reference o
 
 ### 9.4 Untrusted indexes
 
-A remote structural or semantic index is an optimization hint.
+A remote syntax, structural, compiler, or semantic index is an optimization hint.
 
 Clients MAY rebuild it or verify its claims against exact blob OIDs and ranges.
 
@@ -609,6 +830,9 @@ Path:
   task term "provenance"
     → Policy.checkBranchPolicy
     → capabilitiesAt
+
+Resolution:
+  semantic
 ```
 
 Explainability is a first-class product property, not debugging polish.
@@ -663,25 +887,32 @@ A session MAY later generate refreshed or expanded packs. Each pack remains immu
 V1 SHOULD remain deliberately narrow:
 
 ```text
-TypeScript only
+language-agnostic CodeGraph contract
+Tree-sitter syntactic extraction where available
+one initially supported language is sufficient to ship the prototype
 clean worktree only
 deterministic selection only
 no embeddings required
-local disposable structural index
+local disposable graph/index cache
 pinned source/instructions/policy/memory
 bounded Git history
 blob/range evidence
-reference/import/test/config relationships
+definition/reference/call/import/test/config relationships
 canonical Context Pack attachment
 minimal Context Receipt
-context for
-context why
-context refresh
-strict resource ceilings
-no requireContext branch policy
+strict generation ceilings
+three primary CLI questions
+no requireContext policy
 ```
 
-This is enough to validate whether Context Packs are a useful Git primitive without turning `@chr33s/git` into a universal code-intelligence platform.
+The first implementation MAY ship with TypeScript only, but TypeScript MUST be an indexer plugged into the common graph rather than a special case in the selector or Context Pack schema.
+
+A useful proof of language independence is to add a second language later without changing:
+
+- Context Pack schema;
+- Context Receipt schema;
+- selector interfaces;
+- CLI semantics.
 
 ---
 
@@ -695,166 +926,195 @@ Given identical:
 - Repository View;
 - task input/digest;
 - selector version/configuration;
+- graph extractor/grammar/query versions;
 
-a deterministic v1 selector MUST emit byte-identical Context Pack bytes.
+deterministic mode MUST emit byte-identical packs.
 
-### 13.2 Reachability
+### 13.2 Git reachability
 
-A persisted Context Pack attached to a session event MUST survive:
+A persisted pack attached to a session event MUST survive:
 
 ```text
 push
 fresh fetch of the session ref
-normal Git GC
+Git GC
 ```
 
-### 13.3 No fake reachability
+### 13.3 Exact evidence
 
-An OID that appears only as JSON text MUST NOT be treated as Git-reachable.
+Every source item MUST reference a valid blob and byte range.
 
-### 13.4 Exact evidence
+### 13.4 Explainability
 
-Every source range MUST name an existing blob and valid byte range.
+Every selected item MUST have a reason.
 
-### 13.5 Explainability
+### 13.5 Language abstraction
 
-Every item MUST contain a reason.
+The selector MUST consume normalized graph facts rather than language-specific AST node types or compiler objects.
 
-### 13.6 Dirty state
+Adding a second language MUST NOT require changing the Context Pack schema.
 
-V1 MUST refuse a dirty worktree.
+### 13.6 Resolution honesty
 
-### 13.7 No semantic dependency
+An unresolved syntactic relationship MUST NOT be represented as semantically resolved.
 
-Deleting embeddings or all semantic caches MUST NOT prevent deterministic Context Pack generation.
+### 13.7 Dirty worktree
 
-### 13.8 Instruction safety
+V1 MUST refuse dirty worktree context generation.
 
-Selection MUST NOT promote narrative or evidence into instruction authority.
+### 13.8 Missing index
 
-### 13.9 Resource bounds
+Deleting every derived graph/index cache MUST NOT corrupt canonical repository state.
 
-Generation MUST remain inside configured candidate, traversal, history, item, and size ceilings.
+### 13.9 Authority
 
-### 13.10 Read-only safety
+Selection MUST NOT promote narrative/evidence into instruction.
 
-A caller with read permission MUST NOT be able to create unlimited durable Git objects through context generation.
+### 13.10 Redaction
 
-### 13.11 Redaction
+Redacting session prose MUST NOT leave a second canonical readable copy in its attached context artifact.
 
-Redacting session prose MUST NOT leave a second readable copy of that prose in a Context Pack attachment.
+### 13.11 Bounds
+
+Context generation MUST obey configured candidate, graph, history, item, and payload ceilings.
 
 ### 13.12 Retrieval quality
 
-Before v1 is considered successful, repository tasks with known solutions SHOULD demonstrate that bounded packs reliably include the implementation, tests, and configuration required to complete those tasks.
+Historical-task benchmarks SHOULD measure whether packs retain the implementation, tests, and configuration eventually needed under bounded budgets.
 
 ---
 
-## 14. What this is not
+## 14. Non-goals
 
-Context Packs are not:
+V1 does not attempt to:
+
+- store hidden chain-of-thought;
+- store raw transcripts canonically;
+- prove model cognition;
+- prove causal relationship between context and output;
+- resolve every call/reference semantically;
+- standardize one universal parser;
+- require one language server or compiler API;
+- standardize embeddings;
+- replace Git with a graph database;
+- support dirty worktrees;
+- solve cross-repository context;
+- require Context Packs for branch protection;
+- guarantee perfect relevance ranking.
+
+---
+
+## Appendix A — Graph extraction
+
+The graph subsystem has three layers:
 
 ```text
-a transcript store
-a chain-of-thought store
-a proof of cognition
-a proof of causation
-a vector database format
-a universal parser format
-a replacement for Git objects
-a branch-protection requirement
+source
+  ↓
+syntax extraction
+  ↓
+normalized graph
+  ↓
+optional semantic enrichment
 ```
 
-The core primitive remains intentionally small:
+### A.1 Tree-sitter
 
-> **pinned view → explainable pack → signed receipt → session provenance**
+Tree-sitter is a strong default syntax layer because its grammars and query system support many programming languages and can identify useful code-navigation concepts without coupling the selector to a compiler.
 
----
+The Context subsystem SHOULD reuse existing language `tags.scm` conventions where they are sufficient.
 
-# Appendix A — Structural indexing
+`git+`-specific query packs MAY extend them with additional relationships.
 
-The first TypeScript indexer MAY expose relationships such as:
+The parser and query versions that affect output MUST be pinned by selector configuration.
+
+### A.2 Tree-sitter Graph
+
+`tree-sitter-graph` provides a DSL for constructing arbitrary graph structures from Tree-sitter-parsed source and MAY reduce custom per-language extraction code.
+
+It is an implementation option, not a canonical dependency.
+
+### A.3 Semantic resolution
+
+Semantic enrichers MAY replace or supplement syntax-only edges.
+
+Examples:
 
 ```text
-file defines symbol
-symbol references symbol
-module imports module
-symbol calls symbol
-test references source symbol
-file configured-by config entry
+TypeScript compiler API
+rust-analyzer
+language server protocol implementations
+SCIP indexes
+framework analyzers
 ```
 
-The graph is a disposable projection.
+An enricher SHOULD preserve the underlying source range and identify its resolution level.
 
-Where resolution is ambiguous, the index MUST preserve uncertainty rather than invent certainty.
+### A.4 Incremental updates
 
-Changing parser/compiler configuration may invalidate relationships in unchanged source files. Implementations SHOULD distinguish local invalidation from global invalidation and permit a full rebuild when configuration changes affect resolution.
+Git identifies changed blobs exactly, so syntax extraction SHOULD be incremental at blob granularity.
+
+However, configuration changes can invalidate relationships in unchanged files.
+
+Implementations MUST distinguish:
+
+```text
+local invalidation
+  changed source blob
+
+global invalidation
+  module resolution, dependency, compiler, or query configuration changed
+```
+
+Correctness wins over incrementalism.
 
 ---
 
-# Appendix B — Refresh and invalidation
+## Appendix B — Refresh and staleness
 
-A refreshed pack compares the old view with a new source state and re-runs the same selector where possible.
+`context refresh` re-runs selection against a later Repository View.
 
-Useful item classifications are:
+It SHOULD classify prior evidence as:
 
 ```text
 unchanged
 changed
 invalidated
 new
-removed
-reranked
+omitted
 ```
 
-Examples of local invalidation:
+The system MAY additionally flag narrative as:
 
 ```text
-implementation blob changed
-test blob changed
-import target changed
+provably stale
+possibly stale
+still grounded
 ```
 
-Examples that may require global reindexing:
+only when deterministic evidence supports the classification.
 
-```text
-tsconfig.json changed
-module resolution changed
-path aliases changed
-package exports changed
-global type configuration changed
-```
-
-Correctness is more important than pretending every repository change supports precise local invalidation.
+A syntax-only edge that becomes semantically resolved is not necessarily a source change; it MAY be reported as improved resolution metadata.
 
 ---
 
-# Appendix C — Optional semantic ranking
+## Appendix C — Optional semantic ranking
 
-Embeddings or external rerankers MAY improve candidate ordering in a future selector mode.
+Embeddings and LLM rerankers MAY improve relevance.
 
-They remain optional and disposable.
+They MUST remain optional disposable caches.
 
-A semantic cache SHOULD be keyed by enough information to invalidate it when source or model behavior changes, for example:
+The canonical pack records the resulting selection, not embedding vectors.
 
-```text
-blob OID
-byte range
-embedding model identity/version
-chunker version
-```
-
-Embedding vectors SHOULD NOT appear in the canonical Context Pack.
-
-A heuristic selector may produce a valid immutable pack even if the ranking process cannot later be reproduced bit-for-bit. The default v1 selector remains deterministic.
+Default v1 selection SHOULD remain functional without network access or model services.
 
 ---
 
-# Appendix D — Evaluation
+## Appendix D — Evaluation
 
-Implementation correctness alone does not prove Context Packs are useful.
+The project SHOULD evaluate Context Packs on historical tasks rather than judging success by manifest validity alone.
 
-A practical benchmark SHOULD replay known repository tasks and measure at bounded budgets such as 8k, 16k, and 32k estimated tokens:
+Useful metrics include:
 
 ```text
 required-file recall
@@ -864,23 +1124,62 @@ configuration recall
 irrelevant-context ratio
 generation latency
 refresh latency
+pack size
+budget utilization
 ```
 
-Retrieval-poisoning tests SHOULD add decoy lexical matches and verify that graph-connected implementation evidence remains selected.
-
-A handoff evaluation MAY compare:
+Evaluate multiple budgets, for example:
 
 ```text
-fresh agent with no context artifact
-fresh agent with prose summary
-fresh agent with Context Pack
-fresh agent with Context Pack + refresh delta
+8k
+16k
+32k
 ```
 
-The feature should earn additional complexity through measured improvement rather than by specifying the eventual platform in advance.
+Retrieval-poisoning tests SHOULD add decoy lexical matches and verify that graph-connected implementation evidence remains available.
+
+A later handoff benchmark SHOULD compare:
+
+```text
+fresh agent + no pack
+fresh agent + prose summary
+fresh agent + Context Pack
+fresh agent + Context Pack + refresh delta
+```
 
 ---
 
-## Final invariant
+## 15. Product positioning
 
-> **A Context Pack is a content-addressed, explainable selection of repository evidence from a pinned view. A Context Receipt is a signed claim that a harness exposed that pack. Git preserves the provenance of those records; it does not claim the selection was sufficient or that the model consumed it.**
+Do not claim:
+
+> "the exact context the model used"
+
+Prefer:
+
+> **A content-addressed record of the repository evidence selected for a task, plus a signed receipt of what the harness claims it exposed.**
+
+Do not position the feature as another parser or better semantic search engine.
+
+The parser/indexer layer is replaceable.
+
+The differentiated layer is:
+
+```text
+pinned repository view
++ explainable selection
++ immutable evidence manifest
++ exposure receipt
++ provenance
++ refresh/invalidation
+```
+
+The durable product claim is:
+
+> **The repository owns its understanding of itself.**
+
+---
+
+## 16. Final invariant
+
+> **A Context Pack is a content-addressed, explainable selection of repository evidence. A Context Receipt is a signed claim about what a harness exposed. Language-specific parsers and semantic indexes are replaceable derived machinery; anything required to audit the canonical records is Git state or a deterministic derivation from pinned inputs.**
