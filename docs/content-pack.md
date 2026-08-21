@@ -1,1140 +1,933 @@
 # Git-Native Context Packs
 
-**Status:** Draft specification
-**Project:** `@chr33s/git`
-**Target version:** Experimental / pre-1.0
-**Last updated:** 2026-08-21
-**Spec revision:** draft-3
+**Status:** Draft specification  
+**Project:** `@chr33s/git`  
+**Target version:** Experimental / pre-1.0  
+**Last updated:** 2026-08-21  
+**Spec revision:** draft-4
 
 ## 1. Summary
 
-This specification introduces three small Git-native concepts:
+This specification defines a small Git-native audit primitive for repository context used by coding agents.
 
-1. **Repository View** — the exact repository state a selector reads.
-2. **Context Pack** — an immutable, explainable selection of repository evidence for a task.
-3. **Context Receipt** — a session record claiming that a harness exposed a particular Context Pack.
+The problem is not to standardize how an agent retrieves or ranks code. The problem is to make it possible to answer, after an agent operation:
+
+> **What repository state and repository evidence were available to the agent at that point?**
+
+V1 defines three concepts:
+
+1. **Repository View** — the exact repository snapshot from which context was drawn.
+2. **Context Pack** — an immutable manifest of repository evidence associated with one model invocation or agent operation.
+3. **Context Exposure Event** — a signed session record binding a Context Pack, and the exact rendered repository-context bytes, to a point in agent history.
 
 The model is:
 
-```
+```text
 Repository View
       ↓
-   Selector
+any retrieval implementation
       ↓
  Context Pack
       ↓
-   Harness
+   renderer
       ↓
-Context Receipt
+Context Exposure Event
       ↓
-Session → Commit
+model invocation
+      ↓
+agent operation
 ```
 
-The distinction matters:
+The protocol boundary is deliberately narrow:
 
+```text
+Retrieval quality
+  "Did we choose the right context?"
+
+        is separate from
+
+Context provenance
+  "Can we audit what context was actually supplied?"
 ```
-Context Pack
-  "What repository evidence was selected?"
 
-Context Receipt
-  "What selected context does the harness claim it exposed?"
-```
+V1 standardizes **context provenance**, not retrieval quality.
 
-Neither object proves what a model read, understood, or used.
-
-The goal is not another semantic-search platform. The goal is to make task-specific repository understanding **portable, inspectable, versioned, explainable, and linked to Git-native provenance**.
-
-> **The repository owns its understanding of itself.**
+A Context Pack does not prove that a model read, understood, remembered, or used any item. A Context Exposure Event does not prove causation. Together with signed session history, they provide a tamper-evident record of the repository context that the harness claims it supplied to a model invocation.
 
 ---
 
 ## 2. Problem
 
-Coding agents repeatedly rediscover the same repository context:
+Coding agents can fail because repository context is missing, stale, truncated, or hallucinated.
 
-- which implementation matters;
-- which tests constrain it;
-- which configuration changes its behavior;
-- which standing instructions apply;
-- which repository learnings are still relevant.
+Typical failures include:
 
-Existing retrieval systems commonly make this context transient, provider-owned, difficult to reproduce, opaque about why items were selected, and weakly connected to the commit eventually produced.
+- an agent edits code without seeing a relevant implementation;
+- an agent reasons from a stale version of a file;
+- an agent never sees the tests or configuration that constrain a change;
+- a context window drops repository evidence that was available earlier;
+- a retrieval implementation silently changes behavior;
+- an agent claims a repository fact that was never present in its supplied context.
 
-`@chr33s/git` already stores source, sessions, decisions, memory, identity, and collaboration state as Git-native data. Context Packs extend that model with a durable answer to:
+Today these failures are difficult to investigate because repository retrieval is often transient and weakly connected to the agent operation that follows.
 
-> **What should an agent know about this repository for this task, and why?**
+For auditability, the useful questions are:
 
-V1 deliberately does **not** try to build a universal code-intelligence platform. It defines the smallest useful Git primitive plus a language-agnostic graph contract. Parsing and semantic enrichment remain replaceable derived machinery.
+```text
+Which repository snapshot was active?
+Which exact blobs or byte ranges were selected?
+Which exact repository-context bytes were sent to the model?
+Which model invocation and agent operation followed that exposure?
+```
+
+The selector's internal score, graph traversal, embedding model, parser implementation, or token estimator is secondary evidence. It is not required to answer those questions.
 
 ---
 
-## 3. Core principles
+## 3. Goals and non-goals
 
-### 3.1 Selection is not cognition
+### 3.1 Goals
 
-A Context Pack records selected evidence. A Context Receipt records a harness claim about exposure. Neither proves that the model read every item, understood it, had sufficient context, or was caused by it.
+V1 MUST make it possible to:
 
-This is stated once, normatively, here. It is the reason every downstream object is described as a *claim* rather than a proof.
+1. identify the exact repository snapshot used for context;
+2. resolve selected source evidence to immutable Git bytes;
+3. record the exact repository-context rendering supplied to a model invocation;
+4. bind that exposure to signed session history;
+5. audit stale, missing, or contradictory repository context after an agent operation;
+6. validate a pack without reproducing the retrieval implementation that created it.
 
-### 3.2 Exact inputs
+### 3.2 Non-goals
 
-A deterministic selector is reproducible only when **every** input that affects selection is pinned.
+V1 does **not** standardize:
 
-V1 pins, in the Repository View (§4):
+- a deterministic selector;
+- ranking weights or scoring arithmetic;
+- fixed-point math;
+- token estimators;
+- candidate limits;
+- CodeGraph schemas;
+- Tree-sitter query semantics;
+- compiler, LSP, SCIP, or embedding behavior;
+- graph digests;
+- selector configuration digests;
+- task normalization digests;
+- deterministic tie-breaking;
+- omission ranking;
+- byte-identical manifests produced independently by different implementations.
 
-- source commit (or overlay tree);
-- standing instructions;
-- repository policy;
-- repository Memory projection.
+Implementations MAY use any of those techniques internally.
 
-V1 pins, in the selector descriptor (§5.7):
+They are not required to validate Context Pack provenance.
 
-- selector name, mode, and version (Appendix C);
-- task input (§5.1);
-- ranking parameters, tie-break order, and budget (§7.12);
-- the normalized CodeGraph digest actually consumed (§5.7.1);
-- token estimator identity and version;
-- every extractor, grammar, query pack, graph rule set, and semantic enricher version that can affect output;
-- **all resource limits** (§7.9).
+### 3.3 Selection is not cognition
 
-Resource limits are pinned inputs, not host configuration. A host that wishes to run tighter limits produces a *different* selector configuration and therefore a different pack; it does not silently produce a different pack under the same configuration digest.
+A Context Pack records repository evidence associated with an invocation. A Context Exposure Event records a harness claim that a particular repository-context rendering was supplied.
 
-> **If an input affects deterministic selection, pin it.**
+Neither proves that the model:
 
-### 3.3 Evidence over prose
+- attended to an item;
+- understood it;
+- retained it across turns;
+- based an action on it;
+- had sufficient context to act correctly.
 
-Context Packs SHOULD primarily reference exact repository evidence: blobs, byte ranges, symbols, tests, configuration, and pinned policy and instructions. Generated summaries are optional derived conveniences, never repository truth.
-
-### 3.4 Explainability
-
-Every selected item MUST state why it was selected, in machine-readable form (§5.4).
-
-### 3.5 Derived indexes are disposable
-
-Syntax trees, normalized code graphs, compiler indexes, embeddings, and summaries MAY accelerate or enrich selection. Deleting them MUST NOT corrupt canonical repository state.
-
-### 3.6 Language independence
-
-The Context Pack schema and selector MUST NOT depend on TypeScript, Tree-sitter, `tree-sitter-graph`, an LSP, SCIP, or any one parser ecosystem.
-
-```
-language source
-     ↓
-language extractor
-     ↓
-normalized CodeGraph
-     ↓
-language-agnostic selector
-     ↓
-Context Pack
-```
-
-Tree-sitter SHOULD be the default syntactic extraction substrate for languages with suitable grammars. `tree-sitter-graph` MAY implement richer declarative extraction. Neither is the protocol boundary.
-
-### 3.7 Selection never creates instruction authority
-
-Retrieved content does not become instruction merely because it was selected. V1 context items use four kinds:
-
-```
-instruction
-evidence
-narrative
-derived
-```
-
-`instruction` is valid only when it is *verifiable* against pinned authority (§5.3.1). A consumer that cannot verify the authority chain MUST downgrade the item to `narrative`.
-
-### 3.8 Persistent means Git-reachable
-
-An OID written inside JSON is only text. It does not create Git reachability. A Context Pack claimed to replicate and survive Git GC MUST be structurally reachable from a Git ref through commits/trees (§8).
-
-### 3.9 Bounded work
-
-Context generation MUST bound attacker-controlled work — candidate count, extractor output, graph traversal, history scanned, manifest size, and rendered context size — using deterministic counters (§7.9).
+This specification uses **exposed** and **available**, not **read**, **understood**, or **used**.
 
 ---
 
-## 4. Repository View
+## 4. Core principles
 
-The Repository View names the complete deterministic repository state used by selection.
+### 4.1 Retrieval is replaceable
+
+The protocol MUST NOT depend on one retrieval architecture.
+
+A producer MAY select repository context using:
+
+- explicit file reads;
+- grep or lexical search;
+- Tree-sitter;
+- `tree-sitter-graph`;
+- compiler APIs;
+- LSP;
+- SCIP;
+- embeddings;
+- an LLM reranker;
+- an agent recursively opening files;
+- repository-specific indexes;
+- any combination of the above.
+
+The durable boundary begins when that machinery produces references to repository evidence.
+
+> **Retrieval may be probabilistic. Evidence identity must not be.**
+
+### 4.2 Evidence is Git-grounded
+
+Repository evidence is identified by Git object identity and, when needed, a byte range.
+
+For source evidence, the durable identity is:
+
+```text
+blob OID + optional byte range
+```
+
+Paths, symbol names, ranking scores, and parser node handles are not immutable evidence identity.
+
+### 4.3 The effective repository tree is authoritative
+
+A pack MUST name the exact tree against which its evidence is interpreted.
+
+This includes dirty-worktree operation. A producer MUST NOT record `HEAD` as the effective view while supplying different worktree bytes to the model.
+
+### 4.4 Rendered exposure matters
+
+A manifest of selected evidence is not sufficient to audit what reached the model.
+
+Rendering may:
+
+- truncate evidence;
+- add line numbers;
+- omit ranges;
+- insert summaries;
+- reorder items;
+- apply a context-window limit;
+- accidentally render stale bytes.
+
+Therefore every auditable model invocation MUST record a digest of the **exact repository-context bytes supplied to that invocation**.
+
+### 4.5 Session history provides ordering
+
+Context exposure is historical provenance. It belongs in the signed session/event history.
+
+A Context Exposure Event MUST occur before the model invocation or agent operation whose repository context it describes. The following operation MUST reference that exposure event, or the surrounding session protocol MUST otherwise bind the operation to it unambiguously.
+
+The exposure event MUST NOT contain a self-reference to its own event identifier.
+
+### 4.6 Context does not grant instruction authority
+
+A Context Pack describes exposure, not authority.
+
+Selecting a file, comment, documentation fragment, memory entry, or generated summary MUST NOT cause it to become an instruction merely because it appears in context.
+
+Instruction authority is enforced by the harness or session policy outside this specification.
+
+### 4.7 Derived indexes are disposable
+
+Parsers, syntax trees, graphs, embeddings, symbol indexes, and summaries are accelerators.
+
+Deleting them MUST NOT corrupt a persisted Context Pack or prevent verification of its Git-grounded evidence.
+
+---
+
+## 5. Repository View
+
+A Repository View names the exact source snapshot from which repository evidence may be selected.
 
 ```json
 {
   "base": "sha256:abc123...",
-  "overlay": null,
-  "instructions": "sha256:def456...",
-  "policy": "sha256:789abc...",
-  "memory": "sha256:456def..."
+  "tree": "sha256:def456..."
 }
 ```
 
-`base` is the exact source commit being understood. All paths and blob relationships are interpreted against it.
+### 5.1 `base`
 
-`instructions`, `policy`, and `memory` pin the exact standing instructions, repository policy, and bounded Repository Memory projection used for selection.
+`base` is the commit OID that anchors committed history for the operation.
 
-### 4.1 Object identifiers
+It is useful for:
 
-Every object identifier in every v1 object is an **algorithm-prefixed OID string**:
+- human inspection;
+- ancestry checks;
+- linking the operation to normal Git history;
+- explaining whether context came from committed or edited state.
 
+### 5.2 `tree`
+
+`tree` is the root tree OID of the **effective repository snapshot** visible to context retrieval.
+
+For a clean worktree:
+
+```text
+view.tree == root tree of view.base
 ```
+
+For a dirty worktree, the implementation MUST construct an overlay tree containing the exact repository bytes that retrieval is allowed to inspect.
+
+The selector MUST select repository evidence from `view.tree`, not directly from mutable filesystem state after the view has been captured.
+
+This makes the tree, rather than the host worktree, the audit boundary.
+
+### 5.3 Dirty worktrees
+
+To capture a dirty worktree, an implementation MAY:
+
+1. hash modified or newly included files as Git blobs;
+2. apply additions, modifications, and deletions over the base tree;
+3. write an overlay tree;
+4. record that tree as `view.tree`.
+
+The exact construction mechanism is implementation-defined.
+
+The resulting tree MUST represent every repository path from which the retrieval implementation is allowed to select evidence for that invocation.
+
+A dirty view intended for durable audit MUST keep the overlay tree and referenced blobs reachable for as long as the corresponding session provenance is retained.
+
+### 5.4 Object identifiers
+
+Git object identifiers are encoded as:
+
+```text
 <algorithm>:<lowercase-hex>
 ```
 
-`algorithm` is `sha1` or `sha256` and MUST match the object-format of the repository the OID belongs to. Implementations MUST NOT assume SHA-1. Digests that are not Git objects (task digests, configuration digests) use the same prefixed form with a non-Git algorithm name, e.g. `sha256:`.
+where `algorithm` matches the repository object format, currently `sha1` or `sha256`.
 
-Consumers MUST treat OID strings as opaque and compare them literally, including the prefix.
+Consumers MUST treat Git OIDs as opaque strings and MUST NOT assume SHA-1 length.
 
-### 4.1.1 Repository identity
+V1 does not define a separate repository-family identity. `view.base` and `view.tree` identify the repository state required for this audit primitive.
 
-The pack's `repo` field is **not** a commit or a remote URL, both of which are mutable or ambiguous across mirrors. It is:
+### 5.5 Paths, symlinks, submodules, and unavailable content
 
-```
-repo = sha256( "git+repo:v1\n" + <object-format> + "\n" + <root-commit-oid> + "\n" )
-```
+Evidence resolution follows the recorded tree.
 
-where `object-format` is `sha1` or `sha256` and `root-commit-oid` is the OID of the repository's **earliest reachable root commit** under that format, selected as the lexicographically smallest root-commit OID when history has multiple roots.
-
-This is stable across clones, mirrors, and renames, and distinguishes unrelated repositories that happen to share a name. A repository converted between object formats has two identities; implementations MUST NOT treat packs across formats as comparable. Repositories with no commits have no identity and cannot produce packs.
-
-### 4.2 Dirty worktrees and overlay trees
-
-The most valuable moment for context is usually mid-edit. V1 therefore supports uncommitted state through an **overlay tree** rather than refusing.
-
-When the worktree is dirty, the implementation:
-
-1. hashes modified, added, and staged blobs into the object database;
-2. constructs a tree that applies those blobs over `base`;
-3. records the resulting tree OID in `view.overlay`;
-4. records deletions as part of that tree.
-
-Rules:
-
-- `overlay` MUST be `null` for a clean worktree.
-- A pack whose view has a non-null `overlay` is **reproducible only while the overlay tree's objects exist**. It MUST NOT be attached durably (§8) unless the overlay objects are themselves reachable.
-- Ignored files, untracked files, and files excluded by the repository's path filters MUST NOT enter the overlay.
-- Implementations MUST NOT generate context from `HEAD` while an agent edits different bytes and present it as clean.
-
-`git+ context for` MAY be invoked with `--no-overlay` to require a clean view.
-
-### 4.3 Path handling
-
-The selector MUST define deterministic behavior for:
-
-- **submodules** — gitlink entries are opaque; the selector MAY reference the submodule path and pinned commit, and MUST NOT traverse into the submodule in v1;
-- **symlinks** — never followed; the link blob itself is the evidence;
-- **LFS / partial-clone pointers** — if the real content is unavailable, the pointer is evidence and the item MUST carry a `content-unavailable` omission (§5.5) rather than a silent miss;
-- **binary blobs** — detected via `.gitattributes` and content sniffing; never range-selected, only referenced whole, and only when explicitly anchored;
-- **generated and vendored paths** — matched by `.gitattributes` (`linguist-generated`, `linguist-vendored`) or repository policy, and deprioritized rather than excluded, with the deprioritization visible as a reason weight.
-
-`.gitattributes` at the pinned view is an input to selection and is therefore covered by `view.base`.
+- **Paths** are presentation and lookup metadata; blob identity remains authoritative.
+- **Symlinks** are evidence as link blobs and MUST NOT be silently followed when resolving an item.
+- **Submodules** are gitlinks. V1 MAY record the gitlink but does not require traversal into the submodule.
+- **Missing partial-clone/LFS content** MUST be reported as unavailable rather than silently replaced with different bytes.
 
 ---
 
-## 5. Context Pack
+## 6. Context Pack
 
-A Context Pack is the canonical selected-evidence manifest.
+A Context Pack is an immutable manifest of repository evidence associated with one auditable context exposure.
+
+Minimal example:
 
 ```json
 {
   "version": 1,
-  "repo": "sha256:...",
   "view": {
     "base": "sha256:abc123...",
-    "overlay": null,
-    "instructions": "sha256:def456...",
-    "policy": "sha256:789abc...",
-    "memory": "sha256:456def..."
-  },
-  "task": {
-    "digest": "sha256:...",
-    "termCount": 2
-  },
-  "selector": {
-    "name": "context-v1",
-    "version": "1.0.0",
-    "config": "sha256:...",
-    "configBlob": "sha256:...",
-    "graph": "sha256:..."
-  },
-  "budget": {
-    "unit": "estimated-tokens",
-    "estimator": "chars4-v1",
-    "limit": 20000,
-    "used": 18422
+    "tree": "sha256:def456..."
   },
   "items": [
     {
-      "kind": "evidence",
-      "path": "src/server/Policy.ts",
-      "blob": "sha256:...",
-      "range": [4210, 6844],
-      "cost": 658,
-      "score": "0.7310",
-      "reasons": [
-        {
-          "kind": "reference",
-          "from": "symbol:sha256:...:1204-1899",
-          "resolution": "semantic"
-        },
-        { "kind": "task-term", "term": 0 }
-      ]
+      "path": "src/auth.ts",
+      "blob": "sha256:111aaa...",
+      "range": [1200, 1840],
+      "role": "implementation",
+      "reason": "reference"
+    },
+    {
+      "path": "tests/auth.test.ts",
+      "blob": "sha256:222bbb...",
+      "range": [400, 920],
+      "role": "test",
+      "reason": "test"
     }
-  ],
-  "omissions": []
+  ]
 }
 ```
 
-### 5.1 Task binding
+Only `version`, `view`, `items[].blob`, and sufficient information to resolve an item's bytes are protocol-critical.
 
-**A persisted Context Pack contains no prose.** No prompt text, no task terms, no generated summaries, no comment bodies — only references, digests, and integers. This is a structural rule, not a preference, and it exists because §8 makes the pack a content-addressed, reachable tree entry: anything inside it is immutable, so anything inside it can never be redacted. Prose that must be redactable therefore cannot live in the pack.
+`path`, `role`, `reason`, symbols, selector metadata, and other annotations are descriptive metadata.
 
-The pack stores:
+### 6.1 Item identity
 
-- `task.digest` — a digest over the **canonical normalized task input**, not raw prompt bytes. The normalization rule is part of the selector configuration.
-- `task.termCount` — the number of entries in the session's term list.
-
-#### 5.1.1 Term slots
-
-The session event owns the normalized selection term list: the deduplicated, deterministically ordered terms derived from the task. The session already owns prompt storage, secret scanning, and redaction, so terms inherit that lifecycle by construction.
-
-The pack refers to terms only by **slot index** into that list:
-
-```json
-{ "kind": "task-term", "term": 0 }
-```
-
-Slot indices are stable for the life of the pack. The session term list is append-only within a session; a term is never renumbered. Redaction blanks a slot's content, never its index.
-
-Consequences, stated plainly:
-
-- The pack alone is verifiable by digest but **not reproducible**; reproduction requires the session's term list and the original task input.
-- When the session is available, `context why` renders term text. When it is redacted or absent, `why` renders the slot (`task-term #0`) and states that the text is unavailable (§10.2). Explainability degrades to structure; it never breaks, and immutability is never violated.
-- `task.digest` still proves that a given task input produced this pack, even after every term is redacted.
-
-An implementation MAY hold the term list in a side-store rather than the session event, but that store MUST share the session's redaction lifecycle and MUST NOT be reachable from any ref that outlives it.
-
-### 5.2 Item identity
-
-Exact source evidence is identified by:
-
-```
-blob OID + byte range
-```
-
-Paths and symbol names are presentation metadata, not immutable identity.
-
-Range constraints:
-
-1. Ranges are **half-open byte offsets** `[start, end)` into the blob's exact bytes, before any line-ending, filter, or encoding transformation.
-2. `0 ≤ start < end ≤ blobSize`. Empty ranges are invalid; whole-blob items omit `range` rather than spanning it.
-3. For blobs that decode as UTF-8, both offsets MUST fall on a **UTF-8 codepoint boundary**, so a renderer never slices mid-codepoint. A selector whose candidate boundary lands mid-sequence MUST widen outward to the nearest boundaries.
-4. For blobs that are not valid UTF-8, ranges are permitted only when the item is explicitly anchored, and the item MUST be rendered as bytes, never as decoded text.
-5. Ranges MUST NOT overlap within a single `(blob)` in one pack; overlapping candidates are merged before packing, and the merged item carries the union of their reasons.
-
-### 5.3 Item kinds
-
-```
-instruction
-  standing instructions or otherwise-verifiable scoped instruction
-
-evidence
-  source, tests, configuration, policy, Git-derived facts
-
-narrative
-  docs, session notes, Memory, comments, review text
-
-derived
-  generated summaries, labels, semantic hints
-```
-
-A selector MUST NOT promote `narrative`, `evidence`, or `derived` content to `instruction` because it is relevant, signed, or highly ranked.
-
-#### 5.3.1 Verifying instruction authority
-
-An item with `kind: "instruction"` MUST carry an `authority` object:
+A repository evidence item contains:
 
 ```json
 {
-  "kind": "instruction",
+  "path": "src/auth.ts",
   "blob": "sha256:...",
-  "authority": {
-    "source": "instructions",
-    "root": "sha256:def456...",
-    "path": "AGENTS.md"
+  "range": [1200, 1840]
+}
+```
+
+`blob` is required.
+
+`range` is optional. When absent, the item refers to the whole blob.
+
+`path` SHOULD be present for usability but does not define immutable identity.
+
+### 6.2 Byte ranges
+
+Ranges are half-open byte offsets:
+
+```text
+[start, end)
+```
+
+into the exact blob bytes before line-ending or encoding transformation.
+
+Rules:
+
+1. `0 ≤ start < end ≤ blobSize`;
+2. whole-blob items SHOULD omit `range`;
+3. a UTF-8 text renderer MUST NOT slice through a codepoint boundary;
+4. a consumer MUST verify that the blob exists and that the range is valid before rendering it as verified evidence.
+
+### 6.3 Resolution against the view
+
+For each item, a verifier SHOULD confirm that:
+
+1. `view.tree` exists;
+2. `path`, when present, resolves under `view.tree` to the recorded `blob`; and
+3. `range`, when present, is valid for that blob.
+
+A path mismatch does not change the blob's bytes, but it is an audit failure because the manifest claims that evidence was selected from that repository view at that path.
+
+### 6.4 Descriptive metadata
+
+A producer MAY include metadata such as:
+
+```json
+{
+  "role": "implementation",
+  "reason": "reference",
+  "symbol": "Policy.checkBranchPolicy",
+  "selector": {
+    "name": "repo-context",
+    "version": "2.3.1"
   }
 }
 ```
 
-`source` is `instructions` or `policy`. `root` MUST equal `view.instructions` or `view.policy` respectively.
+Such metadata exists for debugging and explanation.
 
-A consumer MUST verify that `blob` is reachable from `root` at `path`. If it cannot — because the root is unavailable, the path does not resolve, or the blob does not match — the consumer MUST treat the item as `narrative` and SHOULD surface the downgrade. This is the enforcement point for §3.7 and §9.1; without it, `instruction` is an unverifiable assertion.
+A consumer MUST NOT require it to validate the underlying evidence.
 
-### 5.4 Reasons
+No ranking score, fixed-point representation, graph digest, token estimate, or selector configuration digest is required by V1.
 
-Every item MUST have a non-empty `reasons` array. Each reason is:
+### 6.5 Reasons
 
-```json
-{
-  "kind": "reference",
-  "from": "<node-id>",
-  "target": "client.get",
-  "resolution": "syntax",
-  "weight": 0.62
-}
+Reasons are optional and descriptive.
+
+Recommended core reason labels are:
+
+```text
+explicit
+search
+reference
+definition
+call
+import
+test
+config
+instruction
+history
+memory
+tool-opened
+neighbor
+other
 ```
 
-| Field | Required | Meaning |
-|---|---|---|
-| `kind` | yes | one of the reason kinds below |
-| `from` | when the reason is relational | normalized CodeGraph node id (§7.2) of the anchor |
-| `target` | when unresolved | textual target that could not be resolved to a node |
-| `term` | for `task-term` | slot index into the session term list (§5.1.1) |
-| `resolution` | for graph-derived reasons | `syntax` \| `local` \| `semantic` |
-| `weight` | no | selector-assigned contribution, as a fixed-decimal string (§7.12) |
+An implementation MAY use additional namespaced labels.
 
-Core reason kinds:
+A reason answers:
 
-```
-explicit-path      explicit-symbol   task-term
-definition         reference         call
-import             implementation    test
-config             history           memory
-policy             instruction       neighbor
-```
+> "Why did this retrieval implementation include the item?"
 
-Reasons are sorted deterministically by `(kind, from, target, term, resolution)`.
+It does not prove that an independent selector would make the same choice.
 
-#### 5.4.1 Unknown enum members
+### 6.6 No omission ledger
 
-§7.1 permits namespaced CodeGraph node and edge kinds, so the same rule applies symmetrically to reason kinds. Across `reason.kind`, `CodeEdge.kind`, `CodeNode.kind`, `CodeNode.symbolKind`, and `omission.reason`:
+V1 does not require recording high-ranked evidence that was not selected.
 
-1. Core members are the unnamespaced identifiers listed in this document. Extensions MUST be namespaced `vendor/name` and MUST NOT collide with the core vocabulary.
-2. A consumer encountering an unknown **namespaced** member MUST ignore it for behavior — never rank, filter, or grant authority on it — and MUST preserve it byte-for-byte when re-emitting (§5.6).
-3. A consumer encountering an unknown **unnamespaced** member MUST reject the pack. An unnamespaced member it does not know means the pack was written against a core vocabulary it does not implement, and silently ignoring it would change selection semantics invisibly.
-4. Adding a core member is therefore a `version` bump. Adding a namespaced member is not.
-5. An `instruction` reason kind can never arrive via extension: authority comes only from §5.3.1's verified chain.
+An auditor can establish that evidence was absent from a model invocation by inspecting the Context Pack and rendered exposure for that invocation.
 
-### 5.5 Omissions
+Retrieval implementations MAY maintain richer candidate, score, omission, or explanation logs as diagnostics outside the protocol.
 
-The pack SHOULD record high-ranking evidence that was excluded, so a bounded context set does not appear exhaustive.
+### 6.7 Encoding and identity
 
-```json
-{
-  "reason": "budget",
-  "path": "src/trust/Projection.ts",
-  "blob": "sha256:...",
-  "cost": 1240,
-  "rank": 41
-}
-```
+A Context Pack is ordinary UTF-8 JSON.
 
-`reason` is one of:
+V1 does not require RFC 8785/JCS or byte-identical serialization across independent producers.
 
-```
-budget                 rank survived, budget did not
-extractor-limit        §7.9 counter exhausted
-extractor-failure      extractor output could not be normalized
-content-unavailable    LFS / partial clone / missing object
-non-deterministic      wall-clock safety net fired (§7.9)
-redacted               derived source is unavailable under redaction
-policy                 excluded by repository policy
-```
+When persisted as a Git blob, the pack's identity is simply the Git blob OID of the **actual bytes persisted**.
 
-**Disclosure rule.** Omissions name paths. In sparse-checkout, partial-clone, or path-restricted deployments, this can disclose paths the reader may not otherwise see. An implementation MUST filter omissions to the reader's visible path set, and where filtering would itself be informative, MUST degrade to an aggregate:
+Two semantically equivalent JSON serializations MAY therefore have different blob OIDs. That is acceptable: the audit question is which record existed, not whether another producer could independently recreate its bytes.
 
-```json
-{ "reason": "policy", "count": 3, "redactedPaths": true }
-```
-
-A `non-deterministic` omission makes the pack non-reproducible by definition; consumers MUST treat such a pack as advisory and MUST NOT use it as a determinism fixture.
-
-### 5.6 Canonical encoding
-
-Context Pack bytes are protocol surface because the Git object ID depends on them. This is normative, not deferred:
-
-1. Serialization is **JSON Canonicalization Scheme, RFC 8785 (JCS)**: UTF-8, no insignificant whitespace, object members sorted by UTF-16 code unit, JSON numbers in ECMAScript `Number::toString` form.
-2. All JSON numbers MUST be integers within the safe-integer range. Ranking quantities (`score`, `weight`) are never JSON numbers; they are serialized as **string decimals with exactly 4 fractional digits**, and the values they encode are computed in fixed-point integer arithmetic (§7.12), not floats.
-3. The canonical bytes are terminated by **exactly one** `\n`. The trailing newline is inside the hashed bytes.
-4. Array order is selector-defined but MUST be deterministic; `items` sort by `(path, blob, range[0], kind)` and `omissions` by `(rank, path)`.
-5. Optional fields with no value are **omitted**, never emitted as `null` — except `view.overlay`, which is always present and explicitly `null` when clean.
-
-**Extensibility.** `version` is a single integer.
-
-- A consumer encountering a `version` it does not implement MUST reject the pack.
-- Within a known `version`, unknown fields MUST be ignored for reading and MUST be preserved byte-for-byte when re-emitting. Because canonical bytes determine identity, a consumer that cannot preserve unknown fields or unknown enum members MUST NOT re-emit the pack.
-- Unknown **enum members** follow §5.4.1: namespaced members are ignored-and-preserved, unnamespaced members are rejected.
-- New required semantics or new core enum members require a `version` bump. New optional fields and namespaced enum members do not.
-
-### 5.7 Selector descriptor
-
-```json
-{
-  "name": "context-v1",
-  "version": "1.0.0",
-  "config": "sha256:...",
-  "configBlob": "sha256:...",
-  "graph": "sha256:..."
-}
-```
-
-`config` is the digest of the canonicalized selector configuration, which MUST enumerate everything listed in §3.2, including all resource limits.
-
-`configBlob` is the OID of a Git blob containing those exact canonical bytes. It SHOULD be present, and MUST be present for any pack that is durably attached (§8). A bare digest is unverifiable: `context why` and `context refresh` cannot re-run selection against a configuration they cannot read. When both are present, `config` MUST equal the digest of `configBlob`'s contents.
-
-#### 5.7.1 Pinned graph digest
-
-`config` pins **version strings**, and a version string is not behavior. A grammar rebuilt against a different Tree-sitter ABI, a query pack patched without a version bump, or an enricher whose upstream index changed all keep their declared version and silently change extraction output. Version pinning alone therefore cannot support §10.5(1).
-
-`selector.graph` closes this: it is the digest of the **canonicalized normalized CodeGraph** actually consumed by the selector, computed after §7.7 normalization and sorting, over nodes and edges only (no timing, no extractor internals, no paths outside the pinned view).
-
-Rules:
-
-- `graph` MUST be present in every pack.
-- A verifier re-running extraction against the same view and configuration MUST obtain the same `graph` digest; a mismatch is a **reproducibility failure**, reported as such, and MUST NOT be papered over as an ordinary `changed` result.
-- `context refresh` compares `graph` digests before comparing items: an unchanged view with a changed graph digest means the toolchain moved, not the repository, and the delta MUST say so.
-- The graph itself is derived and disposable (§3.5). Only its digest is pinned. A consumer that cannot rebuild the graph can still validate the pack's structure, and simply cannot verify reproducibility.
+A consumer MUST NOT claim that reserialized bytes have the original pack OID.
 
 ---
 
-## 6. Context Receipt
+## 7. Context Exposure Event
 
-A Context Receipt is a session claim that a harness exposed a Context Pack.
+A Context Exposure Event binds a Context Pack to the exact repository-context rendering supplied to a model invocation.
+
+Example event payload:
 
 ```json
 {
+  "type": "context-exposure",
   "pack": "sha256:8d7ad4...",
-  "session": "sha256:...",
-  "event": "sha256:...",
-  "at": "2026-08-21T09:14:22Z",
-  "nonce": "sha256:..."
+  "renderDigest": "sha256:6e91f2..."
 }
 ```
 
-Its meaning is intentionally narrow:
+### 7.1 Meaning
 
-> The signer claims this Context Pack was exposed during this session, at this point in the session's history.
+The event means:
 
-**Binding is normative.** A receipt carries no signature of its own; it derives all trust from the enclosing signed session event (§8). Therefore:
+> The harness claims that the Context Pack identified by `pack` describes repository evidence for this invocation, and that the repository-context bytes supplied to the model hashed to `renderDigest`.
 
-- a receipt MUST appear inside a signed session event and MUST reference that event's session;
-- `event` MUST identify the immediately-enclosing session event, so a receipt cannot be lifted into another session or replayed at another point in the same session;
-- a receipt evaluated outside its enclosing signed event carries **no** trust and MUST be treated as an unauthenticated hint.
+The event derives trust from the signed session event that contains it.
 
-Without these fields, `{"pack": "..."}` is a replayable fragment rather than a claim.
+It does not carry a separate signature.
 
-The Pack is a derived selection artifact. The Receipt is historical session provenance. Neither proves cognition or causation (§3.1).
+### 7.2 Render digest
 
-Future versions MAY add a render digest, render profile, expansions, or model-specific token counts.
+`renderDigest` is:
+
+```text
+sha256(<exact repository-context bytes supplied to the model>)
+```
+
+The bytes are hashed exactly as supplied, including ordering, labels, line numbers, truncation markers, summaries, and separators.
+
+This digest is intentionally over the **rendered exposure**, not the pack JSON.
+
+### 7.3 Render storage and redaction
+
+The exact rendered bytes SHOULD be retained by the session system when policy permits, because they are the strongest evidence of what was supplied to the model.
+
+Rendered context may contain source or other sensitive text, so it MUST follow the session's normal retention, secret-handling, access-control, and redaction lifecycle rather than being embedded permanently in the Context Pack.
+
+If rendered bytes remain available, a verifier MUST be able to recompute `renderDigest`.
+
+If rendered bytes have been redacted or expired, `renderDigest` remains a commitment to the prior exposure, but the exact rendering can no longer be independently inspected.
+
+### 7.4 Binding to the agent operation
+
+A Context Exposure Event MUST be bound unambiguously to the model invocation it describes.
+
+The preferred history shape is:
+
+```text
+signed context-exposure event
+        ↓
+model invocation event
+        ↓
+agent/tool operation event(s)
+```
+
+The subsequent model invocation SHOULD reference the exposure event explicitly. If the session protocol already provides an unambiguous parent/sequence relationship, that relationship MAY provide the binding.
+
+The exposure event MUST NOT include its own event identifier. This avoids circular content addressing.
+
+### 7.5 One exposure per auditable invocation
+
+For strongest auditability, each model invocation capable of producing repository-affecting agent actions SHOULD have one Context Exposure Event describing the repository context for that invocation.
+
+If repository context changes between model calls, a new exposure event MUST be recorded.
+
+This includes context acquired through interactive tool use when that tool output becomes part of a later model invocation.
+
+The Context Pack for a later invocation SHOULD describe the repository evidence present in that later invocation, rather than relying on an auditor to reconstruct context-window retention from old turns.
 
 ---
 
-## 7. Selection and the language-agnostic CodeGraph
+## 8. Retrieval and rendering
 
-V1 selection SHOULD remain deterministic and simple:
+### 8.1 Retrieval is outside the protocol
 
-```
-1. explicit task roots
-2. deterministic lexical search
-3. normalized CodeGraph neighbors
-4. tests and configuration
-5. bounded history signal
-6. pinned Memory / instructions / policy
-7. budget packing
-```
+A conforming producer may use any method to construct `items`.
 
-Explicit paths, symbols, commands, and identifiers receive highest priority.
+There is no canonical V1 selector.
 
-### 7.1 Stable boundary: `CodeGraph`
+Therefore these are implementation concerns, not protocol invariants:
 
-```ts
-interface CodeGraph {
-  readonly nodes: ReadonlyArray<CodeNode>
-  readonly edges: ReadonlyArray<CodeEdge>
-}
-
-interface CodeNode {
-  readonly id: string
-  readonly kind: "file" | "symbol"
-  readonly language: string
-  readonly path: string
-  readonly blob: string
-  readonly range?: readonly [startByte: number, endByte: number]
-  readonly name?: string
-  readonly symbolKind?: string
-}
-
-interface CodeEdge {
-  readonly kind:
-    | "defines"
-    | "references"
-    | "calls"
-    | "imports"
-    | "implements"
-    | "extends"
-    | "tests"
-    | "configures"
-
-  readonly from: string
-  readonly to?: string
-  readonly target?: string
-  readonly resolution: "syntax" | "local" | "semantic"
-}
+```text
+ranking
+scoring
+fixed-point arithmetic
+tie-breaking
+CodeGraph construction
+lexical-vs-semantic weighting
+embedding models
+token estimation
+candidate limits
+history windows
+resource counters
+reranking
 ```
 
-The exact in-memory types are implementation detail. The normative ideas are: nodes are grounded in Git evidence; relationships use a small language-independent vocabulary; unresolved targets may remain textual; every relationship states its resolution class.
+A producer MAY record those details for diagnostics.
 
-Implementations MAY add namespaced node/edge kinds internally, but the selector SHOULD rely on the core vocabulary for portable behavior.
+A verifier MUST NOT require them to validate the pack's repository evidence.
 
-### 7.2 `git+` owns identity
+### 8.2 Resource safety remains an implementation requirement
 
-Extractor-specific node IDs MUST NOT become durable CodeGraph identity. Identity is derived from repository evidence:
+Removing deterministic resource limits from the protocol does not remove the need to bound attacker-controlled work.
 
-```
-node-id = <kind>:<blob-oid>:<startByte>-<endByte>
-```
+Retrieval implementations MUST still defend against unbounded:
 
-File nodes omit the range. An extractor may produce temporary IDs, but they MUST be normalized before selection or persistence.
+- source parsing;
+- graph expansion;
+- history scans;
+- candidate generation;
+- rendered context size;
+- memory use;
+- wall-clock execution.
 
-This prevents Context Pack semantics from depending on Tree-sitter node handles, `tree-sitter-graph` node IDs, compiler object identity, process memory, or parser lifetimes.
+The exact limits are host policy and need not be serialized into every Context Pack.
 
-### 7.3 Extractor interface
+### 8.3 Rendering
 
-```ts
-interface CodeExtractor {
-  readonly name: string
-  readonly version: string
+A renderer transforms a pack and related session context into bytes supplied to a model.
 
-  extract(input: {
-    readonly path: string
-    readonly blob: string
-    readonly source: Uint8Array
-    readonly language: string
-    readonly limits: ExtractorLimits
-  }): CodeGraph
-}
-```
+Rendering is allowed to be implementation-specific.
 
-A new language SHOULD require a grammar/query pack or extractor, not a new selector or Context Pack schema.
+The audit invariant is not that another renderer can reproduce the same bytes from the pack. The invariant is that the producer records `renderDigest` over the bytes it actually supplied.
 
-### 7.4 Tree-sitter as the v1 syntactic substrate
-
-For languages with suitable grammars, V1 SHOULD use Tree-sitter to produce syntax-level graph facts, preferring declarative files:
-
-```
-queries/tags.scm
-queries/locals.scm
-queries/context.scm
-```
-
-`context.scm` MAY identify additional relationships useful to selection, such as imports, exports, test declarations, routes, or configuration references.
-
-```
-Tree-sitter definition capture
-        ↓
-CodeNode(kind="symbol", symbolKind="function")
-
-Tree-sitter call/reference capture
-        ↓
-CodeEdge(kind="calls", resolution="syntax")
-```
-
-### 7.5 Syntax is not semantic resolution
-
-Tree-sitter is a parser, not a compiler. Syntax may identify `client.get(...)` as a call to a member named `get`, but cannot generally prove which declaration it resolves to. The graph MUST preserve that distinction:
-
-```json
-{ "kind": "calls", "from": "symbol:sha256:...:12-40", "target": "client.get", "resolution": "syntax" }
-```
-
-A resolver may later enrich it:
-
-```json
-{ "kind": "calls", "from": "symbol:sha256:...:12-40", "to": "symbol:sha256:...:88-140", "resolution": "semantic" }
-```
-
-The selector MAY prefer stronger resolution, but unresolved syntax facts remain useful and explainable.
-
-### 7.6 `tree-sitter-graph` as an optional extraction engine
-
-`tree-sitter-graph` MAY be used when ordinary queries become awkward for stateful, nested, or cross-stanza graph construction.
-
-```
-source → grammar → syntax tree → .tsg rules → extractor graph → normalize + validate → git+ CodeGraph
-```
-
-The protocol MUST NOT depend on `tree-sitter-graph` node IDs, in-memory graph lifetime, attribute namespace, edge identity rules, `.tsg` execution order, or host-language bindings. The stable boundary remains `CodeGraph`, so implementations may substitute direct queries, compiler APIs, SCIP, LSP, prebuilt indexes, or custom analyzers without changing Context Pack semantics.
-
-### 7.7 Normalization requirements
-
-Every extractor output MUST be normalized before the selector consumes it. Normalization SHOULD:
-
-1. assign Git-grounded node identity (§7.2);
-2. map extractor node kinds to the core vocabulary;
-3. map relationship types to core edge kinds;
-4. preserve unresolved textual targets;
-5. attach `syntax`, `local`, or `semantic` resolution;
-6. validate all blob/range references against the pinned view;
-7. sort nodes and edges deterministically by node id, then edge `(kind, from, to, target)`.
-
-Output that cannot be normalized safely MUST be rejected or omitted with an `extractor-failure` omission rather than treated as canonical fact.
-
-### 7.8 Optional semantic enrichers
-
-```
-   Tree-sitter / TSG
-          │
-          ▼
-   syntactic CodeGraph
-          │
- optional enrichers
-   ┌──────┼──────┐
-   ▼      ▼      ▼
-compiler  LSP   SCIP
-   └──────┼──────┘
-          ▼
-    enriched graph
-          │
-          ▼
-   Context selector
-```
-
-Enrichers are optional and their versions are pinned (§3.2). No enricher is required to read or validate a canonical Context Pack.
-
-### 7.9 Resource bounds
-
-Language extraction and traversal are attacker-controlled work and MUST be bounded — **deterministically**.
-
-All limits are **deterministic counters**, pinned in the selector configuration:
-
-```
-sourceBytesParsed
-queryMatches
-nodesEmitted
-edgesEmitted
-normalizedGraphBytes
-candidatesConsidered
-graphTraversalSteps
-historyCommitsScanned
-manifestBytes
-```
-
-Exceeding a counter MUST produce a bounded partial result with an explicit omission (`extractor-limit`), and MUST NOT create unbounded memory or durable-storage growth. Because the counters are pinned inputs, two hosts running the same configuration produce identical packs.
-
-**Wall-clock is a safety net, not a limit.** An implementation MAY additionally enforce a timeout or cancellation budget for liveness. Because elapsed time is not reproducible, firing it MUST:
-
-1. record a `non-deterministic` omission (§5.5);
-2. mark the pack as non-reproducible;
-3. exclude the pack from determinism fixtures and acceptance testing.
-
-An implementation MUST NOT rely on wall-clock as its primary bound, and MUST NOT allow a timeout to silently truncate a pack that claims reproducibility.
-
-#### 7.9.1 Bounds on `why` and `refresh`
-
-`why` and `refresh` are not free reads, and `refresh` is the largest denial-of-service surface in the system: it re-extracts blobs, maps diffs, and may re-run selection across an entire view, on input a caller chooses. Both MUST be bounded.
-
-`why` is bounded by:
-
-```
-reasonChainDepth        how far a chain is walked before truncation
-reasonChainBranches     alternative chains rendered per item
-```
-
-Truncating a chain MUST be visible in the output, never silent.
-
-`refresh` is bounded by the §7.9 counters for its re-selection pass, **plus** counters governing re-anchoring (§10.3):
-
-```
-itemsReanchored         items attempted before bailing out
-blobsReExtracted        distinct blobs re-parsed for symbol re-match
-diffBytesMapped         total diff volume walked for hunk mapping
-renameDetectionFiles    files considered by rename detection
-```
-
-These counters are pinned in `selector.config` like every other limit. Exceeding one MUST produce a bounded partial delta in which the unprocessed items are reported as `invalidated` with an `extractor-limit` omission — never as `unchanged`, which would falsely assert that the implementation checked them.
-
-An implementation MAY additionally refuse `refresh` between views whose diff exceeds a configured size, and MUST say so rather than returning a partial delta that looks complete.
-
-### 7.10 History and Memory
-
-V1 MAY use bounded Git co-change/history signals. The history horizon is a pinned counter (`historyCommitsScanned`) and a pinned commit boundary, not "recent". The selector SHOULD consult the pinned bounded Memory projection instead of scanning the complete session corpus.
-
-### 7.11 Budget
-
-Selection operates under an explicit budget with a declared unit and estimator:
-
-```json
-{ "unit": "estimated-tokens", "estimator": "chars4-v1", "limit": 20000, "used": 18422 }
-```
-
-`chars4-v1` is `ceil(codepoints / 4)` over the rendered UTF-8 text. It is a stable, model-independent estimator and a poor one: it understates CJK, Devanagari, and other non-Latin scripts by roughly 2–4×, and understates dense punctuation. Implementations serving such repositories SHOULD register a better estimator; the estimator identity is pinned, so packs remain comparable only within the same estimator.
-
-Item `cost` values are in the declared unit and MUST sum to `budget.used`. Harnesses MAY compute exact model-specific tokens when rendering; that does not change the pack.
-
-### 7.12 Deterministic ranking and total order
-
-Byte-identical output requires that ranking be reproducible and that ties be broken by rule rather than by whatever order the candidates happened to arrive in.
-
-**Arithmetic.** Ranking is computed in **fixed-point integer arithmetic**: scores and weights are integers scaled by 10⁴, and all combination is integer addition and multiplication with a defined rounding mode (half-away-from-zero) at each step. Implementations MUST NOT use IEEE-754 floats anywhere in ranking. Floats reorder ties across platforms, compilers, and summation orders, which is exactly the failure §10.5(1) is meant to exclude.
-
-**Total order.** Candidates are ordered by descending score, then by the following tie-break sequence, which is total because the last key is unique per candidate:
-
-```
-1. score                      descending
-2. anchor class               explicit > graph-connected > lexical > history > neighbor
-3. resolution class           semantic > local > syntax
-4. blob OID                   ascending, bytewise on the hex string
-5. range start byte           ascending
-6. range end byte             ascending
-7. path                       ascending, bytewise on UTF-8 bytes
-```
-
-Path is last because it is presentation metadata (§5.2); `(blob, range)` is identity, so keys 4–6 already resolve every distinct candidate. Path appears only to order whole-blob items that a single blob reaches by two paths.
-
-**Budget packing** consumes candidates in this order and is greedy: an item that does not fit is recorded as a `budget` omission and packing continues, so a single oversized item cannot truncate the tail. Packing MUST NOT reorder to improve fit, because a knapsack optimum is not stable under small input changes.
-
-**Ranking parameters** — every weight, boost, decay, and class multiplier — are part of `selector.config` (§3.2). A selector that reads a ranking parameter from anywhere else is non-conforming.
+This distinction allows renderers to evolve without changing Context Pack validity.
 
 ---
 
-## 8. Storage and reachability
+## 9. Storage and reachability
 
-A persistent Context Pack MUST be a Git-reachable attachment of the session record that references it.
+### 9.1 Persistent exposure
 
-```
+A persisted Context Pack intended to support durable audit MUST be reachable from the signed session history that references it.
+
+One valid layout is:
+
+```text
 session event commit
 └── tree
     ├── event.json
     ├── event.sig
-    ├── context.json        # canonical Context Pack
-    └── selector.json       # canonical selector configuration (§5.7)
+    └── context.json
 ```
 
-The event payload MAY also record the pack OID for validation, but the tree edge provides reachability.
+`context.json` is the exact Context Pack blob referenced by the event.
 
-Evidence blobs referenced inside `context.json` SHOULD remain logical references rather than attachments, so provenance replication does not implicitly drag source history with it.
+The event payload MAY duplicate its blob OID for validation.
 
-### 8.1 Generation is a read operation
+### 9.2 Repository evidence
 
-`context for` computes canonical bytes and their would-be OID without writing durable objects. A read-only caller MUST NOT gain arbitrary durable object creation merely by asking for context.
+Evidence blobs inside the pack remain normal Git references.
 
-Durable writes occur only when a pack is attached through an authorized session event. The attach step MUST re-derive the pack's OID from its bytes and MUST reject a mismatch.
+A provenance replica MAY replicate the session record without automatically replicating the entire repository history, but an auditor cannot fully resolve evidence until the referenced Git objects are available.
 
-### 8.2 Generation/attachment skew
+### 9.3 Dirty-view reachability
 
-A pack is generated against view V and attached to a session event that may be created later, against a different `HEAD`. Implementations MUST:
+If `view.tree` is an overlay tree that is not reachable from ordinary source history, durable audit requires preserving that tree and every blob needed to resolve its selected evidence.
 
-- record the pack's own `view` as the authoritative statement of what was selected — never the attaching commit's state;
-- surface skew when `view.base` is not an ancestor of the attaching event's commit;
-- reject attachment of an overlay-based pack (§4.2) whose overlay objects are not reachable, since it would be permanently unverifiable.
+An implementation MUST NOT persist an audit record that claims an exact dirty view while allowing the only copy of that view to be immediately garbage-collected.
 
-### 8.3 Unattached pack storage
+### 9.4 Generation may remain read-only
 
-`context why` and `context refresh` operate on packs that may never be attached. An unattached pack lives in a local, non-replicated content-addressed cache keyed by its OID. Rules:
+A context-selection command MAY compute a transient pack without writing durable Git objects.
 
-- the cache is disposable; a missing entry is a "not found", not corruption;
-- `context why <pack>` and `context refresh <pack>` accept a cache OID, a file path, or canonical bytes on stdin;
-- the cache MUST NOT be reachable from any ref, so it cannot smuggle durable objects past §8.1.
+Durable objects are required only when the pack is attached to a session exposure that the system intends to preserve.
 
 ---
 
-## 9. Security and trust
+## 10. Security and trust
 
-### 9.1 Prompt injection
+### 10.1 Prompt injection
 
-Retrieved comments, docs, Memory, and other narrative do not gain instruction authority through relevance or signature. Enforcement is §5.3.1: an `instruction` item is only an instruction if its authority chain resolves to pinned instructions or policy.
+Context selection does not create instruction authority.
 
-### 9.2 Retrieval poisoning
+A comment, README, generated summary, retrieved memory, or source string does not become an instruction because it appears in a Context Pack.
 
-Lexical relevance is manipulable. A contributor may add decoy files or symbols matching likely task terms to consume the budget. V1 SHOULD mitigate with:
+The harness MUST apply its normal trusted-instruction policy independently of pack relevance.
 
-- explicit-anchor preference;
-- graph-connectedness preference;
-- traversal and candidate limits (§7.9);
-- budget reservations for tests and configuration;
-- lower weight for comments than executable symbols;
-- deprioritization of generated/vendored paths (§4.3);
-- visible omission and reason data.
+### 10.2 Retrieval poisoning
 
-### 9.3 Extractor poisoning and exhaustion
+A malicious repository may manipulate lexical search, graph structure, comments, filenames, or generated files to influence retrieval.
 
-Parser, query, and TSG inputs are repository-controlled. Extractors MUST obey §7.9. A pathological grammar, query, or rule set MUST NOT turn context generation into unbounded CPU, memory, or graph growth.
+V1 does not attempt to prove that retrieval was good.
 
-### 9.4 Secret duplication and redaction
+Implementations SHOULD mitigate poisoning through host policy, tests, retrieval heuristics, path policy, and evaluation. Those mechanisms may evolve without changing the audit format.
 
-A persisted pack is a content-addressed, reachable tree entry (§8). It is immutable. Nothing inside it can be redacted without rewriting history, so **redaction is solved by exclusion, not by removal**:
+### 10.3 Extractor and parser safety
 
-> A persisted Context Pack MUST contain no prose. Only references, digests, and integers.
+Repository-controlled source can trigger expensive parser or index behavior.
 
-Concretely, a persisted pack MUST NOT contain prompt text, task terms, comment or doc bodies, generated summaries, or any other prose extracted from evidence or sessions. It carries `task.digest`, `task.termCount`, `view`, `selector`, item identities (`blob` + `range`), reasons, costs, and omissions — none of which is redactable content.
+Extractors and analyzers MUST be bounded and sandboxed according to host security policy.
 
-Redactable content lives where redaction works:
+A Context Pack does not make derived analyzer output trusted repository truth.
 
-| Content | Owner | Pack holds |
-|---|---|---|
-| Prompt text | session event | `task.digest` |
-| Selection terms | session term list (§5.1.1) | slot indices |
-| Evidence bodies | source blobs | `blob` + `range` |
-| Summaries, labels | derived cache | `derived` item reference |
+### 10.4 Sensitive rendered context
 
-When redacted content is unavailable, rendering degrades and structure survives: `why` shows term slots instead of term text, a `derived` item renders as a reference with no body, and evidence whose blob is gone renders as a `content-unavailable` omission. The pack's OID never changes, its digests remain verifiable, and `refresh` MUST report it as non-reproducible rather than treating missing prose as a repository change.
+The Context Pack SHOULD prefer references to repository evidence over duplicated bodies.
 
-`derived` items are references into a disposable derived cache, never inline bodies; a `derived` item whose cache entry is gone is a cache miss, not corruption (§9.5).
+The exact rendered context belongs to the session's sensitive-content lifecycle because it may duplicate source, secrets, prompts, or derived text.
 
-### 9.5 Derived indexes are untrusted accelerators
+`renderDigest` MAY remain after render-body redaction because the digest is an integrity commitment, not sufficient by itself to recover the rendered content.
 
-Remote or cached structural/semantic indexes MAY be validated, rebuilt, or ignored. A missing index is a performance problem, not repository corruption.
+### 10.5 Visibility boundaries
 
-### 9.6 Path visibility
+A producer MUST NOT place evidence into a Context Pack that the corresponding model invocation was not authorized to receive.
 
-Selection may cross access boundaries in sparse-checkout, partial-clone, or path-restricted deployments. Items, reasons, and omissions MUST be filtered to the reader's visible path set (§5.5), and filtering itself MUST NOT be inferable from counts alone where that would leak.
+Auditing context exposure does not bypass repository, path, tenant, or secret access controls.
 
 ---
 
-## 10. V1 product surface and acceptance criteria
+## 11. Product surface
 
-```
+A minimal V1 product surface is:
+
+```text
 git+ context for --task "..."
-git+ context why <pack> <item>
-git+ context refresh <pack>
+git+ context why <pack> [item]
+git+ context audit <operation-or-session-event>
 ```
 
-They answer:
+### 11.1 `context for`
 
-```
-What should I know?
-Why is this here?
-What changed in what I need to know?
-```
+Generates a Context Pack using the implementation's current retrieval strategy.
 
-### 10.1 `context for`
+It MAY display ranking, scores, graph paths, or token estimates as diagnostics, but none are required fields in the persisted pack.
 
-Generates a deterministic Context Pack from a pinned Repository View, clean or overlay-based (§4.2).
+The command answers:
 
-Returns canonical bytes, the would-be OID, and a concise selection summary. Persistence occurs only through authorized session attachment (§8.1).
+> **What repository evidence would this implementation supply?**
 
-### 10.2 `context why`
+### 11.2 `context why`
 
-Explains the path or rule that caused an item to be selected, by replaying the recorded reason chain against `selector.configBlob`.
+Explains a pack using recorded evidence and optional descriptive metadata.
 
-```
-src/trust/Projection.ts#capabilitiesAt
+Example:
 
-Included because:
-  task term #0 "provenance"
-    → Policy.checkBranchPolicy      (reference, semantic)
-    → capabilitiesAt                (call, syntax)
+```text
+src/auth.ts bytes 1200-1840
+blob: sha256:111aaa...
+view: sha256:def456...
+
+Reason recorded by selector:
+  reference
 ```
 
-When the session term list is unavailable or redacted, the same chain renders structurally:
+If the selector stored richer diagnostics elsewhere, `why` MAY display them.
 
-```
-  task term #0 (text unavailable — session redacted)
-    → Policy.checkBranchPolicy      (reference, semantic)
-    → capabilitiesAt                (call, syntax)
-```
+It MUST distinguish recorded facts from recomputed or inferred explanations.
 
-Explainability is part of the product, not debugging polish. It degrades to structure; it does not break. If `configBlob` is unavailable, `why` MUST report the recorded reasons and explicitly state that they could not be re-derived. Chains truncated by the §7.9.1 bounds MUST be marked truncated.
+### 11.3 `context audit`
 
-### 10.3 `context refresh`
+Audits the repository context bound to an agent operation or model invocation.
 
-Re-evaluates a previous pack against a new Repository View. This is the hard part of the design and is specified, not implied.
+It SHOULD report:
 
-**Re-anchoring.** For each item, identity is `blob + range`. When the blob is unchanged, the item is `unchanged`. When the blob changed, the implementation attempts, in order:
-
-1. **Symbol re-match** — if the item has a CodeGraph symbol node, re-extract the new blob and match on `(path, symbolKind, name, enclosing scope)`. On a unique match, re-anchor the range and mark `changed`.
-2. **Diff-hunk mapping** — map the old range through the blob diff. If the range maps intact and outside every hunk, re-anchor and mark `unchanged`; if it maps through modified hunks, re-anchor and mark `changed`.
-3. **Failure** — if neither yields a unique anchor, mark `invalidated`. Refresh MUST NOT guess.
-
-Renames are followed only via Git's own rename detection at the pinned similarity threshold, which is part of selector configuration.
-
-**Reported states:**
-
-```
-unchanged      re-anchored, bytes semantically identical
-changed        re-anchored, bytes differ
-invalidated    could not be re-anchored, or blob/path gone
-newly relevant selected under the new view, absent from the old pack
-removed        no longer selected under the new view
+```text
+repository base commit
+repository effective tree
+Context Pack OID
+render digest
+whether rendered bytes are still available
+whether each pack item resolves under the recorded tree
+whether the following operation is correctly bound to the exposure
 ```
 
-**Order of checks.** Refresh compares `selector.config`, then `selector.graph` (§5.7.1), then `view`, then items. A changed graph digest under an unchanged view means the toolchain moved, not the repository, and the delta MUST report toolchain drift rather than attributing it to source changes.
+When rendered bytes are available, it SHOULD additionally make it easy to inspect or diff the exact repository context supplied to the model.
 
-Refresh emits a **new pack** plus a delta; it never mutates the old pack. It MUST refuse to compare packs whose `selector.config` differs, MUST report — rather than silently absorb — a pack that is non-reproducible (§7.9, §9.4), and MUST obey the re-anchoring bounds in §7.9.1, reporting bail-outs as `invalidated` rather than `unchanged`.
+This is the primary V1 audit command.
 
-### 10.4 V1 boundary
+### 11.4 `context refresh`
 
+A selector MAY offer a `context refresh` convenience that generates a new pack for a newer view and compares it with an old pack.
+
+Refresh behavior is not normative in V1.
+
+Implementations may use symbol rematching, diffs, graphs, embeddings, or full reselection. A refresh result MUST NOT be presented as proof that the old selector's ranking was reproducible.
+
+---
+
+## 12. Audit examples
+
+### 12.1 Missing context
+
+An agent changes authentication behavior incorrectly.
+
+Audit finds:
+
+```text
+view.base: commit A
+view.tree: tree A
+
+Context Pack:
+  src/login.ts
+  src/session.ts
+
+Not exposed:
+  src/policy.ts
+  tests/policy.test.ts
 ```
-clean view or explicit overlay tree
-language-agnostic CodeGraph
-Tree-sitter queries as default syntactic extraction
-optional tree-sitter-graph adapter
-optional semantic enrichers
-deterministic selector with pinned limits and total order
-pinned CodeGraph digest
-no prose in persisted packs
-no embeddings required
-pinned source/policy/instructions/memory
-blob/range evidence
-Git-reachable pack attachment
-receipt bound to its enclosing signed session event
-no submodule traversal
-no requireContext branch policy
+
+The audit can state that the policy implementation and test were absent from the recorded repository context for that invocation.
+
+It cannot prove that their absence caused the incorrect change.
+
+### 12.2 Stale context
+
+An agent claims `validate()` returns `boolean`, but the active repository returns `ValidationResult`.
+
+Audit finds:
+
+```text
+operation view.tree: tree NEW
+pack item blob: blob OLD
+path resolution under tree NEW: mismatch
 ```
 
-### 10.5 Acceptance criteria
+The exposure record demonstrates that stale repository evidence was supplied or that the pack was constructed incorrectly.
+
+### 12.3 Rendering bug
+
+A pack contains the correct range, but the renderer truncates the final branch of a function.
+
+Audit finds:
+
+```text
+pack item: bytes 1200-1840
+recorded render: contains bytes 1200-1660 only
+renderDigest: valid
+```
+
+The retrieval manifest was correct; the exposure bug occurred during rendering.
+
+### 12.4 Hallucinated repository fact
+
+An agent claims a configuration flag exists.
+
+Audit finds no item or rendered repository context containing that flag for the relevant invocation.
+
+The audit can report:
+
+> The recorded repository context does not support this claim.
+
+It cannot distinguish hallucination from knowledge acquired through some unrecorded external channel unless the rest of the session/tool history is also audited.
+
+---
+
+## 13. Acceptance criteria
 
 V1 is successful when:
 
-1. identical deterministic inputs produce byte-identical packs **on hosts with different machine resources**, because all limits are pinned;
-2. a persistent pack survives push/fetch/GC because it is structurally reachable;
-3. every selected item has at least one machine-readable inclusion reason;
-4. selected source ranges resolve to exact Git blobs under both `sha1` and `sha256` object formats;
-5. adding a new supported language does not require changing the selector or Context Pack schema;
-6. Tree-sitter and `tree-sitter-graph` can be replaced without changing Context Pack semantics;
-7. syntax-only edges remain distinguishable from semantically resolved edges;
-8. pathological source/query/TSG inputs remain within configured counters, and any wall-clock fallback is visibly marked non-reproducible;
-9. deleting all derived indexes and the unattached pack cache does not corrupt canonical repository state;
-10. under the standard decoy fixture — 50 decoy files whose names and contents match the task's top 5 terms, added to a repository whose known-required set is graph-connected — **graph-connected implementation evidence retains ≥70% of the budget, required-file recall drops by ≤10 percentage points against the decoy-free baseline, and no decoy file ranks above any required file**;
-11. an overlay-based pack is reproducible while its overlay objects exist and is refused durable attachment otherwise;
-12. an `instruction` item whose authority chain does not resolve is downgraded to `narrative` by a conforming consumer;
-13. a receipt lifted out of its enclosing session event fails verification;
-14. refresh re-anchors moved symbols, and reports `invalidated` rather than guessing when re-anchoring is ambiguous;
-15. a persisted pack contains no prose: an automated check over the canonical bytes finds only references, digests, and integers;
-16. redacting a session leaves the pack's OID and digests unchanged, and `why` degrades to term slots rather than failing;
-17. rebuilding a grammar against a different parser ABI, with all declared versions unchanged, is detected as a `selector.graph` mismatch and reported as a reproducibility failure;
-18. equal-scored candidates pack in the §7.12 total order across platforms, and no ranking path uses floating-point arithmetic;
-19. `why` and `refresh` remain within their §7.9.1 counters on an adversarially large view, and report truncation rather than returning a partial result that appears complete.
-
-The system should also be benchmarked against historical repository tasks (Appendix D).
-
----
-
-# Appendix A — Extractor architecture
-
-```
-                        ┌─ direct Tree-sitter queries
-                        ├─ tree-sitter-graph
-source + language ──────┼─ compiler API
-                        ├─ LSP / SCIP
-                        └─ custom analyzer
-                                 │
-                                 ▼
-                         normalize + validate
-                                 │
-                                 ▼
-                            CodeGraph
-                                 │
-                                 ▼
-                         Context selector
-```
-
-Direct Tree-sitter queries are the preferred v1 path for common facts: definitions, references, imports, calls, tests. `tree-sitter-graph` becomes attractive when extraction needs stateful or nested graph construction awkward to reconstruct from independent captures. The protocol does not care which extractor produced the normalized graph.
-
-```
-languages/
-  typescript/
-    grammar
-    queries/tags.scm
-    queries/locals.scm
-    queries/context.scm
-    graph.tsg            # optional
-    limits.json          # pinned counters (§7.9)
-
-  python/
-    ...
-
-  rust/
-    ...
-```
-
-Supporting a new language should be mostly an extractor/query contribution rather than a change to the context engine.
+1. every auditable model invocation can be associated with one exact Repository View;
+2. every Context Pack item resolves to an exact Git blob, and optional byte range, under that view;
+3. dirty-worktree context is represented by an exact effective tree rather than mislabeled as `HEAD`;
+4. every repository-affecting model invocation records a Context Exposure Event before the operation it informs;
+5. the exposure event records a digest of the exact repository-context bytes supplied to the model;
+6. when rendered bytes are retained, recomputing their digest matches `renderDigest`;
+7. the pack and any required dirty-view objects survive normal Git reachability and GC rules for the intended audit-retention period;
+8. a verifier can validate pack evidence without Tree-sitter, a CodeGraph, embeddings, selector configuration, ranking weights, or fixed-point math;
+9. replacing the retrieval implementation does not change the meaning of an already-persisted pack;
+10. replacing the renderer does not invalidate an old exposure because the old event commits to the bytes actually rendered at that time;
+11. an auditor can distinguish at least these failure classes:
+    - missing repository context;
+    - stale repository context;
+    - invalid blob/path/range provenance;
+    - rendering mismatch or truncation;
+    - missing exposure-to-operation binding;
+12. selecting content as context does not grant it instruction authority;
+13. deleting derived indexes does not corrupt persisted audit provenance;
+14. a Context Pack never claims that its selector is reproducible unless an implementation-specific extension explicitly provides that stronger guarantee;
+15. no V1 validation rule depends on deterministic ranking, graph hashing, token estimation, or cross-platform numeric behavior.
 
 ---
 
-# Appendix B — Invalidation
+# Appendix A — Optional retrieval diagnostics
 
-Git identifies changed blobs exactly, but semantic relationships can also change when configuration changes.
+Implementations may keep richer diagnostics without putting them into the core protocol.
 
+Examples include:
+
+```text
+candidate scores
+rank position
+semantic search similarity
+graph paths
+Tree-sitter captures
+symbol resolution quality
+token cost
+omission reasons
+retrieval latency
+resource counters
+reranker identity
 ```
-local invalidation
-  changed implementation/test/import blob
 
-global invalidation
-  compiler/module-resolution/dependency configuration changed
-  .gitattributes changed
-  extractor, grammar, query pack, or enricher version changed
-```
+These are useful for improving retrieval quality and explaining implementation behavior.
 
-A global invalidation MAY rebuild the full normalized graph. Correctness is preferred over pretending every change is incrementally local.
+They are deliberately not required to establish what repository evidence was exposed.
 
 ---
 
-# Appendix C — Semantic ranking
+# Appendix B — Optional selector-specific reproducibility
 
-Embeddings or LLM rerankers MAY improve candidate ordering later. They are optional disposable caches, not canonical truth.
+A selector implementation MAY define a stronger reproducibility profile outside V1.
 
-**Two selector modes, named in the artifact.** §10.5(1) and a non-reproducible reranker cannot both be unqualified, so the distinction is carried in `selector.name`:
+Such a profile may pin:
 
+```text
+extractor versions
+query packs
+CodeGraph representation
+graph digest
+ranking formula
+fixed-point arithmetic
+resource counters
+token estimator
+total ordering
+selector configuration
 ```
-canonical   deterministic, fixed-point ranking (§7.12), reproducible
-            byte-identical under identical pinned inputs
-            selector.name has no "+" suffix
 
-advisory    canonical candidate generation, non-deterministic reranking
-            selector.name MUST carry a "+<reranker>" suffix, e.g. "context-v1+rerank"
-            pack MUST carry a "non-deterministic" omission (§5.5)
-```
+If implemented, that profile answers a different question:
 
-Rules:
+> **Could another conforming selector recreate this same evidence selection?**
 
-- A deterministic canonical selector MUST remain available and MUST be the default.
-- §10.5(1) applies to canonical packs only. Advisory packs are excluded from determinism fixtures by name, not by inspection.
-- An advisory selector MUST use canonical candidate generation and MUST reorder only within the candidate set — it may not introduce evidence the canonical selector would not have considered, which keeps the security properties of §9.2 intact.
-- `refresh` MUST refuse to compute an `unchanged`/`changed` delta between a canonical and an advisory pack, since the comparison would attribute reranker noise to the repository.
+The core Context Pack answers only:
 
-Either way, the pack records what was selected and why.
+> **What evidence was associated with this invocation, and can its repository provenance be verified?**
+
+The two guarantees SHOULD remain separate so that retrieval experimentation does not require changing the audit protocol.
 
 ---
 
-# Appendix D — Evaluation
+# Appendix C — Evaluation
 
-Evaluate on historical tasks at multiple budgets:
+Evaluate the system on historical agent failures and handoff tasks.
 
+Auditability metrics SHOULD include:
+
+```text
+percentage of repository-affecting invocations with valid exposure records
+percentage of pack items that resolve under the recorded tree
+stale-context detection rate
+render-mismatch detection rate
+missing-context investigation time
+manifest size
+exposure-record overhead
 ```
+
+Retrieval-quality metrics MAY separately include:
+
+```text
 required-file recall
 required-symbol recall
 test recall
 configuration recall
 irrelevant-context ratio
 generation latency
-refresh latency
-refresh re-anchor accuracy
-manifest size
 ```
 
-Adversarial fixtures SHOULD include lexical decoys, pathological extractor inputs, and rename/refactor histories that stress re-anchoring.
+The two groups SHOULD be reported separately. A retrieval system may have poor recall while still producing excellent provenance, or excellent recall while producing weak audit records.
 
-**Standard decoy fixture** (referenced by §10.5(10)): take a task with a known-required, graph-connected evidence set; extract the task's top 5 normalized terms; add 50 files whose paths and contents match those terms but which no required symbol references. Measure against the decoy-free baseline:
+A useful handoff benchmark remains:
 
-```
-budget share retained by graph-connected implementation evidence   ≥ 70%
-required-file recall drop                                          ≤ 10 pp
-highest-ranked decoy vs. lowest-ranked required file               decoy MUST rank lower
-```
-
-Fixture parameters (term count, decoy count) are pinned alongside the selector configuration so results are comparable across implementations.
-
-A handoff benchmark SHOULD compare:
-
-```
-fresh agent + no pack
+```text
+fresh agent + no recorded context
 fresh agent + prose summary
 fresh agent + Context Pack
-fresh agent + Context Pack + refresh delta
+fresh agent + Context Pack + exact exposure record
 ```
 
 ---
 
 ## Final invariant
 
-> **A Context Pack is a content-addressed, explainable selection of repository evidence. A Context Receipt is a claim, bound to a signed session event, about what a harness exposed. Neither proves cognition. The selector consumes a language-agnostic CodeGraph whose identity and semantics belong to `git+`; Tree-sitter, `tree-sitter-graph`, compiler APIs, LSP, SCIP, and other analyzers are replaceable derived machinery.**
+> **A Context Pack is an immutable manifest of Git-grounded repository evidence for an exact repository tree. A Context Exposure Event commits to the exact repository-context bytes supplied to a model invocation and is bound to that invocation through signed session history. Retrieval and ranking are replaceable implementation details. Neither object proves cognition or causation.**
