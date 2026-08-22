@@ -52,7 +52,7 @@ Context provenance
 
 V1 standardizes **context provenance**, not retrieval quality.
 
-Runtime conditions surrounding the invocation—model/provider identity, token usage, context-window limits, retries, context compaction or truncation, tool diagnostics, and workspace transitions—are specified separately in [invocation-telemetry.md](invocation-telemetry.md). Invocation telemetry MUST NOT affect Context Pack identity or the verification of Git-grounded evidence.
+Runtime conditions surrounding the invocation—model/provider identity, token usage, context-window limits, retries, context compaction or truncation, tool diagnostics, and workspace transitions—are specified separately in [telemetry.md](telemetry.md). Telemetry MUST NOT affect Context Pack identity or the verification of Git-grounded evidence.
 
 A Context Pack does not prove that a model read, understood, remembered, or used any item. A Context Exposure Event does not prove causation. Together with signed session history, they provide a tamper-evident record of the repository context that the harness claims crossed its context-to-invocation audit boundary for a model invocation.
 
