@@ -45,7 +45,7 @@ const git = (directory: string, arguments_: ReadonlyArray<string>): Promise<Uint
       },
       (error, stdout, stderr) => {
         if (error !== null) {
-          const detail = stderr.toString("utf8").trim();
+          const detail = new TextDecoder().decode(stderr).trim();
           reject(new Error(detail === "" ? error.message : detail));
           return;
         }

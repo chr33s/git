@@ -273,7 +273,7 @@ describe("cli queue", () => {
   ) => {
     const receiver = http.createServer((request, response) => {
       let body = "";
-      request.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
+      request.on("data", (chunk: Buffer) => (body += new TextDecoder().decode(chunk)));
       request.on("end", () => {
         handler(body);
         answer(response);

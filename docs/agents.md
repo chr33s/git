@@ -1287,8 +1287,8 @@ each carry their own audit trail:
 - convention: tests colocate as *.test.ts beside sources;
   workerd integration tests read wrangler.test.json
   [7 observations; sessions 0198f2aa…, 0197e1b3…]
-- gotcha: run npm install before typecheck — postinstall
-  applies patches/ the build depends on
+- setup: npm ci applies dependency patches without touching the checkout;
+  npm run setup regenerates build metadata and local Wrangler types
   [session 0198c4d1…; decision 0198d2e4…]
 - friction: build:sea needs node 26+; check first
   [3 observations]

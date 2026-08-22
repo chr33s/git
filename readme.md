@@ -25,14 +25,16 @@ One implementation of Git's core runs everywhere: inside a **Cloudflare Durable 
 
 ### Installation & System Requirements
 
-Requires **Node.js ^22.18.0** or compatible Web API runtime.
+This repository is currently **not published to npm** (`package.json` is private).
+Install [mise](https://mise.jdx.dev/) and use the checkout instead. Node 26 is the
+blessed development and binary-build version; the source compatibility floor is
+Node 24.12.0.
 
 ```bash
-# Run directly via npx
-npx @chr33s/git --help
-
-# Or install globally
-npm install -g @chr33s/git
+git clone https://github.com/chr33s/git.git
+cd git
+mise install
+npm ci                 # installation does not rewrite the checkout
 ```
 
 ### Running a Server
@@ -40,11 +42,14 @@ npm install -g @chr33s/git
 Both server implementations speak standard **Smart-HTTP (v0/v2)**, **Git LFS**, and export a type-safe **JSON API**.
 
 ```bash
-# Serve local repositories on port 8080
-GIT_ROOT=./repos git+ serve --port=8080
+# Explicit flags take precedence over environment variables.
+git+ serve --root ./repos --port 8080
 
-# Serve with write access enabled for un-guarded repositories
-GIT_ROOT=./repos git+ serve --port=8080 --open
+# The same shared configuration works for the CLI and standalone Node host.
+GIT_ROOT=./repos git+ serve
+
+# Serve with write access enabled for un-guarded repositories.
+git+ serve --root ./repos --open
 ```
 
 Standard Git clients can interact directly with the server:
@@ -57,11 +62,15 @@ git clone http://127.0.0.1:8080/my-repo.git
 
 ## CLI Usage
 
-The CLI wraps the unified core repository engine. Supports **34 commands** spanning core porcelain/plumbing, agent coordination, and hub maintenance.
+The CLI wraps the unified core repository engine. Its command tree is the
+canonical reference:
 
-```text
-git+ [global-flags] <command> [subcommand] [flags]
+```bash
+git+ --help
+git+ <command> --help
 ```
+
+[`docs/cli.md`](docs/cli.md) is a generated top-level help snapshot.
 
 ### Core Subcommands
 
@@ -127,12 +136,32 @@ git+ serve --root ./repos --ui
 ## Development & Testing
 
 ```bash
-# Install workspace dependencies
-npm install
+# Install workspace dependencies without changing source files
+npm ci
 
-# Run static type checking and linter
+# Read-only formatting, lint and type checks
 npm run check
 
-# Run Effect test suite across Node & Web API environments
-npm run test
+# Fast feedback loop
+npm run test:unit
+
+# Integration suite only (workerd)
+npm run test:integration
+
+# Everything
+npm test
+
+# Build the preferred end-user executable (Node 26+)
+npm run build:sea
+./dist/sea/git+ --help
 ```
+
+Use the raw TypeScript entry (`node src/cli/main.ts`) for contributor work; the
+SEA binary is the supported end-user distribution while npm publishing is off.
+
+`npm run check` intentionally includes the repository's Effect and anti-slop
+rules as correctness checks, not automatic style fixes. `npm run fix` is the
+explicit opt-in formatter/linter repair command. Run `npm run setup` only to
+regenerate build metadata and Wrangler binding types (for example, after
+changing `package.json` or `wrangler.test.json`); it is never part of
+installation or checking.

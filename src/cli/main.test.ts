@@ -81,6 +81,7 @@ describe("cli", () => {
       const help = await cli(["--help"]);
       assert.match(help, /\bid\b.*Stable principal identity/s);
       assert.match(help, /\bsocial\b.*Social graph/s);
+      assert.match(await cli(["--version"]), /git\+ v0\.1\.0/);
     }),
   );
 
@@ -305,7 +306,7 @@ describe("cli", () => {
     }),
   );
 
-  it.effect("serves repositories via the serve command", () =>
+  it.effect("serves repositories via the serve command's shared environment configuration", () =>
     Effect.promise(async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-serve-"));
       await seed(path.join(root, "hosted"), "served");
@@ -314,7 +315,8 @@ describe("cli", () => {
       try {
         // No auth flags: whether a repository is guarded is the repository's
         // own answer now, so `serve` has nothing to be told about it.
-        child = spawn("node", [entry, "serve", "--root", root, "--port", "0"], {
+        child = spawn("node", [entry, "serve", "--port", "0"], {
+          env: { ...process.env, GIT_ROOT: root },
           stdio: ["ignore", "pipe", "pipe"],
         });
         const url = await new Promise<string>((resolve, reject) => {
@@ -355,9 +357,19 @@ describe("cli", () => {
         // Nothing about `serve` changed — the genesis is what guards it.
         const { credential } = await enableHubUnder(root, "guarded", ["repo.read"]);
 
-        child = spawn("node", [entry, "serve", "--root", root, "--port", "0"], {
-          stdio: ["ignore", "pipe", "pipe"],
-        });
+        child = spawn(
+          "node",
+          [entry, "serve", "--root", root, "--port", "0", "--hostname", "127.0.0.1"],
+          {
+            env: {
+              ...process.env,
+              GIT_ROOT: path.join(root, "ignored"),
+              PORT: "1",
+              HOSTNAME: "not-used.example",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
         const url = await new Promise<string>((resolve, reject) => {
           let buffered = "";
           child!.stdout!.on("data", (chunk: Buffer) => {

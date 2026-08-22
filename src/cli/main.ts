@@ -42,9 +42,7 @@ import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import * as Redaction from "../hub/Redaction.ts";
-import { serve } from "../host/Node.ts";
 import * as Archive from "../server/Archive.ts";
-import * as Static from "../server/Static.ts";
 import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { hubCommand } from "./hub.ts";
@@ -61,12 +59,15 @@ import {
   withRepo,
 } from "./shared.ts";
 import { sessionCommand } from "./session.ts";
+import { serveCommand } from "./serve.ts";
+import { fetchCommand, pullCommand } from "./transport.ts";
 import { queueCommand } from "./queue.ts";
 import { socialCommand } from "./social.ts";
 import { taskCommand } from "./task.ts";
 import { prCommand } from "./pr.ts";
 import { wakeCommand } from "./wake.ts";
 import * as work from "./work.ts";
+import { version } from "./version.ts";
 
 /** One repository's stores as raw instances, for code that needs them directly. */
 const openStores = (directory: string) =>
@@ -381,87 +382,6 @@ const credentialHelper = Command.make(
       // asks for one, and a helper that answers only a password makes it
       // prompt for the name it was trying to avoid asking for.
       yield* Console.log(`username=chr33s-git\npassword=${minted}`);
-    }),
-);
-
-/**
- * Where `build:ui` puts the bundle, found from this file rather than from the
- * working directory — `serve` is run from wherever the repositories are, not
- * from the checkout.
- */
-const defaultUiDir = path.join(import.meta.dirname, "..", "..", "dist", "ui");
-
-const serveCommand = Command.make(
-  "serve",
-  {
-    root: rootFlag,
-    port: Flag.integer("port").pipe(Flag.withDefault(8080), Flag.withAlias("p")),
-    hostname: Flag.string("hostname").pipe(Flag.withDefault("127.0.0.1")),
-    open: Flag.boolean("open").pipe(
-      Flag.withDefault(false),
-      Flag.withDescription("Serve writes to repositories that have no genesis"),
-    ),
-    wake: Flag.boolean("wake").pipe(
-      Flag.withDefault(false),
-      Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
-    ),
-    ui: Flag.boolean("ui").pipe(
-      Flag.withDefault(false),
-      Flag.withDescription("Serve the built browser UI from this origin as well"),
-    ),
-    uiDir: Flag.string("ui-dir").pipe(
-      Flag.withDefault(""),
-      Flag.withDescription("Where the built UI is, if not the one built beside this install"),
-    ),
-  },
-  ({ hostname, open, port, root, ui, uiDir, wake }) =>
-    Effect.gen(function* () {
-      // One origin, because a browser gives no choice: the page fetches
-      // `/{repo}/...` with no host of its own, and a page served from
-      // somewhere else has every one of those requests blocked. Serving the
-      // bundle here is what the deployed Worker does and what `dev:ui` fakes
-      // with a proxy — see `server/Static.ts`.
-      const assets = ui ? (uiDir === "" ? defaultUiDir : uiDir) : undefined;
-      if (assets !== undefined && !(yield* Effect.promise(() => Static.built(assets)))) {
-        return yield* new Invalid({
-          field: "ui",
-          reason: `${assets} holds no built UI; run \`npm run build:ui\` first, or point --ui-dir at one`,
-        });
-      }
-      // There is no `--secret` any more: a repository with a genesis is
-      // guarded by its own membership, and no server secret enters into it.
-      // `--open` survives for the one case the repository cannot speak to —
-      // it has no membership at all — where the choice really is the host's,
-      // and the safe answer is the one you have to ask for.
-      const server = yield* Effect.promise(() =>
-        serve({ root, port, hostname, allowAnonymousWrites: open, wake, ui: assets }),
-      );
-      yield* Console.log(`git smart-HTTP server on ${server.url}, repositories under ${root}/`);
-      if (assets !== undefined) {
-        // Which repository the page is about is baked into its `index.html`
-        // as `<meta name="gp-repo">`, defaulting to `core`; the UI cannot
-        // guess it from a URL that has to stay the API's.
-        yield* Console.log(
-          `browser UI on ${server.url} from ${assets}, showing the repository its index.html names`,
-        );
-      }
-      // Said out loud, because it is the one switch that makes this process
-      // start other processes.
-      if (wake) {
-        yield* Console.error(
-          "--wake: a push that moves a repository's hub refs runs the rules in its wake.json",
-        );
-      }
-      yield* Console.error(
-        (open
-          ? "--open: repositories with no genesis accept writes from anyone who can reach the port. "
-          : "repositories with no genesis are readable by anyone who can reach the port and " +
-            "writable by nobody; pass --open to serve writes to them anyway. ") +
-          "run `git+ hub init <repo> --key <key>` to give a repository a membership " +
-          "of its own. A repository whose members hold no read capability is still public: " +
-          "membership restricts, so restricting nothing restricts nobody",
-      );
-      return yield* Effect.never;
     }),
 );
 
@@ -951,85 +871,6 @@ const reset = Command.make(
     ),
 );
 
-/**
- * Bring a remote's movement into a cloned repository.
- *
- * The same client `clone` uses, re-entered: branches fast-forward where they
- * can and are refused where they diverged — refusing is `fetch` telling the
- * truth, since choosing merge or rebase is not its call. Tags come along;
- * a work tree, where one exists, is `work switch`'s to refresh.
- */
-const fetchCommand = Command.make(
-  "fetch",
-  {
-    root: rootFlag,
-    token: Flag.string("token").pipe(Flag.withDefault("")),
-    branch: Flag.string("branch").pipe(
-      Flag.withDefault(""),
-      Flag.withDescription("Fetch one branch instead of everything advertised"),
-    ),
-    repo: repoArgument,
-    url: Argument.string("url"),
-  },
-  ({ branch, repo, root, token: accessToken, url }) =>
-    Effect.gen(function* () {
-      const target = { objects: yield* ObjectStore, refs: yield* RefStore };
-      // The fetch reports every ref it considered; what a reader wants is
-      // what *moved*, so the before-state is the thing to diff against.
-      const before = new Map(yield* target.refs.list());
-      const request =
-        accessToken === "" ? { url, stores: target } : { url, stores: target, token: accessToken };
-      const result = yield* branch === ""
-        ? fetchRepository(request)
-        : fetchRepository({ ...request, branch });
-      const moved = result.refs.filter((update) => before.get(update.name) !== update.value);
-      for (const update of moved) {
-        yield* Console.log(`${update.value ?? "0".repeat(40)} ${update.name}`);
-      }
-      for (const rejected of result.rejected) {
-        yield* Console.error(`refused ${rejected.name}: not a fast-forward`);
-      }
-      if (moved.length === 0 && result.rejected.length === 0) {
-        yield* Console.log("up to date");
-      }
-    }).pipe(Effect.provide(stores(path.join(root, repo)))),
-);
-
-/** `fetch --branch`, under the name fingers expect. */
-const pullCommand = Command.make(
-  "pull",
-  {
-    root: rootFlag,
-    token: Flag.string("token").pipe(Flag.withDefault("")),
-    repo: repoArgument,
-    url: Argument.string("url"),
-    branch: Argument.string("branch"),
-  },
-  ({ branch, repo, root, token: accessToken, url }) =>
-    Effect.gen(function* () {
-      const target = { objects: yield* ObjectStore, refs: yield* RefStore };
-      const request =
-        accessToken === ""
-          ? { url, stores: target, branch }
-          : { url, stores: target, branch, token: accessToken };
-      const name = `refs/heads/${branch}`;
-      const before = yield* target.refs.read(name);
-      const result = yield* fetchRepository(request);
-      if (result.rejected.some((entry) => entry.name === name)) {
-        return yield* new Invalid({
-          field: "branch",
-          reason: `${name} diverged — merge or rebase, a pull cannot guess which`,
-        });
-      }
-      const moved = result.refs.find((update) => update.name === name && update.value !== before);
-      if (moved !== undefined) {
-        yield* Console.log(`${moved.value ?? ""} ${name}`);
-        return;
-      }
-      yield* Console.log("up to date");
-    }).pipe(Effect.provide(stores(path.join(root, repo)))),
-);
-
 const reflogCommand = Command.make(
   "reflog",
   { root: rootFlag, repo: repoArgument, ref: Argument.string("ref") },
@@ -1234,7 +1075,7 @@ const git = Command.make("git+").pipe(
   ]),
 );
 
-const main = Command.runWith(git, { version: "0.0.0" });
+const main = Command.runWith(git, { version });
 
 /**
  * Domain failures leave as one readable line — `Schema.TaggedError` carries

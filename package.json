@@ -18,14 +18,20 @@
   ],
   "type": "module",
   "scripts": {
-    "build:sea": "node src/cli/sea.build.ts",
+    "build:sea": "npm run codegen && node src/cli/sea.build.ts",
     "build:ui": "node src/ui/build.ts",
     "check": "oxfmt --check && oxlint",
+    "codegen": "node tools/generate-version.ts && wrangler types -c wrangler.test.json",
     "dev:ui": "node src/ui/build.ts --serve",
+    "docs:cli": "node tools/generate-cli-reference.ts",
+    "docs:cli:check": "node tools/generate-cli-reference.ts --check",
     "fix": "oxlint --fix && oxfmt --write",
-    "postinstall": "patch-package && npx wrangler types -c wrangler.test.json && npm run fix",
-    "prepare": "effect-tsgo patch --oxlint",
+    "prepare": "patch-package && effect-tsgo patch --oxlint",
+    "setup": "npm run codegen",
     "test": "vitest run",
+    "test:integration": "vitest run --project integration",
+    "test:unit": "vitest run --project unit",
+    "test:watch": "vitest --project unit",
     "verify:ui": "node src/ui/build.ts && node src/ui/verify.ts"
   },
   "dependencies": {
@@ -33,6 +39,7 @@
   },
   "devDependencies": {
     "@chr33s/base-wc": "github:chr33s/base-wc",
+    "@cloudflare/workers-types": "5.20260821.1",
     "@effect/platform-node": "4.0.0-rc.111",
     "@effect/tsgo": "0.36.5",
     "@effect/vitest": "4.0.0-rc.111",

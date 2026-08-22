@@ -17,7 +17,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
-import { Config, Context, Effect, Layer, Predicate } from "effect";
+import { Context, Effect, Layer, Predicate } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
@@ -47,10 +47,9 @@ import { file as remotesFile } from "../server/Remotes.node.ts";
 import { collects, routeOf, settledWithin } from "../server/Route.ts";
 import { assetResponse } from "../server/Static.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
+import { configuration, type ServeConfig } from "./ServeConfig.ts";
 
-export interface ServeOptions {
-  /** Directory holding one bare repository per subdirectory. */
-  readonly root: string;
+export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname"> {
   /** Defaults to an ephemeral port; the return value carries the real one. */
   readonly port?: number;
   readonly hostname?: string;
@@ -642,22 +641,10 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   };
 };
 
-/**
- * Startup configuration, read through `Config` rather than `process.env`:
- * the provider is swappable (a test can supply `ConfigProvider.fromUnknown`),
- * a malformed `PORT` fails with a config error naming the variable instead of
- * silently becoming `NaN`, and the defaults live in one place.
- */
-export const configuration = Effect.gen(function* () {
-  return {
-    root: yield* Config.string("GIT_ROOT").pipe(Config.withDefault("repos")),
-    port: yield* Config.number("PORT").pipe(Config.withDefault(8080)),
-    hostname: yield* Config.string("HOSTNAME").pipe(Config.withDefault("127.0.0.1")),
-  };
-});
+export { configuration } from "./ServeConfig.ts";
 
 if (import.meta.main) {
-  const options = await Effect.runPromise(configuration.pipe(Effect.orDie));
+  const options = await Effect.runPromise(configuration().pipe(Effect.orDie));
   const { url } = await serve(options);
   console.log(`git smart-HTTP server on ${url}, repositories under ${options.root}/`);
 }

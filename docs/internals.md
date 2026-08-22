@@ -262,7 +262,8 @@ value is thrown, not yielded).
 ## Testing
 
 `npm test` runs both vitest projects — `unit` and `integration` (the workerd
-harness). There is no separate `test:integration` script. The interop tests
+harness). `npm run test:unit` is the fast loop, while `npm run test:integration`
+runs the workerd project alone. The interop tests
 need `git` on `PATH` and skip without it; the real-browser test needs Chromium
 via Playwright and skips without it.
 
