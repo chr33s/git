@@ -26,7 +26,7 @@ Recall
   Does the next human or agent receive it when relevant?
 ```
 
-No one primitive solves all three. The architecture composes signed sessions and decisions, Repository Memory, [Context Packs](context-pack.md), Context Exposure records, and [Invocation Telemetry](invocation-telemetry.md).
+No one primitive solves all three. The architecture composes signed sessions and decisions, Repository Memory, [Context Packs](context-pack.md), Context Exposure records, and [Telemetry](telemetry.md).
 
 The goal is **durable, attributable repository knowledge**, not exhaustive recording of human thought or model cognition.
 
@@ -256,7 +256,7 @@ claim/evidence was actually present in this invocation's context
 
 ### 6.4 Runtime telemetry diagnoses failed recall
 
-Invocation Telemetry can distinguish:
+Telemetry can distinguish:
 
 ```text
 capture failure
@@ -367,14 +367,11 @@ knowledge-durability.md
 context-pack.md
   normative repository + exposure provenance
 
-invocation-telemetry.md
-  normative runtime trace model
-
-telemetry-integration.md
-  non-normative harness/API/UI guidance
+telemetry.md
+  runtime trace protocol + OTel ingestion + harness/API/UI integration
 ```
 
-The architecture notes SHOULD link to the protocol specs rather than duplicate normative wire rules.
+The architecture notes SHOULD link to protocol rules rather than duplicate normative wire rules.
 
 ---
 
