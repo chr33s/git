@@ -1269,6 +1269,14 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   // enriched metadata crosses the wire, not just that a bar rendered.
   check("and the author from the commit view", bar.includes("Rune Baek"), bar.trim());
   check("and a relative age", /\b\d+[wdhm] ago\b|just now/.test(bar));
+  // Early twin of the same assertion below: the commit bar is commitDetail's
+  // work, and the editing flow's pre-existing breakage must not be allowed to
+  // silence the proof that it needs no raw-object round trip.
+  check(
+    "no /object round trips for the commit bar",
+    objectRequests === 0,
+    `${objectRequests} raw-object request(s)`,
+  );
   check(
     "the sidebar identity comes from /whoami",
     (await page.textContent(".gp-user-name"))?.trim() === "anonymous",

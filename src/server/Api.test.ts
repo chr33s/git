@@ -783,6 +783,44 @@ describe("Api", () => {
           query: { ref: "main", path: "topic.txt", encoding: "utf8" },
         });
         assert.equal(after.content, "topic\n");
+
+        // A main-only commit, so the merge below has two real sides — without
+        // it the cherry-pick is main's only move since `topic` branched, and
+        // the merge fast-forwards.
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "main",
+            message: "main moves on",
+            author: alice,
+            files: [{ path: "main.txt", content: "main\n" }],
+          },
+        });
+
+        // And a merge takes the same spellings on all three names.
+        yield* client.repo.branch({
+          params: { repo: "r" },
+          payload: { name: "work", base: "topic" },
+        });
+        yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "work",
+            message: "work",
+            author: alice,
+            files: [{ path: "work.txt", content: "work\n" }],
+          },
+        });
+        const merged = yield* client.repo.merge({
+          params: { repo: "r" },
+          payload: { ours: "main", theirs: "work", into: "main", author: alice },
+        });
+        assert.equal(merged.kind, "merged");
+        const mergedFile = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: "main", path: "work.txt", encoding: "utf8" },
+        });
+        assert.equal(mergedFile.content, "work\n");
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );

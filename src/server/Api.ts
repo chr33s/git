@@ -531,8 +531,7 @@ const page = <A>(items: ReadonlyArray<A>, query: { cursor?: string; limit?: stri
 
 /**
  * One commit on the wire — the same shape from `log`, `commits` and `read`,
- * so no client re-parses a raw object for an author line. The list schemas
- * drop `tree` at encode; `read` keeps it.
+ * so no client re-parses a raw object for an author line.
  */
 const commitView = (oid: Oid, commit: CommitInfo) => ({
   oid,
@@ -543,6 +542,20 @@ const commitView = (oid: Oid, commit: CommitInfo) => ({
   parents: [...commit.parents],
   tree: commit.tree,
 });
+
+/** The listing form of the shared view: no `tree`, spelled out rather than
+ * left to the schema's excess-key stripping. */
+const commitListItem = (oid: Oid, commit: CommitInfo) => {
+  const view = commitView(oid, commit);
+  return {
+    oid: view.oid,
+    message: view.message,
+    subject: view.subject,
+    author: view.author,
+    at: view.at,
+    parents: view.parents,
+  };
+};
 
 /**
  * What a commit's tree should be: stated outright, built from paths on top of
@@ -1407,7 +1420,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const commits = yield* Stream.runCollect(repository.log(params.oid, { limit: 50 })).pipe(
           Effect.catchTag("StorageFailure", Effect.die),
         );
-        return { commits: commits.map((commit) => commitView(commit.oid, commit)) };
+        return { commits: commits.map((commit) => commitListItem(commit.oid, commit)) };
       }),
     )
     .handle("refs", () =>
@@ -1655,6 +1668,14 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
               .pipe(Effect.catchTag("StorageFailure", Effect.die));
         if (target === null) {
           return yield* new Invalid({ field: "to", reason: `unknown revision '${payload.to}'` });
+        }
+
+        // A reset moves a ref; an oid names nothing that moves.
+        if (isOid(payload.ref)) {
+          return yield* new Invalid({
+            field: "ref",
+            reason: "a reset moves a ref, not an object id",
+          });
         }
 
         // Short spellings qualify here, once, so the gate and the write name
@@ -2158,7 +2179,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           repository.log(params.oid, { limit: start + size + 1 }),
         ).pipe(Effect.catchTag("StorageFailure", Effect.die));
         return page(
-          walked.map((commit) => commitView(commit.oid, commit)),
+          walked.map((commit) => commitListItem(commit.oid, commit)),
           query,
         );
       }),

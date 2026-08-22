@@ -33,17 +33,17 @@ export type FileEntry = (typeof FileEntry)["Type"];
 
 export const FilesResponse = Schema.Struct({ files: Schema.Array(FileEntry) });
 
+export const Encoding = Schema.Literals(["utf8", "base64"]);
+
 export const FileContent = Schema.Struct({
   path: Schema.String,
   mode: Schema.String,
   oid: OidString,
   content: Schema.String,
-  encoding: Schema.Literals(["utf8", "base64"]),
+  encoding: Encoding,
   size: Schema.Finite,
 });
 export type FileContent = (typeof FileContent)["Type"];
-
-export const Encoding = Schema.Literals(["utf8", "base64"]);
 
 /** A path to write, or — with `content: null` — to remove. */
 export const FileWrite = Schema.Struct({
