@@ -1,6 +1,6 @@
 # Documentation
 
-The repository documentation is intentionally split by responsibility so protocol rules, architecture goals, implementation guidance, and product behavior can evolve without becoming one brittle specification.
+The repository documentation is intentionally split by responsibility so protocol rules, architecture goals, runtime integration, and product behavior can evolve without becoming one brittle specification.
 
 ## Agent and provenance docs
 
@@ -9,8 +9,8 @@ Read these in roughly this order:
 1. **[agents.md](agents.md)** — existing agent membership, authorization, session provenance, decisions, Memory, and end-to-end workflow.
 2. **[knowledge-durability.md](knowledge-durability.md)** — the Capture → Retention → Recall objective, including team-member departure, cited claims, and structured evidence dependencies.
 3. **[content-pack.md](content-pack.md)** — normative repository and context-exposure provenance: Repository Views, blob/gitlink evidence, ContextRender, reachability, and Context Exposure records.
-4. **[invocation-telemetry.md](invocation-telemetry.md)** — normative runtime audit-trace model: invocation usage, context limits, retries, lifecycle events, tool summaries, workspace transitions, and trace visibility.
-5. **[telemetry-integration.md](telemetry-integration.md)** — non-normative harness, CLI, server-projection, and Flight Recorder UI guidance.
+4. **[invocation-telemetry.md](invocation-telemetry.md)** — normative runtime audit-trace model. Harness-native OpenTelemetry is the preferred capture/correlation input; Git+ normalizes selected observations into signed `refs/hub/trace/*` records.
+5. **[telemetry-integration.md](telemetry-integration.md)** — non-normative OTel-first harness, OTLP ingestion, fallback-hook, server-projection, and Flight Recorder UI guidance.
 
 The core separation is:
 
@@ -19,17 +19,34 @@ Capture / Retention / Recall goal
         ↓
 repository + exposure protocol
         ↓
-runtime audit-trace protocol
+OTel runtime capture / correlation
+        ↓
+Git+ durable audit projection
         ↓
 harness / API / UI implementation
 ```
 
-High-frequency audit provenance is deliberately separate from the policy-critical session DAG:
+OpenTelemetry does not replace Git-native provenance:
+
+```text
+Context Pack / ContextRender
+  exact repository evidence + exposure commitment
+
+OTel
+  runtime spans / events / logs + trace correlation
+
+refs/hub/trace/<session>
+  selected normalized signed audit facts
+```
+
+High-frequency audit provenance remains separate from the policy-critical session DAG:
 
 ```text
 refs/hub/session/<session>  distilled provenance / policy-visible
 refs/hub/trace/<session>    detailed audit trace / policy-invisible
 ```
+
+The Git+ audit path should not silently inherit ordinary observability sampling or filtering. A normal OTel backend may use sampling, transforms, aggregation, and shorter retention; a Git+ deployment claiming durable runtime audit should ingest audit-relevant signals through a loss-intolerant branch or surface the resulting trace as partial/transformed.
 
 ## Other docs
 
@@ -41,4 +58,4 @@ refs/hub/trace/<session>    detailed audit trace / policy-invisible
 
 ## Documentation rule
 
-Normative wire/storage rules belong in the protocol specs. Architecture notes should link to those rules rather than restating them, and UI wording should distinguish signed/observed/reported facts from derived diagnostics or claims about model cognition.
+Normative Git+ wire/storage rules belong in the protocol specs. OpenTelemetry semantic conventions are treated as versioned external input to a normalization layer rather than frozen into Git+ protocol identity. Architecture notes should link to protocol rules instead of restating them, and UI wording should distinguish signed, observed, reported, and derived facts from claims about model cognition.
