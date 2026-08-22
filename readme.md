@@ -170,7 +170,7 @@ git+ session memory --distill
 
 Knowledge and Memory are data, not instruction authority.
 
-See [`docs/knowledge-durability.md`](docs/knowledge-durability.md).
+See [`docs/knowledge.md`](docs/knowledge.md).
 
 ---
 
@@ -284,4 +284,4 @@ Regenerate the CLI help snapshot after command-surface changes:
 npm run docs:cli
 ```
 
-Documentation map: [`docs/README.md`](docs/README.md).
+Documentation map: [`docs/readme.md`](docs/readme.md).

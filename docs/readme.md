@@ -21,7 +21,7 @@ All three use the same Git object store, signed identity, capabilities, and repo
 ## Start here
 
 1. **[agents.md](agents.md)** — Work: membership, authorization, sessions, tasks, decisions, PR workflow, and Repository Memory.
-2. **[knowledge-durability.md](knowledge-durability.md)** — Knowledge: the directly OKF-compatible `.gitplus/knowledge/` corpus, Git+ provenance extensions, freshness, and bounded Memory projection.
+2. **[knowledge.md](knowledge.md)** — Knowledge: the directly OKF-compatible `.gitplus/knowledge/` corpus, Git+ provenance extensions, freshness, and bounded Memory projection.
 3. **[context-pack.md](context-pack.md)** — Audit/context protocol: Repository Views, typed blob/gitlink evidence, exact ContextRender framing, reachability, and Context Exposure.
 4. **[telemetry.md](telemetry.md)** — Audit/runtime protocol: OTel GenAI ingestion, logical Invocations, attempts, capture health, signed `refs/hub/trace/*`, and Flight Recorder projection.
 5. **[cli.md](cli.md)** — CLI conventions and common Work / Knowledge / Audit workflows. Detailed syntax comes from `git+ ... --help`.
