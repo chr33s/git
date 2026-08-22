@@ -38,7 +38,7 @@ export const FileContent = Schema.Struct({
   mode: Schema.String,
   oid: OidString,
   content: Schema.String,
-  encoding: Schema.Literals(["base64"]),
+  encoding: Schema.Literals(["utf8", "base64"]),
   size: Schema.Finite,
 });
 export type FileContent = (typeof FileContent)["Type"];

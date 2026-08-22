@@ -661,6 +661,132 @@ describe("Api", () => {
       ),
   );
 
+  it.live("resolves short ref spellings at every read boundary", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+        const seed = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "seed",
+            author: alice,
+            files: [
+              { path: "readme.md", content: "hello\n" },
+              // A NUL in the first block: `isBinary`'s defining case.
+              { path: "bin.dat", content: "AAEC", encoding: "base64" },
+            ],
+          },
+        });
+        const second = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "main",
+            message: "second",
+            author: alice,
+            files: [{ path: "readme.md", content: "hello again\n" }],
+          },
+        });
+
+        // /files: bare, full, HEAD and the oid are the same tree.
+        const full = yield* client.repo.files({
+          params: { repo: "r" },
+          query: { ref: "refs/heads/main" },
+        });
+        const bare = yield* client.repo.files({ params: { repo: "r" }, query: { ref: "main" } });
+        const atHead = yield* client.repo.files({ params: { repo: "r" }, query: { ref: "HEAD" } });
+        const atOid = yield* client.repo.files({
+          params: { repo: "r" },
+          query: { ref: second.oid },
+        });
+        assert.deepEqual(bare.files, full.files);
+        assert.deepEqual(atHead.files, full.files);
+        assert.deepEqual(atOid.files, full.files);
+
+        // A bare name that resolves to nothing is a clean `Invalid`, naming
+        // what was sent — not a 404 on a qualified name nobody sent.
+        const missing = yield* client.repo
+          .files({ params: { repo: "r" }, query: { ref: "nowhere" } })
+          .pipe(Effect.flip);
+        assert.equal(missing._tag, "Invalid");
+        assert.match(missing.reason, /unknown ref 'nowhere'/);
+
+        // /file: UTF-8 text straight from the JSON; base64 stays the default.
+        const text = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: "main", path: "readme.md", encoding: "utf8" },
+        });
+        assert.equal(text.encoding, "utf8");
+        assert.equal(text.content, "hello again\n");
+        const raw = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: "main", path: "readme.md" },
+        });
+        assert.equal(raw.encoding, "base64");
+        assert.equal(atob(raw.content), "hello again\n");
+
+        // Binary asked for as text is refused, not corrupted into mojibake.
+        const binary = yield* client.repo
+          .file({
+            params: { repo: "r" },
+            query: { ref: "main", path: "bin.dat", encoding: "utf8" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(binary._tag, "Invalid");
+        assert.match(binary.reason, /binary/);
+
+        // /diff, /grep and /reflog take the same spellings.
+        const diff = yield* client.repo.diff({
+          params: { repo: "r" },
+          payload: { from: seed.oid, to: "main" },
+        });
+        assert.deepEqual(
+          diff.files.map((file) => file.path),
+          ["readme.md"],
+        );
+        const hits = yield* client.repo.grep({
+          params: { repo: "r" },
+          payload: { pattern: "hello", ref: "main", fixed: true },
+        });
+        assert.deepEqual(
+          hits.matches.map((match) => match.path),
+          ["readme.md"],
+        );
+        const reflog = yield* client.repo.reflog({
+          params: { repo: "r" },
+          query: { ref: "main" },
+        });
+        assert.ok(reflog.entries.length >= 2);
+
+        // And the write payloads: a branch's base, a cherry-pick's onto/into.
+        const branched = yield* client.repo.branch({
+          params: { repo: "r" },
+          payload: { name: "topic", base: "main" },
+        });
+        assert.equal(branched.oid, second.oid);
+
+        const onTopic = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            branch: "topic",
+            message: "topic work",
+            author: alice,
+            files: [{ path: "topic.txt", content: "topic\n" }],
+          },
+        });
+        yield* client.repo["cherry-pick"]({
+          params: { repo: "r" },
+          payload: { commit: onTopic.oid, onto: "main", into: "main" },
+        });
+        const after = yield* client.repo.file({
+          params: { repo: "r" },
+          query: { ref: "main", path: "topic.txt", encoding: "utf8" },
+        });
+        assert.equal(after.content, "topic\n");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
   it.live("commits real content, and reads it back", () =>
     dispatched(
       Effect.gen(function* () {

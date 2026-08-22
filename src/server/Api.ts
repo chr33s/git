@@ -226,6 +226,15 @@ const branchRefOf = Effect.fn("Api.branchRefOf")(function* (value: string) {
   return refNameOf(value);
 });
 
+/**
+ * A revision as the API takes one, anywhere: an oid, `HEAD`, a full
+ * `refs/…` name, or a bare branch. One normalizer so every endpoint answers
+ * the same spellings — `main`, `refs/heads/main`, `HEAD`, or the oid
+ * itself — instead of each client qualifying at its own boundary. Bare
+ * names mean branches; anything else is named in full.
+ */
+const revisionOf = (value: string): string => (isOid(value) ? value : refNameOf(value));
+
 const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = false) {
   // Fail closed: a policy that cannot be evaluated refuses the write rather
   // than allowing it. The alternative is a repository whose protection turns
@@ -577,7 +586,7 @@ const ARCHIVE_TYPES = {
 const treeOfRef = (repository: Repository["Service"], ref: string | undefined) =>
   Effect.gen(function* () {
     const name = ref === undefined || ref === "" ? "HEAD" : ref;
-    const oid = isOid(name) ? name : yield* repository.resolve(name);
+    const oid = isOid(name) ? name : yield* repository.resolve(refNameOf(name));
     if (oid === null) return yield* new Invalid({ field: "ref", reason: `unknown ref '${name}'` });
     return yield* treeAt(repository, oid);
   }).pipe(Effect.catchTag("StorageFailure", Effect.die));
@@ -912,7 +921,11 @@ const repo = HttpApiGroup.make("repo")
   .add(
     HttpApiEndpoint.get("file", "/file", {
       params: RepoParam,
-      query: { ref: Schema.optional(Schema.String), path: Schema.String },
+      query: {
+        ref: Schema.optional(Schema.String),
+        path: Schema.String,
+        encoding: Schema.optional(Encoding),
+      },
       success: FileContent,
       error: [ObjectNotFound, Invalid],
     }),
@@ -1491,7 +1504,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const repository = yield* Repository;
         yield* gateWrite(`refs/heads/${payload.name}`);
         const oid = yield* repository
-          .branch(payload)
+          .branch({ ...payload, base: revisionOf(payload.base) })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return { name: `refs/heads/${payload.name}`, oid };
       }),
@@ -1638,18 +1651,22 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const target = isOid(payload.to)
           ? payload.to
           : yield* repository
-              .resolve(payload.to)
+              .resolve(refNameOf(payload.to))
               .pipe(Effect.catchTag("StorageFailure", Effect.die));
         if (target === null) {
           return yield* new Invalid({ field: "to", reason: `unknown revision '${payload.to}'` });
         }
+
+        // Short spellings qualify here, once, so the gate and the write name
+        // the same ref — the merge handler's rule.
+        const ref = refNameOf(payload.ref);
 
         // The judged update carries the value the decision was made against,
         // and it is that value the write is applied under: deciding on one
         // state and writing against another is the race the boundary exists
         // to close.
         const judged = yield* gateOne({
-          name: payload.ref,
+          name: ref,
           value: target,
           expected: payload.expected,
         });
@@ -1657,7 +1674,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // The *resolved* oid, not the name it was resolved from: handing
         // `setRef` the name would resolve it a second time, and a source ref
         // that moved in between would land a value the policy never saw.
-        const request: SetRefRequest = { name: payload.ref, to: target };
+        const request: SetRefRequest = { name: ref, to: target };
         if (judged.expected !== undefined) request.expected = judged.expected;
         const moved = yield* repository
           .setRef(request)
@@ -1669,8 +1686,8 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const request: MergeRequest = {
-          ours: payload.ours,
-          theirs: payload.theirs,
+          ours: revisionOf(payload.ours),
+          theirs: revisionOf(payload.theirs),
           author: signatureFrom(payload.author),
         };
         if (payload.message !== undefined) request.message = payload.message;
@@ -1705,7 +1722,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // symrefs. Qualifying first answered `null` for `HEAD` — and a
           // `null` side is a side nothing matches, so the merge was charged a
           // rewrite again for the one spelling git itself uses most.
-          const judged = yield* discards(into, [payload.ours, payload.theirs]);
+          const judged = yield* discards(into, [request.ours, request.theirs]);
           yield* gateWrite(into, judged.rewrites);
           request.expected = judged.swap;
         }
@@ -1720,7 +1737,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // As `merge` above: a cherry-pick writes a commit with or without a
         // branch to land it on.
         yield* requireCapability("source.push");
-        const request: CherryPickRequest = { commit: payload.commit, onto: payload.onto };
+        const request: CherryPickRequest = {
+          commit: revisionOf(payload.commit),
+          onto: revisionOf(payload.onto),
+        };
         if (payload.author !== undefined) request.author = signatureFrom(payload.author);
         // Qualified once, for the gate and the write alike; see `merge` above.
         // And a rewrite only when there is something to rewrite: an `into`
@@ -1729,7 +1749,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         // contributor set a branch they were creating.
         if (payload.into !== undefined) {
           request.into = yield* branchRefOf(payload.into);
-          const judged = yield* discards(request.into, [payload.onto]);
+          const judged = yield* discards(request.into, [request.onto]);
           yield* gateWrite(request.into, judged.rewrites);
           request.expected = judged.swap;
         }
@@ -1740,11 +1760,14 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         // As `merge` above: a rebase writes its replayed commits either way.
         yield* requireCapability("source.push");
-        const request: RebaseRequest = { branch: payload.branch, onto: payload.onto };
+        const request: RebaseRequest = {
+          branch: revisionOf(payload.branch),
+          onto: revisionOf(payload.onto),
+        };
         // As `cherry-pick` above.
         if (payload.into !== undefined) {
           request.into = yield* branchRefOf(payload.into);
-          const judged = yield* discards(request.into, [payload.onto]);
+          const judged = yield* discards(request.into, [request.onto]);
           yield* gateWrite(request.into, judged.rewrites);
           request.expected = judged.swap;
         }
@@ -1842,12 +1865,22 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const data = yield* repository
           .readBlob(entry.oid)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
+        // Text on request, and binary refused rather than decoded into
+        // mojibake: the caller asked for UTF-8, so a byte stream that is not
+        // text is an answer, not a corruption.
+        if (query.encoding === "utf8" && isBinary(data)) {
+          return yield* new Invalid({
+            field: "path",
+            reason: `'${query.path}' is binary; read it as base64`,
+          });
+        }
+        const text = query.encoding === "utf8";
         return {
           path: query.path,
           mode: entry.mode,
           oid: entry.oid,
-          content: toBase64(data),
-          encoding: "base64" as const,
+          content: text ? decoder.decode(data) : toBase64(data),
+          encoding: text ? ("utf8" as const) : ("base64" as const),
           size: data.length,
         };
       }),
@@ -1949,7 +1982,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const entries = yield* repository
-          .reflog(query.ref)
+          .reflog(refNameOf(query.ref))
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
         return {
           entries: entries.map((entry) => ({
@@ -2257,10 +2290,11 @@ export const remoteHandlers = HttpApiBuilder.group(api, "remotes", (group) =>
         const request: PushRequest = {
           url: target.url,
           refs: payload.refs.map((ref): PushRef => {
-            const remote = ref.remote ?? ref.local;
+            const remote = ref.remote ?? refNameOf(ref.local);
+            const local = refNameOf(ref.local);
             return ref.delete === undefined
-              ? { local: ref.local, remote }
-              : { local: ref.local, remote, delete: ref.delete };
+              ? { local, remote }
+              : { local, remote, delete: ref.delete };
           }),
         };
         if (target.credential !== null) request.token = target.credential;

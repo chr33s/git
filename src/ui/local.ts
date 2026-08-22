@@ -38,7 +38,6 @@ import {
   ApiError,
   type CommitDetail,
   type CommitFilesRequest,
-  qualify,
   type CommitCreated,
   type CommitSummary,
   type DiffFile,
@@ -55,6 +54,15 @@ export type { PushResult, SyncState };
 
 const HEADS = "refs/heads/";
 const REMOTE = "refs/remotes/origin/";
+
+const OID = /^[0-9a-f]{40}$/;
+
+/**
+ * Bare branch names, as `Repository` insists on. Private, because this client
+ * talks to `Repository` directly — the HTTP boundary normalizes for itself.
+ */
+const qualify = (ref: string): string =>
+  OID.test(ref) || ref.startsWith("refs/") || ref === "HEAD" ? ref : `${HEADS}${ref}`;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

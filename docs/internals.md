@@ -333,7 +333,10 @@ is what makes a push deliver.
 
 `commit`, `commits` and `log` answer one enriched commit view — oid, message,
 subject, author, ISO date, parents — so a client never re-parses a raw object
-for an author line; `object` stays the low-level endpoint underneath.
+for an author line; `object` stays the low-level endpoint underneath. Ref-ish
+inputs take `main`, `refs/heads/main`, `HEAD` or an oid, normalized by one
+resolver at the boundary; `file` answers UTF-8 text on request and refuses
+binary content rather than corrupting it.
 
 A repository can act as a client of another: remotes are registered per
 repository with an optional credential that is _stored rather than sent_ (a

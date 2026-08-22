@@ -19,7 +19,7 @@ import { customElement, property, state } from "lit/decorators.js";
 
 import type { FileDiff } from "@pierre/diffs";
 
-import { ApiError, describe, type DiffFile, type GitApi, qualify } from "./api.ts";
+import { ApiError, describe, type DiffFile, type GitApi } from "./api.ts";
 import { GitPlusElement, navigate } from "./base.ts";
 import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
@@ -136,9 +136,9 @@ export class GpDetail extends GitPlusElement {
     if (api !== null) {
       try {
         const result = await api.merge({
-          ours: qualify(cr.targetRef),
-          theirs: qualify(cr.sourceRef),
-          into: qualify(cr.targetRef),
+          ours: cr.targetRef,
+          theirs: cr.sourceRef,
+          into: cr.targetRef,
           message: `merge ${cr.id}: ${cr.title}`,
         });
         if (result.kind === "conflicted") {

@@ -140,20 +140,6 @@ const ErrorBody = Schema.Struct({
   reason: Schema.optional(Schema.String),
 });
 
-const OID = /^[0-9a-f]{40}$/;
-
-/**
- * Qualify a ref the way the server insists on.
- *
- * `/files`, `/file` and `/diff` all resolve a ref strictly: an oid, `HEAD`, or a
- * full `refs/...` name. A bare branch name comes back
- * `400 Invalid { field: "ref", reason: "unknown ref 'main'" }` — so the friendly
- * name the UI shows is expanded here, at the boundary, rather than every screen
- * remembering to do it.
- */
-export const qualify = (ref: string): string =>
-  OID.test(ref) || ref.startsWith("refs/") || ref === "HEAD" ? ref : `refs/heads/${ref}`;
-
 const decoder = new TextDecoder();
 
 /**
@@ -273,19 +259,19 @@ export class GitApi {
    * itself — so the answer needs no reshaping at all.
    */
   async files(ref: string, path?: string): Promise<readonly FileEntry[]> {
-    const query = new URLSearchParams({ ref: qualify(ref) });
+    const query = new URLSearchParams({ ref });
     if (path !== undefined) query.set("path", path);
     const body = await this.#json(this.#url("/files", query), Contract.FilesResponse);
     return body.files;
   }
 
-  /** One blob's content, already decoded from base64. */
+  /** One blob's content — UTF-8 text straight from the JSON, no base64 hop. */
   async file(ref: string, path: string): Promise<string> {
     const body = await this.#json(
-      this.#url("/file", new URLSearchParams({ ref: qualify(ref), path })),
+      this.#url("/file", new URLSearchParams({ ref, path, encoding: "utf8" })),
       Contract.FileContent,
     );
-    return decodeContent(body.content);
+    return body.encoding === "utf8" ? body.content : decodeContent(body.content);
   }
 
   /**
@@ -296,10 +282,7 @@ export class GitApi {
    * browser.
    */
   async diff(from: string, to: string, path?: string): Promise<readonly DiffFile[]> {
-    const from_ = qualify(from);
-    const to_ = qualify(to);
-    const payload: Contract.DiffRequest =
-      path === undefined ? { from: from_, to: to_ } : { from: from_, to: to_, path };
+    const payload: Contract.DiffRequest = path === undefined ? { from, to } : { from, to, path };
     const body = await this.#json(this.#url("/diff"), Contract.DiffResponse, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -366,7 +349,7 @@ export class GitApi {
   async grep(pattern: string, ref: string, maxMatches = 50): Promise<GrepResponse> {
     const payload: Contract.GrepRequest = {
       pattern,
-      ref: qualify(ref),
+      ref,
       fixed: true,
       ignore_case: true,
       max_matches: maxMatches,
@@ -376,7 +359,7 @@ export class GitApi {
 
   /** Create a branch at `base` (a ref or an oid). */
   async branchCreate(name: string, base: string): Promise<Ref> {
-    const payload: Contract.BranchCreateRequest = { name, base: qualify(base) };
+    const payload: Contract.BranchCreateRequest = { name, base };
     return await this.#post("/branches/create", payload, Contract.Ref);
   }
 
@@ -386,7 +369,7 @@ export class GitApi {
 
   /** Move a ref to a commit — `reset --hard`, with an optional CAS. */
   async reset(ref: string, to: string, expected?: string): Promise<ResetResult> {
-    const payload: ResetOptions = { ref: qualify(ref), to };
+    const payload: ResetOptions = { ref, to };
     if (expected !== undefined) payload.expected = expected;
     return await this.#post("/reset", payload, Contract.ResetResult);
   }
@@ -422,7 +405,7 @@ export class GitApi {
   /** Where a ref has been: every move, newest first. */
   async reflog(ref: string): Promise<readonly ReflogEntry[]> {
     const body = await this.#json(
-      this.#url("/reflog", new URLSearchParams({ ref: qualify(ref) })),
+      this.#url("/reflog", new URLSearchParams({ ref })),
       Contract.ReflogResponse,
     );
     return body.entries;
@@ -475,11 +458,7 @@ export class GitApi {
 
   /** Push one local branch to a stored remote, same name on the far side. */
   async pushRemote(name: string, branch: string): Promise<PushResult> {
-    return await this.#post(
-      "/push",
-      { name, refs: [{ local: qualify(branch) }] },
-      Contract.PushResult,
-    );
+    return await this.#post("/push", { name, refs: [{ local: branch }] }, Contract.PushResult);
   }
 
   /** Fast-forward one branch from a stored remote. */
@@ -540,20 +519,12 @@ export class GitApi {
 
   /** Replay one commit onto a branch, moving it on success. */
   async cherryPick(commit: string, onto: string): Promise<Contract.ReplayResult> {
-    return await this.#post(
-      "/cherry-pick",
-      { commit, onto: qualify(onto), into: qualify(onto) },
-      Contract.ReplayResult,
-    );
+    return await this.#post("/cherry-pick", { commit, onto, into: onto }, Contract.ReplayResult);
   }
 
   /** Replay a branch onto another, moving it on success. */
   async rebase(branch: string, onto: string): Promise<Contract.ReplayResult> {
-    return await this.#post(
-      "/rebase",
-      { branch: qualify(branch), onto: qualify(onto), into: qualify(branch) },
-      Contract.ReplayResult,
-    );
+    return await this.#post("/rebase", { branch, onto, into: branch }, Contract.ReplayResult);
   }
 
   /** The next revision to test, between known-good marks and a known-bad one. */
@@ -563,7 +534,7 @@ export class GitApi {
 
   /** Where a revision's archive can be fetched — for a download link. */
   archiveUrl(ref: string, format: "tar" | "tar.gz" | "zip" = "tar.gz"): string {
-    return this.#url("/archive", new URLSearchParams({ ref: qualify(ref), format }));
+    return this.#url("/archive", new URLSearchParams({ ref, format }));
   }
 }
 

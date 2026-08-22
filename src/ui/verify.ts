@@ -267,20 +267,28 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
 
       if (api) {
         const ref = url.searchParams.get("ref");
-        // The real server resolves refs strictly — an oid, `HEAD`, or a full
-        // `refs/...` name — and answers 400 for a bare branch name. The stub
-        // enforces the same rule: accepting anything is what let a client that
-        // sent short names pass this suite and then fail against the server.
-        if (ref !== null && !ref.startsWith("refs/") && !/^[0-9a-f]{40}$/.test(ref)) {
+        // The server resolves `main`, `refs/heads/main`, `HEAD`, or an oid —
+        // one normalizer at its boundary. The stub enforces the same
+        // spellings, so a client speaking anything else fails here first.
+        const refIsOid = /^[0-9a-f]{40}$/;
+        if (
+          ref !== null &&
+          !ref.startsWith("refs/") &&
+          ref !== "HEAD" &&
+          !refIsOid.test(ref) &&
+          !tips.has(ref)
+        ) {
           response.writeHead(400, { "content-type": "application/json" });
           return response.end(
             JSON.stringify({ _tag: "Invalid", field: "ref", reason: `unknown ref '${ref}'` }),
           );
         }
         const branchOf = (name: string | null): string =>
-          name !== null && name.startsWith("refs/heads/")
-            ? name.slice("refs/heads/".length)
-            : "main";
+          name !== null && tips.has(name)
+            ? name
+            : name !== null && name.startsWith("refs/heads/")
+              ? name.slice("refs/heads/".length)
+              : "main";
         const tree = trees.get(branchOf(ref)) ?? new Map<string, string>();
         const refsNow = [...tips.entries()].map(([name, tip]) => ({
           name: `refs/heads/${name}`,
@@ -302,12 +310,13 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             response.writeHead(404, { "content-type": "application/json" });
             return response.end(JSON.stringify({ _tag: "ObjectNotFound" }));
           }
+          const utf8 = url.searchParams.get("encoding") === "utf8";
           return json(Contract.FileContent, {
             path: wanted,
             mode: "100644",
             oid: OID_BRANCH,
-            content: base64(content),
-            encoding: "base64",
+            content: utf8 ? content : base64(content),
+            encoding: utf8 ? "utf8" : "base64",
             size: content.length,
           });
         }
@@ -677,7 +686,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             const payload = Schema.decodeUnknownSync(Contract.DiffRequest)(input);
             // CR-15 is the valid empty-diff case. CR-14 is deliberately slower
             // so the live suite can prove an older request cannot overwrite it.
-            if (payload.to === "refs/heads/atran/login-ui") {
+            if (branchOf(payload.to) === "atran/login-ui") {
               return json(Contract.DiffResponse, { files: [] });
             }
             await new Promise((resolve) => setTimeout(resolve, 250));
