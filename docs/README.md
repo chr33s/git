@@ -1,29 +1,83 @@
 # Documentation
 
-The repository documentation is intentionally split by responsibility so protocol rules, architecture goals, runtime integration, and product behavior can evolve without becoming one brittle specification.
+The repository documentation is split by responsibility so protocol rules, knowledge architecture, runtime integration, and product behavior can evolve without becoming one brittle specification.
 
 ## Agent and provenance docs
 
 Read these in roughly this order:
 
-1. **[agents.md](agents.md)** — existing agent membership, authorization, session provenance, decisions, Memory, and end-to-end workflow.
-2. **[knowledge-durability.md](knowledge-durability.md)** — the Capture → Retention → Recall objective, including team-member departure, cited claims, and structured evidence dependencies.
-3. **[context-pack.md](context-pack.md)** — normative repository and context-exposure provenance: Repository Views, blob/gitlink evidence, ContextRender, reachability, and Context Exposure records.
-4. **[telemetry.md](telemetry.md)** — runtime audit model plus OTel GenAI ingestion, harness integration, API projection, and Flight Recorder UI guidance. Harness-native OpenTelemetry is the preferred capture/correlation input; Git+ normalizes selected observations into signed `refs/hub/trace/*` records.
+1. **[agents.md](agents.md)** — existing agent membership, authorization, session provenance, decisions, bounded Repository Memory, and end-to-end workflow.
+2. **[knowledge-durability.md](knowledge-durability.md)** — the Capture → Retention → Recall architecture, including Durable Knowledge Concepts, structured evidence dependencies, freshness, Memory projection, and optional Open Knowledge Format (OKF) interoperability.
+3. **[context-pack.md](context-pack.md)** — normative repository and invocation-exposure provenance: Repository Views, typed blob/gitlink evidence, semantically framed ContextRender, Git reachability, and Context Exposure records.
+4. **[telemetry.md](telemetry.md)** — runtime audit model plus OTel GenAI ingestion, signed `refs/hub/trace/*` storage, harness integration, API projection, and Flight Recorder UI guidance.
 
-The core separation is:
+The core layering is:
 
 ```text
-Capture / Retention / Recall goal
+signed sessions / decisions / repository evidence
+        │
         ↓
-repository + exposure protocol
-        ↓
-OTel runtime capture / correlation
-        ↓
-Git+ durable audit projection
-        ↓
-harness / API / UI implementation
+Durable Knowledge Concepts
+        │
+        ├──────────────→ bounded Repository Memory
+        │
+        └──────────────→ task-specific retrieval
+                                │
+                                ↓
+                           Context Pack
+                                │
+                                ↓
+                         Context Exposure
+                                │
+                                ↓
+                   OTel runtime correlation
+                                │
+                                ↓
+                    Git+ durable audit trace
 ```
+
+The layers intentionally answer different questions:
+
+```text
+session / decision
+  what happened, and who said or did it?
+
+Knowledge Concept
+  what reusable thing does the repository currently claim to know?
+
+Repository Memory
+  what small set of current knowledge should every session receive cheaply?
+
+Context Pack / Context Exposure
+  what exact Git-grounded repository context crossed this invocation boundary?
+
+Telemetry
+  under what observable runtime conditions did the invocation occur?
+```
+
+## Knowledge interoperability
+
+Durable Knowledge Concepts use boring, portable Markdown + YAML frontmatter and may be made compatible with the Open Knowledge Format (OKF):
+
+```text
+https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
+```
+
+OKF is an optional interchange target, not a Git+ trust or protocol dependency.
+
+Useful OKF ideas such as stable source IDs, generated-versus-verified metadata, lifecycle, temporal freshness, per-claim attribution, and progressive-disclosure indexes can round-trip while Git+ retains stronger repository semantics under namespaced metadata:
+
+```text
+Git record commit OIDs
+signed provenance
+blob/gitlink dependencies
+repository trust/capabilities
+Context Exposure
+```
+
+Imported knowledge is data. OKF `verified` metadata, a human-reviewed label, or any other imported field does not grant repository membership, capability, instruction authority, or policy authority.
+
+## Repository provenance versus runtime observability
 
 OpenTelemetry does not replace Git-native provenance:
 
@@ -31,14 +85,12 @@ OpenTelemetry does not replace Git-native provenance:
 Context Pack / ContextRender
   exact repository evidence + exposure commitment
 
-OTel
-  runtime spans / events / logs + trace correlation
+OTel GenAI
+  runtime operation semantics + trace correlation
 
 refs/hub/trace/<session>
   selected normalized signed audit facts
 ```
-
-When an incoming signal declares OpenTelemetry GenAI semantic-convention compatibility, the declared convention controls interpretation of that signal. Git+ may normalize its representation into stable fields, but does not redefine the upstream meaning. In particular, one compliant inference span is one logical invocation; automatic provider retries may remain subordinate attempt detail.
 
 High-frequency audit provenance remains separate from the policy-critical session DAG:
 
@@ -57,6 +109,22 @@ The Git+ audit path should not silently inherit ordinary observability sampling 
 - **[cli.md](cli.md)** — CLI surface.
 - **[internals.md](internals.md)** — implementation structure and contributor-facing internals.
 
-## Documentation rule
+## Documentation rules
 
-Normative Git+ wire/storage rules belong in the protocol portions of the docs. OpenTelemetry semantic conventions are treated as versioned external input to a normalization layer rather than frozen into Git+ protocol identity. Architecture/UI guidance should link to those rules rather than restating them, and UI wording should distinguish signed, observed, reported, and derived facts from claims about model cognition.
+Normative Git+ wire/storage rules belong in protocol specs. Architecture notes should link to those rules instead of restating them.
+
+OpenTelemetry semantic conventions and OKF are versioned external interoperability surfaces. Git+ should preserve their declared meaning at ingestion/import boundaries without freezing their evolving field names into Git-native protocol identity.
+
+Documentation and UI wording should distinguish:
+
+```text
+signed
+observed
+reported
+derived
+editorially verified
+repository-evidence current
+temporally fresh
+```
+
+from stronger claims about truth, authority, cognition, or causation.
