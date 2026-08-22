@@ -3,39 +3,57 @@
 **Status:** Draft architecture note  
 **Project:** `@chr33s/git`  
 **Last updated:** 2026-08-22  
-**Revision:** draft-3
+**Revision:** draft-4
 
-## 1. Summary
+## 1. Purpose
 
-A repository should retain the operational knowledge necessary for the next competent human or agent to continue the work, even when the previous contributor, model session, or hosting platform is gone.
+Git+ keeps reusable repository knowledge durable without turning generated prose into authority or pretending citations prove truth.
 
-The problem has three stages:
+The product model has three planes:
+
+```text
+WORK
+  tasks / PRs / sessions / decisions
+
+KNOWLEDGE
+  OKF-compatible Knowledge Concepts
+  bounded Repository Memory
+
+AUDIT
+  invocations / context / runtime
+```
+
+All three remain grounded in Git-native identity and trust.
+
+Knowledge specifically solves:
 
 ```text
 Capture
-  Did somebody record the claim or evidence while it was available?
-
-      ↓
+  did useful repository knowledge become durable?
 
 Retention
-  Does that record survive the person, session, tool, or host?
-
-      ↓
+  does it survive the person, session, harness, or host?
 
 Recall
-  Does the next human or agent receive it when relevant?
+  does a later human or agent receive it when relevant?
 ```
 
-No one primitive solves all three.
+A crucial distinction is:
 
-Git+ composes five layers:
+> **A citation proves where a claim came from. It does not, by itself, prove the claim is true or still current.**
+
+---
+
+## 2. Architecture
+
+The knowledge path is:
 
 ```text
 signed sessions / decisions / repository evidence
         │
-        │ durable provenance
+        │ distillation or human curation
         ↓
-Durable Knowledge Concepts
+Knowledge Concepts
         │
         ├──────────────→ bounded Repository Memory
         │
@@ -46,9 +64,6 @@ Durable Knowledge Concepts
                                 │
                                 ↓
                          Context Exposure
-                                │
-                                ↓
-                           Telemetry
 ```
 
 The layers answer different questions:
@@ -56,122 +71,19 @@ The layers answer different questions:
 | Layer | Question |
 | --- | --- |
 | signed session / decision | What happened, and who said or did it? |
-| Durable Knowledge Concept | What reusable thing does the repository currently claim to know? |
-| Repository Memory | What small set of knowledge should every new session receive cheaply? |
-| Context Pack / Exposure | What exact Git-grounded context crossed this invocation boundary? |
-| Telemetry | Under what observable runtime conditions did the invocation occur? |
+| Knowledge Concept | What reusable thing does the repository currently claim to know? |
+| Repository Memory | What small set of useful current knowledge should every session receive cheaply? |
+| Context Pack / Exposure | Was this knowledge or its supporting repository evidence actually exposed to this invocation? |
 
-The goal is **durable, attributable, recallable repository knowledge**, not exhaustive recording of human thought or model cognition.
-
-A crucial distinction remains:
-
-> **A citation proves where a claim came from. It does not, by itself, prove the claim is true or still current.**
+A Concept is curated publication, not raw evidence. Memory is a bounded projection, not a knowledge database. Context Exposure is the invocation-specific recall boundary.
 
 ---
 
-## 2. Why add Durable Knowledge Concepts
+## 3. Knowledge bundle: OKF directly
 
-The existing Repository Memory design is intentionally a bounded projection cache. It is small enough to inject at session start, regenerable from durable records, and allowed to evict stale or low-value entries.
+Git+ knowledge is stored as an **Open Knowledge Format (OKF) compatible bundle**, not converted to and from a separate Git+ knowledge format.
 
-Those properties are correct for recall, but they make Memory the wrong place for a larger curated knowledge corpus.
-
-The repository also needs an optional durable unit for knowledge that should:
-
-- remain independently readable after the discovering session ages out;
-- be curated by humans or agents;
-- carry explicit sources and lifecycle metadata;
-- be diffable and reviewable in ordinary Git history;
-- support progressive disclosure rather than being loaded whole;
-- survive Memory eviction;
-- interoperate with external knowledge tools without weakening Git+ provenance.
-
-That unit is a **Durable Knowledge Concept**.
-
-A Concept is publication, not raw evidence. Its claims remain attributable to the signed records, repository objects, and external captures from which it derives.
-
----
-
-## 3. Architectural roles
-
-### 3.1 Signed provenance is the historical record
-
-Sessions and decisions retain durable work provenance such as:
-
-```text
-who was working
-what was asked
-what was produced
-what decisions were requested/resolved
-what compact note the session emitted
-aggregate usage when available
-```
-
-High-frequency invocation/tool telemetry stays in `refs/hub/trace/<session>` rather than the policy-critical session DAG.
-
-Material judgement SHOULD become signed decision provenance rather than remain only in chat.
-
-### 3.2 Durable Knowledge Concepts are curated repository knowledge
-
-A Knowledge Concept captures a reusable repository claim or body of knowledge such as:
-
-```text
-architecture rationale
-repository convention
-gotcha
-operational playbook
-external-system dependency
-migration state
-business/domain rule
-known friction
-important decision summary
-```
-
-Concepts are intended to be human-readable and agent-readable without proprietary tooling.
-
-They MAY be authored manually, generated from sessions, or maintained by an agent, but their provenance must remain explicit.
-
-### 3.3 Repository Memory is a bounded projection
-
-Repository Memory remains:
-
-```text
-small
-regenerable
-disposable
-session-start friendly
-not an authority source
-```
-
-Memory SHOULD be derived from the highest-value current Concepts and/or directly from signed provenance when no Concept exists.
-
-A Concept does not have to appear in Memory, and eviction from Memory does not delete the Concept.
-
-### 3.4 Context Packs prove task-specific recall
-
-A Concept existing in the repository is not proof that an invocation received it.
-
-Task-specific retrieval may select:
-
-- a Knowledge Concept;
-- its current supporting source files;
-- related tests/configuration;
-- other repository evidence.
-
-Those repository blobs then appear in the invocation's [Context Pack](context-pack.md) when exposed.
-
-A Context Exposure record proves the harness-side recall boundary for that invocation.
-
-### 3.5 Telemetry diagnoses failed recall
-
-[Telemetry](telemetry.md) distinguishes whether useful knowledge disappeared through capture, retention, retrieval, selection, lifecycle, assembly, compaction, truncation, or stale workspace state.
-
----
-
-## 4. Knowledge bundle
-
-A repository MAY maintain a human-readable knowledge bundle in ordinary source history.
-
-Recommended default:
+Recommended location:
 
 ```text
 .gitplus/knowledge/
@@ -185,34 +97,27 @@ Recommended default:
   decisions/
 ```
 
-The path is a product convention, not a Git object-format requirement. Repositories MAY choose another configured location.
+The directory itself is the interchange artifact. It can be copied, cloned, archived, indexed, or consumed by another OKF implementation without a Git+-specific export step.
 
-Keeping the bundle in ordinary repository history gives it:
-
-- normal Git diffs;
-- branch/review workflow;
-- commit attribution;
-- easy cloning and inspection;
-- direct eligibility for Context Pack blob evidence;
-- no requirement for a separate knowledge database.
-
-The bundle is not an instruction namespace. Knowledge remains data unless existing harness/repository policy independently grants a particular file instruction authority.
-
----
-
-## 5. Knowledge Concept format
-
-Git+ SHOULD use an intentionally boring, portable representation: UTF-8 Markdown with YAML frontmatter.
-
-This is compatible in spirit and, where practical, structurally compatible with the **Open Knowledge Format (OKF)**:
+Git+ currently profiles OKF v0.2:
 
 ```text
 https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
 ```
 
-Git+ does not require OKF for correctness. OKF is an interoperability target, not a trust root or protocol dependency.
+The root `index.md` MAY carry OKF's `okf_version` metadata. Unknown portable metadata SHOULD be preserved when tools rewrite a Concept.
 
-### 5.1 Minimal Concept
+Git+ adds stronger repository provenance under a namespaced `gitplus:` extension. Generic OKF consumers can ignore that extension and still read the Concept.
+
+This is an interoperability profile, not a trust dependency. OKF metadata never replaces signed Git identity, repository capabilities, or Git evidence verification.
+
+---
+
+## 4. Knowledge Concept
+
+A Concept is a UTF-8 Markdown document with YAML frontmatter following OKF.
+
+`type` is the only universally required portable field.
 
 Example:
 
@@ -220,16 +125,23 @@ Example:
 ---
 type: Gotcha
 title: Worker auth tests require the production policy fixture
+description: The worker auth suite depends on the production policy fixture.
 status: stable
+stale_after: 2026-12-31T00:00:00Z
 generated:
   by: gitplus-distiller/1
   at: 2026-08-22T09:30:00Z
+verified:
+  - by: human:alice
+    at: 2026-08-22T11:00:00Z
 sources:
+  - id: policy-config
+    resource: /references/policy-config.md
   - id: discovery-session
     resource: gitplus:record:sha1:abc123...
-  - id: policy-config
-    resource: config/policy.json
 gitplus:
+  cites:
+    - record: sha1:abc123...
   evidence:
     - kind: blob
       path: tests/worker/auth.test.ts
@@ -244,69 +156,39 @@ The worker authentication tests require the production policy fixture.[^policy-c
 [^policy-config]: Current repository configuration supporting this claim.
 ```
 
-### 5.2 Required and optional shape
+Portable OKF metadata provides readability and interoperability. The `gitplus:` extension provides stronger immutable repository provenance when available.
 
-Git+ SHOULD keep the portable core small.
+### 4.1 Concept identity
 
-Recommended portable fields include:
+The portable Concept ID is its path relative to the bundle root with `.md` removed.
+
+For example:
 
 ```text
-type
-  concept type; required for OKF-compatible export
-
-title
-  human-readable title
-
-description
-  short retrieval/index description
-
-tags
-  cross-cutting categorization
-
-status
-  draft | stable | deprecated
-
-generated
-  who/what authored the current content and when
-
-verified
-  editorial/source-check history
-
-stale_after
-  optional absolute temporal revalidation deadline
-
-sources
-  stable source IDs and locators
+.gitplus/knowledge/gotchas/worker-auth.md
+        ↓
+gotchas/worker-auth
 ```
 
-Git+-specific provenance SHOULD live under a namespaced extension such as:
+That path is a convenient name, not immutable identity.
 
-```yaml
-gitplus:
-  cites: ...
-  evidence: ...
-  verification_records: ...
-```
-
-Consumers that do not understand the extension can still read the Markdown Concept.
+When an exact historical Concept version matters, Git+ uses the ordinary repository tree/blob identity for that file.
 
 ---
 
-## 6. Stable source IDs and per-claim attribution
+## 5. Sources and per-claim attribution
 
-Source arrays are frequently reordered by agents and formatters. Positional references such as `sources[0]` are therefore fragile.
-
-Concept sources SHOULD use stable IDs:
+Concepts SHOULD use stable `sources[].id` values rather than positional references.
 
 ```yaml
 sources:
   - id: auth-policy
-    resource: src/auth/policy.ts
+    resource: /references/auth-policy.md
   - id: design-decision
     resource: gitplus:record:sha1:1234...
 ```
 
-Specific claims MAY use Markdown footnotes keyed to those source IDs:
+Specific claims MAY use OKF's Markdown-footnote attribution:
 
 ```markdown
 Authentication failures are fail-closed.[^auth-policy]
@@ -314,15 +196,15 @@ Authentication failures are fail-closed.[^auth-policy]
 [^auth-policy]: Repository policy implementation.
 ```
 
-The source ID is a join key, not evidence identity.
+The source ID is a stable join key for editorial attribution. It is not immutable evidence identity.
 
-For Git repository evidence, immutable identity comes from the structured Git+ evidence dependency described below.
+Git repository evidence uses structured OIDs under `gitplus.evidence`.
 
 ---
 
-## 7. Provenance: citations versus evidence
+## 6. Citations versus evidence
 
-A Knowledge Concept SHOULD separate:
+A Concept SHOULD distinguish:
 
 ```text
 cites
@@ -332,26 +214,24 @@ evidence
   which repository objects can be mechanically revalidated?
 ```
 
-### 7.1 Signed citations
+### 6.1 Signed citations
 
 Example:
 
 ```yaml
 gitplus:
   cites:
-    - session: 0198f2aa-...
-      record: sha1:abc123...
-    - decision: 0198f312-...
-      record: sha1:456def...
+    - record: sha1:abc123...
+    - record: sha1:456def...
 ```
 
-Later canonical-record references SHOULD use qualified Git record commit OIDs, not only display/event UUIDs.
+Canonical record references use qualified Git record commit OIDs. Session, decision, or other display IDs MAY be included as descriptive metadata but do not replace the record OID.
 
-A cited record being present and valid proves provenance for the citation. It does not prove the Concept's prose is true.
+A valid citation proves that the cited durable record exists and verifies. It does not prove the Concept's prose is true.
 
-### 7.2 Structured repository evidence dependencies
+### 6.2 Structured repository evidence
 
-Example:
+Repository evidence reuses the Context Pack identity model:
 
 ```yaml
 gitplus:
@@ -359,76 +239,71 @@ gitplus:
     - kind: blob
       path: tests/worker/auth.test.ts
       blob: sha1:def456...
-    - kind: blob
-      path: config/policy.json
-      blob: sha1:789abc...
     - kind: gitlink
       path: vendor/policy-engine
       commit: sha1:456def...
 ```
 
-The locator semantics reuse Context Pack evidence rules:
+A reader can compare those dependencies against a chosen Repository View:
 
 ```text
-blob dependency
-  comparison tree + path → recorded blob
+blob
+  tree + path → recorded blob
 
-gitlink dependency
-  comparison tree + path + mode 160000 → recorded submodule commit
+gitlink
+  tree + path → mode 160000 → recorded submodule commit
 ```
 
-This reuse matters: repository evidence should have one identity model across Knowledge Concepts and Context Packs.
+Dependencies SHOULD be as narrow as useful. Unrelated repository changes should not stale every Concept.
 
-### 7.3 Evidence granularity
-
-Dependencies SHOULD be as narrow as useful.
-
-A path/blob dependency is usually better than pinning the entire tree because unrelated repository changes should not stale every Concept.
-
-A range MAY be recorded for claims about a narrow source excerpt, but exact byte-range equality is evidence identity, not semantic equivalence.
+A range MAY be recorded for a narrow source claim, but byte equality is evidence identity rather than semantic equivalence.
 
 ---
 
-## 8. External source capture
+## 7. External sources
 
-An external URI is a locator, not durable evidence by itself.
+An external URI is a locator, not durable evidence.
 
-When an external source materially supports long-lived repository knowledge, Git+ SHOULD record enough information to distinguish:
+When external material materially supports long-lived repository knowledge, Git+ SHOULD preserve enough metadata to distinguish:
 
 ```text
 where to look now
 from
-what content the Concept was actually derived from then
+what content was observed then
 ```
 
-Recommended source metadata is:
+A portable OKF source may remain:
 
 ```yaml
 sources:
   - id: vendor-contract
     resource: https://example.com/contracts/api-v3
-    retrieved_at: 2026-08-22T09:10:00Z
-    content_digest: sha256:...
-    snapshot: gitplus:object:sha256:...   # optional retained snapshot
+```
+
+Git+-specific capture metadata can add:
+
+```yaml
+gitplus:
+  external:
+    vendor-contract:
+      retrieved_at: 2026-08-22T09:10:00Z
+      content_digest: sha256:...
+      snapshot: sha256:...   # optional retained object/blob
 ```
 
 Rules:
 
-1. `resource` is a current locator, not immutable evidence;
-2. `retrieved_at` records when the producer observed it;
-3. `content_digest` commits to captured bytes when exact bytes were available;
-4. `snapshot` MAY retain those bytes under repository access/retention policy;
-5. absent snapshot retention, the digest is only a commitment and cannot reconstruct expired source content.
-
-External captures may contain sensitive or licensed content and therefore require explicit retention policy.
+1. `resource` is a locator, not immutable evidence;
+2. `retrieved_at` records when content was observed;
+3. `content_digest` commits to the captured bytes when exact bytes were available;
+4. `snapshot` MAY retain those bytes subject to access, secret, licensing, and retention policy;
+5. without a retained snapshot, the digest is only a commitment and cannot reconstruct expired content.
 
 ---
 
-## 9. Generated versus verified
+## 8. Generated, verified, and authority
 
-Who wrote a Concept and who checked it are different facts.
-
-A Concept MAY record portable metadata such as:
+OKF keeps `generated` and `verified` separate. Git+ preserves that distinction.
 
 ```yaml
 generated:
@@ -440,13 +315,18 @@ verified:
     at: 2026-08-22T11:00:00Z
 ```
 
-This is useful editorial metadata, but it is not sufficient Git+ authority.
+These are useful editorial and credibility signals. They are **not Git+ authority**.
 
-### 9.1 Git+ verification provenance
+An imported or locally edited string such as:
 
-Where verification matters beyond display, Git+ SHOULD bind the verification to a signed repository record or ordinary reviewed commit provenance.
+```yaml
+verified:
+  - by: human:root
+```
 
-For example:
+cannot grant repository membership, capability, review authority, or instruction authority.
+
+Where verification matters as repository provenance, Git+ SHOULD bind it to a signed record or ordinary reviewed commit and MAY expose those records under:
 
 ```yaml
 gitplus:
@@ -454,158 +334,102 @@ gitplus:
     - sha1:feed123...
 ```
 
-The repository can then answer:
+The product can then separately answer:
 
 ```text
-who signed the verification?
-was the signer a valid member?
-what authority/policy applied?
-what Concept blob/version was reviewed?
+portable editorial state
+  who the Concept says generated/verified it
+
+Git+ provenance
+  which signed identity/commit actually established that state
+
+repository authority
+  what that identity was allowed to authorize
 ```
 
-### 9.2 Trust tier is not authority
-
-An imported knowledge format may classify a Concept as human-reviewed or machine-confirmed.
-
-Git+ MUST treat that as an editorial/credibility signal only.
-
-It MUST NOT derive repository authorization from a generic ranking such as:
-
-```text
-human-reviewed > machine-confirmed > unverified
-```
-
-Repository authority remains a function of signed identity, trust graph, capabilities, and policy.
-
-A designated automated verifier may be more relevant to a repository rule than an arbitrary human reviewer.
+Do not collapse these into one trust score.
 
 ---
 
-## 10. Freshness and staleness
+## 9. Lifecycle and freshness
 
-Knowledge can become stale for different reasons. Git+ SHOULD keep those reasons separate.
+Git+ follows OKF's lifecycle fields:
 
-### 10.1 Repository staleness
+```yaml
+status: draft        # draft | stable | deprecated
+stale_after: 2026-12-31T00:00:00Z
+```
 
-For each structured evidence dependency, a reader can classify against a chosen current Repository View:
+Absent `status` means `stable` under OKF v0.2.
+
+Lifecycle and freshness are separate dimensions. A stable Concept can become stale; a deprecated Concept can remain historically well-supported.
+
+### 9.1 Repository evidence freshness
+
+Each structured repository dependency is classified against a chosen current tree:
 
 ```text
 unchanged
-  path resolves to the same object
+  path resolves to the recorded object
 
 changed
-  path exists but resolves to a different object
+  path exists but resolves to another object
 
 missing
-  path no longer exists or has a different item kind
+  path no longer exists or has another item kind
 
 unknown
-  object/view unavailable or dependency was not structured
+  repository view/object unavailable or dependency unstructured
 ```
 
-A changed dependency means **revalidate the Concept**. It does not prove the prose is false.
+`changed` or `missing` means **revalidate the Concept**. It does not automatically mean the prose is false.
 
-### 10.2 Temporal staleness
+### 9.2 Temporal freshness
 
-Some knowledge expires with time even when repository files do not change.
+A Concept is temporally stale when:
 
-Examples:
+```text
+now >= stale_after
+```
+
+This is useful for knowledge whose validity changes with time even if repository files do not:
 
 ```text
 on-call contacts
 vendor limits
 pricing assumptions
-supported external runtime versions
-certificate/credential procedures
+supported external runtimes
+certificate procedures
 quarterly business rules
 ```
 
-A Concept MAY therefore declare an absolute deadline:
+### 9.3 External-source freshness
 
-```yaml
-stale_after: 2026-12-31T00:00:00Z
-```
+External-source state may become stale or unknown when:
 
-At or after that time, the Concept requires revalidation.
+- its expected freshness deadline passes;
+- it can no longer be fetched;
+- a newly observed digest differs;
+- current state cannot be determined.
 
-Temporal staleness and repository staleness are independent dimensions.
-
-### 10.3 External-source staleness
-
-An external source may also be stale when:
-
-- its expected freshness deadline passed;
-- the source can no longer be fetched;
-- a newly fetched digest differs from the captured digest;
-- current freshness is unknown.
-
-Again, the state is **needs revalidation**, not automatic falsification.
-
-### 10.4 Product state
-
-A useful projection can display:
-
-```text
-source provenance   ✓ signed session exists
-repository evidence ⚠ config/policy.json changed
-external source     ? current state unknown
-temporal freshness  ✓ valid until 2026-12-31
-editorial review    human:alice · 2026-08-22
-```
-
-These signals SHOULD NOT be collapsed into one opaque confidence score.
+Products SHOULD surface repository, temporal, and external freshness separately instead of combining them into one confidence score.
 
 ---
 
-## 11. Lifecycle
+## 10. Indexes and progressive disclosure
 
-Concept lifecycle is useful independently from evidence freshness.
+OKF permits `index.md` files for progressive disclosure. Git+ uses the same convention.
 
-Recommended states:
+Indexes MAY be human-authored or regenerated by tooling from Concept metadata. They are retrieval accelerators and navigation documents, not authority or evidence.
 
-```text
-draft
-  useful but not yet published as current repository guidance
-
-stable
-  current published knowledge
-
-deprecated
-  retained for history but should not normally be recalled as current
-```
-
-A Concept can be `stable` and still become stale due to changed evidence or time.
-
-A deprecated Concept SHOULD link to a replacement when one exists.
-
-Deletion is not required to stop active recall; ordinary Git history preserves prior versions.
-
----
-
-## 12. Progressive disclosure and indexes
-
-A large knowledge corpus should not be injected into every session.
-
-Directories MAY contain generated `index.md` files containing compact descriptions of available Concepts:
+A large corpus should be recalled progressively:
 
 ```text
-.gitplus/knowledge/index.md
-.gitplus/knowledge/architecture/index.md
-.gitplus/knowledge/playbooks/index.md
-```
-
-Indexes are retrieval accelerators and SHOULD be regenerable from Concept frontmatter.
-
-They are not authority or truth sources.
-
-The intended recall path is:
-
-```text
-root knowledge index
+root index / metadata search
        ↓
-relevant category index
+relevant category
        ↓
-selected Knowledge Concept
+selected Concept
        ↓
 current supporting repository evidence
        ↓
@@ -614,36 +438,31 @@ Context Pack
 Context Exposure
 ```
 
-This gives agents progressive disclosure without making the whole corpus fit inside Repository Memory.
+The whole knowledge corpus should not be injected into every session.
 
 ---
 
-## 13. Repository Memory after Concepts
+## 11. Repository Memory
 
-Repository Memory remains valuable after adding Concepts.
-
-Its role becomes clearer:
+Repository Memory remains a bounded, regenerable projection suitable for session start.
 
 ```text
-Durable Knowledge Concepts
-  full curated corpus
+Knowledge bundle
+  durable curated corpus
 
 Repository Memory
-  bounded high-value projection for every session
+  small high-value projection
 ```
 
-Memory MAY contain compact entries such as:
+Memory MAY be built from current high-value Concepts and directly from signed session provenance when no Concept exists.
 
-```text
-gotcha  Worker auth tests require production policy fixture
-concept .gitplus/knowledge/gotchas/worker-auth.md
-source  session 0198f2aa
-state   ⚠ supporting config changed
-```
+A Concept does not have to appear in Memory. Evicting a Memory entry does not delete the Concept or its signed source records.
 
-### 13.1 Memory generation
+Memory is data, not instruction authority.
 
-At session end, the harness/distiller SHOULD identify a small number of reusable repository-specific claims:
+### 11.1 Session-end distillation
+
+At session end, a distiller SHOULD identify only a few reusable repository-specific learnings, commonly:
 
 ```text
 convention
@@ -652,338 +471,156 @@ decision
 friction
 ```
 
-The distiller can then choose among:
+The distiller can choose:
 
 ```text
-no durable publication
-  session note is sufficient
+session note only
+  durable publication is unnecessary
 
-update/create Concept
-  knowledge deserves durable curated publication
+publish/update Concept
+  the knowledge deserves curated persistence
 
-Memory-only projection
-  useful short-term recall but not worth durable publication yet
+Memory projection
+  useful broadly, whether or not a Concept was published
 ```
 
-Repositories MAY require review before agent-generated Concepts become `stable`.
-
-### 13.2 Memory remains data, not authority
-
-A future session SHOULD read bounded Memory beside standing instructions/policy.
-
-Neither Memory nor a Knowledge Concept becomes an instruction merely because it is automatically recalled.
+Repositories MAY require ordinary review before agent-authored Concepts are considered `stable`.
 
 ---
 
-## 14. Recall and Context Packs
+## 12. Recall and audit
 
-### 14.1 Session-start recall
+A Concept existing in the repository is not proof that an invocation received it.
 
-A new session receives bounded Memory and MAY receive the root knowledge index.
-
-### 14.2 Task-specific retrieval
-
-Retrieval MAY select relevant Concepts and current repository evidence.
-
-A Concept committed in the active Repository View is ordinary blob evidence and can be represented in a Context Pack using its path/blob identity.
-
-### 14.3 Exposure proves recall
-
-The repository can distinguish:
+The system can distinguish:
 
 ```text
-Concept existed
+Concept exists
 
-Concept was selected
+Concept was retrieved
 
-Concept blob was present in Context Pack
+Concept blob appears in Context Pack
 
-Concept bytes were actually present in ContextRender
+Concept bytes appear in ContextRender
 ```
 
-Only the latter stages establish invocation-specific context exposure.
+Only Context Pack / Context Exposure establish invocation-specific repository-context exposure.
 
-### 14.4 Current evidence should accompany important claims
+For tasks where current source state matters, retrieval SHOULD include current supporting repository evidence alongside a summarizing Concept rather than allowing stale prose to substitute for the implementation or tests.
 
-A Concept may summarize historical evidence. For tasks where current source state matters, retrieval SHOULD also include the Concept's current structured repository dependencies when useful.
-
-That prevents a stale prose Concept from substituting for the actual current implementation or tests.
+[Telemetry](telemetry.md) then explains the surrounding runtime and context-lifecycle conditions.
 
 ---
 
-## 15. Capture → Retention → Recall failure model
+## 13. Failure model
 
-With Concepts, the existing failure taxonomy becomes:
+The Capture → Retention → Recall architecture distinguishes:
 
 ```text
 capture failure
-  useful knowledge/evidence never entered a durable record or Concept
+  useful knowledge/evidence never became durable
 
 publication failure
-  signed provenance existed but reusable knowledge was never promoted when needed
+  signed provenance existed but reusable knowledge was never curated when needed
 
 retention failure
-  referenced durable object/snapshot no longer survives
+  a referenced durable object/snapshot no longer survives
 
 freshness failure
-  Concept was recalled despite known stale dependencies/deadline
+  known stale knowledge was recalled without revalidation
 
 retrieval failure
   current Concept/evidence existed but retrieval did not surface it
 
-context-selection failure
+selection failure
   retrieval surfaced it but budget/filtering omitted it
 
-context-lifecycle failure
+lifecycle failure
   it was exposed earlier but later compacted/truncated away
 
-context-assembly failure
-  a tool or Concept was available but did not enter the next auditable exposure
+assembly failure
+  available knowledge/tool output failed to enter the next auditable exposure
 
 workspace-staleness failure
-  invocation was grounded against the wrong Repository View
+  the invocation used the wrong Repository View
 ```
 
-Telemetry can diagnose the runtime/context-lifecycle stages; Concept metadata and structured dependencies diagnose publication/freshness stages.
+Concept metadata and evidence dependencies diagnose publication/freshness. Context Pack and telemetry diagnose invocation recall and runtime lifecycle.
 
 ---
 
-## 16. Team-member departure
+## 14. CLI and file DX
 
-The architecture is specifically useful when a contributor leaves:
+Knowledge is deliberately ordinary repository content.
 
-```text
-Alice discovers an obscure deployment constraint
-        ↓
-session/decision captures provenance
-        ↓
-agent or Alice publishes a Knowledge Concept
-        ↓
-Concept cites signed record + supporting blobs
-        ↓
-Memory retains a compact projection
-        ↓
-Alice leaves
-        ↓
-Bob or future agent finds the Concept
-        ↓
-dependencies checked against current tree/time
-        ↓
-current Context Pack grounds the task
+Users edit, review, diff, link, move, and inspect Concepts with normal filesystem and Git tools:
+
+```bash
+$EDITOR .gitplus/knowledge/gotchas/worker-auth.md
+git diff .gitplus/knowledge
+git log -- .gitplus/knowledge/gotchas/worker-auth.md
 ```
 
-The repository can continue to answer:
+Git+ adds only the operation ordinary file tooling cannot provide:
 
 ```text
-What do we currently claim to know?
-Why did we believe it?
-Who/what generated and verified the current Concept?
-Which signed records support it?
-Which repository objects supported it then?
-Have those objects changed?
-Is the Concept past a temporal freshness deadline?
-Was the Concept/evidence actually recalled for a later invocation?
+git+ knowledge check [concept]
 ```
 
-It still cannot recover tacit knowledge nobody recorded.
+With no Concept argument, `knowledge check` validates the configured bundle. With a Concept ID/path, it validates one Concept.
+
+The check reports independently:
+
+```text
+OKF structure
+portable lifecycle/freshness
+signed Git+ citations
+blob/gitlink dependency state
+external capture state when available
+Git+ verification records
+```
+
+There is intentionally no required `knowledge list`, `show`, `index`, `import`, or `export` command. The bundle is already ordinary Markdown and directly OKF-compatible.
+
+Repo-scoped commands SHOULD discover the current checkout by default. Human CLI input MAY use paths, normal revisions, and abbreviated OIDs; canonical serialized provenance continues to use qualified OIDs.
 
 ---
 
-## 17. OKF interoperability
-
-Git+ SHOULD support OKF as an interchange surface rather than make it mandatory protocol state.
-
-### 17.1 Why interoperate
-
-OKF's useful properties include:
-
-```text
-Markdown + YAML portability
-human/agent readability
-open concept types
-stable source IDs
-per-claim source attribution
-separate generated / verified metadata
-lifecycle + temporal freshness
-hierarchical indexes for progressive disclosure
-```
-
-Those map naturally onto Durable Knowledge Concepts.
-
-### 17.2 Boundary
-
-The compatibility rule is:
-
-> **OKF describes portable knowledge publication metadata; Git+ supplies stronger Git-native identity, signed provenance, repository-evidence verification, authority, and invocation exposure.**
-
-Git+ MUST NOT weaken its guarantees to fit an interchange format.
-
-### 17.3 Export/import
-
-A product MAY expose:
-
-```text
-git+ knowledge export --format okf
-git+ knowledge import --format okf
-```
-
-Imported Concepts are **data**.
-
-Import MUST NOT grant instruction authority, repository membership, verification authority, or policy capability based on frontmatter strings.
-
-On export, Git+-specific provenance can be preserved under namespaced extension fields that OKF consumers are expected to tolerate as unknown metadata.
-
-### 17.4 Concept IDs
-
-For OKF-compatible bundles, the file path relative to the bundle with `.md` removed can serve as a portable Concept ID.
-
-Git+ SHOULD still use Git blob/tree/commit OIDs when immutable repository identity matters.
-
-Path identity is convenient naming; Git OIDs are immutable evidence identity.
-
-### 17.5 Trust metadata
-
-OKF-style `generated` and `verified` metadata MAY round-trip.
-
-They MUST remain distinct from Git+ repository trust and signed verification provenance.
-
-### 17.6 Attested Computation
-
-OKF's Attested Computation concept is potentially useful for future sanctioned checks or reproducible repository operations.
-
-It is **not** part of this Knowledge Durability V1 architecture.
-
-If adopted later, Git+ should preserve the useful distinction between:
-
-```text
-definition verified
-  is this computation definition approved/current?
-
-execution attested
-  did this particular run execute the sanctioned computation?
-```
-
-Execution receipts would naturally integrate with Git+ checks/telemetry rather than with Context Pack identity.
-
----
-
-## 18. Security and authority
+## 15. Security and authority
 
 Knowledge is a high-value prompt-injection surface because it is intentionally recalled later.
 
 Rules:
 
-1. Knowledge Concepts and Memory are data unless independent policy grants instruction authority.
-2. Imported OKF metadata MUST NOT create authority.
-3. Source URLs, Concept bodies, and generated summaries are untrusted content for instruction purposes.
+1. Concepts and Memory are data unless independent policy grants instruction authority.
+2. OKF `verified`, actor strings, trust tiers, source metadata, or human-reviewed labels do not create Git+ authority.
+3. Source URLs, bodies, summaries, and external snapshots are untrusted content for instruction purposes.
 4. External snapshots follow repository secret/access/licensing policy.
-5. A verifier signature proves who verified; what that verification authorizes remains repository policy.
-6. Stale status should be visible before automatic recall when known.
-7. Redaction of cited signed provenance should cause derived active Memory and generated indexes to be rebuilt without the redacted claim where required by policy.
+5. A signature proves who signed; what that signature authorizes remains repository policy.
+6. A valid citation proves provenance, not semantic truth.
+7. A changed dependency means revalidation, not automatic falsification.
 
 ---
 
-## 19. Product behavior
+## 16. Acceptance criteria
 
-Useful commands may include:
+The knowledge architecture is successful when:
 
-```text
-git+ knowledge list
-git+ knowledge show <concept>
-git+ knowledge verify <concept>
-git+ knowledge stale [<concept>]
-git+ knowledge import --format okf
-git+ knowledge export --format okf
-git+ session memory --distill
-```
-
-The exact command surface is non-normative here.
-
-A Concept detail view should separate:
-
-```text
-Content lifecycle
-  stable
-
-Generated
-  gitplus-distiller/1 · 2026-08-22
-
-Editorial verification
-  human:alice · 2026-08-22
-
-Signed provenance
-  session sha1:abc… ✓
-  decision sha1:def… ✓
-
-Repository dependencies
-  tests/worker/auth.test.ts ✓ unchanged
-  config/policy.json       ⚠ changed
-
-Temporal freshness
-  valid until 2026-12-31
-
-Recall
-  last exposed in invocation sha1:789…
-```
-
-The UI should say:
-
-> `config/policy.json` changed since this Concept was supported; revalidate the claim.
-
-not:
-
-> This Concept is false.
-
----
-
-## 20. Documentation hierarchy
-
-```text
-agents.md
-  existing membership + session lifecycle + bounded Memory implementation
-
-knowledge-durability.md
-  Capture → Retention → Recall
-  Durable Knowledge Concepts
-  Memory projection
-  OKF interoperability
-
-context-pack.md
-  normative repository evidence + invocation exposure provenance
-
-telemetry.md
-  runtime trace protocol + OTel ingestion + harness/API/UI integration
-```
-
-The architecture notes SHOULD link to protocol rules rather than duplicate wire/storage rules.
-
----
-
-## 21. Success criteria
-
-The architecture is successful when:
-
-1. captured repository-specific claims survive contributor/account loss;
-2. reusable knowledge can be published independently of the bounded Memory cache;
-3. Concepts remain readable and diffable as ordinary Markdown repository content;
-4. Concepts remain attributable to signed provenance without pretending citations prove truth;
-5. structured blob/gitlink dependencies support machine revalidation;
-6. temporal freshness supports knowledge that expires without repository edits;
-7. changed or expired dependencies trigger revalidation rather than automatic falsification;
-8. generated and verified metadata remain distinct;
-9. editorial trust metadata never substitutes for Git+ identity/authority;
-10. external-source provenance distinguishes a locator from captured historical bytes;
-11. indexes provide progressive disclosure without becoming authority sources;
-12. Repository Memory remains a bounded projection rather than a full knowledge database;
-13. Context Packs prove whether selected knowledge/evidence reached a particular invocation;
-14. Telemetry diagnoses runtime/context-lifecycle failures independently from knowledge freshness;
-15. OKF import/export is possible without making OKF a protocol dependency;
-16. imported knowledge never gains instruction authority automatically;
-17. raw transcripts are not required for durable repository knowledge;
-18. unrecorded tacit knowledge remains explicitly outside the guarantee.
+1. the on-disk knowledge bundle is directly consumable as OKF-compatible Markdown/YAML;
+2. no format-conversion command is required to exchange the bundle;
+3. Concepts remain human-readable without Git+ tooling;
+4. Git+-specific signed citations and structured evidence round-trip under a namespaced extension;
+5. citations are not misrepresented as proof of truth;
+6. blob/gitlink dependencies support mechanical staleness checks;
+7. repository, temporal, and external-source freshness remain separate dimensions;
+8. portable `verified` metadata never becomes repository authority;
+9. Repository Memory remains bounded and regenerable rather than becoming the canonical corpus;
+10. Memory eviction does not destroy curated knowledge;
+11. task-specific recall is proved by Context Pack / Context Exposure rather than by corpus membership;
+12. unrecorded tacit knowledge remains explicitly outside the guarantee.
 
 ---
 
 ## Final invariant
 
-> **Git+ separates historical provenance, durable knowledge publication, bounded recall, invocation exposure, and runtime telemetry. Signed sessions and decisions record what happened; Durable Knowledge Concepts publish reusable claims with stable sources, structured Git evidence, lifecycle, and freshness; Repository Memory is a small regenerable projection; Context Packs prove what Git-grounded knowledge/evidence reached an invocation; and Telemetry explains runtime loss. OKF is a useful portable interchange format for Concepts, but Git-native OIDs, signatures, trust, evidence verification, and authority remain the stronger repository contract.**
+> **Git+ knowledge is an ordinary OKF-compatible Markdown corpus with stronger Git-native provenance under a namespaced extension. Concepts publish reusable claims, signed records explain where those claims came from, structured Git evidence makes repository staleness machine-checkable, Repository Memory remains a bounded recall cache, and Context Exposure proves what actually reached a later invocation. None of those layers turns editorial metadata or retrieved content into authority or semantic truth.**
