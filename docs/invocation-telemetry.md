@@ -10,7 +10,7 @@
 
 This specification defines durable runtime provenance for coding-agent invocations.
 
-[Context Packs](content-pack.md) answer:
+[Context Packs](context-pack.md) answer:
 
 > **What Git-grounded repository evidence and semantically framed ContextRender were associated with an invocation?**
 

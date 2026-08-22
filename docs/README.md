@@ -8,7 +8,7 @@ Read these in roughly this order:
 
 1. **[agents.md](agents.md)** — existing agent membership, authorization, session provenance, decisions, Memory, and end-to-end workflow.
 2. **[knowledge-durability.md](knowledge-durability.md)** — the Capture → Retention → Recall objective, including team-member departure, cited claims, and structured evidence dependencies.
-3. **[content-pack.md](content-pack.md)** — normative repository and context-exposure provenance: Repository Views, blob/gitlink evidence, ContextRender, reachability, and Context Exposure records.
+3. **[context-pack.md](context-pack.md)** — normative repository and context-exposure provenance: Repository Views, blob/gitlink evidence, ContextRender, reachability, and Context Exposure records.
 4. **[invocation-telemetry.md](invocation-telemetry.md)** — normative runtime audit-trace model. Harness-native OpenTelemetry is the preferred capture/correlation input; Git+ normalizes selected observations into signed `refs/hub/trace/*` records.
 5. **[telemetry-integration.md](telemetry-integration.md)** — non-normative OTel-first harness, OTLP ingestion, fallback-hook, server-projection, and Flight Recorder UI guidance.
 

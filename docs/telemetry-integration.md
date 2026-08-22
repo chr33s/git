@@ -7,7 +7,7 @@
 
 ## 1. Summary
 
-This document describes how [Invocation Telemetry](invocation-telemetry.md) and [Context Packs](content-pack.md) should be integrated with coding-agent harnesses and surfaced in the Git+ UI.
+This document describes how [Invocation Telemetry](invocation-telemetry.md) and [Context Packs](context-pack.md) should be integrated with coding-agent harnesses and surfaced in the Git+ UI.
 
 The preferred implementation is **OpenTelemetry-first**:
 

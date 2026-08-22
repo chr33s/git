@@ -26,7 +26,7 @@ Recall
   Does the next human or agent receive it when relevant?
 ```
 
-No one primitive solves all three. The architecture composes signed sessions and decisions, Repository Memory, [Context Packs](content-pack.md), Context Exposure records, and [Invocation Telemetry](invocation-telemetry.md).
+No one primitive solves all three. The architecture composes signed sessions and decisions, Repository Memory, [Context Packs](context-pack.md), Context Exposure records, and [Invocation Telemetry](invocation-telemetry.md).
 
 The goal is **durable, attributable repository knowledge**, not exhaustive recording of human thought or model cognition.
 
@@ -364,7 +364,7 @@ agents.md
 knowledge-durability.md
   product objective: Capture → Retention → Recall
 
-content-pack.md
+context-pack.md
   normative repository + exposure provenance
 
 invocation-telemetry.md
