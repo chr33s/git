@@ -3,18 +3,18 @@
 **Status:** Draft architecture note  
 **Project:** `@chr33s/git`  
 **Last updated:** 2026-08-22  
-**Revision:** draft-3
+**Revision:** draft-4
 
 ## 1. Summary
 
 This document describes how [Invocation Telemetry](invocation-telemetry.md) and [Context Packs](context-pack.md) should be integrated with coding-agent harnesses and surfaced in the Git+ UI.
 
-The preferred implementation is **OpenTelemetry-first**:
+The preferred implementation is **OpenTelemetry GenAI semconv first**:
 
 ```text
 agent harness / model runtime
         │
-        │ native OTel spans + events/logs
+        │ OTel GenAI spans + events/logs
         ↓
        OTLP
         │
@@ -24,7 +24,9 @@ agent harness / model runtime
         ↓
 Git+ audit ingester
         │
-        │ select + normalize + Git-ground + sign
+        │ interpret declared GenAI semconv
+        │ normalize without changing meaning
+        │ Git-ground + sign
         ↓
 refs/hub/trace/<session-id>
         │
@@ -37,26 +39,26 @@ Activity · Commit/CR provenance · Flight Recorder
 
 Harness hooks remain a compatibility fallback when native OTel does not expose the required runtime boundaries.
 
-The protocol boundary remains Git-native:
+The protocol boundary is:
 
 ```text
 Context Pack / ContextRender
   exact repository provenance
 
-OTel
-  runtime capture + correlation
+OTel GenAI semconv
+  runtime operation semantics + correlation
 
 Git+ trace
   durable normalized audit projection
 ```
 
-The product goal is not another observability dashboard. It is to explain how repository context, runtime pressure, tools, mutations, and model calls related to the code that was produced.
+The product goal is not another observability dashboard. It is to explain how repository context, runtime conditions, tools, mutations, agents, and model calls relate to the code that was produced.
 
 ---
 
 ## 2. Storage separation
 
-The policy-critical session DAG remains small:
+The policy-critical session DAG stays small:
 
 ```text
 refs/hub/session/<session-id>
@@ -69,70 +71,62 @@ Detailed audit provenance lives separately:
 ```text
 refs/hub/trace/<session-id>
   Context Exposure
-  Invocation Telemetry
-  lifecycle events
+  logical Invocation Telemetry
+  selected agent/tool operations
+  context lifecycle
   workspace transitions
-  selected tool diagnostics
+  trace health
 ```
 
 The trace MUST NOT participate in authorization, membership, protected-branch policy, mergeability, or `requireProvenance` checks.
-
-This is true whether the trace originated from OTel or from fallback hooks.
 
 ---
 
 ## 3. Integration modes
 
-### 3.1 Preferred: harness-native OTel
+### 3.1 Preferred: harness-native OTel GenAI
 
-If the harness/runtime emits suitable OTel, Git+ SHOULD ingest it instead of reconstructing runtime activity from vendor hooks.
+If the harness/runtime emits OpenTelemetry GenAI semantic conventions, Git+ SHOULD consume those signals directly instead of reconstructing runtime activity from vendor hooks.
 
-The harness can naturally expose:
+Useful standard operations include:
 
 ```text
-spans
-  model invocations
-  tool invocations
-  sub-agent operations
-  other duration-bearing work
+inference spans
+  chat / generate_content / text_completion / other inference
 
-events / structured logs
-  context compaction
-  context truncation
-  retry/fallback selection
-  workspace state transitions
+agent/framework spans
+  invoke_agent
+  invoke_workflow
+  plan
 
-span/log attributes
-  model/provider
-  token usage
-  finish status
-  timing
-  runtime limits
+tool spans
+  execute_tool
+
+retrieval spans
+  retrieval
 ```
 
-Trace/span IDs provide correlation between these signals and an external observability backend.
+Standard GenAI attributes can supply provider, requested/response model, usage, finish reasons, agent/tool identity, conversation correlation, and compacted-conversation state.
 
-Git+ then normalizes only the subset needed for durable repository audit.
+Trace/span IDs provide correlation with external OTel systems.
 
-### 3.2 Embedded integration
+### 3.2 Embedded Git+ capture
 
-When Git+ is part of the harness itself, an embedded adapter may capture the same logical boundaries directly.
-
-This is particularly useful for Context Pack and ContextRender creation because those guarantees are stronger than generic telemetry.
+Git+ still needs a direct harness boundary for repository provenance:
 
 ```text
-beforeInvocation
+before logical inference
   materialize Repository View
   build Context Pack
   build semantically framed ContextRender
   append Context Exposure
 
-provider.invoke(...)
-
-afterInvocation
-  normalize provider/runtime facts
+logical inference span completes
+  normalize OTel runtime facts
   append Invocation Telemetry
 ```
+
+This direct integration is necessary because Context Packs provide guarantees beyond generic telemetry.
 
 ### 3.3 Fallback: vendor hooks
 
@@ -142,20 +136,187 @@ When native OTel is absent or incomplete:
 vendor hook
     ↓
 .chr33s/telemetry.mjs
-    ↓ normalize observed fields
+    ↓ normalize only observed fields
     ↓
 git+ trace record
 ```
 
-Vendor event names remain adapter details. Hook integrations should not force their vocabulary into the durable Git+ schema.
+Vendor event names remain adapter details. Fallback adapters SHOULD mimic Git+ stable concepts where meanings are equivalent, but MUST NOT claim OTel GenAI semconv adherence unless that contract is actually implemented.
 
 ---
 
-## 4. Audit tee: do not reuse a lossy observability path blindly
+## 4. Semconv interpretation contract
+
+The normalizer has two responsibilities:
+
+```text
+1. understand the declared upstream semantic convention
+2. project it into stable Git+ fields without changing meaning
+```
+
+If a signal claims `open-telemetry/semantic-conventions-genai` compatibility, Git+ MUST interpret it according to the declared version/revision.
+
+Example capture metadata:
+
+```json
+{
+  "capture": {
+    "transport": "otel",
+    "stage": "sdk-export",
+    "traceId": "...",
+    "spanId": "...",
+    "semconv": {
+      "profile": "open-telemetry/semantic-conventions-genai",
+      "revision": "55a32cddb97d99cec08d5ee081e74206a0636041"
+    }
+  }
+}
+```
+
+The durable Git+ schema SHOULD NOT require old clients to understand historical upstream attribute names.
+
+### 4.1 Core inference mapping
+
+```text
+gen_ai.operation.name                  → operation.name
+gen_ai.provider.name                   → model.provider
+gen_ai.request.model                   → model.requested
+gen_ai.response.model                  → model.response
+gen_ai.response.finish_reasons         → response.finishReasons
+error.type                             → outcome.errorType
+span status                            → outcome.status
+gen_ai.conversation.compacted          → context.compacted
+```
+
+### 4.2 Usage mapping
+
+```text
+gen_ai.usage.input_tokens              → usage.inputTokens
+gen_ai.usage.output_tokens             → usage.outputTokens
+gen_ai.usage.cache_read.input_tokens   → usage.cacheReadInputTokens
+gen_ai.usage.cache_write.input_tokens  → usage.cacheWriteInputTokens
+gen_ai.usage.reasoning.output_tokens   → usage.reasoningOutputTokens
+```
+
+Provider-reported token values remain provider-reported after transport through OTel.
+
+### 4.3 Agent mapping
+
+```text
+gen_ai.agent.id             → agent.id
+gen_ai.agent.name           → agent.name
+gen_ai.agent.version        → agent.version
+gen_ai.conversation.id      → conversation.externalId
+```
+
+`conversation.externalId` is correlation metadata. It is not the Git+ session identity.
+
+### 4.4 Tool mapping
+
+For `gen_ai.operation.name = execute_tool`:
+
+```text
+gen_ai.tool.name          → tool.name
+gen_ai.tool.call.id       → tool.callId
+gen_ai.tool.type          → tool.type
+gen_ai.tool.description   → tool.description
+```
+
+Raw tool arguments/results are opt-in upstream and SHOULD remain non-canonical by default.
+
+### 4.5 Retrieval mapping
+
+`gen_ai.operation.name = retrieval` may contribute selector/retrieval diagnostics.
+
+A retrieval span is **not** evidence that a document entered model context. Only the Context Pack / Context Exposure layer establishes repository-context exposure.
+
+---
+
+## 5. Logical invocations and provider attempts
+
+This distinction is important for semconv compatibility.
+
+### 5.1 One inference span = one logical invocation
+
+The GenAI inference convention models a logical operation. Automatic transient retries may occur inside that span.
+
+Therefore:
+
+```text
+one compliant inference span
+        ↓
+one Git+ logical invocation record
+```
+
+Git+ MUST NOT split one compliant inference span into multiple logical invocations merely because the underlying provider client retried.
+
+### 5.2 Attempt detail is subordinate
+
+If instrumentation exposes provider-attempt detail separately, the normalizer MAY attach it beneath the logical invocation:
+
+```text
+Logical invocation · span 00f067…
+  ├─ attempt 1 · timeout
+  └─ attempt 2 · success
+```
+
+Attempt count/status MUST NOT be inferred from duration, timestamp gaps, or missing response fields.
+
+### 5.3 Fallbacks follow upstream logical boundaries
+
+If model/provider fallback is represented by another inference span, Git+ creates another logical invocation.
+
+If upstream instrumentation keeps fallback inside the same logical span, Git+ keeps one logical record and MAY attach observed fallback/attempt detail.
+
+The normalizer follows the source semantics rather than inventing span boundaries.
+
+---
+
+## 6. Outcome and finish reason are separate
+
+The UI and API must not conflate:
+
+```text
+operation outcome
+  OTel span status + error.type
+
+model generation finish
+  gen_ai.response.finish_reasons
+```
+
+Examples:
+
+```text
+status=ok, finishReasons=[length]
+  successful provider operation whose generation hit a limit
+
+status=error, errorType=timeout
+  provider/client operation failed
+```
+
+This distinction should survive all the way from ingestion to UI.
+
+---
+
+## 7. Context lifecycle
+
+When `gen_ai.conversation.compacted = true`, the invocation projection SHOULD show:
+
+```text
+Context: compacted prior conversation
+```
+
+That boolean does not prove when/how compaction happened.
+
+A separate Git+ `context-compaction` trace event should exist only when the harness directly observes a transition with richer facts such as strategy or reason.
+
+Likewise, truncation records should be emitted only when truncation is observable rather than inferred from absent content.
+
+---
+
+## 8. Audit tee: do not reuse a lossy observability path blindly
 
 Normal OTel pipelines frequently sample, filter, redact, aggregate, and transform telemetry.
-
-That is appropriate for operational observability but must not silently weaken a claimed durable audit trail.
 
 Preferred topology:
 
@@ -168,28 +329,15 @@ harness → OTel SDK ──────┤  no untracked field-dropping transfor
                             sampling / filtering / aggregation allowed
 ```
 
-### 4.1 Strongest ingestion point
+Prefer ingest at or near `sdk-export` before arbitrary Collector processors.
 
-Prefer ingestion at or near `sdk-export`, before arbitrary collectors can mutate or remove data.
+If Git+ receives data after a Collector, preserve that stage and any known sampling/transformation status.
 
-If Git+ receives telemetry after a collector, preserve that fact:
+The UI must not claim stronger coverage than the capture path supports.
 
-```json
-{
-  "capture": {
-    "transport": "otel",
-    "stage": "local-collector"
-  }
-}
-```
+### 8.1 Audit exporter health
 
-The UI should then avoid claiming stronger completeness than the path can support.
-
-### 4.2 Audit exporter health
-
-The audit exporter/receiver should expose loss when it can detect it.
-
-Examples:
+Useful known-loss signals include:
 
 ```text
 export queue overflow
@@ -199,113 +347,15 @@ collector sampling enabled
 processor filtered audit class
 ```
 
-Git+ can normalize these into `trace-health` records or session-level visibility state.
+Normalize these into `trace-health` or equivalent projected visibility.
 
-Absence of a trace record is meaningful only in the context of capture capability and known exporter health.
-
----
-
-## 5. OTel-to-Git+ normalization
-
-OTel is not the persisted Git+ schema.
-
-The normalization layer should answer:
-
-```text
-What stable audit concept does this signal represent?
-What was its evidence class?
-What immutable Git record does it become?
-```
-
-For example:
-
-```text
-OTel model-invocation span
-        ↓
-model/provider attributes
-usage attributes
-finish status
-duration
-trace/span IDs
-        ↓
-Git+ Invocation Telemetry
-```
-
-or:
-
-```text
-OTel event/log "context compacted"
-        ↓
-Git+ context-compaction record
-```
-
-### 5.1 Preserve correlation, not dependence
-
-A normalized record may preserve:
-
-```json
-{
-  "capture": {
-    "transport": "otel",
-    "traceId": "...",
-    "spanId": "...",
-    "scope": "agent-runtime"
-  }
-}
-```
-
-The external OTel trace can then be opened from the Git+ UI if configured.
-
-But Git+ durable joins use Git record commit OIDs:
-
-```text
-OTel TraceId / SpanId
-  external correlation
-
-Git record OID
-  canonical durable audit identity
-```
-
-### 5.2 Do not freeze OTel GenAI attribute names into the protocol
-
-The normalizer should support a versioned mapping layer.
-
-```text
-OTel semantic conventions vN
-provider-specific OTel attributes
-custom harness instrumentation
-        ↓
-normalization mapping
-        ↓
-Git+ stable fields
-```
-
-Persist the instrumentation scope/version or semantic-convention version as diagnostic metadata when useful.
-
-Git+ should not require historical clients to understand every upstream convention version.
-
-### 5.3 Evidence class survives transport
-
-Examples:
-
-```text
-provider token count carried in OTel
-  still provider-reported
-
-harness wall-clock duration carried in OTel
-  harness-observed
-
-pressure ratio computed by hub
-  derived
-```
-
-The transport does not upgrade the authority of a value.
+Absence of an event is meaningful only with known capture capability and trace health.
 
 ---
 
-## 6. Context Packs remain direct Git+ capture
+## 9. Context Packs remain direct Git+ capture
 
-Context Packs and ContextRender SHOULD NOT be reduced to generic OTel attributes.
+Context Packs and ContextRender SHOULD NOT be reduced to generic GenAI attributes.
 
 The harness/Git+ integration directly creates:
 
@@ -316,15 +366,15 @@ ContextRender
 Context Exposure record
 ```
 
-because those require:
+because these require:
 
 - Git object verification;
 - blob/gitlink resolution;
-- semantic ContextRender placement framing;
+- ContextRender semantic placement framing;
 - real Git reachability to `view.tree`;
 - durable render commitments.
 
-OTel correlation is attached to the exposure when available:
+OTel correlation MAY be attached to the exposure:
 
 ```json
 {
@@ -340,16 +390,16 @@ OTel correlation is attached to the exposure when available:
 }
 ```
 
-That lets the UI join exact repository provenance with the model invocation span without making OTel storage authoritative.
+Opt-in `gen_ai.input.messages`, `gen_ai.output.messages`, or `gen_ai.system_instructions` do not replace ContextRender verification.
 
 ---
 
-## 7. Baggage is not an authority channel
+## 10. Baggage is not an authority channel
 
 Do not use OTel Baggage for:
 
 ```text
-repository authority
+repository identity
 member identity
 capabilities
 instruction authority
@@ -357,31 +407,28 @@ Context Pack identity
 policy decisions
 ```
 
-Baggage may be propagated to downstream services and has no built-in integrity guarantee.
-
-For correlation, prefer explicit span/log attributes or validated Git+ metadata. Authorization continues to derive from repository trust/policy and signed records.
+For correlation, prefer explicit trace/span attributes or validated Git+ metadata. Repository trust/policy and signed Git records remain authoritative.
 
 ---
 
-## 8. Machine-facing interfaces
+## 11. Machine-facing interfaces
 
-### 8.1 OTel receiver/exporter path
+### 11.1 OTel audit receiver/exporter
 
-The preferred integration should expose an OTLP-compatible audit endpoint or exporter path such as conceptually:
+Preferred shape:
 
 ```text
 harness OTel SDK
   → OTLP localhost / unix socket / embedded receiver
-  → Git+ normalizer
+  → versioned GenAI semconv normalizer
+  → Git+ trace writer
 ```
 
-The exact transport binding is implementation-specific.
+The receiver should know repository/session association from authenticated local configuration rather than trusting arbitrary incoming attributes to choose another repository.
 
-The receiver should know the repository/session association from authenticated local configuration, not trust arbitrary incoming attributes to choose another repository.
+### 11.2 Fallback recorder
 
-### 8.2 Generic fallback recorder
-
-Keep a generic fallback primitive for non-OTel adapters:
+Keep:
 
 ```text
 git+ trace record <repo> \
@@ -390,36 +437,26 @@ git+ trace record <repo> \
   --event <event.json>
 ```
 
-It should:
+for non-OTel adapters.
 
-```text
-validate
-secret-scan / apply retention rules
-bind repository + session
-sign
-append to refs/hub/trace/<session-id>
-print resulting qualified record OID
-```
-
-The same trace schema is produced whether input came from OTel, hooks, or embedded capture.
+The trace schema after normalization is the same regardless of input transport.
 
 ---
 
-## 9. Trace volume and batching
+## 12. Trace volume and retention
 
-OTel may produce far more telemetry than belongs in Git.
+OTel may produce far more detail than belongs in Git.
 
-Git+ should select, distill, and batch.
-
-Recommended canonical records:
+Recommended canonical Git records:
 
 ```text
 Context Exposure
-Invocation Telemetry
-Workspace Transition when audit-relevant
-Context compaction/truncation when audit-relevant
-Tool failures/truncations or mutation summaries
-Trace-health / known-loss markers
+logical Invocation Telemetry
+selected agent operations
+workspace transitions when audit-relevant
+context lifecycle changes when directly observed
+tool failures/truncations/mutation summaries
+trace-health / known-loss markers
 ```
 
 Usually external-only or side telemetry:
@@ -427,44 +464,45 @@ Usually external-only or side telemetry:
 ```text
 every successful read/grep
 raw provider request/response
-raw tool bodies
-verbose model stream events
+raw tool arguments/results
+complete input/output messages
+stream chunks
 high-cardinality timing detail
 fleet metrics
 ```
 
-The Git trace is the durable audit index, not a second OTel backend.
+The Git trace is an audit index, not a second telemetry backend.
 
 ---
 
-## 10. Workspace capture
+## 13. Workspace capture
 
-Workspace tree capture should remain boundary-driven.
+Workspace tree capture remains boundary-driven:
 
 ```text
-edit begins
+edit starts
   remember tree A
 
 writes happen
-  workspace marked dirty
+  mark workspace dirty
 
-before next auditable invocation
+before next auditable logical invocation
   materialize tree B
   record A → B
   next Context Pack uses B
 ```
 
-An OTel tool span can identify the operation that caused the mutation, but the authoritative repository identities are the Git tree OIDs.
+An OTel tool span can identify the operation that caused mutation, but Git tree OIDs remain authoritative repository identities.
 
 ---
 
-## 11. Server projection
+## 14. Server projection
 
-The browser should not reconstruct session/trace DAG semantics or trust state.
+The browser should not reconstruct semconv meaning, trace DAGs, or trust state.
 
-### 11.1 Session list
+### 14.1 Session list
 
-`/hub/sessions` stays cheap and may show trace-derived summaries:
+`/hub/sessions` stays cheap and may include:
 
 ```json
 {
@@ -475,63 +513,67 @@ The browser should not reconstruct session/trace DAG semantics or trust state.
   },
   "telemetry": {
     "transport": "otel",
-    "invocations": 18,
+    "semconv": "genai",
+    "logicalInvocations": 18,
+    "providerAttempts": 20,
+    "providerAttemptsKnown": true,
     "peakInputPressure": 0.96,
     "peakInvocation": "sha1:abc123...",
-    "compactions": 2,
-    "retries": 1,
+    "compactedInvocations": 2,
     "toolFailures": 1,
     "coverage": "partial"
   }
 }
 ```
 
-`peakInputPressure` exists only when a compatible effective input limit is known.
+`providerAttempts` MUST be omitted when attempt-level instrumentation is unavailable. It must not be guessed from logical invocation count.
 
-### 11.2 Session detail
+### 14.2 Session detail
 
 ```text
 GET /hub/sessions/:id
 ```
 
-should join:
+joins:
 
 ```text
-small session DAG
+small policy-visible session DAG
 +
-policy-invisible Git+ trace
+policy-invisible Git+ audit trace
 +
-optional external OTel correlation links
+optional external OTel links
 ```
 
 The server owns:
 
-- trust/signature verification;
+- signature/trust verification;
 - session/trace folding;
+- GenAI semconv normalization;
 - causal parentage;
 - redaction state;
-- joins between exposures, invocations, tools, transitions, commits, and refs;
-- trace visibility/health;
+- Context Exposure / invocation joins;
+- agent/tool/workspace joins;
+- trace health and coverage;
 - derived diagnostics.
 
 The browser owns presentation.
 
 ---
 
-## 12. UI principle
+## 15. UI principles
 
-Lead with repository-context changes, not telemetry plumbing.
+### 15.1 Lead with repository context
 
-Useful story:
+The useful story is:
 
 ```text
 tests/auth.test.ts exposed
       ↓
-model invocation span
+logical inference
       ↓
 96% effective input pressure
       ↓
-context compaction event
+compacted context reported/observed
       ↓
 tests/auth.test.ts absent from next exposure
       ↓
@@ -540,43 +582,74 @@ workspace mutation
 commit
 ```
 
-The OTel trace/span IDs should be available for experts, but they should not dominate the primary UI.
+OTel plumbing should be available for experts without dominating the primary view.
+
+### 15.2 Requested versus response model
+
+Show a single model label when both values match.
+
+When they differ, expose the distinction:
+
+```text
+requested  model-x
+response   model-x-20260815
+```
+
+Do not silently overwrite one with the other.
+
+### 15.3 Finish reason versus error
+
+Display:
+
+```text
+✓ completed · finish: length
+```
+
+separately from:
+
+```text
+✕ error · timeout
+```
+
+This avoids treating normal generation termination as transport/provider failure.
 
 ---
 
-## 13. Activity rows
+## 16. Activity rows
 
 Healthy session:
 
 ```text
 0198f2aa  claude-code · model-x
-3 commits · 124k tokens · ✓ context
+3 commits · 18 invocations · 124k tokens · ✓ context
 ```
 
 Session with useful warnings:
 
 ```text
 0198f2bb  codex · model-y
-284k tokens · 96% input pressure · 3 compactions · 1 retry · ⚠ context
+18 invocations · 20 attempts · 96% input pressure · 2 compacted · ⚠ context
 ```
+
+Only show attempts when explicitly known.
 
 An optional detail indicator may show:
 
 ```text
-OTel · audit capture available
+OTel GenAI · audit capture available
 ```
 
 Missing telemetry must never render as zero.
 
 ---
 
-## 14. Flight Recorder
+## 17. Flight Recorder
 
 Example:
 
 ```text
 Session 0198f2aa
-Claude Code · model-x
+Claude Code
 ────────────────────────────────────────
 
 09:42  Context Exposure
@@ -586,25 +659,31 @@ Claude Code · model-x
        ✓ evidence + render verified
        OTel span 00f067…
 
-09:42  Invocation
-       model-x
-       118k input · 90k cached · 4.2k output
-       59% of total context window
+09:42  Inference · chat
+       provider anthropic
+       requested model-x
+       response  model-x-20260815
+       118k input · 90k cache-read · 4.2k output
+       ✓ completed · finish: stop
+       2 provider attempts reported
+         1 timeout
+         2 success
 
-09:43  Tool activity
-       14 operations · 1 failure
-       [Open OTel trace]
+09:43  Tool · read-file
+       call call_123
+       ✓ 8.4 KB · result digest retained
 
 09:45  Workspace
        tree 79ad… → a130…
 
-09:46  Context compaction
-       context-window · summary
+09:46  Context
+       compacted prior conversation
+       separate compaction transition: summary · context-window
 
 09:46  Context diff
        - tests/auth.test.ts
 
-09:47  Invocation
+09:47  Inference · chat
        172k / 180k effective input limit
        ⚠ 96% input pressure
 
@@ -612,23 +691,19 @@ Claude Code · model-x
        abc123 Fix auth policy
 ```
 
-### 14.1 External OTel deep link
+### 17.1 External OTel deep link
 
-If an observability backend is configured, a trace/span row MAY expose:
+If an observability backend is configured, rows MAY expose **Open trace**.
 
-```text
-Open trace
-```
+Git+ audit pages must remain useful after external telemetry expires or is sampled out.
 
-The external backend is supplemental. Git+ audit pages must remain useful when that backend has expired, sampled out, or deleted detailed telemetry.
+### 17.2 Preserve concurrency
 
-### 14.2 Preserve concurrency
-
-Session and trace histories may be DAGs. The UI should show branches/lanes for concurrent records or resumed divergent histories rather than infer causality from timestamps.
+Session/trace histories may be DAGs. Show branches/lanes for concurrent or resumed divergent histories rather than inferring causality from timestamps.
 
 ---
 
-## 15. Context Pack diffs
+## 18. Context Pack diffs
 
 Adjacent exposures should support:
 
@@ -645,11 +720,11 @@ Removed
 
 Clicking a blob opens the exact historical blob/range. Clicking a gitlink shows the recorded submodule commit pointer.
 
-OTel does not replace this Git-native historical evidence view.
+OTel retrieval documents do not replace this Git-native historical evidence view.
 
 ---
 
-## 16. Provenance and capture status
+## 19. Provenance and capture status
 
 Display evidence dimensions separately:
 
@@ -657,9 +732,11 @@ Display evidence dimensions separately:
 Repository evidence   ✓ verified
 View reachability     ✓ retained through Git trace record
 Context render        ✓ retained and digest verified
+Runtime semantics     OTel GenAI · declared revision
 Runtime usage         provider reported
-Runtime capture       OTel · partial
+Runtime capture       partial
 Collector path        local-collector · transformed
+Provider attempts     unknown
 Tool body             expired
 Workspace alignment   ✓ matched recorded invocation boundary
 ```
@@ -670,66 +747,35 @@ Useful warnings include:
 ⚠ audit OTel export reported drops
 ⚠ sampling/filtering exists before Git+ ingest
 ⚠ capture path transformed telemetry
-⚠ lifecycle capture unavailable
+⚠ semconv version unknown; best-effort mapping
+⚠ attempt-level telemetry unavailable
 ✕ path/blob mismatch
 ✕ gitlink mode/commit mismatch
 ```
 
-A green repository-provenance state must not hide weak runtime-capture coverage, and weak OTel coverage must not invalidate valid Git evidence.
+Weak runtime capture must not invalidate valid Git evidence, and valid Git evidence must not imply complete runtime capture.
 
 ---
 
-## 17. Audit summary
+## 20. Commit and Change Request surfaces
 
-A derived card may show:
-
-```text
-Agent session audit
-
-Context provenance      ✓ 18 / 18 verified
-Runtime capture          OTel · partial
-Audit exporter health    ✓ no known drops
-Workspace alignment      ✓ matched invocation boundaries
-Peak input pressure      ⚠ 96% · sha1:c3…
-Compactions              2
-Retries                  1
-Failed tools             1
-Knowledge continuity     ⚠ test removed after compaction
-```
-
-Derived diagnosis must use observable language.
-
-Prefer:
-
-> `tests/auth.test.ts` was present in Exposure A and absent after a recorded compaction before Exposure B.
-
-Avoid:
-
-> The model forgot the test.
-
----
-
-## 18. Commit and Change Request surfaces
-
-Repository artifacts should link back to the Flight Recorder.
-
-A commit may show:
+Repository artifacts should link back to the Flight Recorder only with a causal binding.
 
 ```text
 Produced by session 0198f2aa
-Causally bound invocation: sha1:c3…
-model-y · 96% input pressure
+Causally bound logical invocation: sha1:c3…
+chat · model-y · 96% input pressure
 Context Pack: 12 blobs · 1 gitlink
 OTel trace available
 ```
 
-Only show an invocation as causal when the Git/session/trace relationship supports that claim. Do not infer it merely from timestamp proximity.
+Do not infer a causal invocation merely from timestamp proximity.
 
 ---
 
-## 19. Metrics stay operational
+## 21. Metrics stay operational
 
-OTel metrics can power separate fleet views:
+OTel metrics can power fleet views:
 
 ```text
 tokens per day
@@ -739,117 +785,98 @@ tool failure rates
 model/provider mix
 ```
 
-Those are valuable, but they are not the canonical source for one session's audit history.
-
-The Flight Recorder should use per-invocation trace facts, not reconstructed metric aggregates.
+They are not the canonical source for one session's audit history.
 
 ---
 
-## 20. Knowledge durability UI
-
-Repository Memory should continue to display cited claims and structured evidence dependencies independently of OTel:
-
-```text
-gotcha  Worker auth tests require production policy fixture
-source  session 0198f2aa
-support 2 blobs · 1 gitlink
-state   ⚠ config/policy.json changed; revalidate
-```
-
-OTel helps diagnose whether recalled knowledge survived runtime context lifecycle; it does not turn a cited claim into truth.
-
----
-
-## 21. Implementation sequence
+## 22. Implementation sequence
 
 ### Phase 1 — existing session summary
 
-Use current `session.produced.usage` in Activity. Do not invent window pressure or trace completeness before detailed capture exists.
+Use current `session.produced.usage` in Activity. Do not invent detailed runtime semantics before capture exists.
 
-### Phase 2 — OTel audit ingest
+### Phase 2 — semconv-aware OTel audit ingest
 
 Implement:
 
 ```text
 OTLP audit receiver/exporter integration
-OTel → Git+ normalization
+versioned OpenTelemetry GenAI mapping
+one logical invocation per inference span
 refs/hub/trace/<session>
 trace-health / capture-stage metadata
 ```
 
-Support model invocation telemetry first.
+Start with inference spans.
 
-### Phase 3 — Context Exposure integration
+### Phase 3 — model/usage/outcome mapping
 
-Add direct Git+ capture for:
-
-```text
-Repository View
-Context Pack
-ContextRender
-Context Exposure
-```
-
-Correlate each exposure with the relevant OTel trace/span when available.
-
-### Phase 4 — fallback hooks and generic recorder
-
-Add:
+Add explicit mappings for:
 
 ```text
-git+ trace record
-vendor hook adapters
+provider
+requested vs response model
+input/output/cache/reasoning usage
+span status + error.type
+finish reasons
+conversation.compacted
 ```
 
-for harnesses without sufficient native OTel.
+### Phase 4 — agent/tool/retrieval support
 
-### Phase 5 — server projection
+Add GenAI agent/framework spans, execute-tool spans, and retrieval diagnostics while preserving their upstream meanings.
 
-Extend `/hub/sessions` and add `GET /hub/sessions/:id` joining session, Git trace, and optional external OTel links.
+### Phase 5 — Context Exposure integration
 
-### Phase 6 — Flight Recorder
+Add direct Git+ Repository View / Context Pack / ContextRender capture and correlate exposures with inference spans.
 
-Add context diffs, pressure, retries, tool groups, workspace transitions, capture-health status, and external trace deep links.
+### Phase 6 — fallback hooks
 
-This order uses the standard runtime signal first instead of building a vendor-adapter matrix before it is necessary.
+Add `git+ trace record` and vendor adapters for harnesses without sufficient native OTel.
+
+### Phase 7 — server projection and Flight Recorder
+
+Add session detail projections, context diffs, logical invocation/attempt hierarchy, pressure, tool groups, workspace transitions, capture health, and external OTel links.
 
 ---
 
-## 22. Acceptance criteria
+## 23. Acceptance criteria
 
 The integration is useful when:
 
-1. a harness with native OTel can feed Git+ without a vendor-specific runtime adapter;
-2. hooks remain available when OTel is missing or insufficient;
-3. audit capture is independent from lossy observability sampling/filtering;
-4. Git+ normalizes OTel conventions instead of persisting them as the durable protocol contract;
-5. OTel TraceId/SpanId provide correlation while Git record OIDs remain canonical identity;
-6. OTel Baggage is never treated as authority or integrity evidence;
-7. Context Packs/ContextRender remain directly Git-grounded and survive external telemetry loss;
-8. provider-reported values remain distinct from harness-observed and derived values;
-9. high-volume OTel detail does not turn the Git trace into a second telemetry backend;
-10. high-frequency trace data remains outside policy-critical session folds;
-11. exporter loss/sampling/transformation is visible when known;
-12. workspace mutations remain grounded by Git trees, not by telemetry strings;
-13. the Flight Recorder remains useful after external OTel retention expires;
-14. a reviewer can move from a commit or Change Request to repository evidence, runtime audit, and optionally the external OTel trace.
+1. a harness emitting OTel GenAI conventions can feed Git+ without a vendor-specific runtime adapter;
+2. Git+ interprets a declared semconv version according to upstream meaning;
+3. one semconv inference span maps to one logical invocation;
+4. automatic retries do not become invented logical spans;
+5. provider attempts appear only when explicitly observed;
+6. requested and response model identifiers remain distinct;
+7. finish reasons remain distinct from span errors;
+8. standard agent/tool attributes map predictably;
+9. `gen_ai.conversation.compacted` is preserved without fabricating a compaction transition;
+10. retrieval spans never substitute for Context Exposure evidence;
+11. the audit path is independent from lossy observability sampling/filtering;
+12. Git record OIDs remain canonical durable identity;
+13. OTel Baggage is never treated as authority;
+14. Context Packs/ContextRender remain directly Git-grounded;
+15. high-volume OTel detail does not turn Git into a second telemetry backend;
+16. the Flight Recorder remains useful after external OTel retention expires.
 
 ---
 
-## 23. Upstream compatibility notes
+## 24. Upstream compatibility
 
-Useful OTel references:
+Primary upstream specification:
 
-- Logs and trace correlation: `https://opentelemetry.io/docs/specs/otel/logs/`
-- Log data model / TraceId / SpanId: `https://opentelemetry.io/docs/specs/otel/logs/data-model/`
-- Semantic conventions: `https://opentelemetry.io/docs/specs/otel/semantic-conventions/`
-- Collector transformations/filtering: `https://opentelemetry.io/docs/collector/transforming-telemetry/`
-- Baggage security considerations: `https://opentelemetry.io/docs/concepts/signals/baggage/`
+```text
+https://github.com/open-telemetry/semantic-conventions-genai
+```
 
-The mapping layer should be versioned because semantic conventions may evolve independently of Git+.
+The GenAI conventions are currently Development-status. The normalizer SHOULD therefore pin/report the revision it understands and SHOULD test mappings against upstream reference scenarios where practical.
+
+Git+ should track upstream semantic changes at the ingestion boundary without forcing those changes into its durable Git schema.
 
 ---
 
 ## Final principle
 
-> **Harness-native OpenTelemetry is the preferred way to capture runtime behavior; Git+ is the durable repository audit projection. OTel carries operation correlation and runtime facts, Git+ selects and normalizes the audit-relevant subset into signed records, and Context Packs/ContextRender retain the stronger Git-native evidence guarantees. Hooks are a fallback, metrics remain operational, and lossy observability processing must never be mistaken for a complete audit trail.**
+> **Harness-native OpenTelemetry GenAI is the preferred runtime semantic interface; Git+ is the durable repository audit projection. A declared semconv controls interpretation of incoming spans, events, and logs, while Git+ normalizes that meaning into stable signed records. Logical inference spans remain logical invocations, retry attempts remain subordinate, model request/response and finish/error distinctions survive normalization, and Git-native Context Packs retain the stronger repository-evidence guarantees.**
