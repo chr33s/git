@@ -472,6 +472,11 @@ describe("Api", () => {
         const read = yield* client.repo.read({ params: { repo: "r", oid: created.oid } });
         assert.equal(read.message, "first");
         assert.deepEqual(read.parents, []);
+        // The enriched view: one read carries everything a UI header needs.
+        assert.equal(read.subject, "first");
+        assert.deepEqual(read.author, { name: "Alice", email: "alice@example.com" });
+        assert.equal(read.at, alice.at);
+        assert.match(read.tree, /^[0-9a-f]{40}$/);
 
         const second = yield* client.repo.create({
           params: { repo: "r" },
@@ -482,6 +487,9 @@ describe("Api", () => {
           log.commits.map((commit) => commit.message),
           ["second", "first"],
         );
+        assert.equal(log.commits[0]?.subject, "second");
+        assert.equal(log.commits[0]?.author.name, "Alice");
+        assert.equal(log.commits[0]?.at, alice.at);
 
         const refs = yield* client.repo.refs({ params: { repo: "r" } });
         assert.deepEqual(refs.refs, [{ name: "refs/heads/main", oid: second.oid }]);
@@ -495,6 +503,7 @@ describe("Api", () => {
           firstPage.items.map((commit) => commit.message),
           ["second"],
         );
+        assert.deepEqual(firstPage.items[0]?.parents, [created.oid]);
         assert.equal(firstPage.has_more, true);
         const nextPage = yield* client.repo.commits({
           params: { repo: "r", oid: second.oid },
@@ -550,6 +559,106 @@ describe("Api", () => {
         assert.equal(conflict._tag, "RefConflict");
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
+  );
+
+  it.live(
+    "pages enriched commits — author, date, parents, subject and message in one response",
+    () =>
+      dispatched(
+        Effect.gen(function* () {
+          const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+
+          const seed = yield* client.repo.create({
+            params: { repo: "r" },
+            payload: { message: "seed the tree\n\nwith a body", author: alice },
+          });
+          yield* client.repo.branch({
+            params: { repo: "r" },
+            payload: { name: "side", base: "refs/heads/main" },
+          });
+          yield* client.repo.create({
+            params: { repo: "r" },
+            payload: {
+              branch: "side",
+              message: "side work",
+              author: {
+                name: "Bob",
+                email: "bob@example.com",
+                at: new Date(1_700_000_001_000).toISOString(),
+                offset: 0,
+              },
+              files: [{ path: "side.txt", content: "side\n" }],
+            },
+          });
+          yield* client.repo.create({
+            params: { repo: "r" },
+            payload: { branch: "main", message: "main moves on", author: alice },
+          });
+          const merged = yield* client.repo.merge({
+            params: { repo: "r" },
+            payload: {
+              ours: "refs/heads/main",
+              theirs: "refs/heads/side",
+              author: alice,
+              into: "main",
+            },
+          });
+          assert.equal(merged.kind, "merged");
+
+          // No author at all: the server's defaults, carried on the wire like
+          // any other commit's.
+          const anonymous = yield* client.repo.create({
+            params: { repo: "r" },
+            payload: { message: "unsigned" },
+          });
+
+          const page = yield* client.repo.commits({
+            params: { repo: "r", oid: anonymous.oid },
+            query: { limit: "10" },
+          });
+          assert.equal(page.items.length, 5);
+          assert.equal(page.has_more, false);
+          for (const item of page.items) {
+            assert.match(item.oid, /^[0-9a-f]{40}$/);
+            assert.equal(item.subject, item.message.split("\n", 1)[0]?.trim());
+            assert.ok(item.author.name.length > 0, item.oid);
+            assert.match(item.author.email, /@/);
+            assert.ok(!Number.isNaN(Date.parse(item.at)), item.at);
+            assert.ok(Array.isArray(item.parents));
+          }
+
+          const rows = new Map(page.items.map((item) => [item.subject, item]));
+          assert.deepEqual(rows.get("unsigned")?.author, {
+            name: "Anonymous",
+            email: "anonymous@example.com",
+          });
+          assert.deepEqual(rows.get("unsigned")?.parents, [merged.commit]);
+          assert.equal(rows.get("side work")?.author.name, "Bob");
+          assert.equal(rows.get("side work")?.at, new Date(1_700_000_001_000).toISOString());
+          assert.equal(rows.get("seed the tree")?.message, "seed the tree\n\nwith a body");
+          assert.deepEqual(rows.get("seed the tree")?.parents, []);
+
+          const mergeRow = page.items.find((item) => item.oid === merged.commit);
+          assert.equal(mergeRow?.parents.length, 2, "the merge names both parents");
+          assert.equal(mergeRow?.at, alice.at);
+
+          // And the single read agrees with the row, field for field.
+          const read = yield* client.repo.read({ params: { repo: "r", oid: seed.oid } });
+          assert.equal(read.subject, "seed the tree");
+          assert.deepEqual(read.author, { name: "Alice", email: "alice@example.com" });
+          assert.equal(read.at, alice.at);
+          assert.match(read.tree, /^[0-9a-f]{40}$/);
+
+          // Paging keeps the same shape.
+          const firstPage = yield* client.repo.commits({
+            params: { repo: "r", oid: anonymous.oid },
+            query: { limit: "2" },
+          });
+          assert.equal(firstPage.items.length, 2);
+          assert.equal(firstPage.has_more, true);
+          assert.equal(firstPage.items[0]?.subject, "unsigned");
+        }).pipe(Effect.scoped, Effect.provide(live)),
+      ),
   );
 
   it.live("commits real content, and reads it back", () =>
@@ -914,6 +1023,8 @@ describe("Api", () => {
           params: { repo: "r", oid: merged.commit! },
         });
         assert.equal(commit.parents.length, 2);
+        assert.equal(commit.author.name, "Alice");
+        assert.equal(commit.at, alice.at);
 
         // Their edit to shared.txt survived, and our file is still there.
         const shared = yield* client.repo.file({

@@ -159,8 +159,8 @@ opening a Change Request.
 /**
  * The tip commit, as the commit bar shows it.
  *
- * Author and age come from the raw commit header via `api.commitDetail` — no
- * JSON endpoint carries a timestamp, so that is the only route to one.
+ * Author and age arrive on `/commit/:oid` itself — the enriched view means no
+ * raw-object round trip.
  */
 interface HeadCommit {
   readonly sha: string;

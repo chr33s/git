@@ -31,7 +31,13 @@ import {
 import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
-import { EMPTY_TREE_OID, isGitlink, isTree, type Signature } from "../git/Format.ts";
+import {
+  EMPTY_TREE_OID,
+  isGitlink,
+  isTree,
+  type CommitInfo,
+  type Signature,
+} from "../git/Format.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { type Strategy as MergeStrategy } from "../git/Merge.ts";
@@ -513,6 +519,21 @@ const page = <A>(items: ReadonlyArray<A>, query: { cursor?: string; limit?: stri
   const more = start + size < items.length;
   return { items: slice, next_cursor: more ? String(start + size) : null, has_more: more };
 };
+
+/**
+ * One commit on the wire — the same shape from `log`, `commits` and `read`,
+ * so no client re-parses a raw object for an author line. The list schemas
+ * drop `tree` at encode; `read` keeps it.
+ */
+const commitView = (oid: Oid, commit: CommitInfo) => ({
+  oid,
+  message: commit.message,
+  subject: (commit.message.split("\n", 1)[0] ?? "").trim(),
+  author: { name: commit.author.name, email: commit.author.email },
+  at: commit.author.at.toISOString(),
+  parents: [...commit.parents],
+  tree: commit.tree,
+});
 
 /**
  * What a commit's tree should be: stated outright, built from paths on top of
@@ -1364,7 +1385,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const commit = yield* repository
           .readCommit(params.oid)
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-        return { message: commit.message, parents: commit.parents, tree: commit.tree };
+        return commitView(params.oid, commit);
       }),
     )
     .handle("log", ({ params }) =>
@@ -1373,9 +1394,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
         const commits = yield* Stream.runCollect(repository.log(params.oid, { limit: 50 })).pipe(
           Effect.catchTag("StorageFailure", Effect.die),
         );
-        return {
-          commits: commits.map((commit) => ({ message: commit.message, oid: commit.oid })),
-        };
+        return { commits: commits.map((commit) => commitView(commit.oid, commit)) };
       }),
     )
     .handle("refs", () =>
@@ -2106,7 +2125,7 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           repository.log(params.oid, { limit: start + size + 1 }),
         ).pipe(Effect.catchTag("StorageFailure", Effect.die));
         return page(
-          walked.map((commit) => ({ message: commit.message, oid: commit.oid })),
+          walked.map((commit) => commitView(commit.oid, commit)),
           query,
         );
       }),

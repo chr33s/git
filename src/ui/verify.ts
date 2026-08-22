@@ -93,6 +93,7 @@ interface Stubbed {
   readonly subject: string;
   readonly author: string;
   readonly daysAgo: number;
+  readonly parents?: readonly Contract.Ref["oid"][];
 }
 
 const HISTORY: readonly Stubbed[] = [
@@ -173,6 +174,28 @@ const rawCommit = (commit: Stubbed): string => {
 };
 
 /**
+ * The same commit as the enriched JSON endpoints answer it — one shape for
+ * `/commit`, `/commits` and `/log`.
+ */
+const commitView = (
+  commit: Stubbed,
+  parents?: readonly Contract.Ref["oid"][],
+): Contract.CommitView => ({
+  oid: commit.oid,
+  message: `${commit.subject}\n`,
+  subject: commit.subject,
+  author: {
+    name: commit.author,
+    email: `${commit.author.split(" ")[0]?.toLowerCase() ?? "who"}@example.com`,
+  },
+  at: new Date(Date.now() - commit.daysAgo * 86400000).toISOString(),
+  parents: [...(parents ?? commit.parents ?? [])],
+});
+
+/** Raw-object requests the stub served; the UI should need none of them. */
+let objectRequests = 0;
+
+/**
  * Static files, plus — when `api` is set — the JSON endpoints the UI calls.
  *
  * With the API off, every call 404s, which is exactly the condition the
@@ -190,7 +213,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
     ["main", OID_MAIN],
     [BRANCH, OID_BRANCH],
   ]);
-  /** Commits written during the run, served back by `/object/:oid`. */
+  /** Commits written during the run, served back by `/commit/:oid` and `/object/:oid`. */
   const written = new Map<string, Stubbed>();
   const NEXT_TIPS = ["5", "6", "7", "8", "9", "ab", "cd", "ef"] as const;
   let commitCount = 0;
@@ -325,6 +348,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           });
         }
         if (path.startsWith("/core/object/")) {
+          objectRequests += 1;
           const requestedOid = oid(path.slice("/core/object/".length));
           const commit =
             HISTORY.find((entry) => entry.oid === requestedOid) ?? written.get(requestedOid);
@@ -342,18 +366,46 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             encoding: "base64",
           });
         }
+        if (path.startsWith("/core/commit/")) {
+          const requestedOid = oid(path.slice("/core/commit/".length));
+          const entry = HISTORY.find((item) => item.oid === requestedOid) ??
+            written.get(requestedOid) ?? {
+              oid: requestedOid,
+              subject: "add auth middleware",
+              author: "Rune Baek",
+              daysAgo: 0,
+            };
+          return json(Contract.Commit, { ...commitView(entry), tree: oid("a".repeat(40)) });
+        }
         if (path.startsWith("/core/commits/")) {
           return json(Contract.CommitPage, {
-            items: HISTORY.map((entry) => ({ oid: entry.oid, message: `${entry.subject}\n` })),
+            items: HISTORY.map((entry, index) => {
+              const next = HISTORY.at(index + 1);
+              return commitView(entry, next === undefined ? [] : [next.oid]);
+            }),
             next_cursor: null,
             has_more: false,
           });
         }
         if (path.startsWith("/core/log/")) {
+          const head = HISTORY.find((entry) => entry.oid === OID_MAIN) ?? {
+            oid: OID_MAIN,
+            subject: "merge CR-18: update pipeline config",
+            author: "Rune Baek",
+            daysAgo: 1,
+          };
           return json(Contract.LogResponse, {
             commits: [
-              { oid: OID_MAIN, message: "merge CR-18: update pipeline config\n\nbody" },
-              { oid: OID_BRANCH, message: "earlier" },
+              {
+                ...commitView(head, [OID_BRANCH]),
+                message: "merge CR-18: update pipeline config\n\nbody",
+              },
+              commitView({
+                oid: OID_BRANCH,
+                subject: "earlier",
+                author: "Rune Baek",
+                daysAgo: 2,
+              }),
             ],
           });
         }
@@ -604,6 +656,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
               subject: (payload.message ?? "").split("\n", 1)[0] ?? "",
               author: "Rune Baek",
               daysAgo: 0,
+              parents: [tip],
             });
             return json(Contract.CommitCreated, { oid: next, tree: oid("a".repeat(40)) });
           } catch (cause) {
@@ -1203,9 +1256,9 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     "and the short oid",
     (await page.textContent(".gp-commit-sha"))?.trim() === OID_MAIN.slice(0, 7),
   );
-  // Author and age exist only in the raw commit header, so these two prove the
-  // `/object/:oid` round trip and the header parse, not just that a bar rendered.
-  check("and the author from the raw commit header", bar.includes("Rune Baek"), bar.trim());
+  // Author and age ride on `/commit/:oid` now, so these two prove the
+  // enriched metadata crosses the wire, not just that a bar rendered.
+  check("and the author from the commit view", bar.includes("Rune Baek"), bar.trim());
   check("and a relative age", /\b\d+[wdhm] ago\b|just now/.test(bar));
   check(
     "the sidebar identity comes from /whoami",
@@ -1530,6 +1583,12 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     (await page.locator(".gp-cal-day").count()) === 14,
   );
   await shot(page, "live-activity");
+
+  check(
+    "no /object round trips — commit metadata arrived enriched",
+    objectRequests === 0,
+    `${objectRequests} raw-object request(s)`,
+  );
 
   // --- search, over /grep -------------------------------------------------
   await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });

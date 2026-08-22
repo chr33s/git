@@ -103,16 +103,13 @@ interface RemoteAddRequest {
 export type FileContent = Contract.FileContent;
 export type DiffFile = Contract.DiffFile;
 export type CommitSummary = Contract.CommitSummary;
+export type CommitView = Contract.CommitView;
 export type Commit = Contract.Commit;
 
 /**
- * A commit with its author and date.
- *
- * Assembled from `/object/:oid` rather than `/commit/:oid`, because **no JSON
- * endpoint carries a commit timestamp**: `/log`, `/commits` and `/history`
- * answer `{ oid, message }`, and `/commit/:oid` adds only parents and tree. The
- * raw object does carry it — `author NAME <EMAIL> UNIXTS TZ` — so the header is
- * parsed here, at the boundary, and every screen above sees a `Date`.
+ * A commit with its author and date, as the enriched JSON endpoints answer
+ * it. The ISO `at` becomes a `Date` here, once, at the boundary — screens
+ * never see the wire string.
  */
 export interface CommitDetail {
   readonly oid: string;
@@ -122,13 +119,6 @@ export interface CommitDetail {
   readonly email: string;
   readonly at: Date;
   readonly parents: readonly string[];
-}
-
-/** A raw object, decoded from base64 to text. */
-export interface RawObject {
-  readonly oid: string;
-  readonly type: "blob" | "tree" | "commit" | "tag";
-  readonly text: string;
 }
 
 /**
@@ -179,44 +169,15 @@ export const decodeContent = (content: string): string => {
   return decoder.decode(bytes);
 };
 
-/**
- * `author NAME <EMAIL> UNIXTS TZ`, from a raw commit's header.
- *
- * Anchored to the start of a line so a message body mentioning "author" cannot
- * be mistaken for the header field.
- */
-const AUTHOR = /^author (.+) <([^>]*)> (\d+) ([+-]\d{4})$/m;
-
-const PARENT = /^parent ([0-9a-f]{40})$/gm;
-
-/**
- * Split a raw commit into the parts the UI needs.
- *
- * The header ends at the first blank line; everything after it is the message,
- * whose first line is the subject. A commit with no parsable author line is not
- * an error worth failing a screen over — the date falls back to the epoch and
- * the caller can still show the subject.
- */
-const parseCommit = (oid: string, raw: string): CommitDetail => {
-  const blank = raw.indexOf("\n\n");
-  const header = blank === -1 ? raw : raw.slice(0, blank);
-  const message = blank === -1 ? "" : raw.slice(blank + 2);
-  const author = AUTHOR.exec(header);
-  const parents: string[] = [];
-  for (const match of header.matchAll(PARENT)) {
-    const parent = match[1];
-    if (parent !== undefined) parents.push(parent);
-  }
-  const seconds = author?.[3];
-  return {
-    oid,
-    subject: (message.split("\n", 1)[0] ?? "").trim(),
-    author: author?.[1] ?? "unknown",
-    email: author?.[2] ?? "",
-    at: new Date(seconds === undefined ? 0 : Number(seconds) * 1000),
-    parents,
-  };
-};
+/** Wire → client, once: the ISO timestamp becomes a `Date` here. */
+const commitDetailOf = (commit: Contract.CommitView): CommitDetail => ({
+  oid: commit.oid,
+  subject: commit.subject,
+  author: commit.author.name,
+  email: commit.author.email,
+  at: new Date(commit.at),
+  parents: commit.parents,
+});
 
 export interface ClientOptions {
   /** Repository name — the first path segment the server routes on. */
@@ -526,35 +487,25 @@ export class GitApi {
     return await this.#post("/pull", { name, branch }, Contract.PullResult);
   }
 
-  /** One raw object, decoded to text. */
-  async object(oid: string): Promise<RawObject> {
-    const body = await this.#json(this.#url(`/object/${oid}`), Contract.RawObject);
-    return { oid: body.oid, type: body.type, text: decodeContent(body.content) };
-  }
-
-  /** One commit, with the author and date its raw header carries. */
+  /** One commit, with author and date, straight from `/commit/:oid`. */
   async commitDetail(oid: string): Promise<CommitDetail> {
-    const object = await this.object(oid);
-    return parseCommit(oid, object.text);
+    return commitDetailOf(await this.#json(this.#url(`/commit/${oid}`), Contract.Commit));
   }
 
   /**
-   * The newest `limit` commits reachable from `oid`, each with author and date.
-   *
-   * One request for the list and one per commit for its header, because the
-   * list endpoint carries no timestamp. Bounded by `limit` precisely because
-   * that makes it N+1.
+   * The newest `limit` commits reachable from `oid`, each with author and
+   * date — one paged request, because the rows carry the metadata now.
    */
   async recentCommits(oid: string, limit = 30): Promise<readonly CommitDetail[]> {
     const page = await this.#json(
       this.#url(`/commits/${oid}`, new URLSearchParams({ limit: String(limit) })),
       Contract.CommitPage,
     );
-    return await Promise.all(page.items.map((item) => this.commitDetail(item.oid)));
+    return page.items.map(commitDetailOf);
   }
 
   /** Commit history from a starting oid, newest first. */
-  async log(oid: string): Promise<readonly CommitSummary[]> {
+  async log(oid: string): Promise<readonly CommitView[]> {
     const body = await this.#json(this.#url(`/log/${oid}`), Contract.LogResponse);
     return body.commits;
   }

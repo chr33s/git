@@ -331,6 +331,10 @@ Covers content (`commit`, `commit-pack`, `blob`, `tree`, `files`, `file`,
 `push`, `pull`), maintenance (`fsck`, `gc`), and webhook registration — which
 is what makes a push deliver.
 
+`commit`, `commits` and `log` answer one enriched commit view — oid, message,
+subject, author, ISO date, parents — so a client never re-parses a raw object
+for an author line; `object` stays the low-level endpoint underneath.
+
 A repository can act as a client of another: remotes are registered per
 repository with an optional credential that is _stored rather than sent_ (a
 token in a request body is a token in an access log), and `pull` reports a

@@ -82,14 +82,31 @@ export const CommitSummary = Schema.Struct({
 });
 export type CommitSummary = (typeof CommitSummary)["Type"];
 
-export const LogResponse = Schema.Struct({ commits: Schema.Array(CommitSummary) });
-export const CommitPage = Page(CommitSummary);
+/** A commit's author on the wire; the timestamp lives on the commit itself. */
+export const CommitAuthor = Schema.Struct({ name: Schema.String, email: Schema.String });
+export type CommitAuthor = (typeof CommitAuthor)["Type"];
 
-export const Commit = Schema.Struct({
+/**
+ * The commit view `log`, `commits` and `commit` all answer: everything a
+ * listing or a header needs, so no client parses a raw object for an author
+ * line. `at` is an ISO timestamp.
+ */
+export const CommitView = Schema.Struct({
+  oid: OidString,
   message: Schema.String,
+  /** First line of the message, trimmed. */
+  subject: Schema.String,
+  author: CommitAuthor,
+  at: Schema.String,
   parents: Schema.Array(OidString),
-  tree: OidString,
 });
+export type CommitView = (typeof CommitView)["Type"];
+
+export const LogResponse = Schema.Struct({ commits: Schema.Array(CommitView) });
+export const CommitPage = Page(CommitView);
+
+/** `GET /:repo/commit/:oid` — the shared view, plus the tree the commit wrote. */
+export const Commit = Schema.Struct({ ...CommitView.fields, tree: OidString });
 export type Commit = (typeof Commit)["Type"];
 
 export const HistoryEntry = Schema.Struct({
