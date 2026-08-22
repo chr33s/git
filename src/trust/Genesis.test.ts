@@ -41,364 +41,410 @@ const linesOf = (roots: ReadonlyArray<PrivateKey>): ReadonlyArray<string> =>
   roots.map((root) => formatPublicKey(root.publicKey));
 
 describe("Genesis", () => {
-  it("derives a stable RepoID from the stored bytes", async () => {
-    const [genesis, again] = await Effect.runPromise(
-      Effect.gen(function* () {
-        const roots = yield* keys(3);
-        const first = yield* create(linesOf(roots), 2);
-        // The same document, loaded from the bytes rather than constructed.
-        const second = yield* load(first.bytes);
-        return [first, second];
-      }),
-    );
-
-    assert.ok(isRepoId(genesis.repoId), `not a RepoID: ${genesis.repoId}`);
-    assert.equal(again.repoId, genesis.repoId);
-    assert.equal(again.document.threshold, 2);
-    assert.equal(again.roots.length, 3);
-  });
-
-  it("hashes the bytes it was given, not a re-encoding of them", async () => {
-    // A document whose stored form differs from this version's canonical
-    // spelling — a host that wrote it with different whitespace. Identity must
-    // follow the bytes, or every pinned entry pointing at it breaks.
-    const stored = await Effect.runPromise(
-      Effect.gen(function* () {
-        const roots = yield* keys(1);
-        const canonical = yield* create(linesOf(roots), 1);
-        const compact = new TextEncoder().encode(
-          JSON.stringify(JSON.parse(new TextDecoder().decode(canonical.bytes))),
-        );
-        return {
-          canonical,
-          loaded: yield* load(compact),
-          expected: yield* repoIdOf(compact),
-        };
-      }),
-    );
-
-    assert.equal(stored.loaded.repoId, stored.expected);
-    assert.notEqual(
-      stored.loaded.repoId,
-      stored.canonical.repoId,
-      "different bytes must be a different identity",
-    );
-  });
-
-  it("round-trips the canonical encoding", async () => {
-    const bytes = await Effect.runPromise(
-      Effect.gen(function* () {
-        const roots = yield* keys(2);
-        const genesis = yield* create(linesOf(roots), 2);
-        return { written: genesis.bytes, re: encodeDocument(genesis.document) };
-      }),
-    );
-    assert.deepEqual(bytes.re, bytes.written);
-  });
-
-  describe("validation", () => {
-    it("refuses a threshold no set of keys can meet", async () => {
-      const failure = await Effect.runPromise(
+  it.effect("derives a stable RepoID from the stored bytes", () =>
+    Effect.promise(async () => {
+      const [genesis, again] = await Effect.runPromise(
         Effect.gen(function* () {
-          const roots = yield* keys(2);
-          return yield* create(linesOf(roots), 3).pipe(Effect.flip);
+          const roots = yield* keys(3);
+          const first = yield* create(linesOf(roots), 2);
+          // The same document, loaded from the bytes rather than constructed.
+          const second = yield* load(first.bytes);
+          return [first, second];
         }),
       );
-      assert.match(failure.reason, /exceeds 2 root keys/);
-    });
 
-    it("refuses a threshold below one", async () => {
-      const failure = await Effect.runPromise(
+      assert.ok(isRepoId(genesis.repoId), `not a RepoID: ${genesis.repoId}`);
+      assert.equal(again.repoId, genesis.repoId);
+      assert.equal(again.document.threshold, 2);
+      assert.equal(again.roots.length, 3);
+    }),
+  );
+
+  it.effect("hashes the bytes it was given, not a re-encoding of them", () =>
+    Effect.promise(async () => {
+      // A document whose stored form differs from this version's canonical
+      // spelling — a host that wrote it with different whitespace. Identity must
+      // follow the bytes, or every pinned entry pointing at it breaks.
+      const stored = await Effect.runPromise(
         Effect.gen(function* () {
           const roots = yield* keys(1);
-          return yield* create(linesOf(roots), 0).pipe(Effect.flip);
-        }),
-      );
-      assert.match(failure.reason, /at least 1/);
-    });
-
-    it("refuses a repository with no root keys", async () => {
-      const failure = await Effect.runPromise(create([], 1).pipe(Effect.flip));
-      assert.match(failure.reason, /needs a root key/);
-    });
-
-    it("refuses the same key listed twice", async () => {
-      const failure = await Effect.runPromise(
-        Effect.gen(function* () {
-          const [root] = yield* keys(1);
-          const line = formatPublicKey(root!.publicKey);
-          return yield* create([line, line], 2).pipe(Effect.flip);
-        }),
-      );
-      assert.match(failure.reason, /duplicate root key/);
-    });
-
-    it("refuses a root key that is not a key", async () => {
-      const failure = await Effect.runPromise(
-        create(["ssh-ed25519 nonsense"], 1).pipe(Effect.flip),
-      );
-      assert.match(failure.reason, /bad root key/);
-    });
-
-    it("says so when the object format is one this version cannot serve", async () => {
-      const document = new TextEncoder().encode(
-        JSON.stringify({
-          version: 1,
-          objectFormat: "sha256",
-          uuid: "00000000-0000-7000-8000-000000000000",
-          rootKeys: [],
-          threshold: 1,
-        }),
-      );
-      const failure = await Effect.runPromise(load(document).pipe(Effect.flip));
-      assert.match(failure.reason, /not supported in this version/);
-    });
-
-    it("reports malformed JSON as an invalid genesis", async () => {
-      const failure = await Effect.runPromise(
-        load(new TextEncoder().encode("{ not json")).pipe(Effect.flip),
-      );
-      assert.equal(failure._tag, "Invalid");
-    });
-  });
-
-  describe("signatures", () => {
-    it("counts distinct root signers towards the quorum", async () => {
-      const outcome = await Effect.runPromise(
-        Effect.gen(function* () {
-          const roots = yield* keys(3);
-          const genesis = yield* create(linesOf(roots), 2);
-          const signatures = yield* Effect.all([
-            signGenesis(genesis, roots[0]!),
-            signGenesis(genesis, roots[1]!),
-          ]);
-          const signers = yield* rootSigners(genesis, signatures);
-          return { genesis, signers };
-        }),
-      );
-
-      assert.equal(outcome.signers.length, 2);
-      assert.ok(quorumMet(outcome.genesis, outcome.signers));
-    });
-
-    it("remembers a genesis it could not use, as well as one it could", async () => {
-      // A failure costs what a success costs: the commit, two blobs, a
-      // SHA-256 and an Ed25519 verification per root signature — on a path
-      // every request takes, twice or three times on a write. Remembered only
-      // on success, a genesis short of its own threshold re-ran all of it
-      // every time, which is an amplifier on exactly the anonymous loop the
-      // memo was added to protect.
-      const outcome = await scenario(
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const objects = yield* ObjectStore;
-          const roots = yield* keys(3);
-          const genesis = yield* create(linesOf(roots), 2);
-          // One signature against a threshold of two.
-          yield* writeGenesis(genesis, [yield* signGenesis(genesis, roots[0]!)]);
-
-          const first = yield* readGenesis().pipe(
-            Effect.as(null),
-            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          const canonical = yield* create(linesOf(roots), 1);
+          const compact = new TextEncoder().encode(
+            JSON.stringify(JSON.parse(new TextDecoder().decode(canonical.bytes))),
           );
-
-          // The bytes go. A second read that still says the same thing is a
-          // second read that did not happen — the answer came from the memo.
-          const commit = yield* repository.resolve(GENESIS_REF);
-          const info = yield* repository.readCommit(commit!);
-          yield* objects.delete(info.tree);
-
-          const second = yield* readGenesis().pipe(
-            Effect.as(null),
-            Effect.catchTags({
-              Invalid: (error) => Effect.succeed(error.reason),
-              ObjectNotFound: () => Effect.succeed("read again"),
-            }),
-          );
-          return { first, second };
-        }),
-      );
-
-      assert.match(outcome.first ?? "", /threshold/);
-      assert.match(outcome.second ?? "", /threshold/);
-    });
-
-    it("does not let one root sign twice to reach a quorum", async () => {
-      const outcome = await Effect.runPromise(
-        Effect.gen(function* () {
-          const roots = yield* keys(3);
-          const genesis = yield* create(linesOf(roots), 2);
-          // The same holder, signing twice: two armored blobs, one signer.
-          const signatures = yield* Effect.all([
-            signGenesis(genesis, roots[0]!),
-            signGenesis(genesis, roots[0]!),
-          ]);
-          return { genesis, signers: yield* rootSigners(genesis, signatures) };
-        }),
-      );
-
-      assert.equal(outcome.signers.length, 1);
-      assert.equal(quorumMet(outcome.genesis, outcome.signers), false);
-    });
-
-    it("ignores a signature from a key that is not a root", async () => {
-      const signers = await Effect.runPromise(
-        Effect.gen(function* () {
-          const roots = yield* keys(2);
-          const stranger = yield* generate("stranger@example.com");
-          const genesis = yield* create(linesOf(roots), 2);
-          return yield* rootSigners(genesis, [
-            yield* signGenesis(genesis, roots[0]!),
-            yield* signGenesis(genesis, stranger),
-          ]);
-        }),
-      );
-      assert.equal(signers.length, 1);
-    });
-
-    it("ignores a signature over different bytes", async () => {
-      const signers = await Effect.runPromise(
-        Effect.gen(function* () {
-          const roots = yield* keys(2);
-          const genesis = yield* create(linesOf(roots), 2);
-          const other = yield* create(linesOf(roots), 1);
-          // Signed over a different genesis: valid armor, wrong document.
-          return yield* rootSigners(genesis, [yield* signGenesis(other, roots[0]!)]);
-        }),
-      );
-      assert.equal(signers.length, 0);
-    });
-  });
-
-  it("gives two repositories built from the same key distinct identities", async () => {
-    // One person setting up two projects uses the same key and the same
-    // threshold for both. Hashing only those, the two shared a `RepoID` —
-    // which breaks `known_repos` on both and lets a certificate or a hub event
-    // bound to one verify against the other.
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
-        const roots = yield* keys(1);
-        const first = yield* create(linesOf(roots), 1);
-        const second = yield* create(linesOf(roots), 1);
-        return { first: first.repoId, second: second.repoId };
-      }),
-    );
-
-    assert.notEqual(outcome.first, outcome.second);
-  });
-
-  it("keeps an identity stable when the same document is loaded again", async () => {
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
-        const roots = yield* keys(1);
-        const made = yield* create(linesOf(roots), 1);
-        const read = yield* load(made.bytes);
-        return { made: made.repoId, read: read.repoId };
-      }),
-    );
-
-    assert.equal(outcome.read, outcome.made);
-  });
-
-  describe("storage", () => {
-    it("writes the genesis and reads back the same identity", async () => {
-      const outcome = await scenario(
-        Effect.gen(function* () {
-          const roots = yield* keys(3);
-          const genesis = yield* create(linesOf(roots), 2);
-          const signatures = yield* Effect.all([
-            signGenesis(genesis, roots[0]!),
-            signGenesis(genesis, roots[1]!),
-          ]);
-          yield* writeGenesis(genesis, signatures);
-
-          const stored = yield* readGenesis();
-          if (stored === null) throw new Error("expected a genesis");
           return {
-            expected: genesis.repoId,
-            got: stored.genesis.repoId,
-            signers: yield* rootSigners(stored.genesis, stored.signatures),
-            quorum: quorumMet(
-              stored.genesis,
-              yield* rootSigners(stored.genesis, stored.signatures),
-            ),
+            canonical,
+            loaded: yield* load(compact),
+            expected: yield* repoIdOf(compact),
           };
         }),
       );
 
-      assert.equal(outcome.got, outcome.expected);
-      assert.equal(outcome.signers.length, 2);
-      assert.ok(outcome.quorum);
-    });
+      assert.equal(stored.loaded.repoId, stored.expected);
+      assert.notEqual(
+        stored.loaded.repoId,
+        stored.canonical.repoId,
+        "different bytes must be a different identity",
+      );
+    }),
+  );
 
-    it("answers null for a repository that has no genesis", async () => {
-      assert.equal(await scenario(readGenesis()), null);
-    });
-
-    it("refuses a genesis whose roots never signed it", async () => {
-      // A `RepoID` says what a document hashes to; it does not say the roots
-      // agreed to it. Left unchecked, a replica serving a genesis nobody's
-      // roots signed was believed by every path that reads one — a client that
-      // had pinned the identity would catch it, one meeting the repository for
-      // the first time would not.
-      const failure = await scenario(
+  it.effect("round-trips the canonical encoding", () =>
+    Effect.promise(async () => {
+      const bytes = await Effect.runPromise(
         Effect.gen(function* () {
           const roots = yield* keys(2);
           const genesis = yield* create(linesOf(roots), 2);
-          // One of the two the threshold asks for.
-          yield* writeGenesis(genesis, [yield* signGenesis(genesis, roots[0]!)]);
-          return yield* readGenesis().pipe(Effect.flip);
+          return { written: genesis.bytes, re: encodeDocument(genesis.document) };
         }),
       );
+      assert.deepEqual(bytes.re, bytes.written);
+    }),
+  );
 
-      assert.equal(failure._tag, "Invalid");
-      assert.match(failure.reason, /threshold is 2/);
-    });
+  describe("validation", () => {
+    it.effect("refuses a threshold no set of keys can meet", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(
+          Effect.gen(function* () {
+            const roots = yield* keys(2);
+            return yield* create(linesOf(roots), 3).pipe(Effect.flip);
+          }),
+        );
+        assert.match(failure.reason, /exceeds 2 root keys/);
+      }),
+    );
 
-    it("ignores a signature from a key that is not a root", async () => {
-      // It proves something true about a key nobody asked about, and treating
-      // it as an error would let anyone break a genesis by appending their own.
-      const outcome = await scenario(
-        Effect.gen(function* () {
-          const roots = yield* keys(1);
-          const stranger = yield* keys(1);
-          const genesis = yield* create(linesOf(roots), 1);
-          yield* writeGenesis(genesis, [
-            yield* signGenesis(genesis, stranger[0]!),
-            yield* signGenesis(genesis, roots[0]!),
-          ]);
-          return yield* readGenesis();
-        }),
-      );
+    it.effect("refuses a threshold below one", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(
+          Effect.gen(function* () {
+            const roots = yield* keys(1);
+            return yield* create(linesOf(roots), 0).pipe(Effect.flip);
+          }),
+        );
+        assert.match(failure.reason, /at least 1/);
+      }),
+    );
 
-      assert.notEqual(outcome, null);
-    });
+    it.effect("refuses a repository with no root keys", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(create([], 1).pipe(Effect.flip));
+        assert.match(failure.reason, /needs a root key/);
+      }),
+    );
 
-    it("refuses to replace an identity a repository already has", async () => {
-      const failure = await scenario(
+    it.effect("refuses the same key listed twice", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(
+          Effect.gen(function* () {
+            const [root] = yield* keys(1);
+            const line = formatPublicKey(root!.publicKey);
+            return yield* create([line, line], 2).pipe(Effect.flip);
+          }),
+        );
+        assert.match(failure.reason, /duplicate root key/);
+      }),
+    );
+
+    it.effect("refuses a root key that is not a key", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(
+          create(["ssh-ed25519 nonsense"], 1).pipe(Effect.flip),
+        );
+        assert.match(failure.reason, /bad root key/);
+      }),
+    );
+
+    it.effect("says so when the object format is one this version cannot serve", () =>
+      Effect.promise(async () => {
+        const document = new TextEncoder().encode(
+          JSON.stringify({
+            version: 1,
+            objectFormat: "sha256",
+            uuid: "00000000-0000-7000-8000-000000000000",
+            rootKeys: [],
+            threshold: 1,
+          }),
+        );
+        const failure = await Effect.runPromise(load(document).pipe(Effect.flip));
+        assert.match(failure.reason, /not supported in this version/);
+      }),
+    );
+
+    it.effect("reports malformed JSON as an invalid genesis", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(
+          load(new TextEncoder().encode("{ not json")).pipe(Effect.flip),
+        );
+        assert.equal(failure._tag, "Invalid");
+      }),
+    );
+  });
+
+  describe("signatures", () => {
+    it.effect("counts distinct root signers towards the quorum", () =>
+      Effect.promise(async () => {
+        const outcome = await Effect.runPromise(
+          Effect.gen(function* () {
+            const roots = yield* keys(3);
+            const genesis = yield* create(linesOf(roots), 2);
+            const signatures = yield* Effect.all([
+              signGenesis(genesis, roots[0]!),
+              signGenesis(genesis, roots[1]!),
+            ]);
+            const signers = yield* rootSigners(genesis, signatures);
+            return { genesis, signers };
+          }),
+        );
+
+        assert.equal(outcome.signers.length, 2);
+        assert.ok(quorumMet(outcome.genesis, outcome.signers));
+      }),
+    );
+
+    it.effect("remembers a genesis it could not use, as well as one it could", () =>
+      Effect.promise(async () => {
+        // A failure costs what a success costs: the commit, two blobs, a
+        // SHA-256 and an Ed25519 verification per root signature — on a path
+        // every request takes, twice or three times on a write. Remembered only
+        // on success, a genesis short of its own threshold re-ran all of it
+        // every time, which is an amplifier on exactly the anonymous loop the
+        // memo was added to protect.
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const objects = yield* ObjectStore;
+            const roots = yield* keys(3);
+            const genesis = yield* create(linesOf(roots), 2);
+            // One signature against a threshold of two.
+            yield* writeGenesis(genesis, [yield* signGenesis(genesis, roots[0]!)]);
+
+            const first = yield* readGenesis().pipe(
+              Effect.as(null),
+              Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+            );
+
+            // The bytes go. A second read that still says the same thing is a
+            // second read that did not happen — the answer came from the memo.
+            const commit = yield* repository.resolve(GENESIS_REF);
+            const info = yield* repository.readCommit(commit!);
+            yield* objects.delete(info.tree);
+
+            const second = yield* readGenesis().pipe(
+              Effect.as(null),
+              Effect.catchTags({
+                Invalid: (error) => Effect.succeed(error.reason),
+                ObjectNotFound: () => Effect.succeed("read again"),
+              }),
+            );
+            return { first, second };
+          }),
+        );
+
+        assert.match(outcome.first ?? "", /threshold/);
+        assert.match(outcome.second ?? "", /threshold/);
+      }),
+    );
+
+    it.effect("does not let one root sign twice to reach a quorum", () =>
+      Effect.promise(async () => {
+        const outcome = await Effect.runPromise(
+          Effect.gen(function* () {
+            const roots = yield* keys(3);
+            const genesis = yield* create(linesOf(roots), 2);
+            // The same holder, signing twice: two armored blobs, one signer.
+            const signatures = yield* Effect.all([
+              signGenesis(genesis, roots[0]!),
+              signGenesis(genesis, roots[0]!),
+            ]);
+            return { genesis, signers: yield* rootSigners(genesis, signatures) };
+          }),
+        );
+
+        assert.equal(outcome.signers.length, 1);
+        assert.equal(quorumMet(outcome.genesis, outcome.signers), false);
+      }),
+    );
+
+    it.effect("ignores a signature from a key that is not a root", () =>
+      Effect.promise(async () => {
+        const signers = await Effect.runPromise(
+          Effect.gen(function* () {
+            const roots = yield* keys(2);
+            const stranger = yield* generate("stranger@example.com");
+            const genesis = yield* create(linesOf(roots), 2);
+            return yield* rootSigners(genesis, [
+              yield* signGenesis(genesis, roots[0]!),
+              yield* signGenesis(genesis, stranger),
+            ]);
+          }),
+        );
+        assert.equal(signers.length, 1);
+      }),
+    );
+
+    it.effect("ignores a signature over different bytes", () =>
+      Effect.promise(async () => {
+        const signers = await Effect.runPromise(
+          Effect.gen(function* () {
+            const roots = yield* keys(2);
+            const genesis = yield* create(linesOf(roots), 2);
+            const other = yield* create(linesOf(roots), 1);
+            // Signed over a different genesis: valid armor, wrong document.
+            return yield* rootSigners(genesis, [yield* signGenesis(other, roots[0]!)]);
+          }),
+        );
+        assert.equal(signers.length, 0);
+      }),
+    );
+  });
+
+  it.effect("gives two repositories built from the same key distinct identities", () =>
+    Effect.promise(async () => {
+      // One person setting up two projects uses the same key and the same
+      // threshold for both. Hashing only those, the two shared a `RepoID` —
+      // which breaks `known_repos` on both and lets a certificate or a hub event
+      // bound to one verify against the other.
+      const outcome = await Effect.runPromise(
         Effect.gen(function* () {
           const roots = yield* keys(1);
           const first = yield* create(linesOf(roots), 1);
-          yield* writeGenesis(first, []);
-
-          const usurper = yield* keys(1);
-          const second = yield* create(linesOf(usurper), 1);
-          return yield* writeGenesis(second, []).pipe(Effect.flip);
+          const second = yield* create(linesOf(roots), 1);
+          return { first: first.repoId, second: second.repoId };
         }),
       );
-      assert.equal(failure._tag, "RefConflict");
-    });
 
-    it("puts the genesis where a stock clone would replicate it", async () => {
-      const ref = await scenario(
+      assert.notEqual(outcome.first, outcome.second);
+    }),
+  );
+
+  it.effect("keeps an identity stable when the same document is loaded again", () =>
+    Effect.promise(async () => {
+      const outcome = await Effect.runPromise(
         Effect.gen(function* () {
-          const repository = yield* Repository;
           const roots = yield* keys(1);
-          yield* writeGenesis(yield* create(linesOf(roots), 1), []);
-          return yield* repository.resolve(GENESIS_REF);
+          const made = yield* create(linesOf(roots), 1);
+          const read = yield* load(made.bytes);
+          return { made: made.repoId, read: read.repoId };
         }),
       );
-      assert.notEqual(ref, null);
-    });
+
+      assert.equal(outcome.read, outcome.made);
+    }),
+  );
+
+  describe("storage", () => {
+    it.effect("writes the genesis and reads back the same identity", () =>
+      Effect.promise(async () => {
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            const roots = yield* keys(3);
+            const genesis = yield* create(linesOf(roots), 2);
+            const signatures = yield* Effect.all([
+              signGenesis(genesis, roots[0]!),
+              signGenesis(genesis, roots[1]!),
+            ]);
+            yield* writeGenesis(genesis, signatures);
+
+            const stored = yield* readGenesis();
+            if (stored === null) throw new Error("expected a genesis");
+            return {
+              expected: genesis.repoId,
+              got: stored.genesis.repoId,
+              signers: yield* rootSigners(stored.genesis, stored.signatures),
+              quorum: quorumMet(
+                stored.genesis,
+                yield* rootSigners(stored.genesis, stored.signatures),
+              ),
+            };
+          }),
+        );
+
+        assert.equal(outcome.got, outcome.expected);
+        assert.equal(outcome.signers.length, 2);
+        assert.ok(outcome.quorum);
+      }),
+    );
+
+    it.effect("answers null for a repository that has no genesis", () =>
+      Effect.promise(async () => {
+        assert.equal(await scenario(readGenesis()), null);
+      }),
+    );
+
+    it.effect("refuses a genesis whose roots never signed it", () =>
+      Effect.promise(async () => {
+        // A `RepoID` says what a document hashes to; it does not say the roots
+        // agreed to it. Left unchecked, a replica serving a genesis nobody's
+        // roots signed was believed by every path that reads one — a client that
+        // had pinned the identity would catch it, one meeting the repository for
+        // the first time would not.
+        const failure = await scenario(
+          Effect.gen(function* () {
+            const roots = yield* keys(2);
+            const genesis = yield* create(linesOf(roots), 2);
+            // One of the two the threshold asks for.
+            yield* writeGenesis(genesis, [yield* signGenesis(genesis, roots[0]!)]);
+            return yield* readGenesis().pipe(Effect.flip);
+          }),
+        );
+
+        assert.equal(failure._tag, "Invalid");
+        assert.match(failure.reason, /threshold is 2/);
+      }),
+    );
+
+    it.effect("ignores a signature from a key that is not a root", () =>
+      Effect.promise(async () => {
+        // It proves something true about a key nobody asked about, and treating
+        // it as an error would let anyone break a genesis by appending their own.
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            const roots = yield* keys(1);
+            const stranger = yield* keys(1);
+            const genesis = yield* create(linesOf(roots), 1);
+            yield* writeGenesis(genesis, [
+              yield* signGenesis(genesis, stranger[0]!),
+              yield* signGenesis(genesis, roots[0]!),
+            ]);
+            return yield* readGenesis();
+          }),
+        );
+
+        assert.notEqual(outcome, null);
+      }),
+    );
+
+    it.effect("refuses to replace an identity a repository already has", () =>
+      Effect.promise(async () => {
+        const failure = await scenario(
+          Effect.gen(function* () {
+            const roots = yield* keys(1);
+            const first = yield* create(linesOf(roots), 1);
+            yield* writeGenesis(first, []);
+
+            const usurper = yield* keys(1);
+            const second = yield* create(linesOf(usurper), 1);
+            return yield* writeGenesis(second, []).pipe(Effect.flip);
+          }),
+        );
+        assert.equal(failure._tag, "RefConflict");
+      }),
+    );
+
+    it.effect("puts the genesis where a stock clone would replicate it", () =>
+      Effect.promise(async () => {
+        const ref = await scenario(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const roots = yield* keys(1);
+            yield* writeGenesis(yield* create(linesOf(roots), 1), []);
+            return yield* repository.resolve(GENESIS_REF);
+          }),
+        );
+        assert.notEqual(ref, null);
+      }),
+    );
   });
 });

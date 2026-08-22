@@ -87,83 +87,87 @@ const hexBytes = (hex: string): number[] => {
 };
 
 describe("applyDelta bounds", () => {
-  it("refuses a delta that claims more than it could hold", () => {
-    // A varint target size is a claim by whoever wrote the pack: the
-    // allocation happens before a single byte of it is justified, so a
-    // sixty-byte push could otherwise ask for gigabytes.
-    const base = new Uint8Array([0x61]);
-    const delta = new Uint8Array([
-      0x01, // base size 1, which matches
-      0xff,
-      0xff,
-      0xff,
-      0xff,
-      0x07, // target size 0x7fffffff
-      0x90,
-      0x01, // one copy instruction
-    ]);
+  it.effect("refuses a delta that claims more than it could hold", () =>
+    Effect.sync(() => {
+      // A varint target size is a claim by whoever wrote the pack: the
+      // allocation happens before a single byte of it is justified, so a
+      // sixty-byte push could otherwise ask for gigabytes.
+      const base = new Uint8Array([0x61]);
+      const delta = new Uint8Array([
+        0x01, // base size 1, which matches
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0x07, // target size 0x7fffffff
+        0x90,
+        0x01, // one copy instruction
+      ]);
 
-    const result = applyDelta(base, delta);
-    assert.equal(result._tag, "Failure");
-  });
+      const result = applyDelta(base, delta);
+      assert.equal(result._tag, "Failure");
+    }),
+  );
 });
 
 describe("Pack", () => {
   describe("round-trip", () => {
-    it("packs from one store and unpacks into another, bytes identical", async () => {
-      const author = {
-        name: "Alice",
-        email: "alice@example.com",
-        at: new Date(1_700_000_000_000),
-        offset: 60,
-      };
+    it.effect("packs from one store and unpacks into another, bytes identical", () =>
+      Effect.promise(async () => {
+        const author = {
+          name: "Alice",
+          email: "alice@example.com",
+          at: new Date(1_700_000_000_000),
+          offset: 60,
+        };
 
-      const written: RawObject[] = [
-        { type: "blob", data: encoder.encode("hello\n") },
-        { type: "blob", data: encoder.encode("x".repeat(100_000)) },
-      ];
-      const treeData = encodeTree([{ mode: "100644", name: "a.txt", oid: oidOf(written[0]!) }]);
-      written.push({ type: "tree", data: treeData });
-      written.push({
-        type: "commit",
-        data: encodeCommit({
-          tree: oidOf({ type: "tree", data: treeData }),
-          parents: [],
-          author,
-          committer: author,
-          message: "first",
-        }),
-      });
+        const written: RawObject[] = [
+          { type: "blob", data: encoder.encode("hello\n") },
+          { type: "blob", data: encoder.encode("x".repeat(100_000)) },
+        ];
+        const treeData = encodeTree([{ mode: "100644", name: "a.txt", oid: oidOf(written[0]!) }]);
+        written.push({ type: "tree", data: treeData });
+        written.push({
+          type: "commit",
+          data: encodeCommit({
+            tree: oidOf({ type: "tree", data: treeData }),
+            parents: [],
+            author,
+            committer: author,
+            message: "first",
+          }),
+        });
 
-      const bytes = await run(
-        Effect.gen(function* () {
-          const store = yield* ObjectStore;
-          const oids: Oid[] = [];
-          for (const object of written) oids.push(yield* store.write(object));
-          const chunks = yield* Stream.runCollect(pack(oids));
-          return concat([...chunks]);
-        }),
-      );
+        const bytes = await run(
+          Effect.gen(function* () {
+            const store = yield* ObjectStore;
+            const oids: Oid[] = [];
+            for (const object of written) oids.push(yield* store.write(object));
+            const chunks = yield* Stream.runCollect(pack(oids));
+            return concat([...chunks]);
+          }),
+        );
 
-      const oids = await run(unpack(Stream.fromIterable(chunked(bytes, 7))));
-      assert.deepEqual(oids, written.map(oidOf));
+        const oids = await run(unpack(Stream.fromIterable(chunked(bytes, 7))));
+        assert.deepEqual(oids, written.map(oidOf));
 
-      const readBack = await run(
-        Effect.gen(function* () {
-          const store = yield* ObjectStore;
-          // Provided fresh above — prove the objects came from the pack, not
-          // the writer's store, by unpacking and reading in one program.
-          yield* unpack(Stream.fromIterable(chunked(bytes, 1024)));
-          const objects: RawObject[] = [];
-          for (const oid of written.map(oidOf)) objects.push(yield* store.read(oid));
-          return objects;
-        }),
-      );
-      assert.deepEqual(
-        readBack.map((object) => [object.type, decoder.decode(object.data).length]),
-        written.map((object) => [object.type, decoder.decode(object.data).length]),
-      );
-    });
+        const readBack = await run(
+          Effect.gen(function* () {
+            const store = yield* ObjectStore;
+            // Provided fresh above — prove the objects came from the pack, not
+            // the writer's store, by unpacking and reading in one program.
+            yield* unpack(Stream.fromIterable(chunked(bytes, 1024)));
+            const objects: RawObject[] = [];
+            for (const oid of written.map(oidOf)) objects.push(yield* store.read(oid));
+            return objects;
+          }),
+        );
+        assert.deepEqual(
+          readBack.map((object) => [object.type, decoder.decode(object.data).length]),
+          written.map((object) => [object.type, decoder.decode(object.data).length]),
+        );
+      }),
+    );
   });
 
   describe("deltas", () => {
@@ -181,59 +185,67 @@ describe("Pack", () => {
       ...copy(35, 8),
     ]);
 
-    it("applyDelta reproduces the target", () => {
-      const result = applyDelta(base.data, delta);
-      assert.ok(Result.isSuccess(result));
-      assert.equal(decoder.decode(result.success), expected);
-    });
+    it.effect("applyDelta reproduces the target", () =>
+      Effect.sync(() => {
+        const result = applyDelta(base.data, delta);
+        assert.ok(Result.isSuccess(result));
+        assert.equal(decoder.decode(result.success), expected);
+      }),
+    );
 
-    it("unpacks ref-delta and ofs-delta objects", async () => {
-      const baseEntry = concat([
-        Uint8Array.from(objectHeader(3, base.data.length)),
-        new Uint8Array(deflateSync(base.data)),
-      ]);
-      const refEntry = concat([
-        Uint8Array.from(objectHeader(7, delta.length)),
-        Uint8Array.from(hexBytes(oidOf(base))),
-        new Uint8Array(deflateSync(delta)),
-      ]);
-      // The base entry starts right after the 12-byte pack header; the
-      // ofs-delta entry starts after base and ref entries.
-      const ofsEntry = concat([
-        Uint8Array.from(objectHeader(6, delta.length)),
-        encodeOfsDistance(baseEntry.length + refEntry.length),
-        new Uint8Array(deflateSync(delta)),
-      ]);
+    it.effect("unpacks ref-delta and ofs-delta objects", () =>
+      Effect.promise(async () => {
+        const baseEntry = concat([
+          Uint8Array.from(objectHeader(3, base.data.length)),
+          new Uint8Array(deflateSync(base.data)),
+        ]);
+        const refEntry = concat([
+          Uint8Array.from(objectHeader(7, delta.length)),
+          Uint8Array.from(hexBytes(oidOf(base))),
+          new Uint8Array(deflateSync(delta)),
+        ]);
+        // The base entry starts right after the 12-byte pack header; the
+        // ofs-delta entry starts after base and ref entries.
+        const ofsEntry = concat([
+          Uint8Array.from(objectHeader(6, delta.length)),
+          encodeOfsDistance(baseEntry.length + refEntry.length),
+          new Uint8Array(deflateSync(delta)),
+        ]);
 
-      const bytes = buildPack([baseEntry, refEntry, ofsEntry]);
-      const [oids, contents] = await run(
-        Effect.gen(function* () {
-          const store = yield* ObjectStore;
-          const unpacked = yield* unpack(Stream.fromIterable(chunked(bytes, 5)));
-          const objects: string[] = [];
-          for (const oid of unpacked) objects.push(decoder.decode((yield* store.read(oid)).data));
-          return [unpacked, objects] as const;
-        }),
-      );
+        const bytes = buildPack([baseEntry, refEntry, ofsEntry]);
+        const [oids, contents] = await run(
+          Effect.gen(function* () {
+            const store = yield* ObjectStore;
+            const unpacked = yield* unpack(Stream.fromIterable(chunked(bytes, 5)));
+            const objects: string[] = [];
+            for (const oid of unpacked) objects.push(decoder.decode((yield* store.read(oid)).data));
+            return [unpacked, objects] as const;
+          }),
+        );
 
-      assert.equal(oids.length, 3);
-      assert.equal(oids[0], oidOf(base));
-      assert.deepEqual(contents, [decoder.decode(base.data), expected, expected]);
-      // Both deltas resolve to the same bytes, so the same oid: dedupe works.
-      assert.equal(oids[1], oids[2]);
-    });
+        assert.equal(oids.length, 3);
+        assert.equal(oids[0], oidOf(base));
+        assert.deepEqual(contents, [decoder.decode(base.data), expected, expected]);
+        // Both deltas resolve to the same bytes, so the same oid: dedupe works.
+        assert.equal(oids[1], oids[2]);
+      }),
+    );
 
-    it("rejects the reserved opcode 0", () => {
-      const bad = Uint8Array.from([...sizeVarint(base.data.length), ...sizeVarint(1), 0]);
-      const result = applyDelta(base.data, bad);
-      assert.ok(Result.isFailure(result));
-      assert.equal(result.failure._tag, "PackCorrupt");
-    });
+    it.effect("rejects the reserved opcode 0", () =>
+      Effect.sync(() => {
+        const bad = Uint8Array.from([...sizeVarint(base.data.length), ...sizeVarint(1), 0]);
+        const result = applyDelta(base.data, bad);
+        assert.ok(Result.isFailure(result));
+        assert.equal(result.failure._tag, "PackCorrupt");
+      }),
+    );
 
-    it("rejects a delta whose base size disagrees", () => {
-      const result = applyDelta(base.data.subarray(1), delta);
-      assert.ok(Result.isFailure(result));
-    });
+    it.effect("rejects a delta whose base size disagrees", () =>
+      Effect.sync(() => {
+        const result = applyDelta(base.data.subarray(1), delta);
+        assert.ok(Result.isFailure(result));
+      }),
+    );
   });
 
   describe("corruption", () => {
@@ -259,30 +271,38 @@ describe("Pack", () => {
       return error;
     };
 
-    it("rejects a flipped checksum", async () => {
-      const bytes = packOf([{ type: "blob", data: encoder.encode("payload") }]);
-      bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 0xff;
-      const error = await expectCorrupt(bytes);
-      assert.match(error.reason, /checksum/);
-    });
+    it.effect("rejects a flipped checksum", () =>
+      Effect.promise(async () => {
+        const bytes = packOf([{ type: "blob", data: encoder.encode("payload") }]);
+        bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 0xff;
+        const error = await expectCorrupt(bytes);
+        assert.match(error.reason, /checksum/);
+      }),
+    );
 
-    it("rejects a truncated pack", async () => {
-      const bytes = packOf([{ type: "blob", data: encoder.encode("payload") }]);
-      await expectCorrupt(bytes.subarray(0, bytes.length - 25));
-    });
+    it.effect("rejects a truncated pack", () =>
+      Effect.promise(async () => {
+        const bytes = packOf([{ type: "blob", data: encoder.encode("payload") }]);
+        await expectCorrupt(bytes.subarray(0, bytes.length - 25));
+      }),
+    );
 
-    it("rejects data that is not a pack", async () => {
-      await expectCorrupt(encoder.encode("this is not a packfile at all"));
-    });
+    it.effect("rejects data that is not a pack", () =>
+      Effect.promise(async () => {
+        await expectCorrupt(encoder.encode("this is not a packfile at all"));
+      }),
+    );
 
-    it("rejects an object whose inflated size disagrees with its header", async () => {
-      const data = encoder.encode("honest payload");
-      const entry = concat([
-        Uint8Array.from(objectHeader(3, data.length + 3)),
-        new Uint8Array(deflateSync(data)),
-      ]);
-      await expectCorrupt(buildPack([entry]));
-    });
+    it.effect("rejects an object whose inflated size disagrees with its header", () =>
+      Effect.promise(async () => {
+        const data = encoder.encode("honest payload");
+        const entry = concat([
+          Uint8Array.from(objectHeader(3, data.length + 3)),
+          new Uint8Array(deflateSync(data)),
+        ]);
+        await expectCorrupt(buildPack([entry]));
+      }),
+    );
   });
 });
 
@@ -294,38 +314,46 @@ describe("createDelta", () => {
   const base = encoder.encode(baseText);
   const target = encoder.encode(baseText.replace("line 60:", "line sixty:"));
 
-  it("round-trips through applyDelta and actually wins", () => {
-    const delta = createDelta(base, target);
-    assert.ok(delta !== null);
-    assert.ok(delta.length * 2 < target.length, "delta should be far smaller than the target");
-    const applied = applyDelta(base, delta);
-    assert.ok(Result.isSuccess(applied));
-    assert.deepEqual(applied.success, target);
-  });
+  it.effect("round-trips through applyDelta and actually wins", () =>
+    Effect.sync(() => {
+      const delta = createDelta(base, target);
+      assert.ok(delta !== null);
+      assert.ok(delta.length * 2 < target.length, "delta should be far smaller than the target");
+      const applied = applyDelta(base, delta);
+      assert.ok(Result.isSuccess(applied));
+      assert.deepEqual(applied.success, target);
+    }),
+  );
 
-  it("handles a target that only appends", () => {
-    const grown = encoder.encode(`${baseText}line 120: appended\n`);
-    const delta = createDelta(base, grown);
-    assert.ok(delta !== null);
-    const applied = applyDelta(base, delta);
-    assert.ok(Result.isSuccess(applied));
-    assert.deepEqual(applied.success, grown);
-  });
+  it.effect("handles a target that only appends", () =>
+    Effect.sync(() => {
+      const grown = encoder.encode(`${baseText}line 120: appended\n`);
+      const delta = createDelta(base, grown);
+      assert.ok(delta !== null);
+      const applied = applyDelta(base, delta);
+      assert.ok(Result.isSuccess(applied));
+      assert.deepEqual(applied.success, grown);
+    }),
+  );
 
-  it("returns null when copying saves nothing", () => {
-    // Deterministic noise: no 16-byte block of it appears in the base.
-    let seed = 1;
-    const noise = new Uint8Array(2048);
-    for (let index = 0; index < noise.length; index++) {
-      seed = (seed * 48271) % 0x7fffffff;
-      noise[index] = seed & 0xff;
-    }
-    assert.equal(createDelta(base, noise), null);
-  });
+  it.effect("returns null when copying saves nothing", () =>
+    Effect.sync(() => {
+      // Deterministic noise: no 16-byte block of it appears in the base.
+      let seed = 1;
+      const noise = new Uint8Array(2048);
+      for (let index = 0; index < noise.length; index++) {
+        seed = (seed * 48271) % 0x7fffffff;
+        noise[index] = seed & 0xff;
+      }
+      assert.equal(createDelta(base, noise), null);
+    }),
+  );
 
-  it("refuses targets smaller than one block", () => {
-    assert.equal(createDelta(base, encoder.encode("tiny")), null);
-  });
+  it.effect("refuses targets smaller than one block", () =>
+    Effect.sync(() => {
+      assert.equal(createDelta(base, encoder.encode("tiny")), null);
+    }),
+  );
 });
 
 describe("deltified writer", () => {
@@ -334,69 +362,75 @@ describe("deltified writer", () => {
     (_, index) => `line ${index}: file content that repeats\n`,
   ).join("");
 
-  it("emits a smaller pack whose objects unpack byte-identically", async () => {
-    const one: RawObject = { type: "blob", data: encoder.encode(baseText) };
-    const two: RawObject = {
-      type: "blob",
-      data: encoder.encode(baseText.replace("line 100:", "line one hundred:")),
-    };
+  it.effect("emits a smaller pack whose objects unpack byte-identically", () =>
+    Effect.promise(async () => {
+      const one: RawObject = { type: "blob", data: encoder.encode(baseText) };
+      const two: RawObject = {
+        type: "blob",
+        data: encoder.encode(baseText.replace("line 100:", "line one hundred:")),
+      };
 
-    const { deltified, full, oids } = await run(
-      Effect.gen(function* () {
-        const store = yield* ObjectStore;
-        const oids = [yield* store.write(one), yield* store.write(two)];
-        const collect = (options?: Parameters<typeof pack>[1]) =>
-          Stream.runCollect(pack(oids, options)).pipe(Effect.map((chunks) => concat([...chunks])));
-        return {
-          oids,
-          deltified: yield* collect({ deltify: {} }),
-          full: yield* collect(),
-        };
-      }),
-    );
+      const { deltified, full, oids } = await run(
+        Effect.gen(function* () {
+          const store = yield* ObjectStore;
+          const oids = [yield* store.write(one), yield* store.write(two)];
+          const collect = (options?: Parameters<typeof pack>[1]) =>
+            Stream.runCollect(pack(oids, options)).pipe(
+              Effect.map((chunks) => concat([...chunks])),
+            );
+          return {
+            oids,
+            deltified: yield* collect({ deltify: {} }),
+            full: yield* collect(),
+          };
+        }),
+      );
 
-    assert.ok(
-      deltified.length < full.length,
-      `deltified pack (${deltified.length}) should undercut the full one (${full.length})`,
-    );
+      assert.ok(
+        deltified.length < full.length,
+        `deltified pack (${deltified.length}) should undercut the full one (${full.length})`,
+      );
 
-    // A fresh store: everything read back must come from the pack alone.
-    const contents = await run(
-      Effect.gen(function* () {
-        const store = yield* ObjectStore;
-        const unpacked = yield* unpack(Stream.fromIterable(chunked(deltified, 997)));
-        const objects: RawObject[] = [];
-        for (const oid of unpacked) objects.push(yield* store.read(oid));
-        return { unpacked, objects };
-      }),
-    );
+      // A fresh store: everything read back must come from the pack alone.
+      const contents = await run(
+        Effect.gen(function* () {
+          const store = yield* ObjectStore;
+          const unpacked = yield* unpack(Stream.fromIterable(chunked(deltified, 997)));
+          const objects: RawObject[] = [];
+          for (const oid of unpacked) objects.push(yield* store.read(oid));
+          return { unpacked, objects };
+        }),
+      );
 
-    assert.deepEqual(contents.unpacked, oids);
-    assert.deepEqual(contents.objects[0], one);
-    assert.deepEqual(contents.objects[1], two);
-  });
+      assert.deepEqual(contents.unpacked, oids);
+      assert.deepEqual(contents.objects[0], one);
+      assert.deepEqual(contents.objects[1], two);
+    }),
+  );
 
-  it("never deltas across types", async () => {
-    // A tree whose payload happens to resemble the blob would still be a
-    // type confusion if used as a base; sameness of type gates the window.
-    const blob: RawObject = { type: "blob", data: encoder.encode(baseText) };
-    const bytes = await run(
-      Effect.gen(function* () {
-        const store = yield* ObjectStore;
-        const blobOid = yield* store.write(blob);
-        const treeOid = yield* store.write({
-          type: "tree",
-          data: encodeTree([{ mode: "100644", name: "a.txt", oid: blobOid }]),
-        });
-        return concat([...(yield* Stream.runCollect(pack([blobOid, treeOid], { deltify: {} })))]);
-      }),
-    );
+  it.effect("never deltas across types", () =>
+    Effect.promise(async () => {
+      // A tree whose payload happens to resemble the blob would still be a
+      // type confusion if used as a base; sameness of type gates the window.
+      const blob: RawObject = { type: "blob", data: encoder.encode(baseText) };
+      const bytes = await run(
+        Effect.gen(function* () {
+          const store = yield* ObjectStore;
+          const blobOid = yield* store.write(blob);
+          const treeOid = yield* store.write({
+            type: "tree",
+            data: encodeTree([{ mode: "100644", name: "a.txt", oid: blobOid }]),
+          });
+          return concat([...(yield* Stream.runCollect(pack([blobOid, treeOid], { deltify: {} })))]);
+        }),
+      );
 
-    // Re-ingest into a fresh store; a cross-type delta would fail to apply
-    // or change an oid, and either would surface here.
-    const oids = await run(unpack(Stream.fromIterable([bytes])));
-    assert.equal(oids.length, 2);
-  });
+      // Re-ingest into a fresh store; a cross-type delta would fail to apply
+      // or change an oid, and either would surface here.
+      const oids = await run(unpack(Stream.fromIterable([bytes])));
+      assert.equal(oids.length, 2);
+    }),
+  );
 });
 
 describe("ingest", () => {
@@ -413,128 +447,138 @@ describe("ingest", () => {
     ]);
   };
 
-  it("keeps a pack worth keeping, and serves every read from it", async () => {
-    const texts = Array.from({ length: 8 }, (_, index) => `retained object ${index}\n`);
-    const packBytes = buildPack(texts.map(blobEntry));
-    const name = `pack-${hex(sha1(packBytes.subarray(0, packBytes.length - 20)))}`;
+  it.effect("keeps a pack worth keeping, and serves every read from it", () =>
+    Effect.promise(async () => {
+      const texts = Array.from({ length: 8 }, (_, index) => `retained object ${index}\n`);
+      const packBytes = buildPack(texts.map(blobEntry));
+      const name = `pack-${hex(sha1(packBytes.subarray(0, packBytes.length - 20)))}`;
 
-    const outcome = await runIngest(
-      Effect.gen(function* () {
-        const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 7)));
-        const packs = yield* PackStore;
-        const handles = yield* packs.list;
-        const store = yield* ObjectStore;
-        // The overlay's `delete` touches loose objects only — so a read that
-        // survives deleting every oid is a read served from the pack, which
-        // is the whole claim: nothing was exploded.
-        for (const oid of oids) yield* store.delete(oid);
-        const first = yield* store.read(oids[0]!);
-        return { oids, names: handles.map((handle) => handle.name), first };
-      }),
-    );
+      const outcome = await runIngest(
+        Effect.gen(function* () {
+          const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 7)));
+          const packs = yield* PackStore;
+          const handles = yield* packs.list;
+          const store = yield* ObjectStore;
+          // The overlay's `delete` touches loose objects only — so a read that
+          // survives deleting every oid is a read served from the pack, which
+          // is the whole claim: nothing was exploded.
+          for (const oid of oids) yield* store.delete(oid);
+          const first = yield* store.read(oids[0]!);
+          return { oids, names: handles.map((handle) => handle.name), first };
+        }),
+      );
 
-    assert.deepEqual(outcome.names, [name]);
-    assert.deepEqual(
-      outcome.oids,
-      texts.map((text) => oidOf({ type: "blob", data: encoder.encode(text) })),
-    );
-    assert.equal(decoder.decode(outcome.first.data), texts[0]);
-  });
+      assert.deepEqual(outcome.names, [name]);
+      assert.deepEqual(
+        outcome.oids,
+        texts.map((text) => oidOf({ type: "blob", data: encoder.encode(text) })),
+      );
+      assert.equal(decoder.decode(outcome.first.data), texts[0]);
+    }),
+  );
 
-  it("retains a thin pack, resolving its base from the store", async () => {
-    const baseText = "the base the pack does not carry\n";
-    const targetText = `${baseText} plus what the delta adds`;
-    const base = encoder.encode(baseText);
-    const target = encoder.encode(targetText);
-    const delta = Uint8Array.from([
-      ...sizeVarint(base.length),
-      ...sizeVarint(target.length),
-      ...copy(0, base.length),
-      ...insert(" plus what the delta adds"),
-    ]);
+  it.effect("retains a thin pack, resolving its base from the store", () =>
+    Effect.promise(async () => {
+      const baseText = "the base the pack does not carry\n";
+      const targetText = `${baseText} plus what the delta adds`;
+      const base = encoder.encode(baseText);
+      const target = encoder.encode(targetText);
+      const delta = Uint8Array.from([
+        ...sizeVarint(base.length),
+        ...sizeVarint(target.length),
+        ...copy(0, base.length),
+        ...insert(" plus what the delta adds"),
+      ]);
 
-    const fillers = Array.from({ length: 7 }, (_, index) => `filler ${index}\n`);
-    const thinEntry = concat([
-      Uint8Array.from(objectHeader(7, delta.length)),
-      Uint8Array.from(hexBytes(oidOf({ type: "blob", data: base }))),
-      new Uint8Array(deflateSync(delta)),
-    ]);
-    const packBytes = buildPack([...fillers.map(blobEntry), thinEntry]);
+      const fillers = Array.from({ length: 7 }, (_, index) => `filler ${index}\n`);
+      const thinEntry = concat([
+        Uint8Array.from(objectHeader(7, delta.length)),
+        Uint8Array.from(hexBytes(oidOf({ type: "blob", data: base }))),
+        new Uint8Array(deflateSync(delta)),
+      ]);
+      const packBytes = buildPack([...fillers.map(blobEntry), thinEntry]);
 
-    const outcome = await runIngest(
-      Effect.gen(function* () {
-        const store = yield* ObjectStore;
-        yield* store.write({ type: "blob", data: base });
-        const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 11)));
-        const packs = yield* PackStore;
-        const resolved = yield* store.read(oids.at(-1)!);
-        return { oids, packCount: (yield* packs.list).length, resolved };
-      }),
-    );
+      const outcome = await runIngest(
+        Effect.gen(function* () {
+          const store = yield* ObjectStore;
+          yield* store.write({ type: "blob", data: base });
+          const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 11)));
+          const packs = yield* PackStore;
+          const resolved = yield* store.read(oids.at(-1)!);
+          return { oids, packCount: (yield* packs.list).length, resolved };
+        }),
+      );
 
-    assert.equal(outcome.packCount, 1, "a thin pack is still worth keeping");
-    assert.equal(outcome.oids.at(-1), oidOf({ type: "blob", data: target }));
-    assert.equal(decoder.decode(outcome.resolved.data), targetText);
-  });
+      assert.equal(outcome.packCount, 1, "a thin pack is still worth keeping");
+      assert.equal(outcome.oids.at(-1), oidOf({ type: "blob", data: target }));
+      assert.equal(decoder.decode(outcome.resolved.data), targetText);
+    }),
+  );
 
-  it("explodes a small push loose, exactly as before", async () => {
-    const packBytes = buildPack([blobEntry("tiny 0\n"), blobEntry("tiny 1\n")]);
+  it.effect("explodes a small push loose, exactly as before", () =>
+    Effect.promise(async () => {
+      const packBytes = buildPack([blobEntry("tiny 0\n"), blobEntry("tiny 1\n")]);
 
-    const outcome = await runIngest(
-      Effect.gen(function* () {
-        const oids = yield* ingest(Stream.fromIterable([packBytes]));
-        const packs = yield* PackStore;
-        const store = yield* ObjectStore;
-        const held = yield* store.read(oids[0]!);
-        // Deleting a loose object removes it — the inverse of the retained
-        // case above, proving where these bytes actually landed.
-        yield* store.delete(oids[0]!);
-        const gone = yield* store.read(oids[0]!).pipe(Effect.flip);
-        return { packCount: (yield* packs.list).length, held, gone: gone._tag };
-      }),
-    );
+      const outcome = await runIngest(
+        Effect.gen(function* () {
+          const oids = yield* ingest(Stream.fromIterable([packBytes]));
+          const packs = yield* PackStore;
+          const store = yield* ObjectStore;
+          const held = yield* store.read(oids[0]!);
+          // Deleting a loose object removes it — the inverse of the retained
+          // case above, proving where these bytes actually landed.
+          yield* store.delete(oids[0]!);
+          const gone = yield* store.read(oids[0]!).pipe(Effect.flip);
+          return { packCount: (yield* packs.list).length, held, gone: gone._tag };
+        }),
+      );
 
-    assert.equal(outcome.packCount, 0);
-    assert.equal(decoder.decode(outcome.held.data), "tiny 0\n");
-    assert.equal(outcome.gone, "ObjectNotFound");
-  });
+      assert.equal(outcome.packCount, 0);
+      assert.equal(decoder.decode(outcome.held.data), "tiny 0\n");
+      assert.equal(outcome.gone, "ObjectNotFound");
+    }),
+  );
 
-  it("streams an oversized push loose rather than buffering it", async () => {
-    const texts = Array.from({ length: 8 }, (_, index) => `too big to hold ${index}\n`);
-    const packBytes = buildPack(texts.map(blobEntry));
+  it.effect("streams an oversized push loose rather than buffering it", () =>
+    Effect.promise(async () => {
+      const texts = Array.from({ length: 8 }, (_, index) => `too big to hold ${index}\n`);
+      const packBytes = buildPack(texts.map(blobEntry));
 
-    const outcome = await runIngest(
-      Effect.gen(function* () {
-        const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 16)), {
-          retainUpTo: 32,
-        });
-        const packs = yield* PackStore;
-        const store = yield* ObjectStore;
-        const last = yield* store.read(oids.at(-1)!);
-        return { count: oids.length, packCount: (yield* packs.list).length, last };
-      }),
-    );
+      const outcome = await runIngest(
+        Effect.gen(function* () {
+          const oids = yield* ingest(Stream.fromIterable(chunked(packBytes, 16)), {
+            retainUpTo: 32,
+          });
+          const packs = yield* PackStore;
+          const store = yield* ObjectStore;
+          const last = yield* store.read(oids.at(-1)!);
+          return { count: oids.length, packCount: (yield* packs.list).length, last };
+        }),
+      );
 
-    assert.equal(outcome.count, 8);
-    assert.equal(outcome.packCount, 0, "past the cap the pack is not retained");
-    assert.equal(decoder.decode(outcome.last.data), texts.at(-1));
-  });
+      assert.equal(outcome.count, 8);
+      assert.equal(outcome.packCount, 0, "past the cap the pack is not retained");
+      assert.equal(decoder.decode(outcome.last.data), texts.at(-1));
+    }),
+  );
 
-  it("refuses a corrupt trailer before anything is registered", async () => {
-    const packBytes = buildPack(
-      Array.from({ length: 8 }, (_, index) => blobEntry(`honest ${index}\n`)),
-    );
-    packBytes[packBytes.length - 1]! ^= 0xff;
+  it.effect("refuses a corrupt trailer before anything is registered", () =>
+    Effect.promise(async () => {
+      const packBytes = buildPack(
+        Array.from({ length: 8 }, (_, index) => blobEntry(`honest ${index}\n`)),
+      );
+      packBytes[packBytes.length - 1]! ^= 0xff;
 
-    const outcome = await runIngest(
-      Effect.gen(function* () {
-        const failure = yield* ingest(Stream.fromIterable([packBytes])).pipe(Effect.flip);
-        const packs = yield* PackStore;
-        return { tag: failure._tag, packCount: (yield* packs.list).length };
-      }),
-    );
+      const outcome = await runIngest(
+        Effect.gen(function* () {
+          const failure = yield* ingest(Stream.fromIterable([packBytes])).pipe(Effect.flip);
+          const packs = yield* PackStore;
+          return { tag: failure._tag, packCount: (yield* packs.list).length };
+        }),
+      );
 
-    assert.equal(outcome.tag, "PackCorrupt");
-    assert.equal(outcome.packCount, 0);
-  });
+      assert.equal(outcome.tag, "PackCorrupt");
+      assert.equal(outcome.packCount, 0);
+    }),
+  );
 });

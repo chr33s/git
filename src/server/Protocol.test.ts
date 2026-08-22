@@ -151,92 +151,108 @@ const push = (commands: ReadonlyArray<string>): Request =>
   });
 
 describe("Protocol negotiation", () => {
-  it("advertises multi_ack_detailed on upload-pack", async () => {
-    const text = await scenario(
-      Effect.gen(function* () {
-        yield* history;
-        const response = yield* Protocol.advertise("git-upload-pack");
-        return decoder.decode(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())));
-      }),
-    );
-    assert.match(text, /multi_ack_detailed/);
-  });
+  it.effect("advertises multi_ack_detailed on upload-pack", () =>
+    Effect.promise(async () => {
+      const text = await scenario(
+        Effect.gen(function* () {
+          yield* history;
+          const response = yield* Protocol.advertise("git-upload-pack");
+          return decoder.decode(
+            new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+          );
+        }),
+      );
+      assert.match(text, /multi_ack_detailed/);
+    }),
+  );
 
-  it("acknowledges every common have, says ready, and ends the round with NAK", async () => {
-    const { a, b, lines } = await scenario(
-      Effect.gen(function* () {
-        const { a, b, c } = yield* history;
-        const { lines } = yield* answer(
-          v0Request({ wants: [c], capabilities: "multi_ack_detailed", haves: [a, b] }),
-        );
-        return { a, b, lines };
-      }),
-    );
-    assert.deepEqual(lines, [`ACK ${a} common`, `ACK ${b} common`, `ACK ${b} ready`, "NAK"]);
-  });
+  it.effect("acknowledges every common have, says ready, and ends the round with NAK", () =>
+    Effect.promise(async () => {
+      const { a, b, lines } = await scenario(
+        Effect.gen(function* () {
+          const { a, b, c } = yield* history;
+          const { lines } = yield* answer(
+            v0Request({ wants: [c], capabilities: "multi_ack_detailed", haves: [a, b] }),
+          );
+          return { a, b, lines };
+        }),
+      );
+      assert.deepEqual(lines, [`ACK ${a} common`, `ACK ${b} common`, `ACK ${b} ready`, "NAK"]);
+    }),
+  );
 
-  it("withholds ready while a want cannot reach the common set", async () => {
-    const { a, lines } = await scenario(
-      Effect.gen(function* () {
-        const { a, c, side } = yield* history;
-        const { lines } = yield* answer(
-          v0Request({ wants: [c, side], capabilities: "multi_ack_detailed", haves: [a] }),
-        );
-        return { a, lines };
-      }),
-    );
-    assert.deepEqual(lines, [`ACK ${a} common`, "NAK"]);
-  });
+  it.effect("withholds ready while a want cannot reach the common set", () =>
+    Effect.promise(async () => {
+      const { a, lines } = await scenario(
+        Effect.gen(function* () {
+          const { a, c, side } = yield* history;
+          const { lines } = yield* answer(
+            v0Request({ wants: [c, side], capabilities: "multi_ack_detailed", haves: [a] }),
+          );
+          return { a, lines };
+        }),
+      );
+      assert.deepEqual(lines, [`ACK ${a} common`, "NAK"]);
+    }),
+  );
 
-  it("answers a plain round with a single bare ACK when the capability is absent", async () => {
-    const { a, lines } = await scenario(
-      Effect.gen(function* () {
-        const { a, b, c } = yield* history;
-        const { lines } = yield* answer(v0Request({ wants: [c], haves: [a, b] }));
-        return { a, lines };
-      }),
-    );
-    // First common only: a single-ACK client stops offering at one ACK, so
-    // acknowledging more would be lines nothing reads.
-    assert.deepEqual(lines, [`ACK ${a}`]);
-  });
+  it.effect("answers a plain round with a single bare ACK when the capability is absent", () =>
+    Effect.promise(async () => {
+      const { a, lines } = await scenario(
+        Effect.gen(function* () {
+          const { a, b, c } = yield* history;
+          const { lines } = yield* answer(v0Request({ wants: [c], haves: [a, b] }));
+          return { a, lines };
+        }),
+      );
+      // First common only: a single-ACK client stops offering at one ACK, so
+      // acknowledging more would be lines nothing reads.
+      assert.deepEqual(lines, [`ACK ${a}`]);
+    }),
+  );
 
-  it("restates common acks before the final ACK on the done round", async () => {
-    const { a, lines, sawPack } = await scenario(
-      Effect.gen(function* () {
-        const { a, c } = yield* history;
-        const result = yield* answer(
-          v0Request({ wants: [c], capabilities: "multi_ack_detailed", haves: [a], done: true }),
-        );
-        return { a, ...result };
-      }),
-    );
-    assert.deepEqual(lines, [`ACK ${a} common`, `ACK ${a}`]);
-    assert.equal(sawPack, true);
-  });
+  it.effect("restates common acks before the final ACK on the done round", () =>
+    Effect.promise(async () => {
+      const { a, lines, sawPack } = await scenario(
+        Effect.gen(function* () {
+          const { a, c } = yield* history;
+          const result = yield* answer(
+            v0Request({ wants: [c], capabilities: "multi_ack_detailed", haves: [a], done: true }),
+          );
+          return { a, ...result };
+        }),
+      );
+      assert.deepEqual(lines, [`ACK ${a} common`, `ACK ${a}`]);
+      assert.equal(sawPack, true);
+    }),
+  );
 
-  it("v2: acknowledges without ready while the common set cannot cover the wants", async () => {
-    const { a, lines, sawPack } = await scenario(
-      Effect.gen(function* () {
-        const { a, c, side } = yield* history;
-        const result = yield* answer(v2Request([`want ${c}`, `want ${side}`, `have ${a}`]));
-        return { a, ...result };
-      }),
-    );
-    assert.deepEqual(lines, ["acknowledgments", `ACK ${a}`]);
-    assert.equal(sawPack, false);
-  });
+  it.effect("v2: acknowledges without ready while the common set cannot cover the wants", () =>
+    Effect.promise(async () => {
+      const { a, lines, sawPack } = await scenario(
+        Effect.gen(function* () {
+          const { a, c, side } = yield* history;
+          const result = yield* answer(v2Request([`want ${c}`, `want ${side}`, `have ${a}`]));
+          return { a, ...result };
+        }),
+      );
+      assert.deepEqual(lines, ["acknowledgments", `ACK ${a}`]);
+      assert.equal(sawPack, false);
+    }),
+  );
 
-  it("v2: says ready and streams the pack once the wants are covered", async () => {
-    const { a, lines } = await scenario(
-      Effect.gen(function* () {
-        const { a, c } = yield* history;
-        const result = yield* answer(v2Request([`want ${c}`, `have ${a}`]));
-        return { a, ...result };
-      }),
-    );
-    assert.deepEqual(lines.slice(0, 4), ["acknowledgments", `ACK ${a}`, "ready", "packfile"]);
-  });
+  it.effect("v2: says ready and streams the pack once the wants are covered", () =>
+    Effect.promise(async () => {
+      const { a, lines } = await scenario(
+        Effect.gen(function* () {
+          const { a, c } = yield* history;
+          const result = yield* answer(v2Request([`want ${c}`, `have ${a}`]));
+          return { a, ...result };
+        }),
+      );
+      assert.deepEqual(lines.slice(0, 4), ["acknowledgments", `ACK ${a}`, "ready", "packfile"]);
+    }),
+  );
 });
 
 describe("receive-pack", () => {
@@ -386,149 +402,164 @@ describe("receive-pack", () => {
     { timeout: 60_000 },
   );
 
-  it("advertises a detached HEAD as the commit it holds", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "advertise-"));
-    try {
-      const onDisk = GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provideMerge(nodeStores(root)),
-        Layer.provideMerge(Policy.anonymousWrites(true)),
-      );
+  it.effect("advertises a detached HEAD as the commit it holds", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "advertise-"));
+      try {
+        const onDisk = GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(nodeStores(root)),
+          Layer.provideMerge(Policy.anonymousWrites(true)),
+        );
 
-      const advertised = await Effect.runPromise(
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const commit = yield* repository.commit({
-            branch: "main",
-            tree: EMPTY_TREE_OID,
-            message: "one",
-            author: alice,
-          });
+        const advertised = await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const commit = yield* repository.commit({
+              branch: "main",
+              tree: EMPTY_TREE_OID,
+              message: "one",
+              author: alice,
+            });
 
-          // What `git checkout <sha>`, a rebase or a bisect leaves behind in a
-          // served repository: HEAD holds the commit, not the name of a ref.
-          yield* Effect.promise(() => fs.writeFile(path.join(root, "HEAD"), `${commit}\n`));
+            // What `git checkout <sha>`, a rebase or a bisect leaves behind in a
+            // served repository: HEAD holds the commit, not the name of a ref.
+            yield* Effect.promise(() => fs.writeFile(path.join(root, "HEAD"), `${commit}\n`));
 
-          const response = yield* Protocol.advertise("git-upload-pack");
-          return {
-            commit,
-            text: decoder.decode(
-              new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
-            ),
-          };
-        }).pipe(Effect.provide(onDisk)),
-      );
+            const response = yield* Protocol.advertise("git-upload-pack");
+            return {
+              commit,
+              text: decoder.decode(
+                new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+              ),
+            };
+          }).pipe(Effect.provide(onDisk)),
+        );
 
-      // The HEAD line is there, and no `symref=HEAD:<oid>` claims the commit
-      // is the name of a ref.
-      assert.ok(advertised.text.includes(`${advertised.commit} HEAD`), advertised.text);
-      assert.equal(advertised.text.includes("symref=HEAD:"), false, advertised.text);
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("refuses a push whose ref name escapes the repository", async () => {
-    // The delete-only traversal from the security audit: `next` is the zero
-    // oid, so no pack body is needed and the command reaches the ref store on
-    // its own. On a filesystem backend the name is joined onto the repository
-    // root, so `../../victim` would have unlinked a file outside it — and the
-    // reflog append would have written outside it too.
-    const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), "receive-pack-escape-"));
-    const root = path.join(sandbox, "nested", "repo");
-    await fs.mkdir(root, { recursive: true });
-    const victim = path.join(sandbox, "victim");
-    await fs.writeFile(victim, "precious\n");
-
-    try {
-      const onDisk = GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provideMerge(nodeStores(root)),
-        Layer.provideMerge(Policy.anonymousWrites(true)),
-      );
-
-      const reports = await Effect.runPromise(
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const commit = yield* repository.commit({
-            branch: "main",
-            tree: EMPTY_TREE_OID,
-            message: "one",
-            author: alice,
-          });
-
-          const said: string[] = [];
-          for (const name of ["../../victim", "refs/heads/../../../victim", "refs/../../victim"]) {
-            // Both directions: the delete that needs no pack, and the create
-            // that would write an oid into the escaped path.
-            for (const command of [`${commit} ${ZERO} ${name}\n`, `${ZERO} ${commit} ${name}\n`]) {
-              const response = yield* Protocol.receivePack(push([command]));
-              said.push(
-                decoder.decode(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()))),
-              );
-            }
-          }
-          return said;
-        }).pipe(Effect.provide(onDisk)),
-      );
-
-      // Every one refused per-ref, as a report the client can read — not as a
-      // torn-down connection and not as a 500.
-      for (const report of reports) {
-        assert.ok(report.includes("funny refname"), report);
+        // The HEAD line is there, and no `symref=HEAD:<oid>` claims the commit
+        // is the name of a ref.
+        assert.ok(advertised.text.includes(`${advertised.commit} HEAD`), advertised.text);
+        assert.equal(advertised.text.includes("symref=HEAD:"), false, advertised.text);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
       }
+    }),
+  );
 
-      // And nothing outside the repository moved.
-      assert.equal(await fs.readFile(victim, "utf8"), "precious\n");
-      assert.deepEqual((await fs.readdir(sandbox)).sort(), ["nested", "victim"]);
-      assert.deepEqual(await fs.readdir(path.join(sandbox, "nested")), ["repo"]);
-    } finally {
-      await fs.rm(sandbox, { recursive: true, force: true });
-    }
-  });
+  it.effect("refuses a push whose ref name escapes the repository", () =>
+    Effect.promise(async () => {
+      // The delete-only traversal from the security audit: `next` is the zero
+      // oid, so no pack body is needed and the command reaches the ref store on
+      // its own. On a filesystem backend the name is joined onto the repository
+      // root, so `../../victim` would have unlinked a file outside it — and the
+      // reflog append would have written outside it too.
+      const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), "receive-pack-escape-"));
+      const root = path.join(sandbox, "nested", "repo");
+      await fs.mkdir(root, { recursive: true });
+      const victim = path.join(sandbox, "victim");
+      await fs.writeFile(victim, "precious\n");
 
-  it("reports a ref the store cannot write as a per-ref failure", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "receive-pack-"));
-    try {
-      const onDisk = GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provideMerge(nodeStores(root)),
-        Layer.provideMerge(Policy.anonymousWrites(true)),
-      );
+      try {
+        const onDisk = GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(nodeStores(root)),
+          Layer.provideMerge(Policy.anonymousWrites(true)),
+        );
 
-      const report = await Effect.runPromise(
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const commit = yield* repository.commit({
-            branch: "main",
-            tree: EMPTY_TREE_OID,
-            message: "one",
-            author: alice,
-          });
-          // `refs/heads/feature` is a legal ref name, but on a filesystem
-          // backend that path is now a directory — git calls this "cannot lock
-          // ref", and it has to reach the client as `ng`, not as a 500 with a
-          // JSON body no git client can parse.
-          yield* repository.setRef({ name: "refs/heads/feature/x", to: commit });
+        const reports = await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const commit = yield* repository.commit({
+              branch: "main",
+              tree: EMPTY_TREE_OID,
+              message: "one",
+              author: alice,
+            });
 
-          const response = yield* Protocol.receivePack(
-            push([`${ZERO} ${ZERO} refs/heads/feature\n`]),
-          );
-          return {
-            status: response.status,
-            text: decoder.decode(
-              new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
-            ),
-          };
-        }).pipe(Effect.provide(onDisk)),
-      );
+            const said: string[] = [];
+            for (const name of [
+              "../../victim",
+              "refs/heads/../../../victim",
+              "refs/../../victim",
+            ]) {
+              // Both directions: the delete that needs no pack, and the create
+              // that would write an oid into the escaped path.
+              for (const command of [
+                `${commit} ${ZERO} ${name}\n`,
+                `${ZERO} ${commit} ${name}\n`,
+              ]) {
+                const response = yield* Protocol.receivePack(push([command]));
+                said.push(
+                  decoder.decode(
+                    new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+                  ),
+                );
+              }
+            }
+            return said;
+          }).pipe(Effect.provide(onDisk)),
+        );
 
-      assert.equal(report.status, 200);
-      assert.ok(report.text.includes("ng refs/heads/feature"), report.text);
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
+        // Every one refused per-ref, as a report the client can read — not as a
+        // torn-down connection and not as a 500.
+        for (const report of reports) {
+          assert.ok(report.includes("funny refname"), report);
+        }
+
+        // And nothing outside the repository moved.
+        assert.equal(await fs.readFile(victim, "utf8"), "precious\n");
+        assert.deepEqual((await fs.readdir(sandbox)).sort(), ["nested", "victim"]);
+        assert.deepEqual(await fs.readdir(path.join(sandbox, "nested")), ["repo"]);
+      } finally {
+        await fs.rm(sandbox, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("reports a ref the store cannot write as a per-ref failure", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "receive-pack-"));
+      try {
+        const onDisk = GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provideMerge(nodeStores(root)),
+          Layer.provideMerge(Policy.anonymousWrites(true)),
+        );
+
+        const report = await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const commit = yield* repository.commit({
+              branch: "main",
+              tree: EMPTY_TREE_OID,
+              message: "one",
+              author: alice,
+            });
+            // `refs/heads/feature` is a legal ref name, but on a filesystem
+            // backend that path is now a directory — git calls this "cannot lock
+            // ref", and it has to reach the client as `ng`, not as a 500 with a
+            // JSON body no git client can parse.
+            yield* repository.setRef({ name: "refs/heads/feature/x", to: commit });
+
+            const response = yield* Protocol.receivePack(
+              push([`${ZERO} ${ZERO} refs/heads/feature\n`]),
+            );
+            return {
+              status: response.status,
+              text: decoder.decode(
+                new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+              ),
+            };
+          }).pipe(Effect.provide(onDisk)),
+        );
+
+        assert.equal(report.status, 200);
+        assert.ok(report.text.includes("ng refs/heads/feature"), report.text);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
 });
 
 /**
@@ -539,338 +570,357 @@ describe("receive-pack", () => {
  * no effect on any real client.
  */
 describe("the push report", () => {
-  it("says one thing per ref, and nothing about a ref it never submitted", async () => {
-    // `allFailed` mapped over the client's whole command list, while `refused`
-    // already held an `ng` for every ref the policy gate declined — so a
-    // failure after the gate emitted two `ng` lines for one ref, and a status
-    // line for a ref the store was never asked about.
-    const text = await scenario(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const commit = yield* repository.commit({
-          branch: "main",
-          tree: EMPTY_TREE_OID,
-          message: "one",
-          author: alice,
-        });
+  it.effect("says one thing per ref, and nothing about a ref it never submitted", () =>
+    Effect.promise(async () => {
+      // `allFailed` mapped over the client's whole command list, while `refused`
+      // already held an `ng` for every ref the policy gate declined — so a
+      // failure after the gate emitted two `ng` lines for one ref, and a status
+      // line for a ref the store was never asked about.
+      const text = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "one",
+            author: alice,
+          });
 
-        yield* repository.setRef({ name: "refs/heads/topic", to: commit });
+          yield* repository.setRef({ name: "refs/heads/topic", to: commit });
 
-        // Deletions, so there is no pack body to go wrong: one ordinary branch
-        // and one ref the namespace rules refuse outright.
-        const response = yield* Protocol.receivePack(
-          push([
-            `${commit} ${ZERO} refs/heads/topic\n`,
-            `${commit} ${ZERO} refs/meta/trust/genesis\n`,
-          ]),
-        );
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return linesOf(bytes).lines;
-      }),
-    );
+          // Deletions, so there is no pack body to go wrong: one ordinary branch
+          // and one ref the namespace rules refuse outright.
+          const response = yield* Protocol.receivePack(
+            push([
+              `${commit} ${ZERO} refs/heads/topic\n`,
+              `${commit} ${ZERO} refs/meta/trust/genesis\n`,
+            ]),
+          );
+          const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+          return linesOf(bytes).lines;
+        }),
+      );
 
-    const named = text.filter((line) => /^(ok|ng) refs\//.test(line));
-    const genesis = named.filter((line) => line.includes("refs/meta/trust/genesis"));
-    assert.equal(genesis.length, 1, `one line per ref: ${named.join(" | ")}`);
-    assert.ok(genesis[0]?.startsWith("ng "), `the genesis must be refused: ${named.join(" | ")}`);
-    assert.ok(
-      named.some((line) => line.startsWith("ok refs/heads/topic")),
-      `the other ref must still land: ${named.join(" | ")}`,
-    );
-  });
+      const named = text.filter((line) => /^(ok|ng) refs\//.test(line));
+      const genesis = named.filter((line) => line.includes("refs/meta/trust/genesis"));
+      assert.equal(genesis.length, 1, `one line per ref: ${named.join(" | ")}`);
+      assert.ok(genesis[0]?.startsWith("ng "), `the genesis must be refused: ${named.join(" | ")}`);
+      assert.ok(
+        named.some((line) => line.startsWith("ok refs/heads/topic")),
+        `the other ref must still land: ${named.join(" | ")}`,
+      );
+    }),
+  );
 });
 
 describe("an atomic push the policy refuses", () => {
-  it("reports every command, rather than nothing at all", async () => {
-    // `Policy.gate` returns no allowed updates for a refused atomic batch, so
-    // reporting on *those* produced zero `ng` lines and the client saw a bare
-    // "unpack ok" for a push that had been refused outright.
-    const report = await scenario(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const commit = yield* repository.commit({
-          branch: "main",
-          tree: EMPTY_TREE_OID,
-          message: "one",
-          author: alice,
-        });
-        yield* repository.setRef({ name: "refs/heads/topic", to: commit });
+  it.effect("reports every command, rather than nothing at all", () =>
+    Effect.promise(async () => {
+      // `Policy.gate` returns no allowed updates for a refused atomic batch, so
+      // reporting on *those* produced zero `ng` lines and the client saw a bare
+      // "unpack ok" for a push that had been refused outright.
+      const report = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "one",
+            author: alice,
+          });
+          yield* repository.setRef({ name: "refs/heads/topic", to: commit });
 
-        const request = new Request("http://git.test/r/git-receive-pack", {
-          method: "POST",
-          body: `${[
-            `${commit} ${ZERO} refs/heads/topic\0report-status atomic\n`,
-            `${commit} ${ZERO} refs/meta/trust/genesis\n`,
-          ]
-            .map(pktLine)
-            .join("")}0000`,
-        });
-        const response = yield* Protocol.receivePack(request);
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return { lines: linesOf(bytes).lines, now: yield* repository.resolve("refs/heads/topic") };
-      }),
-    );
+          const request = new Request("http://git.test/r/git-receive-pack", {
+            method: "POST",
+            body: `${[
+              `${commit} ${ZERO} refs/heads/topic\0report-status atomic\n`,
+              `${commit} ${ZERO} refs/meta/trust/genesis\n`,
+            ]
+              .map(pktLine)
+              .join("")}0000`,
+          });
+          const response = yield* Protocol.receivePack(request);
+          const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+          return {
+            lines: linesOf(bytes).lines,
+            now: yield* repository.resolve("refs/heads/topic"),
+          };
+        }),
+      );
 
-    const named = report.lines.filter((line) => /^(ok|ng) refs\//.test(line));
-    assert.equal(named.length, 2, `every command needs a line: ${report.lines.join(" | ")}`);
-    assert.ok(
-      named.every((line) => line.startsWith("ng ")),
-      `atomic means none of them applied: ${named.join(" | ")}`,
-    );
-    assert.notEqual(report.now, null, "and nothing was deleted");
+      const named = report.lines.filter((line) => /^(ok|ng) refs\//.test(line));
+      assert.equal(named.length, 2, `every command needs a line: ${report.lines.join(" | ")}`);
+      assert.ok(
+        named.every((line) => line.startsWith("ng ")),
+        `atomic means none of them applied: ${named.join(" | ")}`,
+      );
+      assert.notEqual(report.now, null, "and nothing was deleted");
 
-    // Each with its own reason. Stamping the first refusal onto all of them
-    // told a user their clean ref had failed for something that was never
-    // about it — here, that `refs/heads/topic` is part of the trust namespace.
-    const genesis = named.find((line) => line.includes("refs/meta/trust/genesis")) ?? "";
-    const topic = named.find((line) => line.includes("refs/heads/topic")) ?? "";
-    assert.doesNotMatch(genesis, /^ng \S+ atomic push refused/, `own reason: ${genesis}`);
-    assert.doesNotMatch(topic, /trust namespace/);
-    assert.match(topic, /atomic/, `the clean ref failed because the batch did: ${topic}`);
-  });
+      // Each with its own reason. Stamping the first refusal onto all of them
+      // told a user their clean ref had failed for something that was never
+      // about it — here, that `refs/heads/topic` is part of the trust namespace.
+      const genesis = named.find((line) => line.includes("refs/meta/trust/genesis")) ?? "";
+      const topic = named.find((line) => line.includes("refs/heads/topic")) ?? "";
+      assert.doesNotMatch(genesis, /^ng \S+ atomic push refused/, `own reason: ${genesis}`);
+      assert.doesNotMatch(topic, /trust namespace/);
+      assert.match(topic, /atomic/, `the clean ref failed because the batch did: ${topic}`);
+    }),
+  );
 });
 
 describe("what a signed envelope binds", () => {
-  it("does not accuse a clean ref of the refusal that stopped the batch", async () => {
-    // An atomic batch is all-or-nothing, so a ref that was fine still gets an
-    // `ng` line — but the reason belongs to the batch, not to whichever
-    // refusal happened to come first. Borrowed, the report told the client
-    // that `refs/heads/main` had a funny refname: an accusation about a name
-    // that is fine, and the one line they have to debug from.
-    const report = await scenario(
-      Effect.gen(function* () {
-        const response = yield* Protocol.receivePack(
-          new Request("http://git.test/r/git-receive-pack", {
-            method: "POST",
-            body:
-              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/ma..in\0report-status atomic`)}` +
-              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/main`)}` +
-              `0000not a pack at all`,
-          }),
-        ).pipe(
-          Effect.provide(Auth.requester({ ...Auth.anonymous, capabilities: ["source.push"] })),
-        );
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return linesOf(bytes).lines;
-      }),
-    );
-
-    const clean = report.find(
-      (entry) => entry.endsWith("refs/heads/main") || entry.includes("refs/heads/main "),
-    );
-    assert.match(clean ?? "", /^ng /, report.join(" | "));
-    assert.doesNotMatch(clean ?? "", /funny refname/, report.join(" | "));
-    assert.match(clean ?? "", /another command was refused/, report.join(" | "));
-  });
-
-  it("refuses a ref it never named before the pack is unpacked", async () => {
-    // The envelope names the refs a native client is moving and where to, and
-    // checking it needs nothing from the pack — unlike the force-push rule,
-    // which cannot tell a fast-forward from a rewrite until the objects are
-    // present. Left to the gate, a push naming refs the signature never
-    // covered had its whole pack unpacked and persisted first.
-    //
-    // The body is deliberately not a pack: a refusal that arrives before the
-    // unpack cannot have noticed, and one that arrives after says so.
-    const report = await scenario(
-      Effect.gen(function* () {
-        const response = yield* Protocol.receivePack(
-          new Request("http://git.test/r/git-receive-pack", {
-            method: "POST",
-            body:
-              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere\0report-status`)}` +
-              `0000not a pack at all`,
-          }),
-        ).pipe(
-          Effect.provide(
-            Auth.requester({
-              ...Auth.anonymous,
-              capabilities: ["source.push"],
-              envelope: {
-                type: "auth.request",
-                version: 1,
-                repo: Auth.anonymous.projection.repoId,
-                operation: "git-receive-pack",
-                commands: [{ ref: "refs/heads/agreed", from: null, to: "a".repeat(40) }],
-                nonce: "n",
-                expiresAt: new Date(Date.now() + 60_000).toISOString(),
-              },
+  it.effect("does not accuse a clean ref of the refusal that stopped the batch", () =>
+    Effect.promise(async () => {
+      // An atomic batch is all-or-nothing, so a ref that was fine still gets an
+      // `ng` line — but the reason belongs to the batch, not to whichever
+      // refusal happened to come first. Borrowed, the report told the client
+      // that `refs/heads/main` had a funny refname: an accusation about a name
+      // that is fine, and the one line they have to debug from.
+      const report = await scenario(
+        Effect.gen(function* () {
+          const response = yield* Protocol.receivePack(
+            new Request("http://git.test/r/git-receive-pack", {
+              method: "POST",
+              body:
+                `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/ma..in\0report-status atomic`)}` +
+                `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/main`)}` +
+                `0000not a pack at all`,
             }),
-          ),
-        );
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return linesOf(bytes).lines;
-      }),
-    );
+          ).pipe(
+            Effect.provide(Auth.requester({ ...Auth.anonymous, capabilities: ["source.push"] })),
+          );
+          const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+          return linesOf(bytes).lines;
+        }),
+      );
 
-    const line = report.find((entry) => entry.includes("refs/heads/elsewhere"));
-    assert.match(line ?? "", /^ng /, report.join(" | "));
-    assert.match(line ?? "", /did not name this ref/, report.join(" | "));
-    assert.ok(
-      !report.some((entry) => entry.includes("unpacker")),
-      `refused before the unpack: ${report.join(" | ")}`,
-    );
-    // One line per ref. `respond` concatenates the refusals it accumulated
-    // with whatever `allFailed` produced, so a ref refused before that point
-    // used to get an `ng` here as well — twice, with two different reasons.
-    assert.equal(
-      report.filter((entry) => entry.includes("refs/heads/elsewhere")).length,
-      1,
-      report.join(" | "),
-    );
-  });
+      const clean = report.find(
+        (entry) => entry.endsWith("refs/heads/main") || entry.includes("refs/heads/main "),
+      );
+      assert.match(clean ?? "", /^ng /, report.join(" | "));
+      assert.doesNotMatch(clean ?? "", /funny refname/, report.join(" | "));
+      assert.match(clean ?? "", /another command was refused/, report.join(" | "));
+    }),
+  );
 
-  it("refuses a command whose old oid the signature never named", async () => {
-    // The envelope's `from` is the compare-and-swap the client signed for; the
-    // `expected` on the command line is unsigned. Comparing only `to` let the
-    // two disagree, so "move `main` from A to B" replayed as an unconditional
-    // "set `main` to B" — landing the push on a branch that had moved on since
-    // the client looked, which is the race the compare-and-swap was promised
-    // against.
-    const report = await scenario(
-      Effect.gen(function* () {
-        const response = yield* Protocol.receivePack(
-          new Request("http://git.test/r/git-receive-pack", {
-            method: "POST",
-            body:
-              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/agreed\0report-status`)}` +
-              `0000not a pack at all`,
-          }),
-        ).pipe(
-          Effect.provide(
-            Auth.requester({
-              ...Auth.anonymous,
-              capabilities: ["source.push"],
-              envelope: {
-                type: "auth.request",
-                version: 1,
-                repo: Auth.anonymous.projection.repoId,
-                operation: "git-receive-pack",
-                // Signed as a move off `b…`, sent as a create.
-                commands: [{ ref: "refs/heads/agreed", from: "b".repeat(40), to: "a".repeat(40) }],
-                nonce: "n",
-                expiresAt: new Date(Date.now() + 60_000).toISOString(),
-              },
+  it.effect("refuses a ref it never named before the pack is unpacked", () =>
+    Effect.promise(async () => {
+      // The envelope names the refs a native client is moving and where to, and
+      // checking it needs nothing from the pack — unlike the force-push rule,
+      // which cannot tell a fast-forward from a rewrite until the objects are
+      // present. Left to the gate, a push naming refs the signature never
+      // covered had its whole pack unpacked and persisted first.
+      //
+      // The body is deliberately not a pack: a refusal that arrives before the
+      // unpack cannot have noticed, and one that arrives after says so.
+      const report = await scenario(
+        Effect.gen(function* () {
+          const response = yield* Protocol.receivePack(
+            new Request("http://git.test/r/git-receive-pack", {
+              method: "POST",
+              body:
+                `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere\0report-status`)}` +
+                `0000not a pack at all`,
             }),
-          ),
-        );
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return linesOf(bytes).lines;
-      }),
-    );
+          ).pipe(
+            Effect.provide(
+              Auth.requester({
+                ...Auth.anonymous,
+                capabilities: ["source.push"],
+                envelope: {
+                  type: "auth.request",
+                  version: 1,
+                  repo: Auth.anonymous.projection.repoId,
+                  operation: "git-receive-pack",
+                  commands: [{ ref: "refs/heads/agreed", from: null, to: "a".repeat(40) }],
+                  nonce: "n",
+                  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+              }),
+            ),
+          );
+          const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+          return linesOf(bytes).lines;
+        }),
+      );
 
-    const line = report.find((entry) => entry.includes("refs/heads/agreed"));
-    assert.match(line ?? "", /^ng /, report.join(" | "));
-    assert.match(line ?? "", /different current revision/, report.join(" | "));
-  });
+      const line = report.find((entry) => entry.includes("refs/heads/elsewhere"));
+      assert.match(line ?? "", /^ng /, report.join(" | "));
+      assert.match(line ?? "", /did not name this ref/, report.join(" | "));
+      assert.ok(
+        !report.some((entry) => entry.includes("unpacker")),
+        `refused before the unpack: ${report.join(" | ")}`,
+      );
+      // One line per ref. `respond` concatenates the refusals it accumulated
+      // with whatever `allFailed` produced, so a ref refused before that point
+      // used to get an `ng` here as well — twice, with two different reasons.
+      assert.equal(
+        report.filter((entry) => entry.includes("refs/heads/elsewhere")).length,
+        1,
+        report.join(" | "),
+      );
+    }),
+  );
 
-  it("reports on every command when a covered delete outlives the refused creates", async () => {
-    // The object phase is the only reader of the pack, and it runs only when
-    // there is a write left to unpack for. With every create uncovered and a
-    // covered delete remaining, `writes` is empty and nothing downstream would
-    // have touched the stream — so the report was written while the pack was
-    // still arriving and the client saw a hung-up connection.
-    const outcome = await scenario(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const commit = yield* repository.commit({
-          branch: "agreed",
-          tree: EMPTY_TREE_OID,
-          message: "one",
-          author: alice,
-        });
-
-        const response = yield* Protocol.receivePack(
-          new Request("http://git.test/r/git-receive-pack", {
-            method: "POST",
-            body:
-              `${pktLine(`${commit} ${ZERO} refs/heads/agreed\0report-status`)}` +
-              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere`)}0000a pack nobody reads`,
-          }),
-        ).pipe(
-          Effect.provide(
-            Auth.requester({
-              ...Auth.anonymous,
-              capabilities: ["source.push", "source.delete"],
-              envelope: {
-                type: "auth.request",
-                version: 1,
-                repo: Auth.anonymous.projection.repoId,
-                operation: "git-receive-pack",
-                commands: [{ ref: "refs/heads/agreed", from: commit, to: null }],
-                nonce: "n",
-                expiresAt: new Date(Date.now() + 60_000).toISOString(),
-              },
+  it.effect("refuses a command whose old oid the signature never named", () =>
+    Effect.promise(async () => {
+      // The envelope's `from` is the compare-and-swap the client signed for; the
+      // `expected` on the command line is unsigned. Comparing only `to` let the
+      // two disagree, so "move `main` from A to B" replayed as an unconditional
+      // "set `main` to B" — landing the push on a branch that had moved on since
+      // the client looked, which is the race the compare-and-swap was promised
+      // against.
+      const report = await scenario(
+        Effect.gen(function* () {
+          const response = yield* Protocol.receivePack(
+            new Request("http://git.test/r/git-receive-pack", {
+              method: "POST",
+              body:
+                `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/agreed\0report-status`)}` +
+                `0000not a pack at all`,
             }),
-          ),
-        );
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return { lines: linesOf(bytes).lines };
-      }),
-    );
+          ).pipe(
+            Effect.provide(
+              Auth.requester({
+                ...Auth.anonymous,
+                capabilities: ["source.push"],
+                envelope: {
+                  type: "auth.request",
+                  version: 1,
+                  repo: Auth.anonymous.projection.repoId,
+                  operation: "git-receive-pack",
+                  // Signed as a move off `b…`, sent as a create.
+                  commands: [
+                    { ref: "refs/heads/agreed", from: "b".repeat(40), to: "a".repeat(40) },
+                  ],
+                  nonce: "n",
+                  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+              }),
+            ),
+          );
+          const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+          return linesOf(bytes).lines;
+        }),
+      );
 
-    const named = outcome.lines.filter((line) => /^(ok|ng) refs\//.test(line));
-    assert.equal(named.length, 2, `every command needs a line: ${outcome.lines.join(" | ")}`);
-    assert.ok(
-      named.some((line) => line.startsWith("ng ") && line.includes("elsewhere")),
-      `the uncovered create is refused: ${named.join(" | ")}`,
-    );
-  });
+      const line = report.find((entry) => entry.includes("refs/heads/agreed"));
+      assert.match(line ?? "", /^ng /, report.join(" | "));
+      assert.match(line ?? "", /different current revision/, report.join(" | "));
+    }),
+  );
 
-  it("applies none of an atomic push when one ref was never named", async () => {
-    // Atomic is all-or-nothing, and an uncovered ref is part of the all. The
-    // covered half was filtered out of what the gate saw and then landed on
-    // its own, which is the one thing the capability promises will not happen.
-    const outcome = await scenario(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const commit = yield* repository.commit({
-          branch: "agreed",
-          tree: EMPTY_TREE_OID,
-          message: "one",
-          author: alice,
-        });
+  it.effect("reports on every command when a covered delete outlives the refused creates", () =>
+    Effect.promise(async () => {
+      // The object phase is the only reader of the pack, and it runs only when
+      // there is a write left to unpack for. With every create uncovered and a
+      // covered delete remaining, `writes` is empty and nothing downstream would
+      // have touched the stream — so the report was written while the pack was
+      // still arriving and the client saw a hung-up connection.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.commit({
+            branch: "agreed",
+            tree: EMPTY_TREE_OID,
+            message: "one",
+            author: alice,
+          });
 
-        const response = yield* Protocol.receivePack(
-          new Request("http://git.test/r/git-receive-pack", {
-            method: "POST",
-            body:
-              `${pktLine(`${commit} ${ZERO} refs/heads/agreed\0report-status atomic`)}` +
-              `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere`)}0000`,
-          }),
-        ).pipe(
-          Effect.provide(
-            Auth.requester({
-              ...Auth.anonymous,
-              capabilities: ["source.push", "source.delete"],
-              envelope: {
-                type: "auth.request",
-                version: 1,
-                repo: Auth.anonymous.projection.repoId,
-                operation: "git-receive-pack",
-                commands: [{ ref: "refs/heads/agreed", from: commit, to: null }],
-                nonce: "n",
-                expiresAt: new Date(Date.now() + 60_000).toISOString(),
-              },
+          const response = yield* Protocol.receivePack(
+            new Request("http://git.test/r/git-receive-pack", {
+              method: "POST",
+              body:
+                `${pktLine(`${commit} ${ZERO} refs/heads/agreed\0report-status`)}` +
+                `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere`)}0000a pack nobody reads`,
             }),
-          ),
-        );
-        const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
-        return {
-          lines: linesOf(bytes).lines,
-          still: yield* repository.resolve("refs/heads/agreed"),
-        };
-      }),
-    );
+          ).pipe(
+            Effect.provide(
+              Auth.requester({
+                ...Auth.anonymous,
+                capabilities: ["source.push", "source.delete"],
+                envelope: {
+                  type: "auth.request",
+                  version: 1,
+                  repo: Auth.anonymous.projection.repoId,
+                  operation: "git-receive-pack",
+                  commands: [{ ref: "refs/heads/agreed", from: commit, to: null }],
+                  nonce: "n",
+                  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+              }),
+            ),
+          );
+          const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+          return { lines: linesOf(bytes).lines };
+        }),
+      );
 
-    const named = outcome.lines.filter((line) => /^(ok|ng) refs\//.test(line));
-    assert.equal(named.length, 2, `every command needs a line: ${outcome.lines.join(" | ")}`);
-    assert.ok(
-      named.every((line) => line.startsWith("ng ")),
-      `atomic means none of them applied: ${named.join(" | ")}`,
-    );
-    assert.notEqual(outcome.still, null, "and the covered half did not land on its own");
-  });
+      const named = outcome.lines.filter((line) => /^(ok|ng) refs\//.test(line));
+      assert.equal(named.length, 2, `every command needs a line: ${outcome.lines.join(" | ")}`);
+      assert.ok(
+        named.some((line) => line.startsWith("ng ") && line.includes("elsewhere")),
+        `the uncovered create is refused: ${named.join(" | ")}`,
+      );
+    }),
+  );
+
+  it.effect("applies none of an atomic push when one ref was never named", () =>
+    Effect.promise(async () => {
+      // Atomic is all-or-nothing, and an uncovered ref is part of the all. The
+      // covered half was filtered out of what the gate saw and then landed on
+      // its own, which is the one thing the capability promises will not happen.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const commit = yield* repository.commit({
+            branch: "agreed",
+            tree: EMPTY_TREE_OID,
+            message: "one",
+            author: alice,
+          });
+
+          const response = yield* Protocol.receivePack(
+            new Request("http://git.test/r/git-receive-pack", {
+              method: "POST",
+              body:
+                `${pktLine(`${commit} ${ZERO} refs/heads/agreed\0report-status atomic`)}` +
+                `${pktLine(`${ZERO} ${"a".repeat(40)} refs/heads/elsewhere`)}0000`,
+            }),
+          ).pipe(
+            Effect.provide(
+              Auth.requester({
+                ...Auth.anonymous,
+                capabilities: ["source.push", "source.delete"],
+                envelope: {
+                  type: "auth.request",
+                  version: 1,
+                  repo: Auth.anonymous.projection.repoId,
+                  operation: "git-receive-pack",
+                  commands: [{ ref: "refs/heads/agreed", from: commit, to: null }],
+                  nonce: "n",
+                  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+              }),
+            ),
+          );
+          const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
+          return {
+            lines: linesOf(bytes).lines,
+            still: yield* repository.resolve("refs/heads/agreed"),
+          };
+        }),
+      );
+
+      const named = outcome.lines.filter((line) => /^(ok|ng) refs\//.test(line));
+      assert.equal(named.length, 2, `every command needs a line: ${outcome.lines.join(" | ")}`);
+      assert.ok(
+        named.every((line) => line.startsWith("ng ")),
+        `atomic means none of them applied: ${named.join(" | ")}`,
+      );
+      assert.notEqual(outcome.still, null, "and the covered half did not land on its own");
+    }),
+  );
 });
 
 describe("advertisement hiding", () => {
@@ -907,112 +957,128 @@ describe("advertisement hiding", () => {
     return commit;
   });
 
-  it("hides hub and trust refs from a v2 ls-refs that asked for everything", async () => {
-    const refs = await scenario(
-      Effect.gen(function* () {
-        yield* withHubRefs();
-        return yield* namedBy(lsRefs());
-      }),
-    );
+  it.effect("hides hub and trust refs from a v2 ls-refs that asked for everything", () =>
+    Effect.promise(async () => {
+      const refs = await scenario(
+        Effect.gen(function* () {
+          yield* withHubRefs();
+          return yield* namedBy(lsRefs());
+        }),
+      );
 
-    assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
-    // The identity stays: it is what lets any client compute the RepoID and
-    // check it against what they trust, and hiding it would make verification
-    // need permission.
-    assert.ok(refs.includes("refs/meta/trust/genesis"), refs.join("\n"));
-    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
-    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
-  });
+      assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
+      // The identity stays: it is what lets any client compute the RepoID and
+      // check it against what they trust, and hiding it would make verification
+      // need permission.
+      assert.ok(refs.includes("refs/meta/trust/genesis"), refs.join("\n"));
+      assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
+      assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
+    }),
+  );
 
-  it("hides them from `ref-prefix refs/`, which is what everything looks like", async () => {
-    const refs = await scenario(
-      Effect.gen(function* () {
-        yield* withHubRefs();
-        return yield* namedBy(lsRefs(["refs/"]));
-      }),
-    );
-    assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
-    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
-  });
+  it.effect("hides them from `ref-prefix refs/`, which is what everything looks like", () =>
+    Effect.promise(async () => {
+      const refs = await scenario(
+        Effect.gen(function* () {
+          yield* withHubRefs();
+          return yield* namedBy(lsRefs(["refs/"]));
+        }),
+      );
+      assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
+      assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
+    }),
+  );
 
-  it("answers a client that names the namespace, which is the only way to fetch it", async () => {
-    // Hiding is about sparing a stock clone an event per comment, not about
-    // withholding state. v0 hides these too, so a `ref-prefix` that names the
-    // namespace is the *only* way a replica can ever learn these oids — and
-    // without it `hub enable` and `Replication.pull` reported success having
-    // fetched no grants and no revocations.
-    const refs = await scenario(
-      Effect.gen(function* () {
-        yield* withHubRefs();
-        return yield* namedBy(lsRefs(["refs/meta/trust/", "refs/hub/"]));
-      }),
-    );
+  it.effect("answers a client that names the namespace, which is the only way to fetch it", () =>
+    Effect.promise(async () => {
+      // Hiding is about sparing a stock clone an event per comment, not about
+      // withholding state. v0 hides these too, so a `ref-prefix` that names the
+      // namespace is the *only* way a replica can ever learn these oids — and
+      // without it `hub enable` and `Replication.pull` reported success having
+      // fetched no grants and no revocations.
+      const refs = await scenario(
+        Effect.gen(function* () {
+          yield* withHubRefs();
+          return yield* namedBy(lsRefs(["refs/meta/trust/", "refs/hub/"]));
+        }),
+      );
 
-    assert.ok(refs.includes("refs/meta/trust/log"), refs.join("\n"));
-    assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
-  });
+      assert.ok(refs.includes("refs/meta/trust/log"), refs.join("\n"));
+      assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
+    }),
+  );
 
-  it("does not hand a namespace to a prefix that merely starts the same way", async () => {
-    // `ls-remote 'refs/h*'` names nothing — three characters, and not the
-    // namespace — so answering it returned the whole of `refs/hub/`: exactly
-    // the state the hiding exists to withhold from a client that did not ask.
-    const refs = await scenario(
-      Effect.gen(function* () {
-        yield* withHubRefs();
-        return yield* namedBy(lsRefs(["refs/h", "refs/m"]));
-      }),
-    );
+  it.effect("does not hand a namespace to a prefix that merely starts the same way", () =>
+    Effect.promise(async () => {
+      // `ls-remote 'refs/h*'` names nothing — three characters, and not the
+      // namespace — so answering it returned the whole of `refs/hub/`: exactly
+      // the state the hiding exists to withhold from a client that did not ask.
+      const refs = await scenario(
+        Effect.gen(function* () {
+          yield* withHubRefs();
+          return yield* namedBy(lsRefs(["refs/h", "refs/m"]));
+        }),
+      );
 
-    assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
-    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
-  });
+      assert.ok(!refs.includes("refs/hub/pr/1"), `hub ref leaked: ${refs.join("\n")}`);
+      assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
+    }),
+  );
 
-  it("answers one that names it without a trailing slash, which is what git sends", async () => {
-    // git derives the prefix from the configured refspec, so `refs/hub/*`
-    // yields `refs/hub` — no slash. The un-hiding test was written against
-    // `hiddenFromAdvertisement`, which asks whether a *ref* is hidden, and
-    // `refs/hub` is not one: the answer came back empty for a client that had
-    // asked by name, and a mirror reported a replication that fetched nothing.
-    const refs = await scenario(
-      Effect.gen(function* () {
-        yield* withHubRefs();
-        return yield* namedBy(lsRefs(["refs/meta/trust", "refs/hub"]));
-      }),
-    );
+  it.effect("answers one that names it without a trailing slash, which is what git sends", () =>
+    Effect.promise(async () => {
+      // git derives the prefix from the configured refspec, so `refs/hub/*`
+      // yields `refs/hub` — no slash. The un-hiding test was written against
+      // `hiddenFromAdvertisement`, which asks whether a *ref* is hidden, and
+      // `refs/hub` is not one: the answer came back empty for a client that had
+      // asked by name, and a mirror reported a replication that fetched nothing.
+      const refs = await scenario(
+        Effect.gen(function* () {
+          yield* withHubRefs();
+          return yield* namedBy(lsRefs(["refs/meta/trust", "refs/hub"]));
+        }),
+      );
 
-    assert.ok(refs.includes("refs/meta/trust/log"), refs.join("\n"));
-    assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
-  });
+      assert.ok(refs.includes("refs/meta/trust/log"), refs.join("\n"));
+      assert.ok(refs.includes("refs/hub/pr/1"), refs.join("\n"));
+    }),
+  );
 
-  it("still hides them from a prefix that only overlaps `refs/`", async () => {
-    // The prefix has to reach the namespace, not merely share a start with it:
-    // `refs/heads/` names no hidden ref, and answering it with hub state would
-    // undo the hiding for every stock client that fetches branches by prefix.
-    const refs = await scenario(
-      Effect.gen(function* () {
-        yield* withHubRefs();
-        return yield* namedBy(lsRefs(["refs/heads/", "refs/hub"]));
-      }),
-    );
+  it.effect("still hides them from a prefix that only overlaps `refs/`", () =>
+    Effect.promise(async () => {
+      // The prefix has to reach the namespace, not merely share a start with it:
+      // `refs/heads/` names no hidden ref, and answering it with hub state would
+      // undo the hiding for every stock client that fetches branches by prefix.
+      const refs = await scenario(
+        Effect.gen(function* () {
+          yield* withHubRefs();
+          return yield* namedBy(lsRefs(["refs/heads/", "refs/hub"]));
+        }),
+      );
 
-    assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
-    assert.ok(refs.includes("refs/hub/pr/1"), "the named namespace still answers");
-    assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
-  });
+      assert.ok(refs.includes("refs/heads/main"), refs.join("\n"));
+      assert.ok(refs.includes("refs/hub/pr/1"), "the named namespace still answers");
+      assert.ok(!refs.includes("refs/meta/trust/log"), `trust log leaked: ${refs.join("\n")}`);
+    }),
+  );
 
-  it("still shows them to a pusher, who has to know what it is replacing", async () => {
-    // receive-pack's old-oid is how a stale push is caught, so hiding these
-    // from the push advertisement would make every hub ref writable exactly
-    // once and then never again.
-    const text = await scenario(
-      Effect.gen(function* () {
-        yield* withHubRefs();
-        const response = yield* Protocol.advertise("git-receive-pack");
-        return decoder.decode(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())));
-      }),
-    );
+  it.effect("still shows them to a pusher, who has to know what it is replacing", () =>
+    Effect.promise(async () => {
+      // receive-pack's old-oid is how a stale push is caught, so hiding these
+      // from the push advertisement would make every hub ref writable exactly
+      // once and then never again.
+      const text = await scenario(
+        Effect.gen(function* () {
+          yield* withHubRefs();
+          const response = yield* Protocol.advertise("git-receive-pack");
+          return decoder.decode(
+            new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+          );
+        }),
+      );
 
-    assert.ok(text.includes("refs/meta/trust/log"), text);
-    assert.ok(text.includes("refs/hub/pr/1"), text);
-  });
+      assert.ok(text.includes("refs/meta/trust/log"), text);
+      assert.ok(text.includes("refs/hub/pr/1"), text);
+    }),
+  );
 });

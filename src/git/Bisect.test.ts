@@ -202,138 +202,146 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
     }
   };
 
-  it("picks the same commit as git on a linear history", async () => {
-    const made = chainOf(13);
+  it.effect("picks the same commit as git on a linear history", () =>
+    Effect.promise(async () => {
+      const made = chainOf(13);
 
-    const bad = made[12]!;
-    const good = [made[0]!];
-    assert.equal((await ours(bad, good)).commit, theirs(bad, good));
+      const bad = made[12]!;
+      const good = [made[0]!];
+      assert.equal((await ours(bad, good)).commit, theirs(bad, good));
 
-    // …and again after one answer, so the agreement is not a coincidence of
-    // this particular range size.
-    const narrowed = theirs(bad, good);
-    assert.equal((await ours(narrowed, good)).commit, theirs(narrowed, good));
-  });
+      // …and again after one answer, so the agreement is not a coincidence of
+      // this particular range size.
+      const narrowed = theirs(bad, good);
+      assert.equal((await ours(narrowed, good)).commit, theirs(narrowed, good));
+    }),
+  );
 
-  it("picks an equally good commit where git has a tie to break", async () => {
-    // Seven suspects split three and four either way, so two commits are
-    // exactly as informative and there is no better one to name. Asserting
-    // git's own pick here would be pinning its tie-break, not our answer.
-    const made = chainOf(8);
+  it.effect("picks an equally good commit where git has a tie to break", () =>
+    Effect.promise(async () => {
+      // Seven suspects split three and four either way, so two commits are
+      // exactly as informative and there is no better one to name. Asserting
+      // git's own pick here would be pinning its tie-break, not our answer.
+      const made = chainOf(8);
 
-    const bad = made[7]!;
-    const good = [made[0]!];
-    const step = await ours(bad, good);
-
-    assert.equal(step.remaining, 7);
-    assertOptimal(step.commit, bad, good);
-    assert.equal(
-      distances(bad, good).filter((entry) => entry.distance === 3).length,
-      2,
-      "the fixture really does present a tie",
-    );
-  });
-
-  it("picks the same commit as git across a merge", async () => {
-    git("init", "-q", "-b", "main", ".");
-
-    // main:  root ── main-1 ── main-2 ─────────── merge ── after-merge
-    //             ╲                              ╱
-    // side:        side-1 ── side-2 ── side-3 ──╯
-    //
-    // Spelled as one stream rather than driven with `checkout` and `merge`:
-    // the shape is the whole point of the fixture, and here it is legible in
-    // one place instead of inferred from a sequence of commands.
-    const main = (mark: number, message: string, from: number) =>
-      importCommit({
-        branch: "refs/heads/main",
-        mark,
-        message,
-        from,
-        files: [{ path: "n.txt", content: `${message}\n` }],
-      });
-    const side = (mark: number, message: string, from: number) =>
-      importCommit({
-        branch: "refs/heads/side",
-        mark,
-        message,
-        from,
-        files: [{ path: "s.txt", content: `${message}\n` }],
-      });
-
-    const marks = fastImport(
-      root,
-      importCommit({
-        branch: "refs/heads/main",
-        mark: 1,
-        message: "root",
-        files: [{ path: "n.txt", content: "root\n" }],
-      }) +
-        main(2, "main-1", 1) +
-        main(3, "main-2", 2) +
-        side(4, "side-1", 1) +
-        side(5, "side-2", 4) +
-        side(6, "side-3", 5) +
-        // The merge carries both sides' files: `merge` adds the parent, it
-        // does not merge the trees, so the tree is stated.
-        importCommit({
-          branch: "refs/heads/main",
-          mark: 7,
-          message: "merge side",
-          from: 3,
-          merge: 6,
-          files: [
-            { path: "n.txt", content: "main-2\n" },
-            { path: "s.txt", content: "side-3\n" },
-          ],
-        }) +
-        importCommit({
-          branch: "refs/heads/main",
-          mark: 8,
-          message: "after-merge",
-          from: 7,
-          files: [
-            { path: "n.txt", content: "after-merge\n" },
-            { path: "s.txt", content: "side-3\n" },
-          ],
-        }),
-    );
-
-    const root0 = marks.get(1)!;
-    const bad = marks.get(8)!;
-
-    // A merge means the suspects are a graph, not a line: the midpoint of a
-    // list would be the wrong answer here and git's choice is not it either.
-    const good = [root0];
-    const mine = await ours(bad, good);
-    assertOptimal(mine.commit, bad, good);
-    assert.equal(
-      mine.remaining,
-      Number(git("rev-list", "--count", bad, `^${root0}`).trim()),
-      "the suspect count is git's `rev-list --count` for the same range",
-    );
-  });
-
-  it("agrees with git all the way down to the culprit", async () => {
-    const made = chainOf(9);
-
-    // Drive a whole session: the fault is at made[6], so every commit from
-    // there on is "bad". Both implementations should walk the same path and
-    // land on the same commit.
-    const culprit = made[6]!;
-    const isBad = (oid: string) => isAncestor(culprit, oid);
-
-    let bad = made[8]!;
-    const good = [made[0]!];
-    for (;;) {
+      const bad = made[7]!;
+      const good = [made[0]!];
       const step = await ours(bad, good);
-      assertOptimal(step.commit, bad, good);
-      if (step.kind === "found") break;
-      if (isBad(step.commit!)) bad = step.commit!;
-      else good.push(step.commit!);
-    }
 
-    const final = await ours(bad, good);
-    assert.equal(final.commit, culprit, "the first bad commit, found");
-  });
+      assert.equal(step.remaining, 7);
+      assertOptimal(step.commit, bad, good);
+      assert.equal(
+        distances(bad, good).filter((entry) => entry.distance === 3).length,
+        2,
+        "the fixture really does present a tie",
+      );
+    }),
+  );
+
+  it.effect("picks the same commit as git across a merge", () =>
+    Effect.promise(async () => {
+      git("init", "-q", "-b", "main", ".");
+
+      // main:  root ── main-1 ── main-2 ─────────── merge ── after-merge
+      //             ╲                              ╱
+      // side:        side-1 ── side-2 ── side-3 ──╯
+      //
+      // Spelled as one stream rather than driven with `checkout` and `merge`:
+      // the shape is the whole point of the fixture, and here it is legible in
+      // one place instead of inferred from a sequence of commands.
+      const main = (mark: number, message: string, from: number) =>
+        importCommit({
+          branch: "refs/heads/main",
+          mark,
+          message,
+          from,
+          files: [{ path: "n.txt", content: `${message}\n` }],
+        });
+      const side = (mark: number, message: string, from: number) =>
+        importCommit({
+          branch: "refs/heads/side",
+          mark,
+          message,
+          from,
+          files: [{ path: "s.txt", content: `${message}\n` }],
+        });
+
+      const marks = fastImport(
+        root,
+        importCommit({
+          branch: "refs/heads/main",
+          mark: 1,
+          message: "root",
+          files: [{ path: "n.txt", content: "root\n" }],
+        }) +
+          main(2, "main-1", 1) +
+          main(3, "main-2", 2) +
+          side(4, "side-1", 1) +
+          side(5, "side-2", 4) +
+          side(6, "side-3", 5) +
+          // The merge carries both sides' files: `merge` adds the parent, it
+          // does not merge the trees, so the tree is stated.
+          importCommit({
+            branch: "refs/heads/main",
+            mark: 7,
+            message: "merge side",
+            from: 3,
+            merge: 6,
+            files: [
+              { path: "n.txt", content: "main-2\n" },
+              { path: "s.txt", content: "side-3\n" },
+            ],
+          }) +
+          importCommit({
+            branch: "refs/heads/main",
+            mark: 8,
+            message: "after-merge",
+            from: 7,
+            files: [
+              { path: "n.txt", content: "after-merge\n" },
+              { path: "s.txt", content: "side-3\n" },
+            ],
+          }),
+      );
+
+      const root0 = marks.get(1)!;
+      const bad = marks.get(8)!;
+
+      // A merge means the suspects are a graph, not a line: the midpoint of a
+      // list would be the wrong answer here and git's choice is not it either.
+      const good = [root0];
+      const mine = await ours(bad, good);
+      assertOptimal(mine.commit, bad, good);
+      assert.equal(
+        mine.remaining,
+        Number(git("rev-list", "--count", bad, `^${root0}`).trim()),
+        "the suspect count is git's `rev-list --count` for the same range",
+      );
+    }),
+  );
+
+  it.effect("agrees with git all the way down to the culprit", () =>
+    Effect.promise(async () => {
+      const made = chainOf(9);
+
+      // Drive a whole session: the fault is at made[6], so every commit from
+      // there on is "bad". Both implementations should walk the same path and
+      // land on the same commit.
+      const culprit = made[6]!;
+      const isBad = (oid: string) => isAncestor(culprit, oid);
+
+      let bad = made[8]!;
+      const good = [made[0]!];
+      for (;;) {
+        const step = await ours(bad, good);
+        assertOptimal(step.commit, bad, good);
+        if (step.kind === "found") break;
+        if (isBad(step.commit!)) bad = step.commit!;
+        else good.push(step.commit!);
+      }
+
+      const final = await ours(bad, good);
+      assert.equal(final.commit, culprit, "the first bad commit, found");
+    }),
+  );
 });

@@ -100,101 +100,107 @@ describe.skipIf(!hasGit)("the object codecs, against git", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("reproduces a commit whose message git stored as Latin-1", async () => {
-    // `i18n.commitEncoding` is how a repository says its messages are not
-    // UTF-8, and git records the fact in an `encoding` header and the message
-    // in those bytes. Decoded and re-encoded, the message became U+FFFD and
-    // the header vanished — so a replay wrote a commit that neither said what
-    // the original said nor admitted which encoding it was in.
-    // `café` with `é` as the single byte 0xe9, which is not a UTF-8 sequence.
-    const oid = await commit(Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]), [
-      "-c",
-      "i18n.commitEncoding=ISO-8859-1",
-    ]);
-    const data = await bytesOf(oid);
-
-    const parsed = parseCommit(data);
-    assert.ok(Result.isSuccess(parsed), "git's own commit must parse");
-    assert.deepEqual([...encodeCommit(parsed.success)], [...data]);
-
-    assert.deepEqual(
-      (parsed.success.headers ?? []).map((header) => header.name),
-      ["encoding"],
-      "the header git wrote has to survive the round trip",
-    );
-    // 0xe9 is `é` in Latin-1 and not a UTF-8 sequence at all, so this is the
-    // case the decode cannot represent.
-    assert.ok([...data].includes(0xe9), "the fixture must actually store the byte");
-  });
-
-  it("reproduces a signed commit, signature header and all", async () => {
-    // A signature is a header spanning as many lines as the armour needs,
-    // each continuation beginning with a space. Split on newlines and
-    // reassembled, it came back mangled; dropped, the commit came back
-    // unsigned. Either way `git verify-commit` had nothing to verify.
-    //
-    // The signing program is a stub, and deliberately: what is under test is
-    // git's *header folding*, not anybody's cryptography, and a test that
-    // needed `ssh-keygen` on the machine would be a test that mostly skipped.
-    // git assembles the header from whatever the program produces, exactly as
-    // it does for a real key.
-    const signer = path.join(root, "signer.sh");
-    await fs.writeFile(
-      signer,
-      [
-        "#!/bin/sh",
-        // git calls `<program> -Y sign -n git -f <key> <payload>` and reads
-        // `<payload>.sig` back.
-        'for argument in "$@"; do last="$argument"; done',
-        "printf -- '-----BEGIN SSH SIGNATURE-----\\nAAAAstub\\n\\nstub\\n-----END SSH SIGNATURE-----\\n' > \"$last.sig\"",
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-
-    const oid = await commit(
-      new TextEncoder().encode("signed\n"),
-      [
+  it.effect("reproduces a commit whose message git stored as Latin-1", () =>
+    Effect.promise(async () => {
+      // `i18n.commitEncoding` is how a repository says its messages are not
+      // UTF-8, and git records the fact in an `encoding` header and the message
+      // in those bytes. Decoded and re-encoded, the message became U+FFFD and
+      // the header vanished — so a replay wrote a commit that neither said what
+      // the original said nor admitted which encoding it was in.
+      // `café` with `é` as the single byte 0xe9, which is not a UTF-8 sequence.
+      const oid = await commit(Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]), [
         "-c",
-        "gpg.format=ssh",
-        "-c",
-        `gpg.ssh.program=${signer}`,
-        "-c",
-        "user.signingkey=irrelevant",
-      ],
-      ["-S"],
-    );
-    const data = await bytesOf(oid);
+        "i18n.commitEncoding=ISO-8859-1",
+      ]);
+      const data = await bytesOf(oid);
 
-    const parsed = parseCommit(data);
-    assert.ok(Result.isSuccess(parsed), "a signed commit must parse");
-    assert.deepEqual([...encodeCommit(parsed.success)], [...data]);
-    assert.deepEqual(
-      (parsed.success.headers ?? []).map((header) => header.name),
-      ["gpgsig"],
-    );
-  });
+      const parsed = parseCommit(data);
+      assert.ok(Result.isSuccess(parsed), "git's own commit must parse");
+      assert.deepEqual([...encodeCommit(parsed.success)], [...data]);
 
-  it("reproduces an annotated tag, whose signature is in its message", async () => {
-    const target = await commit(new TextEncoder().encode("tagged\n"));
-    execFileSync(
-      "git",
-      ["-c", "user.name=T", "-c", "user.email=t@e.com", "tag", "-a", "v1.0", "-m", "release"],
-      {
-        cwd: root,
-        env: {
-          ...process.env,
-          GIT_COMMITTER_DATE: "1700000000 +0000",
+      assert.deepEqual(
+        (parsed.success.headers ?? []).map((header) => header.name),
+        ["encoding"],
+        "the header git wrote has to survive the round trip",
+      );
+      // 0xe9 is `é` in Latin-1 and not a UTF-8 sequence at all, so this is the
+      // case the decode cannot represent.
+      assert.ok([...data].includes(0xe9), "the fixture must actually store the byte");
+    }),
+  );
+
+  it.effect("reproduces a signed commit, signature header and all", () =>
+    Effect.promise(async () => {
+      // A signature is a header spanning as many lines as the armour needs,
+      // each continuation beginning with a space. Split on newlines and
+      // reassembled, it came back mangled; dropped, the commit came back
+      // unsigned. Either way `git verify-commit` had nothing to verify.
+      //
+      // The signing program is a stub, and deliberately: what is under test is
+      // git's *header folding*, not anybody's cryptography, and a test that
+      // needed `ssh-keygen` on the machine would be a test that mostly skipped.
+      // git assembles the header from whatever the program produces, exactly as
+      // it does for a real key.
+      const signer = path.join(root, "signer.sh");
+      await fs.writeFile(
+        signer,
+        [
+          "#!/bin/sh",
+          // git calls `<program> -Y sign -n git -f <key> <payload>` and reads
+          // `<payload>.sig` back.
+          'for argument in "$@"; do last="$argument"; done',
+          "printf -- '-----BEGIN SSH SIGNATURE-----\\nAAAAstub\\n\\nstub\\n-----END SSH SIGNATURE-----\\n' > \"$last.sig\"",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const oid = await commit(
+        new TextEncoder().encode("signed\n"),
+        [
+          "-c",
+          "gpg.format=ssh",
+          "-c",
+          `gpg.ssh.program=${signer}`,
+          "-c",
+          "user.signingkey=irrelevant",
+        ],
+        ["-S"],
+      );
+      const data = await bytesOf(oid);
+
+      const parsed = parseCommit(data);
+      assert.ok(Result.isSuccess(parsed), "a signed commit must parse");
+      assert.deepEqual([...encodeCommit(parsed.success)], [...data]);
+      assert.deepEqual(
+        (parsed.success.headers ?? []).map((header) => header.name),
+        ["gpgsig"],
+      );
+    }),
+  );
+
+  it.effect("reproduces an annotated tag, whose signature is in its message", () =>
+    Effect.promise(async () => {
+      const target = await commit(new TextEncoder().encode("tagged\n"));
+      execFileSync(
+        "git",
+        ["-c", "user.name=T", "-c", "user.email=t@e.com", "tag", "-a", "v1.0", "-m", "release"],
+        {
+          cwd: root,
+          env: {
+            ...process.env,
+            GIT_COMMITTER_DATE: "1700000000 +0000",
+          },
         },
-      },
-    );
-    // SAFETY: `rev-parse` on an annotated tag prints the tag object's own id.
-    const oid = git("rev-parse", "v1.0").trim() as Oid;
-    assert.notEqual(oid, target, "the fixture must be an annotated tag, not a lightweight one");
+      );
+      // SAFETY: `rev-parse` on an annotated tag prints the tag object's own id.
+      const oid = git("rev-parse", "v1.0").trim() as Oid;
+      assert.notEqual(oid, target, "the fixture must be an annotated tag, not a lightweight one");
 
-    const data = await bytesOf(oid);
-    const parsed = parseTag(data);
-    assert.ok(Result.isSuccess(parsed), "git's own tag must parse");
-    assert.deepEqual([...encodeTag(parsed.success)], [...data]);
-  });
+      const data = await bytesOf(oid);
+      const parsed = parseTag(data);
+      assert.ok(Result.isSuccess(parsed), "git's own tag must parse");
+      assert.deepEqual([...encodeTag(parsed.success)], [...data]);
+    }),
+  );
 });

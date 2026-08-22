@@ -342,112 +342,122 @@ describe("a checkout of a tree it did not write", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("creates the checkout directory on its first write", async () => {
-    // `--work ./new` materialises the tree as it writes; a containment check
-    // that resolved the root before it existed would fail with ENOENT here.
-    const checkout = path.join(root, "not-yet");
-    const layer = GitRepository.layer.pipe(
-      Layer.provide(GitRepository.hooksNoop),
-      Layer.provideMerge(nodeStores(path.join(root, "bare"))),
-      Layer.provideMerge(workspace(checkout)),
-    );
+  it.effect("creates the checkout directory on its first write", () =>
+    Effect.promise(async () => {
+      // `--work ./new` materialises the tree as it writes; a containment check
+      // that resolved the root before it existed would fail with ENOENT here.
+      const checkout = path.join(root, "not-yet");
+      const layer = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provideMerge(nodeStores(path.join(root, "bare"))),
+        Layer.provideMerge(workspace(checkout)),
+      );
 
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const work = yield* WorkTree;
-        yield* work.write("a/b.txt", encode("made\n"), 0o100644);
-      }).pipe(Effect.provide(layer)),
-    );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          yield* work.write("a/b.txt", encode("made\n"), 0o100644);
+        }).pipe(Effect.provide(layer)),
+      );
 
-    assert.equal(fsSync.existsSync(path.join(checkout, "a", "b.txt")), true);
-  });
+      assert.equal(fsSync.existsSync(path.join(checkout, "a", "b.txt")), true);
+    }),
+  );
 
-  it("refuses a symlink that points at an ancestor of the checkout", async () => {
-    const checkout = path.join(root, "work");
-    await fs.mkdir(checkout, { recursive: true });
-    // The escape the ancestor-tolerant check let through: `link -> ..` puts
-    // the parent of the checkout inside it, and a write under `link` lands
-    // beside the checkout rather than in it.
-    await fs.symlink("..", path.join(checkout, "link"));
+  it.effect("refuses a symlink that points at an ancestor of the checkout", () =>
+    Effect.promise(async () => {
+      const checkout = path.join(root, "work");
+      await fs.mkdir(checkout, { recursive: true });
+      // The escape the ancestor-tolerant check let through: `link -> ..` puts
+      // the parent of the checkout inside it, and a write under `link` lands
+      // beside the checkout rather than in it.
+      await fs.symlink("..", path.join(checkout, "link"));
 
-    const layer = GitRepository.layer.pipe(
-      Layer.provide(GitRepository.hooksNoop),
-      Layer.provideMerge(nodeStores(path.join(checkout, ".git"))),
-      Layer.provideMerge(workspace(checkout)),
-    );
+      const layer = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provideMerge(nodeStores(path.join(checkout, ".git"))),
+        Layer.provideMerge(workspace(checkout)),
+      );
 
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const work = yield* WorkTree;
-        yield* Effect.flip(work.write("link/pwned.txt", encode("owned\n"), 0o100644));
-      }).pipe(Effect.provide(layer)),
-    );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          yield* Effect.flip(work.write("link/pwned.txt", encode("owned\n"), 0o100644));
+        }).pipe(Effect.provide(layer)),
+      );
 
-    assert.equal(fsSync.existsSync(path.join(root, "pwned.txt")), false);
-  });
+      assert.equal(fsSync.existsSync(path.join(root, "pwned.txt")), false);
+    }),
+  );
 
-  it("refuses to remove through a symlink that leaves the checkout", async () => {
-    const checkout = path.join(root, "work");
-    const outside = path.join(root, "outside");
-    await fs.mkdir(checkout, { recursive: true });
-    await fs.mkdir(outside, { recursive: true });
-    await fs.writeFile(path.join(outside, "keep.txt"), "not yours\n");
-    await fs.symlink(outside, path.join(checkout, "link"));
+  it.effect("refuses to remove through a symlink that leaves the checkout", () =>
+    Effect.promise(async () => {
+      const checkout = path.join(root, "work");
+      const outside = path.join(root, "outside");
+      await fs.mkdir(checkout, { recursive: true });
+      await fs.mkdir(outside, { recursive: true });
+      await fs.writeFile(path.join(outside, "keep.txt"), "not yours\n");
+      await fs.symlink(outside, path.join(checkout, "link"));
 
-    const layer = GitRepository.layer.pipe(
-      Layer.provide(GitRepository.hooksNoop),
-      Layer.provideMerge(nodeStores(path.join(checkout, ".git"))),
-      Layer.provideMerge(workspace(checkout)),
-    );
+      const layer = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provideMerge(nodeStores(path.join(checkout, ".git"))),
+        Layer.provideMerge(workspace(checkout)),
+      );
 
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const work = yield* WorkTree;
-        // `link/keep.txt` names nothing inside the checkout: the name is
-        // innocent and the path still lands in another directory.
-        yield* Effect.flip(work.remove("link/keep.txt"));
-      }).pipe(Effect.provide(layer)),
-    );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          // `link/keep.txt` names nothing inside the checkout: the name is
+          // innocent and the path still lands in another directory.
+          yield* Effect.flip(work.remove("link/keep.txt"));
+        }).pipe(Effect.provide(layer)),
+      );
 
-    assert.equal(fsSync.existsSync(path.join(outside, "keep.txt")), true);
-  });
+      assert.equal(fsSync.existsSync(path.join(outside, "keep.txt")), true);
+    }),
+  );
 
-  it("refuses a tree entry that would write outside the checkout", async () => {
-    const checkout = path.join(root, "work");
-    await fs.mkdir(checkout, { recursive: true });
+  it.effect("refuses a tree entry that would write outside the checkout", () =>
+    Effect.promise(async () => {
+      const checkout = path.join(root, "work");
+      await fs.mkdir(checkout, { recursive: true });
 
-    const layer = GitRepository.layer.pipe(
-      Layer.provide(GitRepository.hooksNoop),
-      Layer.provideMerge(nodeStores(path.join(checkout, ".git"))),
-      Layer.provideMerge(workspace(checkout)),
-    );
+      const layer = GitRepository.layer.pipe(
+        Layer.provide(GitRepository.hooksNoop),
+        Layer.provideMerge(nodeStores(path.join(checkout, ".git"))),
+        Layer.provideMerge(workspace(checkout)),
+      );
 
-    const failure = await Effect.runPromise(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
+      const failure = await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
 
-        // A tree from a remote can name anything: `parseTree` validates the
-        // bytes, not the meaning, so `..` reaches the work tree as a path.
-        // Written as raw bytes, because `writeTree` now refuses to mint one —
-        // this is the other half of the defence, for a tree that arrived in a
-        // pack rather than through this API.
-        const objects = yield* ObjectStore;
-        const blob = yield* repository.writeBlob(encode("owned\n"));
-        const inner = yield* repository.writeTree([{ mode: "100644", name: "escaped", oid: blob }]);
-        const tree = yield* objects.write({
-          type: "tree",
-          data: encodeTree([{ mode: "40000", name: "..", oid: inner }]),
-        });
-        yield* repository.commit({ branch: "main", tree, message: "hostile", author });
+          // A tree from a remote can name anything: `parseTree` validates the
+          // bytes, not the meaning, so `..` reaches the work tree as a path.
+          // Written as raw bytes, because `writeTree` now refuses to mint one —
+          // this is the other half of the defence, for a tree that arrived in a
+          // pack rather than through this API.
+          const objects = yield* ObjectStore;
+          const blob = yield* repository.writeBlob(encode("owned\n"));
+          const inner = yield* repository.writeTree([
+            { mode: "100644", name: "escaped", oid: blob },
+          ]);
+          const tree = yield* objects.write({
+            type: "tree",
+            data: encodeTree([{ mode: "40000", name: "..", oid: inner }]),
+          });
+          yield* repository.commit({ branch: "main", tree, message: "hostile", author });
 
-        return yield* Effect.flip(Checkout.checkout("main"));
-      }).pipe(Effect.provide(layer)),
-    );
+          return yield* Effect.flip(Checkout.checkout("main"));
+        }).pipe(Effect.provide(layer)),
+      );
 
-    assert.equal(failure._tag, "Invalid");
-    // And nothing landed beside the checkout.
-    assert.equal(fsSync.existsSync(path.join(root, "escaped")), false);
-  });
+      assert.equal(failure._tag, "Invalid");
+      // And nothing landed beside the checkout.
+      assert.equal(fsSync.existsSync(path.join(root, "escaped")), false);
+    }),
+  );
 });
 
 describe.skipIf(!hasGit)("working tree, against git", () => {
@@ -470,80 +480,88 @@ describe.skipIf(!hasGit)("working tree, against git", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("stages files that git status then agrees are staged", async () => {
-    git(root, "init", "-q", "-b", "main", ".");
+  it.effect("stages files that git status then agrees are staged", () =>
+    Effect.promise(async () => {
+      git(root, "init", "-q", "-b", "main", ".");
 
-    await fs.writeFile(path.join(root, "a.txt"), "one\n");
-    await fs.mkdir(path.join(root, "dir"), { recursive: true });
-    await fs.writeFile(path.join(root, "dir", "b.txt"), "two\n");
-    await fs.writeFile(path.join(root, "run.sh"), "#!/bin/sh\n");
-    await fs.chmod(path.join(root, "run.sh"), 0o755);
+      await fs.writeFile(path.join(root, "a.txt"), "one\n");
+      await fs.mkdir(path.join(root, "dir"), { recursive: true });
+      await fs.writeFile(path.join(root, "dir", "b.txt"), "two\n");
+      await fs.writeFile(path.join(root, "run.sh"), "#!/bin/sh\n");
+      await fs.chmod(path.join(root, "run.sh"), 0o755);
 
-    await Effect.runPromise(Checkout.add(["."]).pipe(Effect.provide(layerFor(root)), Effect.orDie));
+      await Effect.runPromise(
+        Checkout.add(["."]).pipe(Effect.provide(layerFor(root)), Effect.orDie),
+      );
 
-    // git's own reader on the index we wrote: paths, modes and oids.
-    const listed = git(root, "ls-files", "--stage");
-    assert.match(listed, /^100644 [0-9a-f]{40} 0\ta\.txt$/m);
-    assert.match(listed, /^100644 [0-9a-f]{40} 0\tdir\/b\.txt$/m);
-    // The execute bit survived, which is the mode handling under test.
-    assert.match(listed, /^100755 [0-9a-f]{40} 0\trun\.sh$/m);
+      // git's own reader on the index we wrote: paths, modes and oids.
+      const listed = git(root, "ls-files", "--stage");
+      assert.match(listed, /^100644 [0-9a-f]{40} 0\ta\.txt$/m);
+      assert.match(listed, /^100644 [0-9a-f]{40} 0\tdir\/b\.txt$/m);
+      // The execute bit survived, which is the mode handling under test.
+      assert.match(listed, /^100755 [0-9a-f]{40} 0\trun\.sh$/m);
 
-    // And git agrees these are staged additions, not untracked files.
-    const status = git(root, "status", "--porcelain");
-    assert.match(status, /^A {2}a\.txt$/m);
-    assert.match(status, /^A {2}run\.sh$/m);
+      // And git agrees these are staged additions, not untracked files.
+      const status = git(root, "status", "--porcelain");
+      assert.match(status, /^A {2}a\.txt$/m);
+      assert.match(status, /^A {2}run\.sh$/m);
 
-    // git can complete the commit from our index.
-    git(root, "commit", "-q", "-m", "staged by us");
-    assert.equal(git(root, "log", "--format=%s").trim(), "staged by us");
-  });
+      // git can complete the commit from our index.
+      git(root, "commit", "-q", "-m", "staged by us");
+      assert.equal(git(root, "log", "--format=%s").trim(), "staged by us");
+    }),
+  );
 
-  it("reads an index git wrote, and describes it the same way", async () => {
-    git(root, "init", "-q", "-b", "main", ".");
+  it.effect("reads an index git wrote, and describes it the same way", () =>
+    Effect.promise(async () => {
+      git(root, "init", "-q", "-b", "main", ".");
 
-    await fs.writeFile(path.join(root, "tracked.txt"), "tracked\n");
-    await fs.writeFile(path.join(root, "untracked.txt"), "untracked\n");
-    git(root, "add", "tracked.txt");
+      await fs.writeFile(path.join(root, "tracked.txt"), "tracked\n");
+      await fs.writeFile(path.join(root, "untracked.txt"), "untracked\n");
+      git(root, "add", "tracked.txt");
 
-    const status = await Effect.runPromise(
-      Checkout.status().pipe(Effect.provide(layerFor(root)), Effect.orDie),
-    );
+      const status = await Effect.runPromise(
+        Checkout.status().pipe(Effect.provide(layerFor(root)), Effect.orDie),
+      );
 
-    assert.deepEqual(
-      status.staged.map((entry) => [entry.path, entry.change]),
-      [["tracked.txt", "added"]],
-    );
-    assert.deepEqual(status.untracked, ["untracked.txt"]);
-    assert.deepEqual(status.unstaged, []);
-  });
+      assert.deepEqual(
+        status.staged.map((entry) => [entry.path, entry.change]),
+        [["tracked.txt", "added"]],
+      );
+      assert.deepEqual(status.untracked, ["untracked.txt"]);
+      assert.deepEqual(status.unstaged, []);
+    }),
+  );
 
-  it("commits from its own index into a repository git then reads", async () => {
-    const checkout = path.join(root, "work");
-    await fs.mkdir(checkout, { recursive: true });
+  it.effect("commits from its own index into a repository git then reads", () =>
+    Effect.promise(async () => {
+      const checkout = path.join(root, "work");
+      await fs.mkdir(checkout, { recursive: true });
 
-    // A bare-style setup written by us: `.git` with HEAD, then a checkout.
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* (yield* RefStore).setHead("refs/heads/main");
-      }).pipe(Effect.provide(nodeStores(path.join(checkout, ".git"))), Effect.orDie),
-    );
+      // A bare-style setup written by us: `.git` with HEAD, then a checkout.
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* (yield* RefStore).setHead("refs/heads/main");
+        }).pipe(Effect.provide(nodeStores(path.join(checkout, ".git"))), Effect.orDie),
+      );
 
-    await fs.writeFile(path.join(checkout, "readme.md"), "# hello\n");
-    await fs.mkdir(path.join(checkout, "src"), { recursive: true });
-    await fs.writeFile(path.join(checkout, "src", "main.ts"), "export const x = 1;\n");
+      await fs.writeFile(path.join(checkout, "readme.md"), "# hello\n");
+      await fs.mkdir(path.join(checkout, "src"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "src", "main.ts"), "export const x = 1;\n");
 
-    const committed = await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* Checkout.add(["."]);
-        return yield* Checkout.commit({ message: "from our index", author });
-      }).pipe(Effect.provide(layerFor(checkout)), Effect.orDie),
-    );
-    assert.equal(committed.files, 2);
+      const committed = await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* Checkout.add(["."]);
+          return yield* Checkout.commit({ message: "from our index", author });
+        }).pipe(Effect.provide(layerFor(checkout)), Effect.orDie),
+      );
+      assert.equal(committed.files, 2);
 
-    // git reads the commit, its tree, and finds the work tree clean.
-    assert.equal(git(checkout, "log", "--format=%s").trim(), "from our index");
-    assert.match(git(checkout, "ls-tree", "-r", "--name-only", "HEAD"), /src\/main\.ts/);
-    assert.equal(git(checkout, "status", "--porcelain").trim(), "");
-    git(checkout, "fsck", "--strict");
-  });
+      // git reads the commit, its tree, and finds the work tree clean.
+      assert.equal(git(checkout, "log", "--format=%s").trim(), "from our index");
+      assert.match(git(checkout, "ls-tree", "-r", "--name-only", "HEAD"), /src\/main\.ts/);
+      assert.equal(git(checkout, "status", "--porcelain").trim(), "");
+      git(checkout, "fsck", "--strict");
+    }),
+  );
 });

@@ -172,64 +172,68 @@ interface ScenarioResult {
 const hasChromium = existsSync(chromium.executablePath());
 
 describe.skipIf(!hasChromium)("Client in real Chromium", () => {
-  it("runs OPFS stores and the derived client inside the browser", async () => {
-    const browser = await chromium.launch();
+  it.effect("runs OPFS stores and the derived client inside the browser", () =>
+    Effect.promise(async () => {
+      const browser = await chromium.launch();
 
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "browser-"));
-    const server = await serve({ root, allowAnonymousWrites: true });
-    try {
-      const head = await Effect.runPromise(
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const blob = yield* repository.writeBlob(new TextEncoder().encode("served\n"));
-          const tree = yield* repository.writeTree([{ mode: "100644", name: "s.txt", oid: blob }]);
-          return yield* repository.commit({ branch: "main", tree, message: "served", author });
-        }).pipe(
-          Effect.provide(
-            GitRepository.layer.pipe(
-              Layer.provide(GitRepository.hooksNoop),
-              Layer.provide(nodeStores(path.join(root, "origin"))),
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "browser-"));
+      const server = await serve({ root, allowAnonymousWrites: true });
+      try {
+        const head = await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const blob = yield* repository.writeBlob(new TextEncoder().encode("served\n"));
+            const tree = yield* repository.writeTree([
+              { mode: "100644", name: "s.txt", oid: blob },
+            ]);
+            return yield* repository.commit({ branch: "main", tree, message: "served", author });
+          }).pipe(
+            Effect.provide(
+              GitRepository.layer.pipe(
+                Layer.provide(GitRepository.hooksNoop),
+                Layer.provide(nodeStores(path.join(root, "origin"))),
+              ),
             ),
           ),
-        ),
-      );
+        );
 
-      const bundle = await build({
-        stdin: { contents: scenarioEntry, resolveDir: projectRoot, loader: "ts" },
-        bundle: true,
-        format: "iife",
-        platform: "browser",
-        target: "es2022",
-        write: false,
-      });
+        const bundle = await build({
+          stdin: { contents: scenarioEntry, resolveDir: projectRoot, loader: "ts" },
+          bundle: true,
+          format: "iife",
+          platform: "browser",
+          target: "es2022",
+          write: false,
+        });
 
-      const page = await browser.newPage();
-      // Any response will do: the point is the origin — localhost is a secure
-      // context, so OPFS exists and every fetch is same-origin.
-      await page.goto(server.url);
-      await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+        const page = await browser.newPage();
+        // Any response will do: the point is the origin — localhost is a secure
+        // context, so OPFS exists and every fetch is same-origin.
+        await page.goto(server.url);
+        await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
 
-      // SAFETY: the script tag added above ran `scenarioEntry`, which installs
-      // `scenario` on the page's global and resolves with exactly the members
-      // `ScenarioResult` names.
-      const result = await page.evaluate(
-        ([repo, oid]) =>
-          (
-            globalThis as typeof globalThis & {
-              scenario(repo: string, oid: string): Promise<ScenarioResult>;
-            }
-          ).scenario(repo, oid),
-        ["origin", head] as const,
-      );
+        // SAFETY: the script tag added above ran `scenarioEntry`, which installs
+        // `scenario` on the page's global and resolves with exactly the members
+        // `ScenarioResult` names.
+        const result = await page.evaluate(
+          ([repo, oid]) =>
+            (
+              globalThis as typeof globalThis & {
+                scenario(repo: string, oid: string): Promise<ScenarioResult>;
+              }
+            ).scenario(repo, oid),
+          ["origin", head] as const,
+        );
 
-      assert.deepEqual(result.reread, ["second from OPFS", "first from OPFS"]);
-      assert.deepEqual(result.api.refs, [{ name: "refs/heads/main", oid: head }]);
-      assert.deepEqual(result.api.messages, ["served"]);
-      assert.deepEqual(result.clonedMessages, ["served"]);
-    } finally {
-      await browser.close();
-      await server.close();
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
+        assert.deepEqual(result.reread, ["second from OPFS", "first from OPFS"]);
+        assert.deepEqual(result.api.refs, [{ name: "refs/heads/main", oid: head }]);
+        assert.deepEqual(result.api.messages, ["served"]);
+        assert.deepEqual(result.clonedMessages, ["served"]);
+      } finally {
+        await browser.close();
+        await server.close();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
 });

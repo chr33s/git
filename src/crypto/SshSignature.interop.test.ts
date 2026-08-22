@@ -66,124 +66,137 @@ describe.skipIf(!hasSshKeygen)("SshSignature interop with ssh-keygen", () => {
     return path;
   };
 
-  it("reads a keypair ssh-keygen wrote", async () => {
-    const directory = workspace();
-    try {
-      const path = keygen(directory, "interop@example.com");
-      const parsed = parsePrivateKey(readFileSync(path, "utf8"));
-      if (Result.isFailure(parsed)) throw new Error(JSON.stringify(parsed.failure));
+  it.effect("reads a keypair ssh-keygen wrote", () =>
+    Effect.promise(async () => {
+      const directory = workspace();
+      try {
+        const path = keygen(directory, "interop@example.com");
+        const parsed = parsePrivateKey(readFileSync(path, "utf8"));
+        if (Result.isFailure(parsed)) throw new Error(JSON.stringify(parsed.failure));
 
-      // The public half, as OpenSSH itself spells it.
-      const line = readFileSync(`${path}.pub`, "utf8").trim();
-      assert.equal(formatPublicKey(parsed.success.publicKey), line);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        // The public half, as OpenSSH itself spells it.
+        const line = readFileSync(`${path}.pub`, "utf8").trim();
+        assert.equal(formatPublicKey(parsed.success.publicKey), line);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }),
+  );
 
-  it("agrees with ssh-keygen about a key's fingerprint", async () => {
-    const directory = workspace();
-    try {
-      const path = keygen(directory, "print@example.com");
-      const parsed = parsePublicKey(readFileSync(`${path}.pub`, "utf8"));
-      if (Result.isFailure(parsed)) throw new Error(JSON.stringify(parsed.failure));
+  it.effect("agrees with ssh-keygen about a key's fingerprint", () =>
+    Effect.promise(async () => {
+      const directory = workspace();
+      try {
+        const path = keygen(directory, "print@example.com");
+        const parsed = parsePublicKey(readFileSync(`${path}.pub`, "utf8"));
+        if (Result.isFailure(parsed)) throw new Error(JSON.stringify(parsed.failure));
 
-      // `256 SHA256:<base64> comment (ED25519)`
-      const printed = execFileSync("ssh-keygen", ["-lf", `${path}.pub`], { encoding: "utf8" });
-      const expected = printed.split(/\s+/).at(1);
+        // `256 SHA256:<base64> comment (ED25519)`
+        const printed = execFileSync("ssh-keygen", ["-lf", `${path}.pub`], { encoding: "utf8" });
+        const expected = printed.split(/\s+/).at(1);
 
-      assert.equal(await Effect.runPromise(fingerprint(parsed.success)), expected);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        assert.equal(await Effect.runPromise(fingerprint(parsed.success)), expected);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }),
+  );
 
-  it("makes signatures ssh-keygen verifies", async () => {
-    const directory = workspace();
-    try {
-      const path = keygen(directory, "signer@example.com");
-      const parsed = parsePrivateKey(readFileSync(path, "utf8"));
-      if (Result.isFailure(parsed)) throw new Error(JSON.stringify(parsed.failure));
+  it.effect("makes signatures ssh-keygen verifies", () =>
+    Effect.promise(async () => {
+      const directory = workspace();
+      try {
+        const path = keygen(directory, "signer@example.com");
+        const parsed = parsePrivateKey(readFileSync(path, "utf8"));
+        if (Result.isFailure(parsed)) throw new Error(JSON.stringify(parsed.failure));
 
-      const message = "the payload a membership grant would carry\n";
-      const armored = await Effect.runPromise(
-        sign(parsed.success, encoder.encode(message), NAMESPACE),
-      );
+        const message = "the payload a membership grant would carry\n";
+        const armored = await Effect.runPromise(
+          sign(parsed.success, encoder.encode(message), NAMESPACE),
+        );
 
-      const messagePath = join(directory, "message");
-      const signaturePath = join(directory, "message.sig");
-      const allowed = join(directory, "allowed_signers");
-      writeFileSync(messagePath, message);
-      writeFileSync(signaturePath, armored);
-      writeFileSync(allowed, `signer@example.com ${readFileSync(`${path}.pub`, "utf8").trim()}\n`);
-
-      // Exits zero only if the signature, the namespace and the principal all
-      // check out against the message on stdin.
-      const output = execFileSync(
-        "ssh-keygen",
-        [
-          "-Y",
-          "verify",
-          "-f",
+        const messagePath = join(directory, "message");
+        const signaturePath = join(directory, "message.sig");
+        const allowed = join(directory, "allowed_signers");
+        writeFileSync(messagePath, message);
+        writeFileSync(signaturePath, armored);
+        writeFileSync(
           allowed,
-          "-I",
-          "signer@example.com",
-          "-n",
-          NAMESPACE,
-          "-s",
-          signaturePath,
-        ],
-        { input: message, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
-      );
-      assert.match(output, /Good "chr33s-git\/hub\/v1" signature/);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+          `signer@example.com ${readFileSync(`${path}.pub`, "utf8").trim()}\n`,
+        );
 
-  it("verifies signatures ssh-keygen made", async () => {
-    const directory = workspace();
-    try {
-      const path = keygen(directory, "theirs@example.com");
-      const message = "a review of an exact revision\n";
-      const messagePath = join(directory, "message");
-      writeFileSync(messagePath, message);
+        // Exits zero only if the signature, the namespace and the principal all
+        // check out against the message on stdin.
+        const output = execFileSync(
+          "ssh-keygen",
+          [
+            "-Y",
+            "verify",
+            "-f",
+            allowed,
+            "-I",
+            "signer@example.com",
+            "-n",
+            NAMESPACE,
+            "-s",
+            signaturePath,
+          ],
+          { input: message, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        assert.match(output, /Good "chr33s-git\/hub\/v1" signature/);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }),
+  );
 
-      execFileSync("ssh-keygen", ["-Y", "sign", "-f", path, "-n", NAMESPACE, messagePath], {
-        stdio: "ignore",
-      });
-      const armored = readFileSync(`${messagePath}.sig`, "utf8");
+  it.effect("verifies signatures ssh-keygen made", () =>
+    Effect.promise(async () => {
+      const directory = workspace();
+      try {
+        const path = keygen(directory, "theirs@example.com");
+        const message = "a review of an exact revision\n";
+        const messagePath = join(directory, "message");
+        writeFileSync(messagePath, message);
 
-      const signer = await Effect.runPromise(verify(armored, encoder.encode(message), NAMESPACE));
-      assert.notEqual(signer, null, "a signature from ssh-keygen must verify here");
+        execFileSync("ssh-keygen", ["-Y", "sign", "-f", path, "-n", NAMESPACE, messagePath], {
+          stdio: "ignore",
+        });
+        const armored = readFileSync(`${messagePath}.sig`, "utf8");
 
-      const expected = parsePublicKey(readFileSync(`${path}.pub`, "utf8"));
-      if (Result.isFailure(expected)) throw new Error(JSON.stringify(expected.failure));
-      assert.deepEqual(signer?.point, expected.success.point);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        const signer = await Effect.runPromise(verify(armored, encoder.encode(message), NAMESPACE));
+        assert.notEqual(signer, null, "a signature from ssh-keygen must verify here");
 
-  it("rejects an ssh-keygen signature made under another namespace", async () => {
-    const directory = workspace();
-    try {
-      const path = keygen(directory, "elsewhere@example.com");
-      const message = "signed for a different application\n";
-      const messagePath = join(directory, "message");
-      writeFileSync(messagePath, message);
+        const expected = parsePublicKey(readFileSync(`${path}.pub`, "utf8"));
+        if (Result.isFailure(expected)) throw new Error(JSON.stringify(expected.failure));
+        assert.deepEqual(signer?.point, expected.success.point);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }),
+  );
 
-      execFileSync("ssh-keygen", ["-Y", "sign", "-f", path, "-n", "git", messagePath], {
-        stdio: "ignore",
-      });
-      const armored = readFileSync(`${messagePath}.sig`, "utf8");
+  it.effect("rejects an ssh-keygen signature made under another namespace", () =>
+    Effect.promise(async () => {
+      const directory = workspace();
+      try {
+        const path = keygen(directory, "elsewhere@example.com");
+        const message = "signed for a different application\n";
+        const messagePath = join(directory, "message");
+        writeFileSync(messagePath, message);
 
-      const failure = await Effect.runPromise(
-        verify(armored, encoder.encode(message), NAMESPACE).pipe(Effect.flip),
-      );
-      assert.match(failure.reason, /namespace/);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        execFileSync("ssh-keygen", ["-Y", "sign", "-f", path, "-n", "git", messagePath], {
+          stdio: "ignore",
+        });
+        const armored = readFileSync(`${messagePath}.sig`, "utf8");
+
+        const failure = await Effect.runPromise(
+          verify(armored, encoder.encode(message), NAMESPACE).pipe(Effect.flip),
+        );
+        assert.match(failure.reason, /namespace/);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }),
+  );
 });

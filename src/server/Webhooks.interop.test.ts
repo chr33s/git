@@ -22,7 +22,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Predicate } from "effect";
+import { Effect, Predicate } from "effect";
 
 import { serve, type Server } from "../host/Node.ts";
 import { hasGit } from "../testing/Git.ts";
@@ -108,117 +108,123 @@ describe.skipIf(!hasGit)("webhook delivery on push", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("signs and delivers what a push moved", async () => {
-    const hook = await receiver();
-    const secret = "a-secret-long-enough";
+  it.effect("signs and delivers what a push moved", () =>
+    Effect.promise(async () => {
+      const hook = await receiver();
+      const secret = "a-secret-long-enough";
 
-    try {
-      // Registered over HTTP, the way a user would.
-      const registered = await fetch(`${server.url}/hooked/webhooks`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: hook.url, secret }),
-      });
-      assert.equal(registered.status, 200);
+      try {
+        // Registered over HTTP, the way a user would.
+        const registered = await fetch(`${server.url}/hooked/webhooks`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ url: hook.url, secret }),
+        });
+        assert.equal(registered.status, 200);
 
-      const work = path.join(root, "work");
-      await fs.mkdir(work, { recursive: true });
-      await git(work, "init", "-q", "-b", "main");
-      await fs.writeFile(path.join(work, "file.txt"), "content\n");
-      await git(work, "add", "file.txt");
-      await git(work, "commit", "-q", "-m", "first");
-      await git(work, "push", "-q", `${server.url}/hooked`, "main");
+        const work = path.join(root, "work");
+        await fs.mkdir(work, { recursive: true });
+        await git(work, "init", "-q", "-b", "main");
+        await fs.writeFile(path.join(work, "file.txt"), "content\n");
+        await git(work, "add", "file.txt");
+        await git(work, "commit", "-q", "-m", "first");
+        await git(work, "push", "-q", `${server.url}/hooked`, "main");
 
-      const head = (await git(work, "rev-parse", "HEAD")).trim();
+        const head = (await git(work, "rev-parse", "HEAD")).trim();
 
-      const delivery = await waitFor(() => hook.deliveries);
-      assert.equal(delivery.event, "push");
+        const delivery = await waitFor(() => hook.deliveries);
+        assert.equal(delivery.event, "push");
 
-      // SAFETY: the receiver recorded the exact bytes the server posted, and
-      // delivery writes them as this JSON.
-      const payload = JSON.parse(delivery.body) as {
-        event: string;
-        refs: Array<{ ref: string; before: string | null; after: string | null }>;
-      };
-      assert.equal(payload.event, "push");
-      assert.deepEqual(
-        payload.refs.map((ref) => ref.ref),
-        ["refs/heads/main"],
-      );
-      assert.equal(payload.refs[0]!.after, head);
+        // SAFETY: the receiver recorded the exact bytes the server posted, and
+        // delivery writes them as this JSON.
+        const payload = JSON.parse(delivery.body) as {
+          event: string;
+          refs: Array<{ ref: string; before: string | null; after: string | null }>;
+        };
+        assert.equal(payload.event, "push");
+        assert.deepEqual(
+          payload.refs.map((ref) => ref.ref),
+          ["refs/heads/main"],
+        );
+        assert.equal(payload.refs[0]!.after, head);
 
-      // The signature is over the exact bytes sent, so a receiver that
-      // recomputes it from the body agrees.
-      const expected = `sha256=${createHmac("sha256", secret).update(delivery.body).digest("hex")}`;
-      assert.equal(delivery.signature, expected);
-    } finally {
-      await hook.close();
-    }
-  });
+        // The signature is over the exact bytes sent, so a receiver that
+        // recomputes it from the body agrees.
+        const expected = `sha256=${createHmac("sha256", secret).update(delivery.body).digest("hex")}`;
+        assert.equal(delivery.signature, expected);
+      } finally {
+        await hook.close();
+      }
+    }),
+  );
 
-  it("does not deliver to a webhook that was removed", async () => {
-    const hook = await receiver();
+  it.effect("does not deliver to a webhook that was removed", () =>
+    Effect.promise(async () => {
+      const hook = await receiver();
 
-    try {
-      // SAFETY: registration replies with the stored webhook, id included;
-      // an id that is not there fails the DELETE below.
-      const created = (await (
-        await fetch(`${server.url}/unhooked/webhooks`, {
+      try {
+        // SAFETY: registration replies with the stored webhook, id included;
+        // an id that is not there fails the DELETE below.
+        const created = (await (
+          await fetch(`${server.url}/unhooked/webhooks`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: hook.url, secret: "a-secret-long-enough" }),
+          })
+        ).json()) as { id: string };
+
+        const removed = await fetch(`${server.url}/unhooked/webhooks/${created.id}`, {
+          method: "DELETE",
+        });
+        assert.equal(removed.status, 200);
+
+        const work = path.join(root, "work-removed");
+        await fs.mkdir(work, { recursive: true });
+        await git(work, "init", "-q", "-b", "main");
+        await fs.writeFile(path.join(work, "file.txt"), "content\n");
+        await git(work, "add", "file.txt");
+        await git(work, "commit", "-q", "-m", "first");
+        await git(work, "push", "-q", `${server.url}/unhooked`, "main");
+
+        // Nothing to wait for; give a delivery every chance to show up wrongly.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        assert.deepEqual(hook.deliveries, []);
+      } finally {
+        await hook.close();
+      }
+    }),
+  );
+
+  it.effect("survives a restart, because the registry is on disk", () =>
+    Effect.promise(async () => {
+      const hook = await receiver();
+
+      try {
+        await fetch(`${server.url}/durable/webhooks`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ url: hook.url, secret: "a-secret-long-enough" }),
-        })
-      ).json()) as { id: string };
+        });
 
-      const removed = await fetch(`${server.url}/unhooked/webhooks/${created.id}`, {
-        method: "DELETE",
-      });
-      assert.equal(removed.status, 200);
-
-      const work = path.join(root, "work-removed");
-      await fs.mkdir(work, { recursive: true });
-      await git(work, "init", "-q", "-b", "main");
-      await fs.writeFile(path.join(work, "file.txt"), "content\n");
-      await git(work, "add", "file.txt");
-      await git(work, "commit", "-q", "-m", "first");
-      await git(work, "push", "-q", `${server.url}/unhooked`, "main");
-
-      // Nothing to wait for; give a delivery every chance to show up wrongly.
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      assert.deepEqual(hook.deliveries, []);
-    } finally {
-      await hook.close();
-    }
-  });
-
-  it("survives a restart, because the registry is on disk", async () => {
-    const hook = await receiver();
-
-    try {
-      await fetch(`${server.url}/durable/webhooks`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: hook.url, secret: "a-secret-long-enough" }),
-      });
-
-      // A second server over the same root is what an eviction or a redeploy
-      // looks like from the registry's point of view.
-      const restarted = await serve({ root, allowAnonymousWrites: true });
-      try {
-        // SAFETY: the list endpoint replies with the registry's rows; a
-        // reply of any other form fails the deep equality below.
-        const listed = (await (await fetch(`${restarted.url}/durable/webhooks`)).json()) as {
-          webhooks: Array<{ url: string }>;
-        };
-        assert.deepEqual(
-          listed.webhooks.map((entry) => entry.url),
-          [hook.url],
-        );
+        // A second server over the same root is what an eviction or a redeploy
+        // looks like from the registry's point of view.
+        const restarted = await serve({ root, allowAnonymousWrites: true });
+        try {
+          // SAFETY: the list endpoint replies with the registry's rows; a
+          // reply of any other form fails the deep equality below.
+          const listed = (await (await fetch(`${restarted.url}/durable/webhooks`)).json()) as {
+            webhooks: Array<{ url: string }>;
+          };
+          assert.deepEqual(
+            listed.webhooks.map((entry) => entry.url),
+            [hook.url],
+          );
+        } finally {
+          await restarted.close();
+        }
       } finally {
-        await restarted.close();
+        await hook.close();
       }
-    } finally {
-      await hook.close();
-    }
-  });
+    }),
+  );
 });

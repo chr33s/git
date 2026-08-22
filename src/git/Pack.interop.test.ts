@@ -95,75 +95,85 @@ describe.skipIf(!hasGit)("Pack interop with git", () => {
 
   for (const deltaBaseOffset of [true, false]) {
     const flavour = deltaBaseOffset ? "ofs-delta" : "ref-delta";
-    it(`unpacks a git-produced ${flavour} pack to the reachable set`, async () => {
-      const { root, packBytes, reachable } = await build(deltaBaseOffset);
+    it.effect(`unpacks a git-produced ${flavour} pack to the reachable set`, () =>
+      Effect.promise(async () => {
+        const { root, packBytes, reachable } = await build(deltaBaseOffset);
 
-      const { oids, headCommit } = await Effect.runPromise(
+        const { oids, headCommit } = await Effect.runPromise(
+          Effect.gen(function* () {
+            const store = yield* ObjectStore;
+            const oids = yield* unpack(Stream.fromIterable(chunked(packBytes, 1013)));
+            // SAFETY: `rev-parse HEAD` prints a full 40-hex commit id.
+            const head = git(root, "rev-parse", "HEAD").trim() as Oid;
+            return { oids, headCommit: yield* store.read(head) };
+          }).pipe(Effect.provide(stores)),
+        );
+
+        assert.deepEqual(
+          [...oids].sort((a, b) => a.localeCompare(b)),
+          reachable,
+        );
+
+        // Byte-for-byte agreement on the head commit, delta-resolved or not.
+        const expected = git(root, "cat-file", "commit", "HEAD");
+        assert.equal(new TextDecoder().decode(headCommit.data), expected);
+
+        await fs.rm(root, { recursive: true, force: true });
+      }),
+    );
+  }
+
+  it.effect("produces a pack that git index-pack --strict accepts", () =>
+    Effect.promise(async () => {
+      const { root, packBytes } = await build(true);
+
+      const bytes = await Effect.runPromise(
         Effect.gen(function* () {
-          const store = yield* ObjectStore;
-          const oids = yield* unpack(Stream.fromIterable(chunked(packBytes, 1013)));
-          // SAFETY: `rev-parse HEAD` prints a full 40-hex commit id.
-          const head = git(root, "rev-parse", "HEAD").trim() as Oid;
-          return { oids, headCommit: yield* store.read(head) };
+          const oids = yield* unpack(Stream.fromIterable([packBytes]));
+          const chunks = yield* Stream.runCollect(pack(oids));
+          return concat([...chunks]);
         }).pipe(Effect.provide(stores)),
       );
 
-      assert.deepEqual(
-        [...oids].sort((a, b) => a.localeCompare(b)),
-        reachable,
-      );
-
-      // Byte-for-byte agreement on the head commit, delta-resolved or not.
-      const expected = git(root, "cat-file", "commit", "HEAD");
-      assert.equal(new TextDecoder().decode(headCommit.data), expected);
+      const out = path.join(root, "ours.pack");
+      await fs.writeFile(out, bytes);
+      execFileSync("git", ["index-pack", "--strict", out], { cwd: root, stdio: "ignore" });
 
       await fs.rm(root, { recursive: true, force: true });
-    });
-  }
+    }),
+  );
 
-  it("produces a pack that git index-pack --strict accepts", async () => {
-    const { root, packBytes } = await build(true);
+  it.effect(
+    "produces a deltified pack git accepts, with real deltas, smaller than the full one",
+    () =>
+      Effect.promise(async () => {
+        const { root, packBytes } = await build(true);
 
-    const bytes = await Effect.runPromise(
-      Effect.gen(function* () {
-        const oids = yield* unpack(Stream.fromIterable([packBytes]));
-        const chunks = yield* Stream.runCollect(pack(oids));
-        return concat([...chunks]);
-      }).pipe(Effect.provide(stores)),
-    );
+        const { deltified, full } = await Effect.runPromise(
+          Effect.gen(function* () {
+            const oids = yield* unpack(Stream.fromIterable([packBytes]));
+            const collect = (options?: Parameters<typeof pack>[1]) =>
+              Stream.runCollect(pack(oids, options)).pipe(
+                Effect.map((chunks) => concat([...chunks])),
+              );
+            return { deltified: yield* collect({ deltify: {} }), full: yield* collect() };
+          }).pipe(Effect.provide(stores)),
+        );
 
-    const out = path.join(root, "ours.pack");
-    await fs.writeFile(out, bytes);
-    execFileSync("git", ["index-pack", "--strict", out], { cwd: root, stdio: "ignore" });
+        assert.ok(
+          deltified.length < full.length,
+          `deltified pack (${deltified.length}) should undercut the full one (${full.length})`,
+        );
 
-    await fs.rm(root, { recursive: true, force: true });
-  });
+        const out = path.join(root, "ours-deltified.pack");
+        await fs.writeFile(out, deltified);
+        execFileSync("git", ["index-pack", "--strict", out], { cwd: root, stdio: "ignore" });
 
-  it("produces a deltified pack git accepts, with real deltas, smaller than the full one", async () => {
-    const { root, packBytes } = await build(true);
+        // The pack must contain deltas git resolves, or deltify proved nothing.
+        const verify = git(root, "verify-pack", "-v", path.join(root, "ours-deltified.idx"));
+        assert.match(verify, /chain length = 1: \d+ object/);
 
-    const { deltified, full } = await Effect.runPromise(
-      Effect.gen(function* () {
-        const oids = yield* unpack(Stream.fromIterable([packBytes]));
-        const collect = (options?: Parameters<typeof pack>[1]) =>
-          Stream.runCollect(pack(oids, options)).pipe(Effect.map((chunks) => concat([...chunks])));
-        return { deltified: yield* collect({ deltify: {} }), full: yield* collect() };
-      }).pipe(Effect.provide(stores)),
-    );
-
-    assert.ok(
-      deltified.length < full.length,
-      `deltified pack (${deltified.length}) should undercut the full one (${full.length})`,
-    );
-
-    const out = path.join(root, "ours-deltified.pack");
-    await fs.writeFile(out, deltified);
-    execFileSync("git", ["index-pack", "--strict", out], { cwd: root, stdio: "ignore" });
-
-    // The pack must contain deltas git resolves, or deltify proved nothing.
-    const verify = git(root, "verify-pack", "-v", path.join(root, "ours-deltified.idx"));
-    assert.match(verify, /chain length = 1: \d+ object/);
-
-    await fs.rm(root, { recursive: true, force: true });
-  });
+        await fs.rm(root, { recursive: true, force: true });
+      }),
+  );
 });

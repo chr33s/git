@@ -95,164 +95,172 @@ const alice = {
  * reported as a `Cause` with its fiber trace.
  */
 describe("Api", () => {
-  it("swaps against the value the rewrite charge was judged on", async () => {
-    // The charge is decided from a snapshot of `into`, and the write happens
-    // after a merge or a replay that takes as long as the history is deep.
-    // Read again at write time, the swap compared the ref's value against
-    // itself and could not fail — so a push landing in that window was
-    // silently overwritten, and a write judged a fast-forward became one that
-    // drops commits, which is `source.force-push`'s to allow.
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
-        const git = yield* GitRepository.Repository;
-        const first = yield* git.commit({
-          branch: "refs/heads/main",
-          tree: EMPTY_TREE_OID,
-          message: "first",
-          author: { ...alice, at: new Date(1_700_000_000_000) },
-        });
-        yield* git.setRef({ name: "refs/heads/topic", to: first });
-        const ahead = yield* git.commit({
-          branch: "refs/heads/topic",
-          tree: EMPTY_TREE_OID,
-          message: "ahead",
-          author: { ...alice, at: new Date(1_700_000_001_000) },
-        });
+  it.effect("swaps against the value the rewrite charge was judged on", () =>
+    Effect.promise(async () => {
+      // The charge is decided from a snapshot of `into`, and the write happens
+      // after a merge or a replay that takes as long as the history is deep.
+      // Read again at write time, the swap compared the ref's value against
+      // itself and could not fail — so a push landing in that window was
+      // silently overwritten, and a write judged a fast-forward became one that
+      // drops commits, which is `source.force-push`'s to allow.
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const git = yield* GitRepository.Repository;
+          const first = yield* git.commit({
+            branch: "refs/heads/main",
+            tree: EMPTY_TREE_OID,
+            message: "first",
+            author: { ...alice, at: new Date(1_700_000_000_000) },
+          });
+          yield* git.setRef({ name: "refs/heads/topic", to: first });
+          const ahead = yield* git.commit({
+            branch: "refs/heads/topic",
+            tree: EMPTY_TREE_OID,
+            message: "ahead",
+            author: { ...alice, at: new Date(1_700_000_001_000) },
+          });
 
-        // Judged here: `main` is at `first`, and merging `topic` into it drops
-        // nothing.
-        const judged = yield* Api.discards("refs/heads/main", [
-          "refs/heads/main",
-          "refs/heads/topic",
-        ]);
+          // Judged here: `main` is at `first`, and merging `topic` into it drops
+          // nothing.
+          const judged = yield* Api.discards("refs/heads/main", [
+            "refs/heads/main",
+            "refs/heads/topic",
+          ]);
 
-        // And now somebody else's push lands on `main`.
-        const landed = yield* git.commit({
-          branch: "refs/heads/main",
-          tree: EMPTY_TREE_OID,
-          message: "landed",
-          author: { ...alice, at: new Date(1_700_000_002_000) },
-        });
+          // And now somebody else's push lands on `main`.
+          const landed = yield* git.commit({
+            branch: "refs/heads/main",
+            tree: EMPTY_TREE_OID,
+            message: "landed",
+            author: { ...alice, at: new Date(1_700_000_002_000) },
+          });
 
-        const merged = yield* git
-          .merge({
-            ours: "refs/heads/main",
-            theirs: "refs/heads/topic",
-            author: { ...alice, at: new Date(1_700_000_003_000) },
-            into: "refs/heads/main",
-            expected: judged.swap,
-            noFastForward: true,
-          })
-          .pipe(
-            Effect.as(null),
-            Effect.catchTag("RefConflict", (error) => Effect.succeed(error._tag)),
-          );
+          const merged = yield* git
+            .merge({
+              ours: "refs/heads/main",
+              theirs: "refs/heads/topic",
+              author: { ...alice, at: new Date(1_700_000_003_000) },
+              into: "refs/heads/main",
+              expected: judged.swap,
+              noFastForward: true,
+            })
+            .pipe(
+              Effect.as(null),
+              Effect.catchTag("RefConflict", (error) => Effect.succeed(error._tag)),
+            );
 
-        return {
-          rewrites: judged.rewrites,
-          merged,
-          main: yield* git.resolve("refs/heads/main"),
-          landed,
-          ahead,
-        };
-      }).pipe(Effect.provide(repository)),
-    );
+          return {
+            rewrites: judged.rewrites,
+            merged,
+            main: yield* git.resolve("refs/heads/main"),
+            landed,
+            ahead,
+          };
+        }).pipe(Effect.provide(repository)),
+      );
 
-    assert.equal(outcome.rewrites, false, "the merge was judged to drop nothing");
-    assert.equal(outcome.merged, "RefConflict", "so the write that would has to fail the swap");
-    assert.equal(outcome.main, outcome.landed, "and the push that landed first stands");
-  });
+      assert.equal(outcome.rewrites, false, "the merge was judged to drop nothing");
+      assert.equal(outcome.merged, "RefConflict", "so the write that would has to fail the swap");
+      assert.equal(outcome.main, outcome.landed, "and the push that landed first stands");
+    }),
+  );
 
-  it("reports the swap as what the store compares, not as what the ref resolves to", async () => {
-    // Two readings of "what `into` is now", and they differ. Reachability
-    // wants the commit the destination resolves to; the compare-and-swap
-    // wants exactly what the store will compare against — the ref's own
-    // value, and nothing at all when the destination was spelled as an oid.
-    // Handed the resolved oid instead, a write to a symbolic destination
-    // names a value nobody wrote and fails as a conflict for good, and a
-    // write to an oid destination swaps against a ref that does not exist.
-    // `Policy.evaluate` splits the same two readings for the same reason.
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
-        const git = yield* GitRepository.Repository;
-        const first = yield* git.commit({
-          branch: "refs/heads/main",
-          tree: EMPTY_TREE_OID,
-          message: "first",
-          author: { ...alice, at: new Date(1_700_000_000_000) },
-        });
-        return {
-          first,
-          named: (yield* Api.discards("refs/heads/main", ["refs/heads/main"])).swap,
-          spelled: (yield* Api.discards(first, [first])).swap,
-          absent: (yield* Api.discards("refs/heads/nowhere", ["refs/heads/main"])).swap,
-          // A base this repository cannot resolve is not evidence of a
-          // rewrite: the verb is about to fail on that revision anyway, and
-          // claiming one turns "unknown revision" into a `source.force-push`
-          // refusal — an answer that is wrong, and given only to callers who
-          // lack that capability, so one request reports two different
-          // problems depending on who asks it.
-          unknown: (yield* Api.discards("refs/heads/main", ["refs/heads/nowhere"])).rewrites,
-        };
-      }).pipe(Effect.provide(repository)),
-    );
+  it.effect("reports the swap as what the store compares, not as what the ref resolves to", () =>
+    Effect.promise(async () => {
+      // Two readings of "what `into` is now", and they differ. Reachability
+      // wants the commit the destination resolves to; the compare-and-swap
+      // wants exactly what the store will compare against — the ref's own
+      // value, and nothing at all when the destination was spelled as an oid.
+      // Handed the resolved oid instead, a write to a symbolic destination
+      // names a value nobody wrote and fails as a conflict for good, and a
+      // write to an oid destination swaps against a ref that does not exist.
+      // `Policy.evaluate` splits the same two readings for the same reason.
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const git = yield* GitRepository.Repository;
+          const first = yield* git.commit({
+            branch: "refs/heads/main",
+            tree: EMPTY_TREE_OID,
+            message: "first",
+            author: { ...alice, at: new Date(1_700_000_000_000) },
+          });
+          return {
+            first,
+            named: (yield* Api.discards("refs/heads/main", ["refs/heads/main"])).swap,
+            spelled: (yield* Api.discards(first, [first])).swap,
+            absent: (yield* Api.discards("refs/heads/nowhere", ["refs/heads/main"])).swap,
+            // A base this repository cannot resolve is not evidence of a
+            // rewrite: the verb is about to fail on that revision anyway, and
+            // claiming one turns "unknown revision" into a `source.force-push`
+            // refusal — an answer that is wrong, and given only to callers who
+            // lack that capability, so one request reports two different
+            // problems depending on who asks it.
+            unknown: (yield* Api.discards("refs/heads/main", ["refs/heads/nowhere"])).rewrites,
+          };
+        }).pipe(Effect.provide(repository)),
+      );
 
-    assert.equal(outcome.named, outcome.first, "a ref swaps against its own value");
-    assert.equal(outcome.spelled, undefined, "an oid destination is no ref to swap against");
-    assert.equal(outcome.absent, null, "and a ref that does not exist swaps against nothing");
-    assert.equal(outcome.unknown, false, "an unresolvable base is not a rewrite to charge for");
-  });
+      assert.equal(outcome.named, outcome.first, "a ref swaps against its own value");
+      assert.equal(outcome.spelled, undefined, "an oid destination is no ref to swap against");
+      assert.equal(outcome.absent, null, "and a ref that does not exist swaps against nothing");
+      assert.equal(outcome.unknown, false, "an unresolvable base is not a rewrite to charge for");
+    }),
+  );
 
-  it("charges a rewrite only when the destination would lose commits", async () => {
-    // The charge was "does `into` exist", so `{onto: "main", into: "main"}` —
-    // an ordinary fast-forward — was refused to a member holding only
-    // `source.push`. And for a merge it compared tips by oid, which misses the
-    // destination a side already reaches without being it. The question is
-    // whether the write *contains* what the destination holds, and the write
-    // is not made yet — so it is asked of the bases: a replay lands on top of
-    // `onto`, and a merge commit holds both of its sides.
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
-        const git = yield* GitRepository.Repository;
-        const first = yield* git.commit({
-          branch: "refs/heads/main",
-          tree: EMPTY_TREE_OID,
-          message: "first",
-          author: { ...alice, at: new Date(1_700_000_000_000) },
-        });
-        const second = yield* git.commit({
-          branch: "refs/heads/main",
-          tree: EMPTY_TREE_OID,
-          message: "second",
-          author: { ...alice, at: new Date(1_700_000_001_000) },
-        });
-        yield* git.setRef({ name: "refs/heads/behind", to: first });
-        // A branch that shares no history with `main`.
-        yield* git.commit({
-          branch: "refs/heads/apart",
-          tree: EMPTY_TREE_OID,
-          message: "apart",
-          author: { ...alice, at: new Date(1_700_000_002_000) },
-        });
-        void second;
+  it.effect("charges a rewrite only when the destination would lose commits", () =>
+    Effect.promise(async () => {
+      // The charge was "does `into` exist", so `{onto: "main", into: "main"}` —
+      // an ordinary fast-forward — was refused to a member holding only
+      // `source.push`. And for a merge it compared tips by oid, which misses the
+      // destination a side already reaches without being it. The question is
+      // whether the write *contains* what the destination holds, and the write
+      // is not made yet — so it is asked of the bases: a replay lands on top of
+      // `onto`, and a merge commit holds both of its sides.
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const git = yield* GitRepository.Repository;
+          const first = yield* git.commit({
+            branch: "refs/heads/main",
+            tree: EMPTY_TREE_OID,
+            message: "first",
+            author: { ...alice, at: new Date(1_700_000_000_000) },
+          });
+          const second = yield* git.commit({
+            branch: "refs/heads/main",
+            tree: EMPTY_TREE_OID,
+            message: "second",
+            author: { ...alice, at: new Date(1_700_000_001_000) },
+          });
+          yield* git.setRef({ name: "refs/heads/behind", to: first });
+          // A branch that shares no history with `main`.
+          yield* git.commit({
+            branch: "refs/heads/apart",
+            tree: EMPTY_TREE_OID,
+            message: "apart",
+            author: { ...alice, at: new Date(1_700_000_002_000) },
+          });
+          void second;
 
-        return {
-          onto: (yield* Api.discards("refs/heads/main", ["refs/heads/main"])).rewrites,
-          behind: (yield* Api.discards("refs/heads/behind", ["refs/heads/main"])).rewrites,
-          fresh: (yield* Api.discards("refs/heads/absent", ["refs/heads/main"])).rewrites,
-          side: (yield* Api.discards("refs/heads/behind", ["refs/heads/apart", "refs/heads/main"]))
-            .rewrites,
-          apart: (yield* Api.discards("refs/heads/apart", ["refs/heads/main"])).rewrites,
-        };
-      }).pipe(Effect.provide(repository)),
-    );
+          return {
+            onto: (yield* Api.discards("refs/heads/main", ["refs/heads/main"])).rewrites,
+            behind: (yield* Api.discards("refs/heads/behind", ["refs/heads/main"])).rewrites,
+            fresh: (yield* Api.discards("refs/heads/absent", ["refs/heads/main"])).rewrites,
+            side: (yield* Api.discards("refs/heads/behind", [
+              "refs/heads/apart",
+              "refs/heads/main",
+            ])).rewrites,
+            apart: (yield* Api.discards("refs/heads/apart", ["refs/heads/main"])).rewrites,
+          };
+        }).pipe(Effect.provide(repository)),
+      );
 
-    assert.equal(outcome.onto, false, "landing where you started discards nothing");
-    assert.equal(outcome.behind, false, "nor does a fast-forward");
-    assert.equal(outcome.fresh, false, "nor does creating the destination");
-    assert.equal(outcome.side, false, "nor does a merge whose other side reaches it");
-    assert.equal(outcome.apart, true, "a destination neither base reaches is a rewrite");
-  });
+      assert.equal(outcome.onto, false, "landing where you started discards nothing");
+      assert.equal(outcome.behind, false, "nor does a fast-forward");
+      assert.equal(outcome.fresh, false, "nor does creating the destination");
+      assert.equal(outcome.side, false, "nor does a merge whose other side reaches it");
+      assert.equal(outcome.apart, true, "a destination neither base reaches is a rewrite");
+    }),
+  );
 
   it.live("tells an anonymous request what it may do, rather than refusing the question", () =>
     dispatched(

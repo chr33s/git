@@ -120,94 +120,100 @@ describe("cli pr", () => {
       ])
     ).trim();
 
-  it("opens, discusses, checks and shows a pull request", async () => {
-    const pr = await openPr();
+  it.effect("opens, discusses, checks and shows a pull request", () =>
+    Effect.promise(async () => {
+      const pr = await openPr();
 
-    const listed = JSON.parse(await cli(["pr", "list", "--root", root, "project"]));
-    assert.equal(listed.length, 1);
-    assert.equal(listed[0].id, pr);
-    assert.equal(listed[0].state, "open");
-    assert.equal(listed[0].head, head);
+      const listed = JSON.parse(await cli(["pr", "list", "--root", root, "project"]));
+      assert.equal(listed.length, 1);
+      assert.equal(listed[0].id, pr);
+      assert.equal(listed[0].state, "open");
+      assert.equal(listed[0].head, head);
 
-    await cli([
-      "pr",
-      "comment",
-      "--root",
-      root,
-      "--key",
-      key,
-      "--body",
-      "looks plausible",
-      "project",
-      pr,
-    ]);
-    await cli([
-      "pr",
-      "check",
-      "--root",
-      root,
-      "--key",
-      key,
-      "--name",
-      "test",
-      "--head",
-      "topic",
-      "--status",
-      "started",
-      "project",
-      pr,
-    ]);
-    await cli([
-      "pr",
-      "check",
-      "--root",
-      root,
-      "--key",
-      key,
-      "--name",
-      "test",
-      "--head",
-      "topic",
-      "--status",
-      "success",
-      "project",
-      pr,
-    ]);
+      await cli([
+        "pr",
+        "comment",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--body",
+        "looks plausible",
+        "project",
+        pr,
+      ]);
+      await cli([
+        "pr",
+        "check",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--name",
+        "test",
+        "--head",
+        "topic",
+        "--status",
+        "started",
+        "project",
+        pr,
+      ]);
+      await cli([
+        "pr",
+        "check",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--name",
+        "test",
+        "--head",
+        "topic",
+        "--status",
+        "success",
+        "project",
+        pr,
+      ]);
 
-    const shown = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
-    assert.equal(shown.threads.length, 1);
-    assert.equal(shown.threads[0].comments[0].body, "looks plausible");
-    assert.equal(shown.checks.at(-1)?.status, "success");
+      const shown = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
+      assert.equal(shown.threads.length, 1);
+      assert.equal(shown.threads[0].comments[0].body, "looks plausible");
+      assert.equal(shown.checks.at(-1)?.status, "success");
 
-    const thread = shown.threads[0].id;
-    await cli(["pr", "resolve", "--root", root, "--key", key, "--thread", thread, "project", pr]);
-    const resolved = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
-    assert.equal(resolved.threads[0].resolved, true);
-  });
+      const thread = shown.threads[0].id;
+      await cli(["pr", "resolve", "--root", root, "--key", key, "--thread", thread, "project", pr]);
+      const resolved = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
+      assert.equal(resolved.threads[0].resolved, true);
+    }),
+  );
 
-  it("merges an open pull request and records the merge as an event", async () => {
-    const pr = await openPr();
+  it.effect("merges an open pull request and records the merge as an event", () =>
+    Effect.promise(async () => {
+      const pr = await openPr();
 
-    const merged = (await cli(["pr", "merge", "--root", root, "--key", key, "project", pr])).trim();
-    assert.match(merged, /^[0-9a-f]{40}$/);
+      const merged = (
+        await cli(["pr", "merge", "--root", root, "--key", key, "project", pr])
+      ).trim();
+      assert.match(merged, /^[0-9a-f]{40}$/);
 
-    // The branch really moved, and the projection says merged — from the
-    // event, not from anybody's local bookkeeping.
-    const main = await Effect.runPromise(
-      Effect.gen(function* () {
-        const repository = yield* GitRepository.Repository;
-        return yield* repository.resolve("refs/heads/main");
-      }).pipe(Effect.provide(repoLayer())),
-    );
-    assert.equal(main, merged);
+      // The branch really moved, and the projection says merged — from the
+      // event, not from anybody's local bookkeeping.
+      const main = await Effect.runPromise(
+        Effect.gen(function* () {
+          const repository = yield* GitRepository.Repository;
+          return yield* repository.resolve("refs/heads/main");
+        }).pipe(Effect.provide(repoLayer())),
+      );
+      assert.equal(main, merged);
 
-    const shown = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
-    assert.equal(shown.state, "merged");
-    assert.equal(shown.mergeCommit, merged);
+      const shown = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
+      assert.equal(shown.state, "merged");
+      assert.equal(shown.mergeCommit, merged);
 
-    const open = JSON.parse(await cli(["pr", "list", "--root", root, "project"]));
-    assert.equal(open.length, 0);
-    const all = JSON.parse(await cli(["pr", "list", "--root", root, "--all", "project"]));
-    assert.equal(all.length, 1);
-  });
+      const open = JSON.parse(await cli(["pr", "list", "--root", root, "project"]));
+      assert.equal(open.length, 0);
+      const all = JSON.parse(await cli(["pr", "list", "--root", root, "--all", "project"]));
+      assert.equal(all.length, 1);
+    }),
+  );
 });

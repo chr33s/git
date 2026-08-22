@@ -95,73 +95,81 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("rejects an anonymous clone with 401", async () => {
-    const work = path.join(root, "work-anon");
-    // With prompts disabled, git surfaces the 401 challenge as a refusal to
-    // ask for credentials — that refusal is the rejection.
-    await assert.rejects(
-      git(root, "clone", "--quiet", remote(null, "authed"), work),
-      /Authentication failed|401|terminal prompts disabled/,
-    );
-  });
+  it.effect("rejects an anonymous clone with 401", () =>
+    Effect.promise(async () => {
+      const work = path.join(root, "work-anon");
+      // With prompts disabled, git surfaces the 401 challenge as a refusal to
+      // ask for credentials — that refusal is the rejection.
+      await assert.rejects(
+        git(root, "clone", "--quiet", remote(null, "authed"), work),
+        /Authentication failed|401|terminal prompts disabled/,
+      );
+    }),
+  );
 
-  it("clones with a read token, but cannot push with it", async () => {
-    const work = path.join(root, "work-read");
-    await git(root, "clone", "--quiet", remote(readToken, "authed"), work);
-    assert.equal(await fs.readFile(path.join(work, "g.txt"), "utf8"), "guarded\n");
+  it.effect("clones with a read token, but cannot push with it", () =>
+    Effect.promise(async () => {
+      const work = path.join(root, "work-read");
+      await git(root, "clone", "--quiet", remote(readToken, "authed"), work);
+      assert.equal(await fs.readFile(path.join(work, "g.txt"), "utf8"), "guarded\n");
 
-    await fs.writeFile(path.join(work, "nope.txt"), "denied\n");
-    await git(work, "add", ".");
-    await git(work, "commit", "--quiet", "-m", "denied");
-    await assert.rejects(git(work, "push", "--quiet", "origin", "main"), /403|denied|forbidden/i);
-  });
+      await fs.writeFile(path.join(work, "nope.txt"), "denied\n");
+      await git(work, "add", ".");
+      await git(work, "commit", "--quiet", "-m", "denied");
+      await assert.rejects(git(work, "push", "--quiet", "origin", "main"), /403|denied|forbidden/i);
+    }),
+  );
 
-  it("pushes with a write token", async () => {
-    const work = path.join(root, "work-write");
-    await git(root, "clone", "--quiet", remote(writeToken, "authed"), work);
+  it.effect("pushes with a write token", () =>
+    Effect.promise(async () => {
+      const work = path.join(root, "work-write");
+      await git(root, "clone", "--quiet", remote(writeToken, "authed"), work);
 
-    await fs.writeFile(path.join(work, "ok.txt"), "allowed\n");
-    await git(work, "add", ".");
-    await git(work, "commit", "--quiet", "-m", "allowed");
-    await git(work, "push", "--quiet", "origin", "main");
+      await fs.writeFile(path.join(work, "ok.txt"), "allowed\n");
+      await git(work, "add", ".");
+      await git(work, "commit", "--quiet", "-m", "allowed");
+      await git(work, "push", "--quiet", "origin", "main");
 
-    const pushed = (await git(work, "rev-parse", "HEAD")).trim();
-    const serverMain = await Effect.runPromise(
-      Effect.gen(function* () {
-        return yield* (yield* Repository).resolve("refs/heads/main");
-      }).pipe(
-        Effect.provide(
-          GitRepository.layer.pipe(
-            Layer.provide(GitRepository.hooksNoop),
-            Layer.provide(stores(path.join(root, "authed"))),
+      const pushed = (await git(work, "rev-parse", "HEAD")).trim();
+      const serverMain = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Repository).resolve("refs/heads/main");
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provide(stores(path.join(root, "authed"))),
+            ),
           ),
         ),
-      ),
-    );
-    assert.equal(serverMain, pushed);
-  });
+      );
+      assert.equal(serverMain, pushed);
+    }),
+  );
 
-  it("guards the JSON API with the same tokens", async () => {
-    const anonymous = await fetch(`${server.url}/authed/refs`);
-    assert.equal(anonymous.status, 401);
+  it.effect("guards the JSON API with the same tokens", () =>
+    Effect.promise(async () => {
+      const anonymous = await fetch(`${server.url}/authed/refs`);
+      assert.equal(anonymous.status, 401);
 
-    const read = await fetch(`${server.url}/authed/refs`, {
-      headers: { authorization: `Bearer ${readToken}` },
-    });
-    assert.equal(read.status, 200);
+      const read = await fetch(`${server.url}/authed/refs`, {
+        headers: { authorization: `Bearer ${readToken}` },
+      });
+      assert.equal(read.status, 200);
 
-    const writeDenied = await fetch(`${server.url}/authed/commit`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${readToken}` },
-      body: JSON.stringify({ message: "nope" }),
-    });
-    assert.equal(writeDenied.status, 403);
+      const writeDenied = await fetch(`${server.url}/authed/commit`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${readToken}` },
+        body: JSON.stringify({ message: "nope" }),
+      });
+      assert.equal(writeDenied.status, 403);
 
-    const written = await fetch(`${server.url}/authed/commit`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${writeToken}` },
-      body: JSON.stringify({ message: "yes" }),
-    });
-    assert.equal(written.status, 200);
-  });
+      const written = await fetch(`${server.url}/authed/commit`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${writeToken}` },
+        body: JSON.stringify({ message: "yes" }),
+      });
+      assert.equal(written.status, 200);
+    }),
+  );
 });

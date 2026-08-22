@@ -190,44 +190,46 @@ describe("Remotes", () => {
     }).pipe(Effect.provide(Remotes.memory)),
   );
 
-  it("reads a hand-edited standing instruction it cannot make sense of as none", async () => {
-    // The file is a repository's, and repositories get edited and get carried
-    // between versions. Trusted as written, a `refs` that is not a list is a
-    // shape the forwarder walks straight into — on `post-receive`, where
-    // nothing is watching. The SQL registry already decoded it with a schema;
-    // the file registry now decodes it with the same one.
-    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "remotes-file-"));
-    try {
-      const location = path.join(directory, "remotes.json");
-      await fs.writeFile(
-        location,
-        JSON.stringify([
-          {
-            name: "bent",
-            url: "https://example.com/repo.git",
-            credential: null,
-            sync: { mode: "push", refs: "refs/heads/main" },
-            createdAt: new Date(0).toISOString(),
-          },
-        ]),
-      );
+  it.effect("reads a hand-edited standing instruction it cannot make sense of as none", () =>
+    Effect.promise(async () => {
+      // The file is a repository's, and repositories get edited and get carried
+      // between versions. Trusted as written, a `refs` that is not a list is a
+      // shape the forwarder walks straight into — on `post-receive`, where
+      // nothing is watching. The SQL registry already decoded it with a schema;
+      // the file registry now decodes it with the same one.
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "remotes-file-"));
+      try {
+        const location = path.join(directory, "remotes.json");
+        await fs.writeFile(
+          location,
+          JSON.stringify([
+            {
+              name: "bent",
+              url: "https://example.com/repo.git",
+              credential: null,
+              sync: { mode: "push", refs: "refs/heads/main" },
+              createdAt: new Date(0).toISOString(),
+            },
+          ]),
+        );
 
-      const held = await Effect.runPromise(
-        Effect.flatMap(Remotes.Remotes, (registry) => registry.list).pipe(
-          Effect.provide(remotesFile(location)),
-        ),
-      );
+        const held = await Effect.runPromise(
+          Effect.flatMap(Remotes.Remotes, (registry) => registry.list).pipe(
+            Effect.provide(remotesFile(location)),
+          ),
+        );
 
-      assert.equal(
-        held[0]?.sync,
-        null,
-        "unreadable reads as manual, not as a shape nothing checked",
-      );
-      assert.equal(Remotes.sends(held[0]!), false);
-    } finally {
-      await fs.rm(directory, { recursive: true, force: true });
-    }
-  });
+        assert.equal(
+          held[0]?.sync,
+          null,
+          "unreadable reads as manual, not as a shape nothing checked",
+        );
+        assert.equal(Remotes.sends(held[0]!), false);
+      } finally {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    }),
+  );
 
   it.effect("reads a remote with no standing instruction as having none", () =>
     Effect.gen(function* () {

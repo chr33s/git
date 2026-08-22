@@ -18,7 +18,7 @@ import { type ByteSource, InflateError, inflate as portableInflate } from "./Inf
 import { inflate as zlibInflate } from "./Inflate.zlib.ts";
 import { parsePackIndex } from "./PackIndex.ts";
 import { bufferSource, type PackSource, readAt } from "./PackFile.ts";
-import { Result } from "effect";
+import { Effect, Result } from "effect";
 import type { Oid } from "./Store.ts";
 
 const git = (cwd: string, ...args: string[]) => gitIn(cwd)(...args);
@@ -62,124 +62,134 @@ describe.skipIf(!hasGit)("PackFile", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("reads every object in a pack git wrote, and agrees with git on all of them", async () => {
-    const parsed = parsePackIndex(indexBytes);
-    assert.ok(Result.isSuccess(parsed));
-    const entries = parsed.success;
-    assert.ok(entries.length > 30, `expected a substantial pack, got ${entries.length} objects`);
+  it.effect("reads every object in a pack git wrote, and agrees with git on all of them", () =>
+    Effect.promise(async () => {
+      const parsed = parsePackIndex(indexBytes);
+      assert.ok(Result.isSuccess(parsed));
+      const entries = parsed.success;
+      assert.ok(entries.length > 30, `expected a substantial pack, got ${entries.length} objects`);
 
-    const source = bufferSource(packBytes);
-    const decoder = new TextDecoder();
+      const source = bufferSource(packBytes);
+      const decoder = new TextDecoder();
 
-    for (const entry of entries) {
-      const object = await readAt(source, entry.offset, noBases);
+      for (const entry of entries) {
+        const object = await readAt(source, entry.offset, noBases);
 
-      // git's own view of the same object: type, size and content.
-      const type = git(root, "cat-file", "-t", entry.oid).trim();
-      const size = Number(git(root, "cat-file", "-s", entry.oid).trim());
-      assert.equal(object.type, type, `type of ${entry.oid}`);
-      assert.equal(object.data.length, size, `size of ${entry.oid}`);
+        // git's own view of the same object: type, size and content.
+        const type = git(root, "cat-file", "-t", entry.oid).trim();
+        const size = Number(git(root, "cat-file", "-s", entry.oid).trim());
+        assert.equal(object.type, type, `type of ${entry.oid}`);
+        assert.equal(object.data.length, size, `size of ${entry.oid}`);
 
-      if (type === "blob" || type === "commit") {
-        const expected = execFileSync("git", ["cat-file", type, entry.oid], {
-          cwd: root,
-          maxBuffer: 64 * 1024 * 1024,
-        });
-        assert.equal(decoder.decode(object.data), decoder.decode(new Uint8Array(expected)));
+        if (type === "blob" || type === "commit") {
+          const expected = execFileSync("git", ["cat-file", type, entry.oid], {
+            cwd: root,
+            maxBuffer: 64 * 1024 * 1024,
+          });
+          assert.equal(decoder.decode(object.data), decoder.decode(new Uint8Array(expected)));
+        }
       }
-    }
-  });
+    }),
+  );
 
-  it("resolves the delta chains, not just the full objects", async () => {
-    // A pack where every object were stored whole would make the test above
-    // pass for the wrong reason, so find the delta-encoded ones and read
-    // those specifically.
-    //
-    // `verify-pack -v` prints the *resolved* type, not `ofs-delta` — a delta
-    // is a row that carries the two extra columns, chain depth and base oid:
-    //   <oid> <type> <size> <packed-size> <offset> [<depth> <base-oid>]
-    const packDirectory = path.join(root, ".git", "objects", "pack");
-    const idx = (await fs.readdir(packDirectory)).find((name) => name.endsWith(".idx"))!;
-    const verify = execFileSync("git", ["verify-pack", "-v", path.join(packDirectory, idx)], {
-      cwd: root,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    });
+  it.effect("resolves the delta chains, not just the full objects", () =>
+    Effect.promise(async () => {
+      // A pack where every object were stored whole would make the test above
+      // pass for the wrong reason, so find the delta-encoded ones and read
+      // those specifically.
+      //
+      // `verify-pack -v` prints the *resolved* type, not `ofs-delta` — a delta
+      // is a row that carries the two extra columns, chain depth and base oid:
+      //   <oid> <type> <size> <packed-size> <offset> [<depth> <base-oid>]
+      const packDirectory = path.join(root, ".git", "objects", "pack");
+      const idx = (await fs.readdir(packDirectory)).find((name) => name.endsWith(".idx"))!;
+      const verify = execFileSync("git", ["verify-pack", "-v", path.join(packDirectory, idx)], {
+        cwd: root,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
 
-    const deltas = verify
-      .split("\n")
-      .map((line) => line.trim().split(/\s+/))
-      .filter((fields) => fields.length >= 7 && /^[0-9a-f]{40}$/.test(fields[6] ?? ""))
-      .map((fields) => fields[0]!);
-    assert.ok(deltas.length > 0, "git produced no deltas; the test proves less than it claims");
+      const deltas = verify
+        .split("\n")
+        .map((line) => line.trim().split(/\s+/))
+        .filter((fields) => fields.length >= 7 && /^[0-9a-f]{40}$/.test(fields[6] ?? ""))
+        .map((fields) => fields[0]!);
+      assert.ok(deltas.length > 0, "git produced no deltas; the test proves less than it claims");
 
-    const parsed = parsePackIndex(indexBytes);
-    assert.ok(Result.isSuccess(parsed));
-    const byOid = new Map(parsed.success.map((entry) => [entry.oid, entry]));
-    const source = bufferSource(packBytes);
+      const parsed = parsePackIndex(indexBytes);
+      assert.ok(Result.isSuccess(parsed));
+      const byOid = new Map(parsed.success.map((entry) => [entry.oid, entry]));
+      const source = bufferSource(packBytes);
 
-    for (const oid of deltas) {
-      // SAFETY: each entry in `deltas` is the first column of a verify-pack
-      // object row — a full 40-hex object id.
-      const entry = byOid.get(oid as Oid)!;
-      const object = await readAt(source, entry.offset, noBases);
-      assert.equal(
-        object.data.length,
-        Number(git(root, "cat-file", "-s", oid).trim()),
-        `delta-encoded ${oid} did not reconstruct`,
+      for (const oid of deltas) {
+        // SAFETY: each entry in `deltas` is the first column of a verify-pack
+        // object row — a full 40-hex object id.
+        const entry = byOid.get(oid as Oid)!;
+        const object = await readAt(source, entry.offset, noBases);
+        assert.equal(
+          object.data.length,
+          Number(git(root, "cat-file", "-s", oid).trim()),
+          `delta-encoded ${oid} did not reconstruct`,
+        );
+      }
+    }),
+  );
+
+  it.effect("reads through a windowed source without ever holding the pack", () =>
+    Effect.promise(async () => {
+      // The shape R2 and a file descriptor both take: reads are ranges, and
+      // the test records how much of the pack each object actually touched.
+      let bytesRead = 0;
+      const ranged: PackSource = {
+        size: packBytes.length,
+        read: (offset, length) => {
+          bytesRead += Math.min(length, packBytes.length - offset);
+          return Promise.resolve(packBytes.subarray(offset, offset + length));
+        },
+      };
+
+      const parsed = parsePackIndex(indexBytes);
+      assert.ok(Result.isSuccess(parsed));
+
+      // A small object near the end: the interesting case, because a reader
+      // that scanned from the front would touch the whole file to reach it.
+      const last = [...parsed.success].sort((a, b) => b.offset - a.offset)[0]!;
+      bytesRead = 0;
+      const object = await readAt(ranged, last.offset, noBases);
+      assert.equal(object.data.length, Number(git(root, "cat-file", "-s", last.oid).trim()));
+      assert.ok(
+        bytesRead < packBytes.length,
+        `read ${bytesRead} of ${packBytes.length} bytes to fetch one object`,
       );
-    }
-  });
+    }),
+  );
 
-  it("reads through a windowed source without ever holding the pack", async () => {
-    // The shape R2 and a file descriptor both take: reads are ranges, and
-    // the test records how much of the pack each object actually touched.
-    let bytesRead = 0;
-    const ranged: PackSource = {
-      size: packBytes.length,
-      read: (offset, length) => {
-        bytesRead += Math.min(length, packBytes.length - offset);
-        return Promise.resolve(packBytes.subarray(offset, offset + length));
-      },
-    };
+  it.effect("refuses an offset that is not an object", () =>
+    Effect.promise(async () => {
+      const source = bufferSource(packBytes);
+      await assert.rejects(() => readAt(source, packBytes.length + 1, noBases));
+      // Into the trailer, which is a hash rather than an object header.
+      await assert.rejects(() => readAt(source, packBytes.length - 10, noBases));
+    }),
+  );
 
-    const parsed = parsePackIndex(indexBytes);
-    assert.ok(Result.isSuccess(parsed));
+  it.effect("decodes every object identically on the platform's own zlib", () =>
+    Effect.promise(async () => {
+      const parsed = parsePackIndex(indexBytes);
+      assert.ok(Result.isSuccess(parsed));
+      const source = bufferSource(packBytes);
 
-    // A small object near the end: the interesting case, because a reader
-    // that scanned from the front would touch the whole file to reach it.
-    const last = [...parsed.success].sort((a, b) => b.offset - a.offset)[0]!;
-    bytesRead = 0;
-    const object = await readAt(ranged, last.offset, noBases);
-    assert.equal(object.data.length, Number(git(root, "cat-file", "-s", last.oid).trim()));
-    assert.ok(
-      bytesRead < packBytes.length,
-      `read ${bytesRead} of ${packBytes.length} bytes to fetch one object`,
-    );
-  });
-
-  it("refuses an offset that is not an object", async () => {
-    const source = bufferSource(packBytes);
-    await assert.rejects(() => readAt(source, packBytes.length + 1, noBases));
-    // Into the trailer, which is a hash rather than an object header.
-    await assert.rejects(() => readAt(source, packBytes.length - 10, noBases));
-  });
-
-  it("decodes every object identically on the platform's own zlib", async () => {
-    const parsed = parsePackIndex(indexBytes);
-    assert.ok(Result.isSuccess(parsed));
-    const source = bufferSource(packBytes);
-
-    // The seam only pays for itself if the two decoders are the same
-    // function: this pack has delta chains in it, so the comparison covers
-    // reconstructed objects as well as whole ones.
-    for (const entry of parsed.success) {
-      const portable = await readAt(source, entry.offset, noBases, 0, portableInflate);
-      const native = await readAt(source, entry.offset, noBases, 0, zlibInflate);
-      assert.equal(native.type, portable.type, `type of ${entry.oid}`);
-      assert.deepEqual(native.data, portable.data, `bytes of ${entry.oid}`);
-    }
-  });
+      // The seam only pays for itself if the two decoders are the same
+      // function: this pack has delta chains in it, so the comparison covers
+      // reconstructed objects as well as whole ones.
+      for (const entry of parsed.success) {
+        const portable = await readAt(source, entry.offset, noBases, 0, portableInflate);
+        const native = await readAt(source, entry.offset, noBases, 0, zlibInflate);
+        assert.equal(native.type, portable.type, `type of ${entry.oid}`);
+        assert.deepEqual(native.data, portable.data, `bytes of ${entry.oid}`);
+      }
+    }),
+  );
 });
 
 /**
@@ -212,50 +222,60 @@ describe("the zlib-backed pack inflate", () => {
   const payload = new TextEncoder().encode("pack payload ".repeat(4000));
   const stream = new Uint8Array(deflateSync(payload));
 
-  it("reassembles a stream that spans many reads", async () => {
-    // 64 bytes at a time is nothing like the real 64 KiB window, which is the
-    // point: an object bigger than one read is the case that has to pull
-    // again, and the pulls grow rather than crawling one at a time.
-    assert.deepEqual(await zlibInflate(chunked(stream, 64)), payload);
-    assert.deepEqual(await zlibInflate(chunked(stream, 1)), payload);
-  });
+  it.effect("reassembles a stream that spans many reads", () =>
+    Effect.promise(async () => {
+      // 64 bytes at a time is nothing like the real 64 KiB window, which is the
+      // point: an object bigger than one read is the case that has to pull
+      // again, and the pulls grow rather than crawling one at a time.
+      assert.deepEqual(await zlibInflate(chunked(stream, 64)), payload);
+      assert.deepEqual(await zlibInflate(chunked(stream, 1)), payload);
+    }),
+  );
 
-  it("ignores whatever follows the stream, as the next object does", async () => {
-    const trailing = new Uint8Array(stream.length + 5000);
-    trailing.set(stream, 0);
-    trailing.fill(0xaa, stream.length);
-    assert.deepEqual(await zlibInflate(chunked(trailing, 64)), payload);
-  });
+  it.effect("ignores whatever follows the stream, as the next object does", () =>
+    Effect.promise(async () => {
+      const trailing = new Uint8Array(stream.length + 5000);
+      trailing.set(stream, 0);
+      trailing.fill(0xaa, stream.length);
+      assert.deepEqual(await zlibInflate(chunked(trailing, 64)), payload);
+    }),
+  );
 
-  it("tells a stream that has not arrived from one that never will", async () => {
-    // Truncated: zlib says the same thing it says for "read me more", so the
-    // difference has to come from the source running out.
-    await assert.rejects(
-      () => zlibInflate(chunked(stream.subarray(0, stream.length - 40), 64)),
-      InflateError,
-    );
+  it.effect("tells a stream that has not arrived from one that never will", () =>
+    Effect.promise(async () => {
+      // Truncated: zlib says the same thing it says for "read me more", so the
+      // difference has to come from the source running out.
+      await assert.rejects(
+        () => zlibInflate(chunked(stream.subarray(0, stream.length - 40), 64)),
+        InflateError,
+      );
 
-    const corrupt = Uint8Array.from(stream);
-    corrupt[20] = corrupt[20]! ^ 0xff;
-    await assert.rejects(() => zlibInflate(chunked(corrupt, 4096)), InflateError);
+      const corrupt = Uint8Array.from(stream);
+      corrupt[20] = corrupt[20]! ^ 0xff;
+      await assert.rejects(() => zlibInflate(chunked(corrupt, 4096)), InflateError);
 
-    await assert.rejects(
-      () => zlibInflate(chunked(new Uint8Array([0x78, 0x01, 0x00]), 64)),
-      InflateError,
-    );
-  });
+      await assert.rejects(
+        () => zlibInflate(chunked(new Uint8Array([0x78, 0x01, 0x00]), 64)),
+        InflateError,
+      );
+    }),
+  );
 
-  it("refuses to inflate past the caller's limit", async () => {
-    // The bound `readAt` puts on a delta, whose expanded size the header
-    // declares and nothing else checks.
-    await assert.rejects(() => zlibInflate(chunked(stream, 4096), 100), InflateError);
-    assert.deepEqual(await zlibInflate(chunked(stream, 4096), payload.length), payload);
-  });
+  it.effect("refuses to inflate past the caller's limit", () =>
+    Effect.promise(async () => {
+      // The bound `readAt` puts on a delta, whose expanded size the header
+      // declares and nothing else checks.
+      await assert.rejects(() => zlibInflate(chunked(stream, 4096), 100), InflateError);
+      assert.deepEqual(await zlibInflate(chunked(stream, 4096), payload.length), payload);
+    }),
+  );
 
-  it("agrees with the portable decoder", async () => {
-    assert.deepEqual(
-      await zlibInflate(chunked(stream, 97)),
-      await portableInflate(chunked(stream, 97)),
-    );
-  });
+  it.effect("agrees with the portable decoder", () =>
+    Effect.promise(async () => {
+      assert.deepEqual(
+        await zlibInflate(chunked(stream, 97)),
+        await portableInflate(chunked(stream, 97)),
+      );
+    }),
+  );
 });

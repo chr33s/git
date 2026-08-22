@@ -65,233 +65,239 @@ const guarded: Policy.Rules = {
 };
 
 describe("the acceptance scenario", () => {
-  it("goes from three root keys to a moved repository with its history intact", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "acceptance-"));
-    const origin = path.join(root, "origin");
-    try {
-      // Alice, Bob and Carol each own an independent key; Dave and CI bring
-      // their own later.
-      const alice = await Effect.runPromise(generate("alice@example.com"));
-      const bob = await Effect.runPromise(generate("bob@example.com"));
-      const carol = await Effect.runPromise(generate("carol@example.com"));
-      const dave = await Effect.runPromise(generate("dave@example.com"));
-      const ci = await Effect.runPromise(generate("ci@example.com"));
+  it.effect("goes from three root keys to a moved repository with its history intact", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "acceptance-"));
+      const origin = path.join(root, "origin");
+      try {
+        // Alice, Bob and Carol each own an independent key; Dave and CI bring
+        // their own later.
+        const alice = await Effect.runPromise(generate("alice@example.com"));
+        const bob = await Effect.runPromise(generate("bob@example.com"));
+        const carol = await Effect.runPromise(generate("carol@example.com"));
+        const dave = await Effect.runPromise(generate("dave@example.com"));
+        const ci = await Effect.runPromise(generate("ci@example.com"));
 
-      // -- identity, 2 of 3 ---------------------------------------------------
-      const established = await inside(
-        origin,
-        Effect.gen(function* () {
-          const genesis = yield* create(
-            [alice, bob, carol].map((key) => formatPublicKey(key.publicKey)),
-            2,
-          );
-          // Two of the three sign it, which is the threshold and not a
-          // majority by accident: one signature would be a repository any one
-          // root could have created alone.
-          yield* writeGenesis(genesis, [
-            yield* signGenesis(genesis, alice),
-            yield* signGenesis(genesis, bob),
-          ]);
-          return genesis;
-        }),
-      );
-
-      // -- membership ---------------------------------------------------------
-      const year = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-      await inside(
-        origin,
-        Effect.gen(function* () {
-          const grant = (key: typeof dave, capabilities: ReadonlyArray<string>) =>
-            Effect.flatMap(
-              Certificate.grant({
-                repo: established.repoId,
-                publicKey: formatPublicKey(key.publicKey),
-                capabilities,
-                expiresAt: year,
-                id: Log.newId(),
-              }),
-              // Two roots, because the threshold is two: a repository whose
-              // members one root could invite alone has a quorum in name only.
-              (payload) => Log.issue(payload, [alice, carol]),
+        // -- identity, 2 of 3 ---------------------------------------------------
+        const established = await inside(
+          origin,
+          Effect.gen(function* () {
+            const genesis = yield* create(
+              [alice, bob, carol].map((key) => formatPublicKey(key.publicKey)),
+              2,
             );
+            // Two of the three sign it, which is the threshold and not a
+            // majority by accident: one signature would be a repository any one
+            // root could have created alone.
+            yield* writeGenesis(genesis, [
+              yield* signGenesis(genesis, alice),
+              yield* signGenesis(genesis, bob),
+            ]);
+            return genesis;
+          }),
+        );
 
-          // Dave's certificate, exactly as §32 spells it.
-          yield* grant(dave, ["source.push", "hub.create-pr", "hub.comment", "hub.approve"]);
-          // Bob reviews, and CI holds one scoped check capability and nothing
-          // else — `hub.check:test` cannot sign a `lint` result.
-          yield* grant(bob, ["hub.review", "hub.approve"]);
-          yield* grant(ci, [Certificate.checkCapability("test")]);
-        }),
-      );
+        // -- membership ---------------------------------------------------------
+        const year = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+        await inside(
+          origin,
+          Effect.gen(function* () {
+            const grant = (key: typeof dave, capabilities: ReadonlyArray<string>) =>
+              Effect.flatMap(
+                Certificate.grant({
+                  repo: established.repoId,
+                  publicKey: formatPublicKey(key.publicKey),
+                  capabilities,
+                  expiresAt: year,
+                  id: Log.newId(),
+                }),
+                // Two roots, because the threshold is two: a repository whose
+                // members one root could invite alone has a quorum in name only.
+                (payload) => Log.issue(payload, [alice, carol]),
+              );
 
-      // -- Dave authenticates with a credential he minted himself -------------
-      const credential = await Effect.runPromise(
-        Auth.mintDelegation({
-          key: dave,
-          repo: established.repoId,
-          capabilities: ["source.push", "hub.create-pr"],
-          ttlSeconds: 3600,
-        }),
-      );
-      const delegated = await Effect.runPromise(
-        Auth.openDelegation(credential, established.repoId, new Date(), null),
-      );
-      assert.notEqual(delegated, null, "the credential verifies against its own signature");
-      assert.equal(
-        delegated?.signer,
-        await Effect.runPromise(fingerprint(dave.publicKey)),
-        "and names the member who signed it",
-      );
-      assert.deepEqual(
-        [...(delegated?.delegation.capabilities ?? [])].sort(),
-        ["hub.create-pr", "source.push"],
-        "scoped to what he asked for, and intersected with what he holds when it is used",
-      );
+            // Dave's certificate, exactly as §32 spells it.
+            yield* grant(dave, ["source.push", "hub.create-pr", "hub.comment", "hub.approve"]);
+            // Bob reviews, and CI holds one scoped check capability and nothing
+            // else — `hub.check:test` cannot sign a `lint` result.
+            yield* grant(bob, ["hub.review", "hub.approve"]);
+            yield* grant(ci, [Certificate.checkCapability("test")]);
+          }),
+        );
 
-      // -- a pull request, reviewed and checked -------------------------------
-      const proposed = await inside(
-        origin,
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          // `main` exists, and the revision Dave wants on it does not yet.
-          yield* repository.commit({
-            branch: "refs/heads/main",
-            tree: EMPTY_TREE_OID,
-            message: "first\n",
-            author,
-          });
-          const head = yield* repository.commitTree({
-            tree: EMPTY_TREE_OID,
-            parents: [(yield* repository.resolve("refs/heads/main"))!],
-            message: "the thing\n",
-            author,
-          });
-
-          const { pr } = yield* PullRequest.open({
-            repo: established.repoId,
-            title: "Add a thing",
-            description: "It does the thing.",
-            base: "refs/heads/main",
-            head,
+        // -- Dave authenticates with a credential he minted himself -------------
+        const credential = await Effect.runPromise(
+          Auth.mintDelegation({
             key: dave,
-          });
-
-          // Bob approves the *exact* revision, which is what an approval is.
-          yield* PullRequest.review({
             repo: established.repoId,
-            pr,
-            head,
-            decision: "approve",
-            key: bob,
-          });
+            capabilities: ["source.push", "hub.create-pr"],
+            ttlSeconds: 3600,
+          }),
+        );
+        const delegated = await Effect.runPromise(
+          Auth.openDelegation(credential, established.repoId, new Date(), null),
+        );
+        assert.notEqual(delegated, null, "the credential verifies against its own signature");
+        assert.equal(
+          delegated?.signer,
+          await Effect.runPromise(fingerprint(dave.publicKey)),
+          "and names the member who signed it",
+        );
+        assert.deepEqual(
+          [...(delegated?.delegation.capabilities ?? [])].sort(),
+          ["hub.create-pr", "source.push"],
+          "scoped to what he asked for, and intersected with what he holds when it is used",
+        );
 
-          // CI signs a result for the one check it may sign for.
-          yield* PullRequest.checkCompleted({
-            repo: established.repoId,
-            pr,
-            head,
-            name: "test",
-            provider: "ci",
-            status: "success",
-            key: ci,
-          });
-
-          return { pr, head };
-        }),
-      );
-
-      // -- the branch moves because of that, and not otherwise ----------------
-      const judged = await inside(
-        origin,
-        Effect.gen(function* () {
-          const repository = yield* Repository;
-          const decide = (update: { name: string; value: Oid }, who: typeof dave) =>
-            Effect.gen(function* () {
-              const trust = yield* projectTrust(established);
-              const signer = yield* fingerprint(who.publicKey);
-              const member = trust.members.get(signer);
-              return yield* Policy.evaluate({
-                update,
-                principal: {
-                  member: member ?? null,
-                  capabilities: member?.capabilities ?? [],
-                },
-                genesis: established,
-                trust,
-                rules: guarded,
-              });
+        // -- a pull request, reviewed and checked -------------------------------
+        const proposed = await inside(
+          origin,
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            // `main` exists, and the revision Dave wants on it does not yet.
+            yield* repository.commit({
+              branch: "refs/heads/main",
+              tree: EMPTY_TREE_OID,
+              message: "first\n",
+              author,
+            });
+            const head = yield* repository.commitTree({
+              tree: EMPTY_TREE_OID,
+              parents: [(yield* repository.resolve("refs/heads/main"))!],
+              message: "the thing\n",
+              author,
             });
 
-          const stranger = yield* repository.commitTree({
-            tree: EMPTY_TREE_OID,
-            parents: [(yield* repository.resolve("refs/heads/main"))!],
-            message: "unreviewed\n",
-            author,
-          });
+            const { pr } = yield* PullRequest.open({
+              repo: established.repoId,
+              title: "Add a thing",
+              description: "It does the thing.",
+              base: "refs/heads/main",
+              head,
+              key: dave,
+            });
 
-          return {
-            approved: yield* decide({ name: "refs/heads/main", value: proposed.head }, dave),
-            direct: yield* decide({ name: "refs/heads/main", value: stranger }, dave),
-            at: yield* repository.readRef("refs/heads/main"),
-          };
-        }),
-      );
+            // Bob approves the *exact* revision, which is what an approval is.
+            yield* PullRequest.review({
+              repo: established.repoId,
+              pr,
+              head,
+              decision: "approve",
+              key: bob,
+            });
 
-      assert.equal(
-        judged.approved.ok,
-        true,
-        judged.approved.ok === false ? judged.approved.reason : "",
-      );
-      assert.equal(
-        judged.approved.ok === true ? judged.approved.allowed.expected : null,
-        judged.at,
-        "and the decision carries the swap it was made against",
-      );
-      assert.equal(judged.direct.ok, false, "a revision nobody reviewed does not move it");
+            // CI signs a result for the one check it may sign for.
+            yield* PullRequest.checkCompleted({
+              repo: established.repoId,
+              pr,
+              head,
+              name: "test",
+              provider: "ci",
+              status: "success",
+              key: ci,
+            });
 
-      // -- the repository moves host ------------------------------------------
-      const elsewhere = path.join(root, "elsewhere");
-      await fs.cp(origin, elsewhere, { recursive: true });
+            return { pr, head };
+          }),
+        );
 
-      const rebuilt = await inside(
-        elsewhere,
-        Effect.gen(function* () {
-          const stored = yield* readGenesis();
-          const trust = yield* projectTrust(stored!.genesis);
-          const state = yield* project(stored!.genesis, trust, proposed.pr);
-          return {
-            repoId: stored!.genesis.repoId,
-            members: trust.members.size,
-            title: state.title,
-            base: state.base,
-            head: state.head,
-            approvals: state.reviews.filter((review) => review.decision === "approve").length,
-            checks: state.checks.map((check) => `${check.name}=${check.status}`),
-            author: state.author,
-          };
-        }),
-      );
+        // -- the branch moves because of that, and not otherwise ----------------
+        const judged = await inside(
+          origin,
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const decide = (update: { name: string; value: Oid }, who: typeof dave) =>
+              Effect.gen(function* () {
+                const trust = yield* projectTrust(established);
+                const signer = yield* fingerprint(who.publicKey);
+                const member = trust.members.get(signer);
+                return yield* Policy.evaluate({
+                  update,
+                  principal: {
+                    member: member ?? null,
+                    capabilities: member?.capabilities ?? [],
+                  },
+                  genesis: established,
+                  trust,
+                  rules: guarded,
+                });
+              });
 
-      assert.equal(rebuilt.repoId, established.repoId, "the RepoID does not change with the host");
-      assert.equal(rebuilt.members, 3, "Dave, Bob and CI are read back out of the log");
-      assert.equal(rebuilt.title, "Add a thing");
-      assert.equal(rebuilt.base, "refs/heads/main");
-      assert.equal(rebuilt.head, proposed.head, "on the exact revision proposed");
-      assert.equal(rebuilt.approvals, 1);
-      assert.deepEqual(rebuilt.checks, ["test=success"]);
-      assert.equal(
-        rebuilt.author,
-        await Effect.runPromise(fingerprint(dave.publicKey)),
-        "and it still knows whose pull request it is",
-      );
+            const stranger = yield* repository.commitTree({
+              tree: EMPTY_TREE_OID,
+              parents: [(yield* repository.resolve("refs/heads/main"))!],
+              message: "unreviewed\n",
+              author,
+            });
 
-      // Nothing but git objects and signatures got it there: no database, no
-      // token registry, nothing the copy above could have left behind.
-      const carried = await fs.readdir(elsewhere);
-      assert.ok(carried.includes("objects"), `objects came along: ${carried.join(", ")}`);
-      assert.ok(carried.includes("refs"));
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
+            return {
+              approved: yield* decide({ name: "refs/heads/main", value: proposed.head }, dave),
+              direct: yield* decide({ name: "refs/heads/main", value: stranger }, dave),
+              at: yield* repository.readRef("refs/heads/main"),
+            };
+          }),
+        );
+
+        assert.equal(
+          judged.approved.ok,
+          true,
+          judged.approved.ok === false ? judged.approved.reason : "",
+        );
+        assert.equal(
+          judged.approved.ok === true ? judged.approved.allowed.expected : null,
+          judged.at,
+          "and the decision carries the swap it was made against",
+        );
+        assert.equal(judged.direct.ok, false, "a revision nobody reviewed does not move it");
+
+        // -- the repository moves host ------------------------------------------
+        const elsewhere = path.join(root, "elsewhere");
+        await fs.cp(origin, elsewhere, { recursive: true });
+
+        const rebuilt = await inside(
+          elsewhere,
+          Effect.gen(function* () {
+            const stored = yield* readGenesis();
+            const trust = yield* projectTrust(stored!.genesis);
+            const state = yield* project(stored!.genesis, trust, proposed.pr);
+            return {
+              repoId: stored!.genesis.repoId,
+              members: trust.members.size,
+              title: state.title,
+              base: state.base,
+              head: state.head,
+              approvals: state.reviews.filter((review) => review.decision === "approve").length,
+              checks: state.checks.map((check) => `${check.name}=${check.status}`),
+              author: state.author,
+            };
+          }),
+        );
+
+        assert.equal(
+          rebuilt.repoId,
+          established.repoId,
+          "the RepoID does not change with the host",
+        );
+        assert.equal(rebuilt.members, 3, "Dave, Bob and CI are read back out of the log");
+        assert.equal(rebuilt.title, "Add a thing");
+        assert.equal(rebuilt.base, "refs/heads/main");
+        assert.equal(rebuilt.head, proposed.head, "on the exact revision proposed");
+        assert.equal(rebuilt.approvals, 1);
+        assert.deepEqual(rebuilt.checks, ["test=success"]);
+        assert.equal(
+          rebuilt.author,
+          await Effect.runPromise(fingerprint(dave.publicKey)),
+          "and it still knows whose pull request it is",
+        );
+
+        // Nothing but git objects and signatures got it there: no database, no
+        // token registry, nothing the copy above could have left behind.
+        const carried = await fs.readdir(elsewhere);
+        assert.ok(carried.includes("objects"), `objects came along: ${carried.join(", ")}`);
+        assert.ok(carried.includes("refs"));
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
 });

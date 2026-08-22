@@ -131,47 +131,55 @@ describe.skipIf(!hasGit)("log, against git", () => {
     return merge("side");
   };
 
-  it("reports every commit a merge brought in, in git's order", async () => {
-    const tip = forked();
+  it.effect("reports every commit a merge brought in, in git's order", () =>
+    Effect.promise(async () => {
+      const tip = forked();
 
-    const expected = theirs(tip);
-    assert.equal(expected.length, 6, "root, two on main, two on side, and the merge");
-    assert.deepEqual(await ours(tip), expected);
-  });
+      const expected = theirs(tip);
+      assert.equal(expected.length, 6, "root, two on main, two on side, and the merge");
+      assert.deepEqual(await ours(tip), expected);
+    }),
+  );
 
-  it("flattens to the first parent when asked, as `git log --first-parent` does", async () => {
-    const tip = forked();
+  it.effect("flattens to the first parent when asked, as `git log --first-parent` does", () =>
+    Effect.promise(async () => {
+      const tip = forked();
 
-    const expected = theirs("--first-parent", tip);
-    assert.equal(expected.length, 4, "the side branch's own commits are not listed");
-    assert.deepEqual(await ours(tip, { firstParent: true }), expected);
-  });
+      const expected = theirs("--first-parent", tip);
+      assert.equal(expected.length, 4, "the side branch's own commits are not listed");
+      assert.deepEqual(await ours(tip, { firstParent: true }), expected);
+    }),
+  );
 
-  it("keeps git's order across nested merges", async () => {
-    commit("root");
+  it.effect("keeps git's order across nested merges", () =>
+    Effect.promise(async () => {
+      commit("root");
 
-    // Two side branches merged at different points, so the walk has to hold
-    // more than one pending side at once and still agree with git.
-    git("checkout", "-q", "-b", "a");
-    commit("a-1", "a.txt");
-    git("checkout", "-q", "main");
-    git("checkout", "-q", "-b", "b");
-    commit("b-1", "b.txt");
-    commit("b-2", "b.txt");
+      // Two side branches merged at different points, so the walk has to hold
+      // more than one pending side at once and still agree with git.
+      git("checkout", "-q", "-b", "a");
+      commit("a-1", "a.txt");
+      git("checkout", "-q", "main");
+      git("checkout", "-q", "-b", "b");
+      commit("b-1", "b.txt");
+      commit("b-2", "b.txt");
 
-    git("checkout", "-q", "main");
-    commit("main-1");
-    merge("a");
-    commit("main-2");
-    const tip = merge("b");
+      git("checkout", "-q", "main");
+      commit("main-1");
+      merge("a");
+      commit("main-2");
+      const tip = merge("b");
 
-    assert.deepEqual(await ours(tip), theirs(tip));
-  });
+      assert.deepEqual(await ours(tip), theirs(tip));
+    }),
+  );
 
-  it("reports a commit reachable by two routes exactly once", async () => {
-    const tip = forked();
+  it.effect("reports a commit reachable by two routes exactly once", () =>
+    Effect.promise(async () => {
+      const tip = forked();
 
-    const listed = await ours(tip);
-    assert.equal(new Set(listed).size, listed.length);
-  });
+      const listed = await ours(tip);
+      assert.equal(new Set(listed).size, listed.length);
+    }),
+  );
 });

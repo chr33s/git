@@ -90,102 +90,114 @@ describe("Webhooks", () => {
       ),
     );
 
-  it("posts only the refs that moved, signed the way receivers verify", async () => {
-    hook.calls.length = 0;
-    hook.reply(200);
-    await run();
-
-    assert.equal(hook.calls.length, 1);
-    const call = hook.calls[0]!;
-    assert.equal(call.event, "push");
-
-    // SAFETY: the receiver recorded the exact bytes `deliver` posted, and
-    // `deliver` writes them as this JSON.
-    const body = JSON.parse(call.body) as { event: string; refs: unknown[] };
-    assert.equal(body.event, "push");
-    // The rejected ref is not an event: nothing happened to it.
-    assert.deepEqual(body.refs, [
-      { ref: "refs/heads/main", before: "a".repeat(40), after: "b".repeat(40) },
-    ]);
-
-    // Verifiable with any off-the-shelf HMAC, over the exact bytes sent.
-    const expected = `sha256=${createHmac("sha256", "s3cret").update(call.body).digest("hex")}`;
-    assert.equal(call.signature, expected);
-    assert.equal(await Effect.runPromise(sign(call.body, "s3cret")), expected);
-  });
-
-  it("retries a 5xx and stops once it succeeds", async () => {
-    hook.calls.length = 0;
-    hook.reply(500, 503, 200);
-    await run();
-    assert.equal(hook.calls.length, 3, "two failures then a success");
-  });
-
-  it("does not retry a 4xx — the receiver said never again", async () => {
-    hook.calls.length = 0;
-    hook.reply(404, 200);
-    await run();
-    assert.equal(hook.calls.length, 1);
-  });
-
-  it("gives up after the retry budget, without failing the caller", async () => {
-    hook.calls.length = 0;
-    hook.reply(500, 500, 500, 500, 500, 500);
-    // Resolving at all is the assertion: a webhook cannot fail a push.
-    await run({ retries: 2 });
-    assert.equal(hook.calls.length, 3, "the first attempt plus two retries");
-  });
-
-  it("delivers to every subscriber, and skips the work when there are none", async () => {
-    const second = await receiver();
-    try {
+  it.effect("posts only the refs that moved, signed the way receivers verify", () =>
+    Effect.promise(async () => {
       hook.calls.length = 0;
       hook.reply(200);
-      second.reply(200);
+      await run();
+
+      assert.equal(hook.calls.length, 1);
+      const call = hook.calls[0]!;
+      assert.equal(call.event, "push");
+
+      // SAFETY: the receiver recorded the exact bytes `deliver` posted, and
+      // `deliver` writes them as this JSON.
+      const body = JSON.parse(call.body) as { event: string; refs: unknown[] };
+      assert.equal(body.event, "push");
+      // The rejected ref is not an event: nothing happened to it.
+      assert.deepEqual(body.refs, [
+        { ref: "refs/heads/main", before: "a".repeat(40), after: "b".repeat(40) },
+      ]);
+
+      // Verifiable with any off-the-shelf HMAC, over the exact bytes sent.
+      const expected = `sha256=${createHmac("sha256", "s3cret").update(call.body).digest("hex")}`;
+      assert.equal(call.signature, expected);
+      assert.equal(await Effect.runPromise(sign(call.body, "s3cret")), expected);
+    }),
+  );
+
+  it.effect("retries a 5xx and stops once it succeeds", () =>
+    Effect.promise(async () => {
+      hook.calls.length = 0;
+      hook.reply(500, 503, 200);
+      await run();
+      assert.equal(hook.calls.length, 3, "two failures then a success");
+    }),
+  );
+
+  it.effect("does not retry a 4xx — the receiver said never again", () =>
+    Effect.promise(async () => {
+      hook.calls.length = 0;
+      hook.reply(404, 200);
+      await run();
+      assert.equal(hook.calls.length, 1);
+    }),
+  );
+
+  it.effect("gives up after the retry budget, without failing the caller", () =>
+    Effect.promise(async () => {
+      hook.calls.length = 0;
+      hook.reply(500, 500, 500, 500, 500, 500);
+      // Resolving at all is the assertion: a webhook cannot fail a push.
+      await run({ retries: 2 });
+      assert.equal(hook.calls.length, 3, "the first attempt plus two retries");
+    }),
+  );
+
+  it.effect("delivers to every subscriber, and skips the work when there are none", () =>
+    Effect.promise(async () => {
+      const second = await receiver();
+      try {
+        hook.calls.length = 0;
+        hook.reply(200);
+        second.reply(200);
+        await Effect.runPromise(
+          deliver(results, { baseDelay: "1 millis" }).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                subscribersOf([
+                  { id: "1", url: hook.url, secret: "s3cret" },
+                  { id: "2", url: second.url, secret: "other" },
+                ]),
+                FetchHttpClient.layer,
+              ),
+            ),
+          ),
+        );
+        assert.equal(hook.calls.length, 1);
+        assert.equal(second.calls.length, 1);
+        // Different secrets, so the two signatures must differ.
+        assert.notEqual(hook.calls[0]?.signature, second.calls[0]?.signature);
+      } finally {
+        await second.close();
+      }
+
+      hook.calls.length = 0;
       await Effect.runPromise(
-        deliver(results, { baseDelay: "1 millis" }).pipe(
+        deliver(results).pipe(
+          Effect.provide(Layer.mergeAll(subscribersOf([]), FetchHttpClient.layer)),
+        ),
+      );
+      assert.equal(hook.calls.length, 0);
+    }),
+  );
+
+  it.effect("sends nothing when no ref moved", () =>
+    Effect.promise(async () => {
+      hook.calls.length = 0;
+      const rejected = results.filter((result) => !result.ok);
+      assert.deepEqual(eventOf(rejected), []);
+      await Effect.runPromise(
+        deliver(rejected).pipe(
           Effect.provide(
             Layer.mergeAll(
-              subscribersOf([
-                { id: "1", url: hook.url, secret: "s3cret" },
-                { id: "2", url: second.url, secret: "other" },
-              ]),
+              subscribersOf([{ id: "1", url: hook.url, secret: "s" }]),
               FetchHttpClient.layer,
             ),
           ),
         ),
       );
-      assert.equal(hook.calls.length, 1);
-      assert.equal(second.calls.length, 1);
-      // Different secrets, so the two signatures must differ.
-      assert.notEqual(hook.calls[0]?.signature, second.calls[0]?.signature);
-    } finally {
-      await second.close();
-    }
-
-    hook.calls.length = 0;
-    await Effect.runPromise(
-      deliver(results).pipe(
-        Effect.provide(Layer.mergeAll(subscribersOf([]), FetchHttpClient.layer)),
-      ),
-    );
-    assert.equal(hook.calls.length, 0);
-  });
-
-  it("sends nothing when no ref moved", async () => {
-    hook.calls.length = 0;
-    const rejected = results.filter((result) => !result.ok);
-    assert.deepEqual(eventOf(rejected), []);
-    await Effect.runPromise(
-      deliver(rejected).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            subscribersOf([{ id: "1", url: hook.url, secret: "s" }]),
-            FetchHttpClient.layer,
-          ),
-        ),
-      ),
-    );
-    assert.equal(hook.calls.length, 0);
-  });
+      assert.equal(hook.calls.length, 0);
+    }),
+  );
 });

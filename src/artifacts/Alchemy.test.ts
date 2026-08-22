@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import { describe, it } from "@effect/vitest";
 
 import type { Artifacts } from "alchemy/Cloudflare";
-import type { Effect } from "effect";
+import { Effect } from "effect";
 
 type Raw = Artifacts.RepoClient["raw"];
 
@@ -29,12 +29,14 @@ type Failure = Raw extends Effect.Effect<infer _A, infer E, infer _R> ? E : neve
 const failureIsDeclined: Failure extends { readonly _tag: string } ? true : false = true;
 
 describe("alchemy patch", () => {
-  it("defers RepoClient.raw, per the local patch-package patch", () => {
-    assert.equal(rawIsDeferred, true);
-    assert.equal(failureIsDeclined, true);
-    assert.ok(
-      fs.existsSync("patches/alchemy+2.0.0-beta.72.patch"),
-      "the patch file ships with the repository",
-    );
-  });
+  it.effect("defers RepoClient.raw, per the local patch-package patch", () =>
+    Effect.sync(() => {
+      assert.equal(rawIsDeferred, true);
+      assert.equal(failureIsDeclined, true);
+      assert.ok(
+        fs.existsSync("patches/alchemy+2.0.0-beta.72.patch"),
+        "the patch file ships with the repository",
+      );
+    }),
+  );
 });

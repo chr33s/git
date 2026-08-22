@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "@effect/vitest";
 
-import { Result } from "effect";
+import { Effect, Result } from "effect";
 
 import { hasGit } from "../testing/Git.ts";
 import {
@@ -62,130 +62,148 @@ const entry = (overrides: Partial<IndexEntry> & { readonly path: string }): Inde
 });
 
 describe("Index", () => {
-  it("round-trips entries through the DIRC format", () => {
-    const entries = [
-      entry({ path: "a.txt", oid: oid(0xaa), size: 6 }),
-      entry({ path: "src/main.ts", oid: oid(0xbb), mode: 0o100755, size: 4096 }),
-      entry({ path: "link", oid: oid(0xcc), mode: 0o120000, size: 11, assumeValid: true }),
-    ];
+  it.effect("round-trips entries through the DIRC format", () =>
+    Effect.sync(() => {
+      const entries = [
+        entry({ path: "a.txt", oid: oid(0xaa), size: 6 }),
+        entry({ path: "src/main.ts", oid: oid(0xbb), mode: 0o100755, size: 4096 }),
+        entry({ path: "link", oid: oid(0xcc), mode: 0o120000, size: 11, assumeValid: true }),
+      ];
 
-    const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
-    assert.deepEqual(
-      [...decoded].sort((a, b) => (a.path < b.path ? -1 : 1)),
-      [...entries].sort((a, b) => (a.path < b.path ? -1 : 1)),
-    );
-  });
+      const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
+      assert.deepEqual(
+        [...decoded].sort((a, b) => (a.path < b.path ? -1 : 1)),
+        [...entries].sort((a, b) => (a.path < b.path ? -1 : 1)),
+      );
+    }),
+  );
 
-  it("writes a valid header and a 20-byte trailer", () => {
-    const bytes = encodeIndex([entry({ path: "a.txt" })]);
-    assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), "DIRC");
-    const view = new DataView(bytes.buffer);
-    assert.equal(view.getUint32(4), 2);
-    assert.equal(view.getUint32(8), 1);
-    // 12 header + 72 entry (62 + 5 path + 1 NUL, rounded up to 8) + 20 trailer.
-    assert.equal(bytes.length, 12 + 72 + 20);
-  });
+  it.effect("writes a valid header and a 20-byte trailer", () =>
+    Effect.sync(() => {
+      const bytes = encodeIndex([entry({ path: "a.txt" })]);
+      assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), "DIRC");
+      const view = new DataView(bytes.buffer);
+      assert.equal(view.getUint32(4), 2);
+      assert.equal(view.getUint32(8), 1);
+      // 12 header + 72 entry (62 + 5 path + 1 NUL, rounded up to 8) + 20 trailer.
+      assert.equal(bytes.length, 12 + 72 + 20);
+    }),
+  );
 
-  it("pads every entry to a multiple of eight, at every boundary", () => {
-    // 63 + len rounded up to 8: the lengths either side of each boundary are
-    // where an off-by-one in the padding shows up.
-    for (const length of [1, 2, 7, 8, 9, 10, 16, 17, 25, 33, 64, 65, 128, 255]) {
-      const name = "p".repeat(length);
-      const bytes = encodeIndex([entry({ path: name })]);
-      const size = bytes.length - 12 - 20;
-      assert.equal(size % 8, 0, `entry for a ${length}-byte path is not 8-aligned`);
-      assert.equal(size, Math.ceil((62 + length + 1) / 8) * 8);
+  it.effect("pads every entry to a multiple of eight, at every boundary", () =>
+    Effect.sync(() => {
+      // 63 + len rounded up to 8: the lengths either side of each boundary are
+      // where an off-by-one in the padding shows up.
+      for (const length of [1, 2, 7, 8, 9, 10, 16, 17, 25, 33, 64, 65, 128, 255]) {
+        const name = "p".repeat(length);
+        const bytes = encodeIndex([entry({ path: name })]);
+        const size = bytes.length - 12 - 20;
+        assert.equal(size % 8, 0, `entry for a ${length}-byte path is not 8-aligned`);
+        assert.equal(size, Math.ceil((62 + length + 1) / 8) * 8);
 
-      const decoded = expectSuccess(decodeIndex(bytes));
-      assert.equal(decoded[0]?.path, name);
-    }
-  });
+        const decoded = expectSuccess(decodeIndex(bytes));
+        assert.equal(decoded[0]?.path, name);
+      }
+    }),
+  );
 
-  it("keeps paths of many lengths distinct in one index", () => {
-    const entries = [1, 5, 8, 9, 17, 40, 63, 100].map((length) =>
-      entry({ path: "x".repeat(length), oid: oid(length) }),
-    );
-    const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
-    assert.deepEqual(
-      decoded.map((found) => found.path).sort(),
-      entries.map((found) => found.path).sort(),
-    );
-  });
+  it.effect("keeps paths of many lengths distinct in one index", () =>
+    Effect.sync(() => {
+      const entries = [1, 5, 8, 9, 17, 40, 63, 100].map((length) =>
+        entry({ path: "x".repeat(length), oid: oid(length) }),
+      );
+      const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
+      assert.deepEqual(
+        decoded.map((found) => found.path).sort(),
+        entries.map((found) => found.path).sort(),
+      );
+    }),
+  );
 
-  it("round-trips merge stages and sorts by path then stage", () => {
-    const entries = [
-      entry({ path: "conflict.txt", oid: oid(3), stage: 3 }),
-      entry({ path: "conflict.txt", oid: oid(1), stage: 1 }),
-      entry({ path: "conflict.txt", oid: oid(2), stage: 2 }),
-      entry({ path: "a.txt", oid: oid(9) }),
-    ];
+  it.effect("round-trips merge stages and sorts by path then stage", () =>
+    Effect.sync(() => {
+      const entries = [
+        entry({ path: "conflict.txt", oid: oid(3), stage: 3 }),
+        entry({ path: "conflict.txt", oid: oid(1), stage: 1 }),
+        entry({ path: "conflict.txt", oid: oid(2), stage: 2 }),
+        entry({ path: "a.txt", oid: oid(9) }),
+      ];
 
-    const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
-    assert.deepEqual(
-      decoded.map((found) => [found.path, found.stage]),
-      [
-        ["a.txt", 0],
-        ["conflict.txt", 1],
-        ["conflict.txt", 2],
-        ["conflict.txt", 3],
-      ],
-    );
-  });
+      const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
+      assert.deepEqual(
+        decoded.map((found) => [found.path, found.stage]),
+        [
+          ["a.txt", 0],
+          ["conflict.txt", 1],
+          ["conflict.txt", 2],
+          ["conflict.txt", 3],
+        ],
+      );
+    }),
+  );
 
-  it("preserves the assume-valid bit without disturbing the stage", () => {
-    const entries = [entry({ path: "a.txt", stage: 2, assumeValid: true })];
-    const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
-    assert.equal(decoded[0]?.assumeValid, true);
-    assert.equal(decoded[0]?.stage, 2);
-  });
+  it.effect("preserves the assume-valid bit without disturbing the stage", () =>
+    Effect.sync(() => {
+      const entries = [entry({ path: "a.txt", stage: 2, assumeValid: true })];
+      const decoded = expectSuccess(decodeIndex(encodeIndex(entries)));
+      assert.equal(decoded[0]?.assumeValid, true);
+      assert.equal(decoded[0]?.stage, 2);
+    }),
+  );
 
-  it("fails when the trailer checksum does not match", () => {
-    const bytes = encodeIndex([entry({ path: "a.txt" }), entry({ path: "b.txt" })]);
-    const corrupt = bytes.slice();
-    corrupt[40] = corrupt[40]! ^ 0xff;
+  it.effect("fails when the trailer checksum does not match", () =>
+    Effect.sync(() => {
+      const bytes = encodeIndex([entry({ path: "a.txt" }), entry({ path: "b.txt" })]);
+      const corrupt = bytes.slice();
+      corrupt[40] = corrupt[40]! ^ 0xff;
 
-    const failure = expectFailure(decodeIndex(corrupt));
-    assert.equal(failure._tag, "Invalid");
-    assert.match(failure.reason, /checksum/);
-  });
+      const failure = expectFailure(decodeIndex(corrupt));
+      assert.equal(failure._tag, "Invalid");
+      assert.match(failure.reason, /checksum/);
+    }),
+  );
 
-  it("fails on a bad signature and an unsupported version", () => {
-    const bytes = encodeIndex([entry({ path: "a.txt" })]);
+  it.effect("fails on a bad signature and an unsupported version", () =>
+    Effect.sync(() => {
+      const bytes = encodeIndex([entry({ path: "a.txt" })]);
 
-    const badMagic = bytes.slice();
-    badMagic[0] = 0x44 ^ 0x20;
-    assert.match(expectFailure(decodeIndex(badMagic)).reason, /signature/);
+      const badMagic = bytes.slice();
+      badMagic[0] = 0x44 ^ 0x20;
+      assert.match(expectFailure(decodeIndex(badMagic)).reason, /signature/);
 
-    const badVersion = bytes.slice();
-    new DataView(badVersion.buffer).setUint32(4, 4);
-    assert.match(expectFailure(decodeIndex(badVersion)).reason, /version 4/);
+      const badVersion = bytes.slice();
+      new DataView(badVersion.buffer).setUint32(4, 4);
+      assert.match(expectFailure(decodeIndex(badVersion)).reason, /version 4/);
 
-    assert.match(expectFailure(decodeIndex(new Uint8Array(8))).reason, /truncated/);
-  });
+      assert.match(expectFailure(decodeIndex(new Uint8Array(8))).reason, /truncated/);
+    }),
+  );
 
-  it("adds, replaces, removes and finds entries", () => {
-    const first = addEntry([], entry({ path: "b.txt", oid: oid(1) }));
-    const second = addEntry(first, entry({ path: "a.txt", oid: oid(2) }));
-    assert.deepEqual(
-      second.map((found) => found.path),
-      ["a.txt", "b.txt"],
-    );
+  it.effect("adds, replaces, removes and finds entries", () =>
+    Effect.sync(() => {
+      const first = addEntry([], entry({ path: "b.txt", oid: oid(1) }));
+      const second = addEntry(first, entry({ path: "a.txt", oid: oid(2) }));
+      assert.deepEqual(
+        second.map((found) => found.path),
+        ["a.txt", "b.txt"],
+      );
 
-    const replaced = addEntry(second, entry({ path: "b.txt", oid: oid(3) }));
-    assert.equal(replaced.length, 2);
-    assert.equal(findEntry(replaced, "b.txt")?.oid, oid(3));
+      const replaced = addEntry(second, entry({ path: "b.txt", oid: oid(3) }));
+      assert.equal(replaced.length, 2);
+      assert.equal(findEntry(replaced, "b.txt")?.oid, oid(3));
 
-    // A different stage is a different entry, not a replacement.
-    const staged = addEntry(replaced, entry({ path: "b.txt", oid: oid(4), stage: 2 }));
-    assert.equal(staged.length, 3);
+      // A different stage is a different entry, not a replacement.
+      const staged = addEntry(replaced, entry({ path: "b.txt", oid: oid(4), stage: 2 }));
+      assert.equal(staged.length, 3);
 
-    // ...and removing drops every stage of the path.
-    assert.deepEqual(
-      removeEntry(staged, "b.txt").map((found) => found.path),
-      ["a.txt"],
-    );
-    assert.equal(findEntry(removeEntry(staged, "b.txt"), "b.txt"), undefined);
-  });
+      // ...and removing drops every stage of the path.
+      assert.deepEqual(
+        removeEntry(staged, "b.txt").map((found) => found.path),
+        ["a.txt"],
+      );
+      assert.equal(findEntry(removeEntry(staged, "b.txt"), "b.txt"), undefined);
+    }),
+  );
 });
 
 describe.skipIf(!hasGit)("Index interop with git", () => {
@@ -200,111 +218,117 @@ describe.skipIf(!hasGit)("Index interop with git", () => {
     return root;
   };
 
-  it("writes an index git can read", async () => {
-    const root = await init();
-    try {
-      // The oids have to exist as real blobs, or ls-files is reading a promise
-      // git cannot check.
-      const files = [
-        { path: "a.txt", content: "hello\n", mode: 0o100644 },
-        { path: "src/deeply/nested/module.ts", content: "export {};\n", mode: 0o100644 },
-        { path: "run.sh", content: "#!/bin/sh\n", mode: 0o100755 },
-        { path: `${"n".repeat(120)}.txt`, content: "long\n", mode: 0o100644 },
-      ];
-      // SAFETY: `git hash-object` prints the forty-hex oid of the blob it
-      // just wrote, which is exactly the Oid brand's domain.
-      const entries = files.map((file) =>
-        entry({
-          path: file.path,
-          mode: file.mode,
-          size: file.content.length,
-          oid: execFileSync("git", ["hash-object", "-w", "--stdin"], {
-            cwd: root,
-            encoding: "utf8",
-            input: file.content,
-          }).trim() as Oid,
-        }),
-      );
+  it.effect("writes an index git can read", () =>
+    Effect.promise(async () => {
+      const root = await init();
+      try {
+        // The oids have to exist as real blobs, or ls-files is reading a promise
+        // git cannot check.
+        const files = [
+          { path: "a.txt", content: "hello\n", mode: 0o100644 },
+          { path: "src/deeply/nested/module.ts", content: "export {};\n", mode: 0o100644 },
+          { path: "run.sh", content: "#!/bin/sh\n", mode: 0o100755 },
+          { path: `${"n".repeat(120)}.txt`, content: "long\n", mode: 0o100644 },
+        ];
+        // SAFETY: `git hash-object` prints the forty-hex oid of the blob it
+        // just wrote, which is exactly the Oid brand's domain.
+        const entries = files.map((file) =>
+          entry({
+            path: file.path,
+            mode: file.mode,
+            size: file.content.length,
+            oid: execFileSync("git", ["hash-object", "-w", "--stdin"], {
+              cwd: root,
+              encoding: "utf8",
+              input: file.content,
+            }).trim() as Oid,
+          }),
+        );
 
-      await fs.writeFile(path.join(root, ".git", "index"), encodeIndex(entries));
+        await fs.writeFile(path.join(root, ".git", "index"), encodeIndex(entries));
 
-      const listed = git(root, "ls-files", "--stage")
-        .split("\n")
-        .map((line) => {
-          const [meta = "", filePath = ""] = line.split("\t");
-          const [mode = "", found = "", stage = ""] = meta.split(" ");
-          return { mode, oid: found, stage, path: filePath };
-        });
+        const listed = git(root, "ls-files", "--stage")
+          .split("\n")
+          .map((line) => {
+            const [meta = "", filePath = ""] = line.split("\t");
+            const [mode = "", found = "", stage = ""] = meta.split(" ");
+            return { mode, oid: found, stage, path: filePath };
+          });
 
-      assert.equal(listed.length, entries.length);
-      for (const expected of entries) {
-        const found = listed.find((line) => line.path === expected.path);
-        assert.ok(found !== undefined, `git did not list ${expected.path}`);
-        assert.equal(found.oid, expected.oid);
-        assert.equal(found.mode, expected.mode.toString(8));
-        assert.equal(found.stage, "0");
+        assert.equal(listed.length, entries.length);
+        for (const expected of entries) {
+          const found = listed.find((line) => line.path === expected.path);
+          assert.ok(found !== undefined, `git did not list ${expected.path}`);
+          assert.equal(found.oid, expected.oid);
+          assert.equal(found.mode, expected.mode.toString(8));
+          assert.equal(found.stage, "0");
+        }
+
+        // write-tree consumes the whole index — modes, oids and all — and refuses
+        // an index whose trailer or padding is wrong.
+        assert.match(git(root, "write-tree"), /^[0-9a-f]{40}$/);
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
       }
+    }),
+  );
 
-      // write-tree consumes the whole index — modes, oids and all — and refuses
-      // an index whose trailer or padding is wrong.
-      assert.match(git(root, "write-tree"), /^[0-9a-f]{40}$/);
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+  it.effect("reads an index git wrote", () =>
+    Effect.promise(async () => {
+      const root = await init();
+      try {
+        await fs.mkdir(path.join(root, "lib"), { recursive: true });
+        await fs.writeFile(path.join(root, "a.txt"), "hello\n");
+        await fs.writeFile(path.join(root, "lib", "util.ts"), "export const one = 1;\n");
+        git(root, "add", "a.txt", "lib/util.ts");
 
-  it("reads an index git wrote", async () => {
-    const root = await init();
-    try {
-      await fs.mkdir(path.join(root, "lib"), { recursive: true });
-      await fs.writeFile(path.join(root, "a.txt"), "hello\n");
-      await fs.writeFile(path.join(root, "lib", "util.ts"), "export const one = 1;\n");
-      git(root, "add", "a.txt", "lib/util.ts");
+        const bytes = await fs.readFile(path.join(root, ".git", "index"));
+        const decoded = expectSuccess(decodeIndex(new Uint8Array(bytes)));
 
-      const bytes = await fs.readFile(path.join(root, ".git", "index"));
-      const decoded = expectSuccess(decodeIndex(new Uint8Array(bytes)));
+        const listed = git(root, "ls-files", "--stage")
+          .split("\n")
+          .map((line) => {
+            const [meta = "", filePath = ""] = line.split("\t");
+            const [mode = "", found = ""] = meta.split(" ");
+            return { mode, oid: found, path: filePath };
+          });
 
-      const listed = git(root, "ls-files", "--stage")
-        .split("\n")
-        .map((line) => {
-          const [meta = "", filePath = ""] = line.split("\t");
-          const [mode = "", found = ""] = meta.split(" ");
-          return { mode, oid: found, path: filePath };
-        });
+        assert.deepEqual(
+          decoded.map((found) => ({
+            mode: found.mode.toString(8),
+            oid: found.oid,
+            path: found.path,
+          })),
+          listed,
+        );
+        assert.equal(findEntry(decoded, "a.txt")?.size, 6);
+        // git fills the stat cache in; a zeroed mtime would mean we misread it.
+        assert.ok((findEntry(decoded, "a.txt")?.mtimeSeconds ?? 0) > 1_600_000_000);
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
 
-      assert.deepEqual(
-        decoded.map((found) => ({
-          mode: found.mode.toString(8),
-          oid: found.oid,
-          path: found.path,
-        })),
-        listed,
-      );
-      assert.equal(findEntry(decoded, "a.txt")?.size, 6);
-      // git fills the stat cache in; a zeroed mtime would mean we misread it.
-      assert.ok((findEntry(decoded, "a.txt")?.mtimeSeconds ?? 0) > 1_600_000_000);
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+  it.effect("re-encodes git's index to the same bytes", () =>
+    Effect.promise(async () => {
+      const root = await init();
+      try {
+        await fs.writeFile(path.join(root, "a.txt"), "hello\n");
+        await fs.writeFile(path.join(root, "beta.md"), "# beta\n");
+        git(root, "add", ".");
 
-  it("re-encodes git's index to the same bytes", async () => {
-    const root = await init();
-    try {
-      await fs.writeFile(path.join(root, "a.txt"), "hello\n");
-      await fs.writeFile(path.join(root, "beta.md"), "# beta\n");
-      git(root, "add", ".");
-
-      const bytes = new Uint8Array(await fs.readFile(path.join(root, ".git", "index")));
-      const decoded = expectSuccess(decodeIndex(bytes));
-      // git appends a TREE extension, so compare only the part we write.
-      const ours = encodeIndex(decoded);
-      assert.deepEqual(
-        [...ours.subarray(0, ours.length - 20)],
-        [...bytes.subarray(0, ours.length - 20)],
-      );
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+        const bytes = new Uint8Array(await fs.readFile(path.join(root, ".git", "index")));
+        const decoded = expectSuccess(decodeIndex(bytes));
+        // git appends a TREE extension, so compare only the part we write.
+        const ours = encodeIndex(decoded);
+        assert.deepEqual(
+          [...ours.subarray(0, ours.length - 20)],
+          [...bytes.subarray(0, ours.length - 20)],
+        );
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
 });

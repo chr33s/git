@@ -139,173 +139,189 @@ describe("cli wake", () => {
     return { ...fixture, head, pr: opened.pr };
   };
 
-  it("wakes once for an event, and not again for the same one", async () => {
-    await withPullRequest();
-    await writeRules([recorder(["pr.opened"])]);
+  it.effect("wakes once for an event, and not again for the same one", () =>
+    Effect.promise(async () => {
+      await withPullRequest();
+      await writeRules([recorder(["pr.opened"])]);
 
-    const first = await cli(["wake", "--root", root, "project"]);
-    assert.match(first, /1 rule\(s\) run/);
-    const woken = await lines();
-    assert.equal(woken.length, 1);
-    assert.match(woken[0] ?? "", /^pr\.opened refs\/hub\/pr\//);
-
-    // The cursor advanced, so the same state wakes nothing: a hook that fires
-    // twice, or a timer racing a hook, must not start the work twice.
-    const again = await cli(["wake", "--root", root, "project"]);
-    assert.match(again, /0 rule\(s\) run/);
-    assert.equal((await lines()).length, 1);
-  });
-
-  it("wakes for what arrived since the last run, and passes it through the environment", async () => {
-    const where = await withPullRequest();
-    await writeRules([recorder(["*"])]);
-    await cli(["wake", "--root", root, "project"]);
-
-    await inRepository(
-      project,
-      PullRequest.comment({
-        repo: where.repoId,
-        pr: where.pr,
-        body: "looks right to me",
-        key: where.member,
-      }),
-    );
-
-    const second = await cli(["wake", "--root", root, "project"]);
-    assert.match(second, /1 rule\(s\) run/);
-
-    const woken = await lines();
-    assert.equal(woken.length, 2, `one line per event: ${JSON.stringify(woken)}`);
-    assert.match(woken[0] ?? "", /^pr\.opened refs\/hub\/pr\//);
-    assert.match(woken[1] ?? "", /^comment\.created refs\/hub\/pr\//);
-  });
-
-  it("leaves the cursor where it was when a woken command fails, and replays it", async () => {
-    await withPullRequest();
-    await writeRules([
-      { ref: "refs/hub/pr/*", on: ["*"], run: [process.execPath, "-e", "process.exit(3)"] },
-    ]);
-
-    const failed = await failing(["wake", "--root", root, "project"]);
-    assert.match(failed, /exited 3/);
-
-    // Replayed rather than lost. A woken command re-reads the refs anyway, so
-    // arriving twice costs a wasted start while never arriving costs the work.
-    await writeRules([recorder(["*"])]);
-    const retried = await cli(["wake", "--root", root, "project"]);
-    assert.match(retried, /1 rule\(s\) run/);
-    assert.equal((await lines()).length, 1);
-  });
-
-  it("says what it would do without doing it", async () => {
-    await withPullRequest();
-    await writeRules([recorder(["*"])]);
-
-    const dry = await cli(["wake", "--root", root, "--dry-run", "project"]);
-    assert.match(dry, /would run/);
-    assert.deepEqual(await lines(), [], "a dry run runs nothing");
-
-    // And leaves the cursor alone, so the real run still has the event.
-    const real = await cli(["wake", "--root", root, "project"]);
-    assert.match(real, /1 rule\(s\) run/);
-    assert.equal((await lines()).length, 1);
-  });
-
-  it("wakes from a push, when the host was told to", async () => {
-    const where = await withPullRequest();
-    await writeRules([recorder(["*"])]);
-
-    // A client with something to push. What it pushes is a source branch —
-    // the wake is a walk, not a delivery, so the push only has to happen.
-    const client = path.join(root, "client");
-    await fs.mkdir(client, { recursive: true });
-    await cli(["init", "--root", client, "copy"]);
-    await inRepository(
-      path.join(client, "copy"),
-      Effect.gen(function* () {
-        const repository = yield* GitRepository.Repository;
-        yield* repository.commit({
-          branch: "refs/heads/topic",
-          tree: EMPTY_TREE_OID,
-          message: "from the client",
-          author: {
-            name: "Dev",
-            email: "dev@example.com",
-            at: new Date(1_700_000_100_000),
-            offset: 0,
-          },
-        });
-      }),
-    );
-
-    const server = await serve({ root, wake: true });
-    try {
-      await cli([
-        "push",
-        "--root",
-        client,
-        "--token",
-        where.credential,
-        "copy",
-        `${server.url}/project`,
-        "topic",
-      ]);
-
-      // Forked off the response, so the push does not wait for it — which is
-      // the point, and why this waits here instead.
-      const deadline = Date.now() + 10_000;
-      while ((await lines()).length === 0 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      const first = await cli(["wake", "--root", root, "project"]);
+      assert.match(first, /1 rule\(s\) run/);
       const woken = await lines();
-      assert.equal(
-        woken.length,
-        1,
-        `the push should have woken the rule: ${JSON.stringify(woken)}`,
-      );
+      assert.equal(woken.length, 1);
       assert.match(woken[0] ?? "", /^pr\.opened refs\/hub\/pr\//);
 
-      // The rule having run is not the pass having finished: the fork advances
-      // its bookmark afterwards, and a teardown that removed the directory in
-      // between failed with ENOTEMPTY — intermittently, which is the worst way
-      // for a suite to fail. The bookmark is the pass's last write, so waiting
-      // for it is waiting for the fork to be done.
-      const bookmark = path.join(project, "wake.cursor.json");
-      while (
-        !(await fs
-          .access(bookmark)
-          .then(() => true)
-          .catch(() => false)) &&
-        Date.now() < deadline
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
+      // The cursor advanced, so the same state wakes nothing: a hook that fires
+      // twice, or a timer racing a hook, must not start the work twice.
+      const again = await cli(["wake", "--root", root, "project"]);
+      assert.match(again, /0 rule\(s\) run/);
+      assert.equal((await lines()).length, 1);
+    }),
+  );
+
+  it.effect(
+    "wakes for what arrived since the last run, and passes it through the environment",
+    () =>
+      Effect.promise(async () => {
+        const where = await withPullRequest();
+        await writeRules([recorder(["*"])]);
+        await cli(["wake", "--root", root, "project"]);
+
+        await inRepository(
+          project,
+          PullRequest.comment({
+            repo: where.repoId,
+            pr: where.pr,
+            body: "looks right to me",
+            key: where.member,
+          }),
+        );
+
+        const second = await cli(["wake", "--root", root, "project"]);
+        assert.match(second, /1 rule\(s\) run/);
+
+        const woken = await lines();
+        assert.equal(woken.length, 2, `one line per event: ${JSON.stringify(woken)}`);
+        assert.match(woken[0] ?? "", /^pr\.opened refs\/hub\/pr\//);
+        assert.match(woken[1] ?? "", /^comment\.created refs\/hub\/pr\//);
+      }),
+  );
+
+  it.effect("leaves the cursor where it was when a woken command fails, and replays it", () =>
+    Effect.promise(async () => {
+      await withPullRequest();
+      await writeRules([
+        { ref: "refs/hub/pr/*", on: ["*"], run: [process.execPath, "-e", "process.exit(3)"] },
+      ]);
+
+      const failed = await failing(["wake", "--root", root, "project"]);
+      assert.match(failed, /exited 3/);
+
+      // Replayed rather than lost. A woken command re-reads the refs anyway, so
+      // arriving twice costs a wasted start while never arriving costs the work.
+      await writeRules([recorder(["*"])]);
+      const retried = await cli(["wake", "--root", root, "project"]);
+      assert.match(retried, /1 rule\(s\) run/);
+      assert.equal((await lines()).length, 1);
+    }),
+  );
+
+  it.effect("says what it would do without doing it", () =>
+    Effect.promise(async () => {
+      await withPullRequest();
+      await writeRules([recorder(["*"])]);
+
+      const dry = await cli(["wake", "--root", root, "--dry-run", "project"]);
+      assert.match(dry, /would run/);
+      assert.deepEqual(await lines(), [], "a dry run runs nothing");
+
+      // And leaves the cursor alone, so the real run still has the event.
+      const real = await cli(["wake", "--root", root, "project"]);
+      assert.match(real, /1 rule\(s\) run/);
+      assert.equal((await lines()).length, 1);
+    }),
+  );
+
+  it.effect("wakes from a push, when the host was told to", () =>
+    Effect.promise(async () => {
+      const where = await withPullRequest();
+      await writeRules([recorder(["*"])]);
+
+      // A client with something to push. What it pushes is a source branch —
+      // the wake is a walk, not a delivery, so the push only has to happen.
+      const client = path.join(root, "client");
+      await fs.mkdir(client, { recursive: true });
+      await cli(["init", "--root", client, "copy"]);
+      await inRepository(
+        path.join(client, "copy"),
+        Effect.gen(function* () {
+          const repository = yield* GitRepository.Repository;
+          yield* repository.commit({
+            branch: "refs/heads/topic",
+            tree: EMPTY_TREE_OID,
+            message: "from the client",
+            author: {
+              name: "Dev",
+              email: "dev@example.com",
+              at: new Date(1_700_000_100_000),
+              offset: 0,
+            },
+          });
+        }),
+      );
+
+      const server = await serve({ root, wake: true });
+      try {
+        await cli([
+          "push",
+          "--root",
+          client,
+          "--token",
+          where.credential,
+          "copy",
+          `${server.url}/project`,
+          "topic",
+        ]);
+
+        // Forked off the response, so the push does not wait for it — which is
+        // the point, and why this waits here instead.
+        const deadline = Date.now() + 10_000;
+        while ((await lines()).length === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const woken = await lines();
+        assert.equal(
+          woken.length,
+          1,
+          `the push should have woken the rule: ${JSON.stringify(woken)}`,
+        );
+        assert.match(woken[0] ?? "", /^pr\.opened refs\/hub\/pr\//);
+
+        // The rule having run is not the pass having finished: the fork advances
+        // its bookmark afterwards, and a teardown that removed the directory in
+        // between failed with ENOTEMPTY — intermittently, which is the worst way
+        // for a suite to fail. The bookmark is the pass's last write, so waiting
+        // for it is waiting for the fork to be done.
+        const bookmark = path.join(project, "wake.cursor.json");
+        while (
+          !(await fs
+            .access(bookmark)
+            .then(() => true)
+            .catch(() => false)) &&
+          Date.now() < deadline
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      } finally {
+        await server.close();
       }
-    } finally {
-      await server.close();
-    }
-  });
+    }),
+  );
 
-  it("refuses a rule for a ref it never walks, and says when one matches nothing", async () => {
-    await withPullRequest();
+  it.effect("refuses a rule for a ref it never walks, and says when one matches nothing", () =>
+    Effect.promise(async () => {
+      await withPullRequest();
 
-    // A rule outside the one namespace a wake walks can never fire, so it is
-    // refused where it is written rather than accepted and ignored.
-    await writeRules([{ ref: "refs/heads/main", on: ["*"], run: [process.execPath, "-e", ""] }]);
-    const refused = await failing(["wake", "--root", root, "project"]);
-    assert.match(refused, /watches a ref this never walks/);
+      // A rule outside the one namespace a wake walks can never fire, so it is
+      // refused where it is written rather than accepted and ignored.
+      await writeRules([{ ref: "refs/heads/main", on: ["*"], run: [process.execPath, "-e", ""] }]);
+      const refused = await failing(["wake", "--root", root, "project"]);
+      assert.match(refused, /watches a ref this never walks/);
 
-    // And one that is in the namespace but matches nothing here — a typo the
-    // file cannot catch — is reported instead of passing as "nothing to do".
-    await writeRules([{ ref: "refs/hub/prs/*", on: ["*"], run: [process.execPath, "-e", ""] }]);
-    const quiet = await cli(["wake", "--root", root, "project"]);
-    assert.match(quiet, /watches nothing here/);
-  });
+      // And one that is in the namespace but matches nothing here — a typo the
+      // file cannot catch — is reported instead of passing as "nothing to do".
+      await writeRules([{ ref: "refs/hub/prs/*", on: ["*"], run: [process.execPath, "-e", ""] }]);
+      const quiet = await cli(["wake", "--root", root, "project"]);
+      assert.match(quiet, /watches nothing here/);
+    }),
+  );
 
-  it("refuses rules it cannot read rather than treating them as none", async () => {
-    await withPullRequest();
-    await fs.writeFile(path.join(project, "wake.json"), "{ this is not json");
+  it.effect("refuses rules it cannot read rather than treating them as none", () =>
+    Effect.promise(async () => {
+      await withPullRequest();
+      await fs.writeFile(path.join(project, "wake.json"), "{ this is not json");
 
-    const refused = await failing(["wake", "--root", root, "project"]);
-    assert.match(refused, /not valid JSON/);
-  });
+      const refused = await failing(["wake", "--root", root, "project"]);
+      assert.match(refused, /not valid JSON/);
+    }),
+  );
 });

@@ -82,84 +82,90 @@ const history = Effect.gen(function* () {
 });
 
 describe("Maintenance.deltaOrder", () => {
-  it("groups same-named objects adjacently, largest first, types apart", async () => {
-    const { ordered, storyOids, types } = await scenario(
-      Effect.gen(function* () {
-        const { classified, objects, storyOids } = yield* history;
-        const ordered = deltaOrder(classified);
-        const types: string[] = [];
-        for (const oid of ordered) types.push((yield* objects.read(oid)).type);
-        return { ordered, storyOids, types };
-      }),
-    );
+  it.effect("groups same-named objects adjacently, largest first, types apart", () =>
+    Effect.promise(async () => {
+      const { ordered, storyOids, types } = await scenario(
+        Effect.gen(function* () {
+          const { classified, objects, storyOids } = yield* history;
+          const ordered = deltaOrder(classified);
+          const types: string[] = [];
+          for (const oid of ordered) types.push((yield* objects.read(oid)).type);
+          return { ordered, storyOids, types };
+        }),
+      );
 
-    // Type-major: commits, then trees, then blobs, with no interleaving.
-    const boundaries = types.filter((type, index) => types[index - 1] !== type);
-    assert.deepEqual(boundaries, ["commit", "tree", "blob"]);
+      // Type-major: commits, then trees, then blobs, with no interleaving.
+      const boundaries = types.filter((type, index) => types[index - 1] !== type);
+      assert.deepEqual(boundaries, ["commit", "tree", "blob"]);
 
-    // The three story versions sit in one run, sizes 6000 > 4000 > 2000 —
-    // which is versions 1, 2, 0, not their commit order.
-    const positions = storyOids.map((oid) => ordered.indexOf(oid));
-    const run = [...positions].sort((left, right) => left - right);
-    assert.deepEqual(run, [run[0]!, run[0]! + 1, run[0]! + 2]);
-    assert.deepEqual(
-      run.map((at) => ordered[at]),
-      [storyOids[1], storyOids[2], storyOids[0]],
-    );
-  });
+      // The three story versions sit in one run, sizes 6000 > 4000 > 2000 —
+      // which is versions 1, 2, 0, not their commit order.
+      const positions = storyOids.map((oid) => ordered.indexOf(oid));
+      const run = [...positions].sort((left, right) => left - right);
+      assert.deepEqual(run, [run[0]!, run[0]! + 1, run[0]! + 2]);
+      assert.deepEqual(
+        run.map((at) => ordered[at]),
+        [storyOids[1], storyOids[2], storyOids[0]],
+      );
+    }),
+  );
 
-  it("is worth real bytes against the same writer fed walk order", async () => {
-    const { orderedSize, walkSize } = await scenario(
-      Effect.gen(function* () {
-        const { classified, objects, walk } = yield* history;
-        const ordered = deltaOrder(classified);
-        const packed = (oids: ReadonlyArray<Oid>) =>
-          Stream.runCollect(
-            Pack.pack(oids, { deltify: {} }).pipe(Stream.provideService(ObjectStore, objects)),
-          ).pipe(Effect.map((chunks) => chunks.reduce((sum, chunk) => sum + chunk.length, 0)));
-        return {
-          orderedSize: yield* packed(ordered),
-          walkSize: yield* packed(walk),
-        };
-      }),
-    );
+  it.effect("is worth real bytes against the same writer fed walk order", () =>
+    Effect.promise(async () => {
+      const { orderedSize, walkSize } = await scenario(
+        Effect.gen(function* () {
+          const { classified, objects, walk } = yield* history;
+          const ordered = deltaOrder(classified);
+          const packed = (oids: ReadonlyArray<Oid>) =>
+            Stream.runCollect(
+              Pack.pack(oids, { deltify: {} }).pipe(Stream.provideService(ObjectStore, objects)),
+            ).pipe(Effect.map((chunks) => chunks.reduce((sum, chunk) => sum + chunk.length, 0)));
+          return {
+            orderedSize: yield* packed(ordered),
+            walkSize: yield* packed(walk),
+          };
+        }),
+      );
 
-    assert.ok(
-      orderedSize < walkSize,
-      `ordered pack (${orderedSize}) should undercut walk order (${walkSize})`,
-    );
-  });
+      assert.ok(
+        orderedSize < walkSize,
+        `ordered pack (${orderedSize}) should undercut walk order (${walkSize})`,
+      );
+    }),
+  );
 });
 
 describe("Maintenance.gc with repack", () => {
-  it("tolerates a dangling ref: everything readable is packed, nothing fails", async () => {
-    const { packed, refs } = await scenario(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const refStore = yield* RefStore;
-        yield* repository.commit({
-          branch: "main",
-          tree: EMPTY_TREE_OID,
-          message: "real",
-          author: alice,
-        });
-        // The exact case gc's tolerance comment promises to survive: a ref
-        // whose target no store holds. The walk records the oid as seen but
-        // never classifies it, so repack must neither pack nor trip on it.
-        // SAFETY: forty lowercase hex characters by construction, which is
-        // exactly what the Oid brand stands for.
-        const fake = "a".repeat(40) as Oid;
-        yield* refStore.apply([{ name: "refs/heads/dangling", value: fake, reason: "test" }]);
-        const report = yield* repository.gc({ repack: true });
-        return { packed: report.packed, refs: yield* repository.fsck };
-      }),
-    );
+  it.effect("tolerates a dangling ref: everything readable is packed, nothing fails", () =>
+    Effect.promise(async () => {
+      const { packed, refs } = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const refStore = yield* RefStore;
+          yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "real",
+            author: alice,
+          });
+          // The exact case gc's tolerance comment promises to survive: a ref
+          // whose target no store holds. The walk records the oid as seen but
+          // never classifies it, so repack must neither pack nor trip on it.
+          // SAFETY: forty lowercase hex characters by construction, which is
+          // exactly what the Oid brand stands for.
+          const fake = "a".repeat(40) as Oid;
+          yield* refStore.apply([{ name: "refs/heads/dangling", value: fake, reason: "test" }]);
+          const report = yield* repository.gc({ repack: true });
+          return { packed: report.packed, refs: yield* repository.fsck };
+        }),
+      );
 
-    assert.notEqual(packed, undefined);
-    assert.equal(packed!.objects, 1);
-    assert.deepEqual(
-      refs.danglingRefs.map((entry) => entry.ref),
-      ["refs/heads/dangling"],
-    );
-  });
+      assert.notEqual(packed, undefined);
+      assert.equal(packed!.objects, 1);
+      assert.deepEqual(
+        refs.danglingRefs.map((entry) => entry.ref),
+        ["refs/heads/dangling"],
+      );
+    }),
+  );
 });

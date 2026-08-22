@@ -115,87 +115,95 @@ const listing = async (root: string): Promise<ReadonlyArray<string>> => {
 };
 
 describe.skipIf(!hasTar)("Archive through the system tar", () => {
-  it("writes a tar the system tar extracts, modes and symlinks included", async () => {
-    const { into, root } = await untar(await collect("tar"), "-xf");
-    try {
-      assert.deepEqual(
-        await listing(into),
-        [LONG_FLAT, "bin/run.sh", LONG_SPLIT, "link.txt", "readme.md", "src/main.ts"].sort(),
+  it.effect("writes a tar the system tar extracts, modes and symlinks included", () =>
+    Effect.promise(async () => {
+      const { into, root } = await untar(await collect("tar"), "-xf");
+      try {
+        assert.deepEqual(
+          await listing(into),
+          [LONG_FLAT, "bin/run.sh", LONG_SPLIT, "link.txt", "readme.md", "src/main.ts"].sort(),
+        );
+
+        for (const [file, content] of CONTENTS) {
+          assert.equal(await fs.readFile(path.join(into, file), "utf8"), content);
+        }
+
+        // The bit git records in mode 100755, and the only thing an archive can
+        // lose that makes the extracted tree unusable.
+        const script = await fs.stat(path.join(into, "bin/run.sh"));
+        assert.equal(script.mode & 0o111, 0o111);
+        assert.equal((await fs.stat(path.join(into, "readme.md"))).mode & 0o111, 0);
+
+        const link = await fs.lstat(path.join(into, "link.txt"));
+        assert.ok(link.isSymbolicLink());
+        assert.equal(await fs.readlink(path.join(into, "link.txt")), "readme.md");
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
+
+  it.effect("writes a tar.gz the system tar decompresses", () =>
+    Effect.promise(async () => {
+      const bytes = await collect("tar.gz");
+      // gzip's own magic, before tar ever sees it.
+      assert.deepEqual([...bytes.subarray(0, 3)], [0x1f, 0x8b, 0x08]);
+
+      const { into, root } = await untar(bytes, "-xzf");
+      try {
+        assert.equal(await fs.readFile(path.join(into, "readme.md"), "utf8"), "hello\n");
+        assert.equal(await fs.readFile(path.join(into, LONG_SPLIT), "utf8"), CONTENTS[2]![1]);
+        assert.equal(await fs.readFile(path.join(into, LONG_FLAT), "utf8"), CONTENTS[3]![1]);
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
+
+  it.effect("puts everything under the prefix", () =>
+    Effect.promise(async () => {
+      const { into, root } = await untar(await collect("tar", "myrepo-v1"), "-xf");
+      try {
+        const files = await listing(into);
+        assert.ok(files.length > 0);
+        assert.ok(files.every((file) => file.startsWith("myrepo-v1/")));
+        assert.equal(await fs.readFile(path.join(into, "myrepo-v1/readme.md"), "utf8"), "hello\n");
+        assert.ok((await fs.stat(path.join(into, "myrepo-v1"))).isDirectory());
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
+
+  it.effect("serves an archive request, extension picking the format", () =>
+    Effect.promise(async () => {
+      const response = await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* seed;
+          const request = new Request("http://host/repo/archive/myrepo-v1.tar.gz");
+          const answer = yield* Archive.handle(request);
+          assert.ok(answer !== null);
+          return {
+            type: answer.headers.get("content-type"),
+            disposition: answer.headers.get("content-disposition"),
+            bytes: new Uint8Array(yield* Effect.promise(() => answer.arrayBuffer())),
+          };
+        }).pipe(Effect.provide(repository)),
       );
 
-      for (const [file, content] of CONTENTS) {
-        assert.equal(await fs.readFile(path.join(into, file), "utf8"), content);
+      assert.equal(response.type, "application/gzip");
+      assert.equal(response.disposition, 'attachment; filename="myrepo-v1.tar.gz"');
+
+      const { into, root } = await untar(response.bytes, "-xzf");
+      try {
+        // The default prefix is the name without its extension, so an unpacked
+        // archive leaves one directory behind rather than scattering files.
+        assert.equal(await fs.readFile(path.join(into, "myrepo-v1/readme.md"), "utf8"), "hello\n");
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
       }
-
-      // The bit git records in mode 100755, and the only thing an archive can
-      // lose that makes the extracted tree unusable.
-      const script = await fs.stat(path.join(into, "bin/run.sh"));
-      assert.equal(script.mode & 0o111, 0o111);
-      assert.equal((await fs.stat(path.join(into, "readme.md"))).mode & 0o111, 0);
-
-      const link = await fs.lstat(path.join(into, "link.txt"));
-      assert.ok(link.isSymbolicLink());
-      assert.equal(await fs.readlink(path.join(into, "link.txt")), "readme.md");
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
-
-  it("writes a tar.gz the system tar decompresses", async () => {
-    const bytes = await collect("tar.gz");
-    // gzip's own magic, before tar ever sees it.
-    assert.deepEqual([...bytes.subarray(0, 3)], [0x1f, 0x8b, 0x08]);
-
-    const { into, root } = await untar(bytes, "-xzf");
-    try {
-      assert.equal(await fs.readFile(path.join(into, "readme.md"), "utf8"), "hello\n");
-      assert.equal(await fs.readFile(path.join(into, LONG_SPLIT), "utf8"), CONTENTS[2]![1]);
-      assert.equal(await fs.readFile(path.join(into, LONG_FLAT), "utf8"), CONTENTS[3]![1]);
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
-
-  it("puts everything under the prefix", async () => {
-    const { into, root } = await untar(await collect("tar", "myrepo-v1"), "-xf");
-    try {
-      const files = await listing(into);
-      assert.ok(files.length > 0);
-      assert.ok(files.every((file) => file.startsWith("myrepo-v1/")));
-      assert.equal(await fs.readFile(path.join(into, "myrepo-v1/readme.md"), "utf8"), "hello\n");
-      assert.ok((await fs.stat(path.join(into, "myrepo-v1"))).isDirectory());
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
-
-  it("serves an archive request, extension picking the format", async () => {
-    const response = await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* seed;
-        const request = new Request("http://host/repo/archive/myrepo-v1.tar.gz");
-        const answer = yield* Archive.handle(request);
-        assert.ok(answer !== null);
-        return {
-          type: answer.headers.get("content-type"),
-          disposition: answer.headers.get("content-disposition"),
-          bytes: new Uint8Array(yield* Effect.promise(() => answer.arrayBuffer())),
-        };
-      }).pipe(Effect.provide(repository)),
-    );
-
-    assert.equal(response.type, "application/gzip");
-    assert.equal(response.disposition, 'attachment; filename="myrepo-v1.tar.gz"');
-
-    const { into, root } = await untar(response.bytes, "-xzf");
-    try {
-      // The default prefix is the name without its extension, so an unpacked
-      // archive leaves one directory behind rather than scattering files.
-      assert.equal(await fs.readFile(path.join(into, "myrepo-v1/readme.md"), "utf8"), "hello\n");
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+    }),
+  );
 });
 
 /** A zip reader over the central directory, for the assertions unzip cannot make. */
@@ -234,66 +242,75 @@ const readZip = (bytes: Uint8Array) => {
 };
 
 describe("Archive as zip", () => {
-  it("ends with a central directory its own reader walks back", async () => {
-    const bytes = await collect("zip");
-    const zip = readZip(bytes);
+  it.effect("ends with a central directory its own reader walks back", () =>
+    Effect.promise(async () => {
+      const bytes = await collect("zip");
+      const zip = readZip(bytes);
 
-    // The signature `unzip` looks for first; without it nothing else is read.
-    assert.equal(new DataView(bytes.buffer).getUint32(zip.end, true), 0x0605_4b50);
+      // The signature `unzip` looks for first; without it nothing else is read.
+      assert.equal(new DataView(bytes.buffer).getUint32(zip.end, true), 0x0605_4b50);
 
-    const files = new Map(zip.entries.map((entry) => [entry.name, entry]));
-    for (const [file, content] of CONTENTS) {
-      assert.equal(decoder.decode(files.get(file)?.content), content);
-    }
-    assert.ok(files.has("src/"), "directory entries are present");
-    assert.equal(files.get("bin/run.sh")!.mode & 0o111, 0o111);
-    assert.equal(files.get("readme.md")!.mode & 0o111, 0);
-    assert.equal(decoder.decode(files.get("link.txt")!.content), "readme.md");
-  });
+      const files = new Map(zip.entries.map((entry) => [entry.name, entry]));
+      for (const [file, content] of CONTENTS) {
+        assert.equal(decoder.decode(files.get(file)?.content), content);
+      }
+      assert.ok(files.has("src/"), "directory entries are present");
+      assert.equal(files.get("bin/run.sh")!.mode & 0o111, 0o111);
+      assert.equal(files.get("readme.md")!.mode & 0o111, 0);
+      assert.equal(decoder.decode(files.get("link.txt")!.content), "readme.md");
+    }),
+  );
 
-  it("puts everything under the prefix", async () => {
-    const zip = readZip(await collect("zip", "myrepo-v1"));
-    assert.ok(zip.entries.every((entry) => entry.name.startsWith("myrepo-v1/")));
-  });
+  it.effect("puts everything under the prefix", () =>
+    Effect.promise(async () => {
+      const zip = readZip(await collect("zip", "myrepo-v1"));
+      assert.ok(zip.entries.every((entry) => entry.name.startsWith("myrepo-v1/")));
+    }),
+  );
 });
 
 describe.skipIf(!hasUnzip)("Archive through the system unzip", () => {
-  it("lists and prints what it was given", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "archive-"));
-    const file = path.join(root, "archive.zip");
-    try {
-      await fs.writeFile(file, await collect("zip"));
+  it.effect("lists and prints what it was given", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "archive-"));
+      const file = path.join(root, "archive.zip");
+      try {
+        await fs.writeFile(file, await collect("zip"));
 
-      const list = execFileSync("unzip", ["-l", file], { encoding: "utf8" });
-      for (const [name] of CONTENTS) assert.ok(list.includes(name), `${name} missing from listing`);
+        const list = execFileSync("unzip", ["-l", file], { encoding: "utf8" });
+        for (const [name] of CONTENTS)
+          assert.ok(list.includes(name), `${name} missing from listing`);
 
-      assert.equal(
-        execFileSync("unzip", ["-p", file, "readme.md"], { encoding: "utf8" }),
-        "hello\n",
-      );
-      assert.equal(
-        execFileSync("unzip", ["-p", file, LONG_FLAT], { encoding: "utf8" }),
-        "pax extended header\n",
-      );
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+        assert.equal(
+          execFileSync("unzip", ["-p", file, "readme.md"], { encoding: "utf8" }),
+          "hello\n",
+        );
+        assert.equal(
+          execFileSync("unzip", ["-p", file, LONG_FLAT], { encoding: "utf8" }),
+          "pax extended header\n",
+        );
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
 });
 
 describe("formatOf", () => {
-  it("maps extensions, and only the ones it can write", () => {
-    assert.equal(Archive.formatOf("x.tar"), "tar");
-    assert.equal(Archive.formatOf("x.tar.gz"), "tar.gz");
-    assert.equal(Archive.formatOf("x.tgz"), "tar.gz");
-    assert.equal(Archive.formatOf("x.zip"), "zip");
-    assert.equal(Archive.formatOf("X.ZIP"), "zip");
-    // `.gz` alone is a compressed file, not an archive of one.
-    assert.equal(Archive.formatOf("x.gz"), null);
-    assert.equal(Archive.formatOf("x.tar.bz2"), null);
-    assert.equal(Archive.formatOf("x"), null);
-    assert.equal(Archive.formatOf(""), null);
-  });
+  it.effect("maps extensions, and only the ones it can write", () =>
+    Effect.sync(() => {
+      assert.equal(Archive.formatOf("x.tar"), "tar");
+      assert.equal(Archive.formatOf("x.tar.gz"), "tar.gz");
+      assert.equal(Archive.formatOf("x.tgz"), "tar.gz");
+      assert.equal(Archive.formatOf("x.zip"), "zip");
+      assert.equal(Archive.formatOf("X.ZIP"), "zip");
+      // `.gz` alone is a compressed file, not an archive of one.
+      assert.equal(Archive.formatOf("x.gz"), null);
+      assert.equal(Archive.formatOf("x.tar.bz2"), null);
+      assert.equal(Archive.formatOf("x"), null);
+      assert.equal(Archive.formatOf(""), null);
+    }),
+  );
 });
 
 describe("Archive.handle", () => {
@@ -305,23 +322,30 @@ describe("Archive.handle", () => {
       }).pipe(Effect.provide(repository)),
     );
 
-  it("declines anything that is not an archive request", async () => {
-    assert.equal(await answer("http://host/repo/info/refs"), null);
-    assert.equal(await answer("http://host/repo/archive/x.rar"), null);
-    // The name is the last segment; a deeper path is somebody else's route.
-    assert.equal(await answer("http://host/repo/archive/x.tar/more"), null);
-  });
+  it.effect("declines anything that is not an archive request", () =>
+    Effect.promise(async () => {
+      assert.equal(await answer("http://host/repo/info/refs"), null);
+      assert.equal(await answer("http://host/repo/archive/x.rar"), null);
+      // The name is the last segment; a deeper path is somebody else's route.
+      assert.equal(await answer("http://host/repo/archive/x.tar/more"), null);
+    }),
+  );
 
-  it("archives a subdirectory, and reports what it cannot find", async () => {
-    const subdirectory = await answer("http://host/repo/archive/src.zip?path=src");
-    assert.equal(subdirectory?.status, 200);
-    const zip = readZip(new Uint8Array(await subdirectory!.arrayBuffer()));
-    assert.deepEqual(
-      zip.entries.map((entry) => entry.name),
-      ["src/", "src/main.ts"],
-    );
+  it.effect("archives a subdirectory, and reports what it cannot find", () =>
+    Effect.promise(async () => {
+      const subdirectory = await answer("http://host/repo/archive/src.zip?path=src");
+      assert.equal(subdirectory?.status, 200);
+      const zip = readZip(new Uint8Array(await subdirectory!.arrayBuffer()));
+      assert.deepEqual(
+        zip.entries.map((entry) => entry.name),
+        ["src/", "src/main.ts"],
+      );
 
-    assert.equal((await answer("http://host/repo/archive/x.zip?ref=refs/heads/nope"))?.status, 404);
-    assert.equal((await answer("http://host/repo/archive/x.zip?path=nope"))?.status, 404);
-  });
+      assert.equal(
+        (await answer("http://host/repo/archive/x.zip?ref=refs/heads/nope"))?.status,
+        404,
+      );
+      assert.equal((await answer("http://host/repo/archive/x.zip?path=nope"))?.status, 404);
+    }),
+  );
 });

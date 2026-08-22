@@ -206,257 +206,278 @@ afterAll(async () => {
 });
 
 describe("Fetch", () => {
-  it("reports a stripped Git-Protocol header rather than fetching nothing", async () => {
-    // The hidden namespaces are reachable only through a v2 `ls-refs`, and the
-    // version travels in a header. A proxy that drops unknown headers leaves
-    // this server reading a v2 body as a v0 want-list and answering 400 — which
-    // means "your request did not arrive", not "there is nothing here". Read as
-    // the latter, a mirror reported a trust and hub replication it had not
-    // performed, revocations included, which is the one failure this whole
-    // path exists to make visible.
-    const source = path.join(root, "stripped-source");
-    await commitFile(source, "a.txt", "one\n", "one");
+  it.effect("reports a stripped Git-Protocol header rather than fetching nothing", () =>
+    Effect.promise(async () => {
+      // The hidden namespaces are reachable only through a v2 `ls-refs`, and the
+      // version travels in a header. A proxy that drops unknown headers leaves
+      // this server reading a v2 body as a v0 want-list and answering 400 — which
+      // means "your request did not arrive", not "there is nothing here". Read as
+      // the latter, a mirror reported a trust and hub replication it had not
+      // performed, revocations included, which is the one failure this whole
+      // path exists to make visible.
+      const source = path.join(root, "stripped-source");
+      await commitFile(source, "a.txt", "one\n", "one");
 
-    const original = globalThis.fetch;
-    const stripped: typeof globalThis.fetch = async (input, init) => {
-      const headers = new Headers(init?.headers);
-      headers.delete("git-protocol");
-      return original(input, { ...init, headers });
-    };
+      const original = globalThis.fetch;
+      const stripped: typeof globalThis.fetch = async (input, init) => {
+        const headers = new Headers(init?.headers);
+        headers.delete("git-protocol");
+        return original(input, { ...init, headers });
+      };
 
-    globalThis.fetch = stripped;
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
-        const target = { objects: yield* ObjectStore, refs: yield* RefStore };
-        return yield* fetchRepository({
-          url: `${server.url}/stripped-source`,
-          stores: target,
-          refspecs: HUB_FETCH,
-        });
-      }).pipe(
-        Effect.provide(stores(path.join(root, "stripped-target"))),
-        Effect.map(() => null),
-        Effect.catchCause((cause: unknown) => Effect.succeed(String(cause))),
-      ),
-    ).finally(() => {
-      globalThis.fetch = original;
-    });
+      globalThis.fetch = stripped;
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const target = { objects: yield* ObjectStore, refs: yield* RefStore };
+          return yield* fetchRepository({
+            url: `${server.url}/stripped-source`,
+            stores: target,
+            refspecs: HUB_FETCH,
+          });
+        }).pipe(
+          Effect.provide(stores(path.join(root, "stripped-target"))),
+          Effect.map(() => null),
+          Effect.catchCause((cause: unknown) => Effect.succeed(String(cause))),
+        ),
+      ).finally(() => {
+        globalThis.fetch = original;
+      });
 
-    assert.notEqual(outcome, null, "a replication that fetched nothing must not report success");
-  });
+      assert.notEqual(outcome, null, "a replication that fetched nothing must not report success");
+    }),
+  );
 
-  it("writes one update per local ref, whatever the refspecs overlap on", async () => {
-    // Two refspecs can name one local ref from different remote ones. Both
-    // updates then go into a single `apply` batch judged against the value the
-    // ref held before either — so the store takes both, the second silently
-    // wins, and nothing is reported as rejected. Whichever the caller listed
-    // first is the one that lands.
-    const source = path.join(root, "overlap-source");
-    const head = await commitFile(source, "a.txt", "one\n", "one");
-    await inRepo(
-      source,
-      Effect.flatMap(Repository, (repository) =>
-        repository.setRef({ name: "refs/heads/other", to: head }),
-      ),
-    );
+  it.effect("writes one update per local ref, whatever the refspecs overlap on", () =>
+    Effect.promise(async () => {
+      // Two refspecs can name one local ref from different remote ones. Both
+      // updates then go into a single `apply` batch judged against the value the
+      // ref held before either — so the store takes both, the second silently
+      // wins, and nothing is reported as rejected. Whichever the caller listed
+      // first is the one that lands.
+      const source = path.join(root, "overlap-source");
+      const head = await commitFile(source, "a.txt", "one\n", "one");
+      await inRepo(
+        source,
+        Effect.flatMap(Repository, (repository) =>
+          repository.setRef({ name: "refs/heads/other", to: head }),
+        ),
+      );
 
-    const target = path.join(root, "overlap-target");
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
-        const stores_ = { objects: yield* ObjectStore, refs: yield* RefStore };
-        const fetched = yield* fetchRepository({
-          url: `${server.url}/overlap-source`,
-          stores: stores_,
-          refspecs: [
-            { force: false, source: "refs/heads/main", destination: "refs/heads/landed" },
-            { force: false, source: "refs/heads/other", destination: "refs/heads/landed" },
-          ],
-        });
-        return fetched.refs.filter((ref) => ref.name === "refs/heads/landed").length;
-      }).pipe(Effect.provide(stores(target))),
-    );
+      const target = path.join(root, "overlap-target");
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const stores_ = { objects: yield* ObjectStore, refs: yield* RefStore };
+          const fetched = yield* fetchRepository({
+            url: `${server.url}/overlap-source`,
+            stores: stores_,
+            refspecs: [
+              { force: false, source: "refs/heads/main", destination: "refs/heads/landed" },
+              { force: false, source: "refs/heads/other", destination: "refs/heads/landed" },
+            ],
+          });
+          return fetched.refs.filter((ref) => ref.name === "refs/heads/landed").length;
+        }).pipe(Effect.provide(stores(target))),
+      );
 
-    assert.equal(outcome, 1, "one destination, one update");
-  });
+      assert.equal(outcome, 1, "one destination, one update");
+    }),
+  );
 
-  it("takes the default branch from what the remote says HEAD is", async () => {
-    // Worked out by matching HEAD's *oid* against the branches, the answer was
-    // whichever branch the server happened to advertise first — so two
-    // branches at one commit, which is every release cut and every fresh
-    // fork, made a clone check out a branch the remote does not consider
-    // default. The remote states it outright in `symref=HEAD:`.
-    const source = path.join(root, "symref-source");
-    await commitFile(source, "a.txt", "one\n", "one");
-    await inRepo(
-      source,
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const head = yield* repository.resolve("refs/heads/main");
-        if (head === null) return;
-        // `release` carries the same commit as `main` and sorts after it, so
-        // an oid match finds `main` first and gets it wrong.
-        yield* repository.setRef({ name: "refs/heads/release", to: head });
-      }),
-    );
-    await setHead(source, "refs/heads/release");
+  it.effect("takes the default branch from what the remote says HEAD is", () =>
+    Effect.promise(async () => {
+      // Worked out by matching HEAD's *oid* against the branches, the answer was
+      // whichever branch the server happened to advertise first — so two
+      // branches at one commit, which is every release cut and every fresh
+      // fork, made a clone check out a branch the remote does not consider
+      // default. The remote states it outright in `symref=HEAD:`.
+      const source = path.join(root, "symref-source");
+      await commitFile(source, "a.txt", "one\n", "one");
+      await inRepo(
+        source,
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const head = yield* repository.resolve("refs/heads/main");
+          if (head === null) return;
+          // `release` carries the same commit as `main` and sorts after it, so
+          // an oid match finds `main` first and gets it wrong.
+          yield* repository.setRef({ name: "refs/heads/release", to: head });
+        }),
+      );
+      await setHead(source, "refs/heads/release");
 
-    const cloned = await fetchInto(path.join(root, "symref-target"), `${server.url}/symref-source`);
-    assert.equal(cloned.defaultBranch, "release");
-  });
+      const cloned = await fetchInto(
+        path.join(root, "symref-target"),
+        `${server.url}/symref-source`,
+      );
+      assert.equal(cloned.defaultBranch, "release");
+    }),
+  );
 
-  it("clones an empty target whole, and sends no haves doing it", async () => {
-    await commitFile(path.join(root, "clone-source"), "a.txt", "one\n", "one");
-    await commitFile(path.join(root, "clone-source"), "b.txt", "two\n", "two");
+  it.effect("clones an empty target whole, and sends no haves doing it", () =>
+    Effect.promise(async () => {
+      await commitFile(path.join(root, "clone-source"), "a.txt", "one\n", "one");
+      await commitFile(path.join(root, "clone-source"), "b.txt", "two\n", "two");
 
-    const { result, traffic } = await capturing(() =>
-      fetchInto(path.join(root, "clone-target"), `${server.url}/clone-source`),
-    );
+      const { result, traffic } = await capturing(() =>
+        fetchInto(path.join(root, "clone-target"), `${server.url}/clone-source`),
+      );
 
-    assert.equal(result.defaultBranch, "main");
-    // One request, carrying `done` and nothing else: an empty repository has
-    // nothing to offer, and a round that said so would be a round wasted.
-    assert.deepEqual(traffic.rounds, [[]]);
-    // Two commits, two trees, two blobs.
-    assert.deepEqual(traffic.packs, [6]);
-    assert.deepEqual(await refsOf(path.join(root, "clone-target")), [
-      ["refs/heads/main", result.refs[0]?.value],
-    ]);
-  });
+      assert.equal(result.defaultBranch, "main");
+      // One request, carrying `done` and nothing else: an empty repository has
+      // nothing to offer, and a round that said so would be a round wasted.
+      assert.deepEqual(traffic.rounds, [[]]);
+      // Two commits, two trees, two blobs.
+      assert.deepEqual(traffic.packs, [6]);
+      assert.deepEqual(await refsOf(path.join(root, "clone-target")), [
+        ["refs/heads/main", result.refs[0]?.value],
+      ]);
+    }),
+  );
 
-  it("transfers strictly fewer objects than a full clone on the second fetch", async () => {
-    const source = path.join(root, "incremental-source");
-    await commitFile(source, "a.txt", "one\n", "one");
-    await commitFile(source, "b.txt", "two\n", "two");
-    await commitFile(source, "c.txt", "three\n", "three");
+  it.effect("transfers strictly fewer objects than a full clone on the second fetch", () =>
+    Effect.promise(async () => {
+      const source = path.join(root, "incremental-source");
+      await commitFile(source, "a.txt", "one\n", "one");
+      await commitFile(source, "b.txt", "two\n", "two");
+      await commitFile(source, "c.txt", "three\n", "three");
 
-    const target = path.join(root, "incremental-target");
-    const first = await capturing(() => fetchInto(target, `${server.url}/incremental-source`));
-    assert.deepEqual(first.traffic.rounds, [[]]);
-    assert.deepEqual(first.traffic.packs, [9]);
+      const target = path.join(root, "incremental-target");
+      const first = await capturing(() => fetchInto(target, `${server.url}/incremental-source`));
+      assert.deepEqual(first.traffic.rounds, [[]]);
+      assert.deepEqual(first.traffic.packs, [9]);
 
-    const head = await commitFile(source, "d.txt", "four\n", "four");
+      const head = await commitFile(source, "d.txt", "four\n", "four");
 
-    const second = await capturing(() => fetchInto(target, `${server.url}/incremental-source`));
-    assert.equal(second.result.refs[0]?.value, head);
+      const second = await capturing(() => fetchInto(target, `${server.url}/incremental-source`));
+      assert.equal(second.result.refs[0]?.value, head);
 
-    // The load-bearing numbers. A clone of the same four commits into an empty
-    // repository is the control, and it is measured against the same server in
-    // the same state — so the comparison is of two packs, not of a pack and a
-    // memory of one.
-    const control = await capturing(() =>
-      fetchInto(path.join(root, "incremental-control"), `${server.url}/incremental-source`),
-    );
-    assert.deepEqual(control.traffic.packs, [12]);
-    assert.deepEqual(second.traffic.packs, [3]);
-    assert.ok(
-      (second.traffic.packs[0] ?? Infinity) < (control.traffic.packs[0] ?? 0),
-      "the incremental fetch must move fewer objects than the clone it replaces",
-    );
+      // The load-bearing numbers. A clone of the same four commits into an empty
+      // repository is the control, and it is measured against the same server in
+      // the same state — so the comparison is of two packs, not of a pack and a
+      // memory of one.
+      const control = await capturing(() =>
+        fetchInto(path.join(root, "incremental-control"), `${server.url}/incremental-source`),
+      );
+      assert.deepEqual(control.traffic.packs, [12]);
+      assert.deepEqual(second.traffic.packs, [3]);
+      assert.ok(
+        (second.traffic.packs[0] ?? Infinity) < (control.traffic.packs[0] ?? 0),
+        "the incremental fetch must move fewer objects than the clone it replaces",
+      );
 
-    // Three haves offered — the three commits already held — in one round,
-    // and then the round that carries `done` repeats them.
-    assert.deepEqual(
-      second.traffic.rounds.map((round) => round.length),
-      [3, 3],
-    );
+      // Three haves offered — the three commits already held — in one round,
+      // and then the round that carries `done` repeats them.
+      assert.deepEqual(
+        second.traffic.rounds.map((round) => round.length),
+        [3, 3],
+      );
 
-    assert.deepEqual(await refsOf(target), await refsOf(source));
-  });
+      assert.deepEqual(await refsOf(target), await refsOf(source));
+    }),
+  );
 
-  it("offers haves in rounds of 32, newest first", async () => {
-    const source = path.join(root, "rounds-source");
-    for (let index = 0; index < 40; index++) {
-      await commitFile(source, "f.txt", `line ${index}\n`, `commit ${index}`);
-    }
+  it.effect("offers haves in rounds of 32, newest first", () =>
+    Effect.promise(async () => {
+      const source = path.join(root, "rounds-source");
+      for (let index = 0; index < 40; index++) {
+        await commitFile(source, "f.txt", `line ${index}\n`, `commit ${index}`);
+      }
 
-    const target = path.join(root, "rounds-target");
-    const tip = (await fetchInto(target, `${server.url}/rounds-source`)).refs[0]?.value;
-    const head = await commitFile(source, "f.txt", "last\n", "last");
+      const target = path.join(root, "rounds-target");
+      const tip = (await fetchInto(target, `${server.url}/rounds-source`)).refs[0]?.value;
+      const head = await commitFile(source, "f.txt", "last\n", "last");
 
-    const { result, traffic } = await capturing(() =>
-      fetchInto(target, `${server.url}/rounds-source`),
-    );
-    assert.equal(result.refs[0]?.value, head);
+      const { result, traffic } = await capturing(() =>
+        fetchInto(target, `${server.url}/rounds-source`),
+      );
+      assert.equal(result.refs[0]?.value, head);
 
-    // 32, then `done` repeating those 32. The server holds every commit
-    // offered, so it acknowledges on the first round and the client stops
-    // offering — the remaining 8 haves are never sent, which is the point of
-    // negotiating in rounds rather than shipping the whole history at once.
-    assert.deepEqual(
-      traffic.rounds.map((round) => round.length),
-      [32, 32],
-    );
-    // The tip goes first. Ordering is the whole reason a round is 32 lines and
-    // not the entire history: the base is expected in the first handful.
-    assert.equal(traffic.rounds[0]?.[0], tip);
-    assert.deepEqual(traffic.packs, [3]);
-  });
+      // 32, then `done` repeating those 32. The server holds every commit
+      // offered, so it acknowledges on the first round and the client stops
+      // offering — the remaining 8 haves are never sent, which is the point of
+      // negotiating in rounds rather than shipping the whole history at once.
+      assert.deepEqual(
+        traffic.rounds.map((round) => round.length),
+        [32, 32],
+      );
+      // The tip goes first. Ordering is the whole reason a round is 32 lines and
+      // not the entire history: the base is expected in the first handful.
+      assert.equal(traffic.rounds[0]?.[0], tip);
+      assert.deepEqual(traffic.packs, [3]);
+    }),
+  );
 
-  it("fetches nothing when the target is already up to date", async () => {
-    const source = path.join(root, "uptodate-source");
-    await commitFile(source, "a.txt", "one\n", "one");
+  it.effect("fetches nothing when the target is already up to date", () =>
+    Effect.promise(async () => {
+      const source = path.join(root, "uptodate-source");
+      await commitFile(source, "a.txt", "one\n", "one");
 
-    const target = path.join(root, "uptodate-target");
-    await fetchInto(target, `${server.url}/uptodate-source`);
+      const target = path.join(root, "uptodate-target");
+      await fetchInto(target, `${server.url}/uptodate-source`);
 
-    const { traffic } = await capturing(() => fetchInto(target, `${server.url}/uptodate-source`));
-    // The want is the have: everything the client asked for is excluded by
-    // what it offered, so the pack is empty rather than absent.
-    assert.deepEqual(traffic.packs, [0]);
-  });
+      const { traffic } = await capturing(() => fetchInto(target, `${server.url}/uptodate-source`));
+      // The want is the have: everything the client asked for is excluded by
+      // what it offered, so the pack is empty rather than absent.
+      assert.deepEqual(traffic.packs, [0]);
+    }),
+  );
 });
 
 describe.skipIf(!hasGit)("Fetch, checked by the git binary", () => {
-  it("leaves a repository git fsck accepts, matching the source object for object", async () => {
-    const source = path.join(root, "fsck-source");
-    await commitFile(source, "a.txt", "one\n", "one");
-    await commitFile(source, "nested/b.txt", "two\n", "two");
-    await setHead(source, "refs/heads/main");
+  it.effect("leaves a repository git fsck accepts, matching the source object for object", () =>
+    Effect.promise(async () => {
+      const source = path.join(root, "fsck-source");
+      await commitFile(source, "a.txt", "one\n", "one");
+      await commitFile(source, "nested/b.txt", "two\n", "two");
+      await setHead(source, "refs/heads/main");
 
-    const target = path.join(root, "fsck-target");
-    await fetchInto(target, `${server.url}/fsck-source`);
-    await commitFile(source, "nested/c.txt", "three\n", "three");
-    await fetchInto(target, `${server.url}/fsck-source`);
-    await setHead(target, "refs/heads/main");
+      const target = path.join(root, "fsck-target");
+      await fetchInto(target, `${server.url}/fsck-source`);
+      await commitFile(source, "nested/c.txt", "three\n", "three");
+      await fetchInto(target, `${server.url}/fsck-source`);
+      await setHead(target, "refs/heads/main");
 
-    // The incrementally-fetched repository, read by a program that had no part
-    // in writing it: every object present, every object well-formed.
-    await git(root, "--git-dir", target, "fsck", "--strict", "--full");
+      // The incrementally-fetched repository, read by a program that had no part
+      // in writing it: every object present, every object well-formed.
+      await git(root, "--git-dir", target, "fsck", "--strict", "--full");
 
-    const listing = async (dir: string) =>
-      (await git(root, "--git-dir", dir, "rev-list", "--objects", "--all")).stdout
-        .split("\n")
-        .filter((line) => line !== "")
-        .sort();
-    assert.deepEqual(await listing(target), await listing(source));
-    assert.deepEqual(await refsOf(target), await refsOf(source));
-  });
+      const listing = async (dir: string) =>
+        (await git(root, "--git-dir", dir, "rev-list", "--objects", "--all")).stdout
+          .split("\n")
+          .filter((line) => line !== "")
+          .sort();
+      assert.deepEqual(await listing(target), await listing(source));
+      assert.deepEqual(await refsOf(target), await refsOf(source));
+    }),
+  );
 
-  it("serves an incremental fetch to the git binary itself", async () => {
-    const source = path.join(root, "git-fetch-source");
-    await commitFile(source, "a.txt", "one\n", "one");
-    await commitFile(source, "b.txt", "two\n", "two");
+  it.effect("serves an incremental fetch to the git binary itself", () =>
+    Effect.promise(async () => {
+      const source = path.join(root, "git-fetch-source");
+      await commitFile(source, "a.txt", "one\n", "one");
+      await commitFile(source, "b.txt", "two\n", "two");
 
-    const work = path.join(root, "git-fetch-work");
-    await git(root, "clone", "--quiet", `${server.url}/git-fetch-source`, work);
+      const work = path.join(root, "git-fetch-work");
+      await git(root, "clone", "--quiet", `${server.url}/git-fetch-source`, work);
 
-    const head = await commitFile(source, "c.txt", "three\n", "three");
-    const packs = path.join(work, ".git", "objects", "pack");
-    const before = new Set(await fs.readdir(packs));
-    // `unpackLimit=1` keeps the pack instead of exploding it into loose
-    // objects, which is the only way to read back what actually crossed.
-    await git(work, "-c", "fetch.unpackLimit=1", "fetch", "origin");
-    const arrived = (await fs.readdir(packs)).filter(
-      (name) => name.endsWith(".pack") && !before.has(name),
-    );
+      const head = await commitFile(source, "c.txt", "three\n", "three");
+      const packs = path.join(work, ".git", "objects", "pack");
+      const before = new Set(await fs.readdir(packs));
+      // `unpackLimit=1` keeps the pack instead of exploding it into loose
+      // objects, which is the only way to read back what actually crossed.
+      await git(work, "-c", "fetch.unpackLimit=1", "fetch", "origin");
+      const arrived = (await fs.readdir(packs)).filter(
+        (name) => name.endsWith(".pack") && !before.has(name),
+      );
 
-    // git's own negotiation against our upload-pack: the commit, its tree and
-    // one blob, not the whole history it already has.
-    assert.equal(arrived.length, 1);
-    assert.equal(packObjectCount(await fs.readFile(path.join(packs, arrived[0] ?? ""))), 3);
-    assert.equal((await git(work, "rev-parse", "origin/main")).stdout.trim(), head);
-    await git(work, "fsck", "--strict");
-  });
+      // git's own negotiation against our upload-pack: the commit, its tree and
+      // one blob, not the whole history it already has.
+      assert.equal(arrived.length, 1);
+      assert.equal(packObjectCount(await fs.readFile(path.join(packs, arrived[0] ?? ""))), 3);
+      assert.equal((await git(work, "rev-parse", "origin/main")).stdout.trim(), head);
+      await git(work, "fsck", "--strict");
+    }),
+  );
 });
 
 /**
@@ -550,45 +571,47 @@ describe.skipIf(!hasHttpBackend)("Fetch, negotiating with git-http-backend", () 
     await fs.rm(backendRoot, { recursive: true, force: true });
   });
 
-  it("fetches incrementally from stock upload-pack", async () => {
-    const bare = path.join(backendRoot, "origin.git");
-    await git(backendRoot, "init", "--quiet", "--bare", bare);
+  it.effect("fetches incrementally from stock upload-pack", () =>
+    Effect.promise(async () => {
+      const bare = path.join(backendRoot, "origin.git");
+      await git(backendRoot, "init", "--quiet", "--bare", bare);
 
-    const work = path.join(backendRoot, "work");
-    await git(backendRoot, "clone", "--quiet", bare, work);
-    await fs.writeFile(path.join(work, "a.txt"), "one\n");
-    await git(work, "add", "a.txt");
-    await git(work, "commit", "--quiet", "-m", "one");
-    await fs.writeFile(path.join(work, "b.txt"), "two\n");
-    await git(work, "add", "b.txt");
-    await git(work, "commit", "--quiet", "-m", "two");
-    await git(work, "push", "--quiet", "origin", "main");
+      const work = path.join(backendRoot, "work");
+      await git(backendRoot, "clone", "--quiet", bare, work);
+      await fs.writeFile(path.join(work, "a.txt"), "one\n");
+      await git(work, "add", "a.txt");
+      await git(work, "commit", "--quiet", "-m", "one");
+      await fs.writeFile(path.join(work, "b.txt"), "two\n");
+      await git(work, "add", "b.txt");
+      await git(work, "commit", "--quiet", "-m", "two");
+      await git(work, "push", "--quiet", "origin", "main");
 
-    const target = path.join(root, "backend-target");
-    const first = await capturing(() => fetchInto(target, `${backend.url}/origin.git`));
-    assert.equal(first.result.defaultBranch, "main");
-    assert.deepEqual(first.traffic.rounds, [[]]);
-    assert.deepEqual(first.traffic.packs, [6]);
+      const target = path.join(root, "backend-target");
+      const first = await capturing(() => fetchInto(target, `${backend.url}/origin.git`));
+      assert.equal(first.result.defaultBranch, "main");
+      assert.deepEqual(first.traffic.rounds, [[]]);
+      assert.deepEqual(first.traffic.packs, [6]);
 
-    await fs.writeFile(path.join(work, "c.txt"), "three\n");
-    await git(work, "add", "c.txt");
-    await git(work, "commit", "--quiet", "-m", "three");
-    await git(work, "push", "--quiet", "origin", "main");
-    const head = (await git(work, "rev-parse", "HEAD")).stdout.trim();
+      await fs.writeFile(path.join(work, "c.txt"), "three\n");
+      await git(work, "add", "c.txt");
+      await git(work, "commit", "--quiet", "-m", "three");
+      await git(work, "push", "--quiet", "origin", "main");
+      const head = (await git(work, "rev-parse", "HEAD")).stdout.trim();
 
-    const second = await capturing(() => fetchInto(target, `${backend.url}/origin.git`));
-    assert.equal(second.result.refs[0]?.value, head);
-    // Stock upload-pack acknowledges as soon as it recognises a have, so the
-    // negotiation ends on the first round and `done` follows immediately —
-    // the shape our own server cannot produce, and the reason this test is
-    // here.
-    assert.ok(
-      second.traffic.rounds.length <= 2,
-      `expected the negotiation to settle in one round, saw ${second.traffic.rounds.length}`,
-    );
-    assert.deepEqual(second.traffic.packs, [3]);
+      const second = await capturing(() => fetchInto(target, `${backend.url}/origin.git`));
+      assert.equal(second.result.refs[0]?.value, head);
+      // Stock upload-pack acknowledges as soon as it recognises a have, so the
+      // negotiation ends on the first round and `done` follows immediately —
+      // the shape our own server cannot produce, and the reason this test is
+      // here.
+      assert.ok(
+        second.traffic.rounds.length <= 2,
+        `expected the negotiation to settle in one round, saw ${second.traffic.rounds.length}`,
+      );
+      assert.deepEqual(second.traffic.packs, [3]);
 
-    await setHead(target, "refs/heads/main");
-    await git(root, "--git-dir", target, "fsck", "--strict", "--full");
-  });
+      await setHead(target, "refs/heads/main");
+      await git(root, "--git-dir", target, "fsck", "--strict", "--full");
+    }),
+  );
 });

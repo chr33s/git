@@ -43,71 +43,75 @@ const absent = (count: number): ReadonlyArray<Oid> =>
   Array.from({ length: count }, (_, at) => `${at}`.padStart(40, "a") as Oid);
 
 describe("Dag.reachable", () => {
-  it("pays for a commit it turns away exactly once, and counts it", async () => {
-    // A commit outside the history was never recorded, so the question was
-    // asked again for every edge naming it — and, because the answer was not
-    // kept, none of those reads counted toward the limit. One pushed commit
-    // listing a hundred thousand fabricated parents cost a hundred thousand
-    // object reads on the receive-pack path without ever reaching the ceiling
-    // that was supposed to refuse it.
-    const outcome = await scenario(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
+  it.effect("pays for a commit it turns away exactly once, and counts it", () =>
+    Effect.promise(async () => {
+      // A commit outside the history was never recorded, so the question was
+      // asked again for every edge naming it — and, because the answer was not
+      // kept, none of those reads counted toward the limit. One pushed commit
+      // listing a hundred thousand fabricated parents cost a hundred thousand
+      // object reads on the receive-pack path without ever reaching the ceiling
+      // that was supposed to refuse it.
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
 
-        const strangers = absent(6);
-        const head = yield* repository.commitTree({
-          tree: EMPTY_TREE_OID,
-          parents: strangers,
-          message: "head\n",
-          author,
-        });
-
-        const asked: Oid[] = [];
-        const belongs = (commit: Oid) =>
-          Effect.gen(function* () {
-            asked.push(commit);
-            return (
-              (yield* repository
-                .readCommit(commit)
-                .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)))) !== null
-            );
+          const strangers = absent(6);
+          const head = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: strangers,
+            message: "head\n",
+            author,
           });
 
-        const unbounded = yield* Dag.reachable(head, null, belongs);
-        const asks = asked.length;
-        const bounded = yield* Dag.reachable(head, null, belongs, 3).pipe(
-          Effect.as(null),
-          Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
-        );
-        return { walked: [...unbounded.keys()], asks, bounded };
-      }),
-    );
+          const asked: Oid[] = [];
+          const belongs = (commit: Oid) =>
+            Effect.gen(function* () {
+              asked.push(commit);
+              return (
+                (yield* repository
+                  .readCommit(commit)
+                  .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)))) !== null
+              );
+            });
 
-    assert.deepEqual(outcome.walked.length, 1, "only the commit the repository holds is kept");
-    assert.equal(outcome.asks, 7, "each stranger is asked about once, and the head once");
-    assert.match(outcome.bounded ?? "", /more than 3 commits/);
-  });
+          const unbounded = yield* Dag.reachable(head, null, belongs);
+          const asks = asked.length;
+          const bounded = yield* Dag.reachable(head, null, belongs, 3).pipe(
+            Effect.as(null),
+            Effect.catchTag("Invalid", (error) => Effect.succeed(error.reason)),
+          );
+          return { walked: [...unbounded.keys()], asks, bounded };
+        }),
+      );
 
-  it("stops at the boundary rather than walking past it", async () => {
-    const walked = await scenario(
-      Effect.gen(function* () {
-        const repository = yield* Repository;
-        const first = yield* repository.commitTree({
-          tree: EMPTY_TREE_OID,
-          parents: [],
-          message: "first\n",
-          author,
-        });
-        const second = yield* repository.commitTree({
-          tree: EMPTY_TREE_OID,
-          parents: [first],
-          message: "second\n",
-          author,
-        });
-        return [...(yield* Dag.reachable(second, first)).keys()];
-      }),
-    );
+      assert.deepEqual(outcome.walked.length, 1, "only the commit the repository holds is kept");
+      assert.equal(outcome.asks, 7, "each stranger is asked about once, and the head once");
+      assert.match(outcome.bounded ?? "", /more than 3 commits/);
+    }),
+  );
 
-    assert.deepEqual(walked.length, 1);
-  });
+  it.effect("stops at the boundary rather than walking past it", () =>
+    Effect.promise(async () => {
+      const walked = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const first = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "first\n",
+            author,
+          });
+          const second = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [first],
+            message: "second\n",
+            author,
+          });
+          return [...(yield* Dag.reachable(second, first)).keys()];
+        }),
+      );
+
+      assert.deepEqual(walked.length, 1);
+    }),
+  );
 });

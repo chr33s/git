@@ -120,118 +120,140 @@ const rfcKey = (): PrivateKey =>
   expectSuccess(parsePrivateKey(opensshPrivateKey(RFC8032.seed, RFC8032.point, "rfc8032@test")));
 
 describe("SshSignature", () => {
-  it("takes a 32-byte seed however wide the PKCS#8 export is", async () => {
-    // Neither end of the buffer is the answer. "Everything after the fixed
-    // prefix" is right only for the 48-byte v1 export; a v2 one carries the
-    // public key too, leaving a seed wider than 32 bytes that WebCrypto then
-    // refuses as a defect nothing can catch. "The last 32 bytes" is worse: in
-    // that encoding the trailing bytes are the *public* point, and signing
-    // would produce signatures no verifier accepts. The field's own header is
-    // what is stable, so that is what is looked for.
-    const key = await Effect.runPromise(generate("wide@example.com"));
-    assert.equal(key.seed.length, 32);
+  it.effect("takes a 32-byte seed however wide the PKCS#8 export is", () =>
+    Effect.promise(async () => {
+      // Neither end of the buffer is the answer. "Everything after the fixed
+      // prefix" is right only for the 48-byte v1 export; a v2 one carries the
+      // public key too, leaving a seed wider than 32 bytes that WebCrypto then
+      // refuses as a defect nothing can catch. "The last 32 bytes" is worse: in
+      // that encoding the trailing bytes are the *public* point, and signing
+      // would produce signatures no verifier accepts. The field's own header is
+      // what is stable, so that is what is looked for.
+      const key = await Effect.runPromise(generate("wide@example.com"));
+      assert.equal(key.seed.length, 32);
 
-    const bytes = new TextEncoder().encode("something to sign");
-    const armored = await Effect.runPromise(sign(key, bytes, NAMESPACE));
-    // The round trip is the assertion that matters: a seed read from the wrong
-    // place still signs, and the signature verifies against nothing.
-    const back = await Effect.runPromise(verify(armored, bytes, NAMESPACE));
-    assert.notEqual(back, null, "a key that signs must verify");
-    assert.deepEqual([...(back?.point ?? [])], [...key.publicKey.point]);
-  });
+      const bytes = new TextEncoder().encode("something to sign");
+      const armored = await Effect.runPromise(sign(key, bytes, NAMESPACE));
+      // The round trip is the assertion that matters: a seed read from the wrong
+      // place still signs, and the signature verifies against nothing.
+      const back = await Effect.runPromise(verify(armored, bytes, NAMESPACE));
+      assert.notEqual(back, null, "a key that signs must verify");
+      assert.deepEqual([...(back?.point ?? [])], [...key.publicKey.point]);
+    }),
+  );
 
   describe("public keys", () => {
-    it("round-trips an authorized_keys line", async () => {
-      const key = await Effect.runPromise(generate("alice@example.com"));
-      const line = formatPublicKey(key.publicKey);
-      assert.match(line, /^ssh-ed25519 [A-Za-z0-9+/=]+ alice@example\.com$/);
+    it.effect("round-trips an authorized_keys line", () =>
+      Effect.promise(async () => {
+        const key = await Effect.runPromise(generate("alice@example.com"));
+        const line = formatPublicKey(key.publicKey);
+        assert.match(line, /^ssh-ed25519 [A-Za-z0-9+/=]+ alice@example\.com$/);
 
-      const parsed = expectSuccess(parsePublicKey(line));
-      assert.equal(parsed.algorithm, "ssh-ed25519");
-      assert.equal(parsed.comment, "alice@example.com");
-      assert.deepEqual(parsed.point, key.publicKey.point);
-    });
+        const parsed = expectSuccess(parsePublicKey(line));
+        assert.equal(parsed.algorithm, "ssh-ed25519");
+        assert.equal(parsed.comment, "alice@example.com");
+        assert.deepEqual(parsed.point, key.publicKey.point);
+      }),
+    );
 
-    it("keeps a comment containing spaces", () => {
-      const line = formatPublicKey(rfcKey().publicKey).replace("rfc8032@test", "my laptop key");
-      assert.equal(expectSuccess(parsePublicKey(line)).comment, "my laptop key");
-    });
+    it.effect("keeps a comment containing spaces", () =>
+      Effect.sync(() => {
+        const line = formatPublicKey(rfcKey().publicKey).replace("rfc8032@test", "my laptop key");
+        assert.equal(expectSuccess(parsePublicKey(line)).comment, "my laptop key");
+      }),
+    );
 
-    it("refuses a key whose body disagrees with its label", () => {
-      const line = formatPublicKey(rfcKey().publicKey);
-      const swapped = line.replace("ssh-ed25519", "sk-ssh-ed25519@openssh.com");
-      assert.match(expectFailure(parsePublicKey(swapped)).reason, /line says/);
-    });
+    it.effect("refuses a key whose body disagrees with its label", () =>
+      Effect.sync(() => {
+        const line = formatPublicKey(rfcKey().publicKey);
+        const swapped = line.replace("ssh-ed25519", "sk-ssh-ed25519@openssh.com");
+        assert.match(expectFailure(parsePublicKey(swapped)).reason, /line says/);
+      }),
+    );
 
-    it("refuses key types this version cannot verify", () => {
-      const failure = expectFailure(parsePublicKey("ssh-rsa AAAAB3NzaC1yc2E= bob"));
-      assert.match(failure.reason, /unsupported key type 'ssh-rsa'/);
-    });
+    it.effect("refuses key types this version cannot verify", () =>
+      Effect.sync(() => {
+        const failure = expectFailure(parsePublicKey("ssh-rsa AAAAB3NzaC1yc2E= bob"));
+        assert.match(failure.reason, /unsupported key type 'ssh-rsa'/);
+      }),
+    );
 
-    it("refuses a body that is not base64", () => {
-      assert.match(expectFailure(parsePublicKey("ssh-ed25519 not!base64")).reason, /base64/);
-    });
+    it.effect("refuses a body that is not base64", () =>
+      Effect.sync(() => {
+        assert.match(expectFailure(parsePublicKey("ssh-ed25519 not!base64")).reason, /base64/);
+      }),
+    );
 
-    it("fingerprints in OpenSSH's spelling", async () => {
-      const printed = await Effect.runPromise(fingerprint(rfcKey().publicKey));
-      assert.ok(isFingerprint(printed), `not a fingerprint: ${printed}`);
-      assert.ok(!printed.includes("="), "padding must be stripped");
-      // Stable across runs: the same key must name the same subject forever,
-      // or every membership record that points at it goes dangling.
-      const again = await Effect.runPromise(
-        fingerprint(expectSuccess(parsePublicKey(formatPublicKey(rfcKey().publicKey)))),
-      );
-      assert.equal(again, printed);
-    });
+    it.effect("fingerprints in OpenSSH's spelling", () =>
+      Effect.promise(async () => {
+        const printed = await Effect.runPromise(fingerprint(rfcKey().publicKey));
+        assert.ok(isFingerprint(printed), `not a fingerprint: ${printed}`);
+        assert.ok(!printed.includes("="), "padding must be stripped");
+        // Stable across runs: the same key must name the same subject forever,
+        // or every membership record that points at it goes dangling.
+        const again = await Effect.runPromise(
+          fingerprint(expectSuccess(parsePublicKey(formatPublicKey(rfcKey().publicKey)))),
+        );
+        assert.equal(again, printed);
+      }),
+    );
   });
 
   describe("private keys", () => {
-    it("reads an unencrypted OpenSSH key, comment and all", () => {
-      const key = rfcKey();
-      assert.deepEqual(key.seed, RFC8032.seed);
-      assert.deepEqual(key.publicKey.point, RFC8032.point);
-      assert.equal(key.publicKey.comment, "rfc8032@test");
-    });
+    it.effect("reads an unencrypted OpenSSH key, comment and all", () =>
+      Effect.sync(() => {
+        const key = rfcKey();
+        assert.deepEqual(key.seed, RFC8032.seed);
+        assert.deepEqual(key.publicKey.point, RFC8032.point);
+        assert.equal(key.publicKey.comment, "rfc8032@test");
+      }),
+    );
 
-    it("refuses a key whose halves disagree about the public point", () => {
-      // The private section repeats the type and the point, and the 64-byte
-      // key material repeats the point again. Read and discarded, a key whose
-      // halves disagree loaded happily and then signed with one seed while
-      // advertising another key: every signature verified nowhere, and the
-      // failure surfaced as "the grant did not take effect", pointing at the
-      // trust log rather than at the key file. The key *type* was already held
-      // to exactly this rule one field earlier.
-      const other = new Uint8Array(RFC8032.point);
-      other[0] = other[0]! ^ 0xff;
+    it.effect("refuses a key whose halves disagree about the public point", () =>
+      Effect.sync(() => {
+        // The private section repeats the type and the point, and the 64-byte
+        // key material repeats the point again. Read and discarded, a key whose
+        // halves disagree loaded happily and then signed with one seed while
+        // advertising another key: every signature verified nowhere, and the
+        // failure surfaced as "the grant did not take effect", pointing at the
+        // trust log rather than at the key file. The key *type* was already held
+        // to exactly this rule one field earlier.
+        const other = new Uint8Array(RFC8032.point);
+        other[0] = other[0]! ^ 0xff;
 
-      const advertised = parsePrivateKey(
-        opensshPrivateKey(RFC8032.seed, RFC8032.point, "mismatch@test", other),
-      );
-      const paired = parsePrivateKey(
-        opensshPrivateKey(RFC8032.seed, RFC8032.point, "mismatch@test", RFC8032.point, other),
-      );
+        const advertised = parsePrivateKey(
+          opensshPrivateKey(RFC8032.seed, RFC8032.point, "mismatch@test", other),
+        );
+        const paired = parsePrivateKey(
+          opensshPrivateKey(RFC8032.seed, RFC8032.point, "mismatch@test", RFC8032.point, other),
+        );
 
-      assert.match(expectFailure(advertised).reason, /disagrees about the public key/);
-      assert.match(expectFailure(paired).reason, /does not match the public key/);
-    });
+        assert.match(expectFailure(advertised).reason, /disagrees about the public key/);
+        assert.match(expectFailure(paired).reason, /does not match the public key/);
+      }),
+    );
 
-    it("says so when the key is passphrase-protected", () => {
-      const key = opensshPrivateKey(RFC8032.seed, RFC8032.point, "x");
-      const encrypted = key.replace(
-        Buffer.from(concatBytes([text("none"), text("none")]))
-          .toString("base64")
-          .slice(0, 8),
-        Buffer.from(concatBytes([text("aes2"), text("bcry")]))
-          .toString("base64")
-          .slice(0, 8),
-      );
-      const failure = expectFailure(parsePrivateKey(encrypted));
-      assert.match(failure.reason, /passphrase|encrypted|openssh-key-v1/);
-    });
+    it.effect("says so when the key is passphrase-protected", () =>
+      Effect.sync(() => {
+        const key = opensshPrivateKey(RFC8032.seed, RFC8032.point, "x");
+        const encrypted = key.replace(
+          Buffer.from(concatBytes([text("none"), text("none")]))
+            .toString("base64")
+            .slice(0, 8),
+          Buffer.from(concatBytes([text("aes2"), text("bcry")]))
+            .toString("base64")
+            .slice(0, 8),
+        );
+        const failure = expectFailure(parsePrivateKey(encrypted));
+        assert.match(failure.reason, /passphrase|encrypted|openssh-key-v1/);
+      }),
+    );
 
-    it("refuses armor it does not recognise", () => {
-      assert.match(expectFailure(parsePrivateKey("not a key")).reason, /armor/);
-    });
+    it.effect("refuses armor it does not recognise", () =>
+      Effect.sync(() => {
+        assert.match(expectFailure(parsePrivateKey("not a key")).reason, /armor/);
+      }),
+    );
   });
 
   describe("signing", () => {
@@ -240,120 +262,140 @@ describe("SshSignature", () => {
      * `verify` checks against the point alone. They only agree if the PKCS#8
      * wrapper maps RFC 8032's seed to RFC 8032's public key.
      */
-    it("signs under the key the standard pairs with the seed", async () => {
-      const key = rfcKey();
-      const message = encoder.encode("the quick brown fox");
-      const armored = await Effect.runPromise(sign(key, message, NAMESPACE));
+    it.effect("signs under the key the standard pairs with the seed", () =>
+      Effect.promise(async () => {
+        const key = rfcKey();
+        const message = encoder.encode("the quick brown fox");
+        const armored = await Effect.runPromise(sign(key, message, NAMESPACE));
 
-      const signer = await Effect.runPromise(verify(armored, message, NAMESPACE));
-      assert.notEqual(signer, null, "the RFC 8032 seed must verify under the RFC 8032 point");
-      assert.deepEqual(signer?.point, RFC8032.point);
-    });
+        const signer = await Effect.runPromise(verify(armored, message, NAMESPACE));
+        assert.notEqual(signer, null, "the RFC 8032 seed must verify under the RFC 8032 point");
+        assert.deepEqual(signer?.point, RFC8032.point);
+      }),
+    );
 
-    it("writes armor with the header, footer and 70-column body", async () => {
-      const key = await Effect.runPromise(generate("t"));
-      const armored = await Effect.runPromise(sign(key, encoder.encode("x"), NAMESPACE));
+    it.effect("writes armor with the header, footer and 70-column body", () =>
+      Effect.promise(async () => {
+        const key = await Effect.runPromise(generate("t"));
+        const armored = await Effect.runPromise(sign(key, encoder.encode("x"), NAMESPACE));
 
-      const lines = armored.trimEnd().split("\n");
-      assert.equal(lines.at(0), "-----BEGIN SSH SIGNATURE-----");
-      assert.equal(lines.at(-1), "-----END SSH SIGNATURE-----");
-      for (const line of lines.slice(1, -1)) assert.ok(line.length <= 70, `long line: ${line}`);
+        const lines = armored.trimEnd().split("\n");
+        assert.equal(lines.at(0), "-----BEGIN SSH SIGNATURE-----");
+        assert.equal(lines.at(-1), "-----END SSH SIGNATURE-----");
+        for (const line of lines.slice(1, -1)) assert.ok(line.length <= 70, `long line: ${line}`);
 
-      const decoded = expectSuccess(decodeArmored(armored));
-      assert.equal(decoded.namespace, NAMESPACE);
-      assert.equal(decoded.hashAlgorithm, "sha512");
-      assert.equal(encodeArmored(decoded), armored);
-    });
+        const decoded = expectSuccess(decodeArmored(armored));
+        assert.equal(decoded.namespace, NAMESPACE);
+        assert.equal(decoded.hashAlgorithm, "sha512");
+        assert.equal(encodeArmored(decoded), armored);
+      }),
+    );
 
-    it("rejects a message that changed after signing", async () => {
-      const key = await Effect.runPromise(generate("t"));
-      const armored = await Effect.runPromise(sign(key, encoder.encode("pay alice 1"), NAMESPACE));
+    it.effect("rejects a message that changed after signing", () =>
+      Effect.promise(async () => {
+        const key = await Effect.runPromise(generate("t"));
+        const armored = await Effect.runPromise(
+          sign(key, encoder.encode("pay alice 1"), NAMESPACE),
+        );
 
-      const signer = await Effect.runPromise(
-        verify(armored, encoder.encode("pay alice 2"), NAMESPACE),
-      );
-      assert.equal(signer, null);
-    });
+        const signer = await Effect.runPromise(
+          verify(armored, encoder.encode("pay alice 2"), NAMESPACE),
+        );
+        assert.equal(signer, null);
+      }),
+    );
 
-    it("rejects a signature made for another namespace", async () => {
-      const key = await Effect.runPromise(generate("t"));
-      const message = encoder.encode("grant bob push");
-      const armored = await Effect.runPromise(sign(key, message, "other-application"));
+    it.effect("rejects a signature made for another namespace", () =>
+      Effect.promise(async () => {
+        const key = await Effect.runPromise(generate("t"));
+        const message = encoder.encode("grant bob push");
+        const armored = await Effect.runPromise(sign(key, message, "other-application"));
 
-      const failure = await Effect.runPromise(
-        verify(armored, message, NAMESPACE).pipe(Effect.flip),
-      );
-      assert.match(failure.reason, /namespace/);
-    });
+        const failure = await Effect.runPromise(
+          verify(armored, message, NAMESPACE).pipe(Effect.flip),
+        );
+        assert.match(failure.reason, /namespace/);
+      }),
+    );
 
-    it("rejects a signature whose body was swapped for another key's", async () => {
-      const [alice, bob] = await Effect.runPromise(
-        Effect.all([generate("alice"), generate("bob")]),
-      );
-      const message = encoder.encode("approve sha1:abc");
-      const signed = expectSuccess(
-        decodeArmored(await Effect.runPromise(sign(alice, message, NAMESPACE))),
-      );
+    it.effect("rejects a signature whose body was swapped for another key's", () =>
+      Effect.promise(async () => {
+        const [alice, bob] = await Effect.runPromise(
+          Effect.all([generate("alice"), generate("bob")]),
+        );
+        const message = encoder.encode("approve sha1:abc");
+        const signed = expectSuccess(
+          decodeArmored(await Effect.runPromise(sign(alice, message, NAMESPACE))),
+        );
 
-      // Alice's signature, presented as Bob's: the point verifies nothing.
-      const forged = encodeArmored({ ...signed, publicKey: bob.publicKey });
-      assert.equal(await Effect.runPromise(verify(forged, message, NAMESPACE)), null);
-    });
+        // Alice's signature, presented as Bob's: the point verifies nothing.
+        const forged = encodeArmored({ ...signed, publicKey: bob.publicKey });
+        assert.equal(await Effect.runPromise(verify(forged, message, NAMESPACE)), null);
+      }),
+    );
 
-    it("reports malformed armor as a failure, not as a bad signature", async () => {
-      const failure = await Effect.runPromise(
-        verify(
-          "-----BEGIN SSH SIGNATURE-----\nnope\n-----END SSH SIGNATURE-----",
-          new Uint8Array(),
-          NAMESPACE,
-        ).pipe(Effect.flip),
-      );
-      assert.equal(failure._tag, "Invalid");
-    });
+    it.effect("reports malformed armor as a failure, not as a bad signature", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(
+          verify(
+            "-----BEGIN SSH SIGNATURE-----\nnope\n-----END SSH SIGNATURE-----",
+            new Uint8Array(),
+            NAMESPACE,
+          ).pipe(Effect.flip),
+        );
+        assert.equal(failure._tag, "Invalid");
+      }),
+    );
 
-    it("rejects a truncated signature body", async () => {
-      const key = await Effect.runPromise(generate("t"));
-      const armored = await Effect.runPromise(sign(key, encoder.encode("x"), NAMESPACE));
-      const signed = expectSuccess(decodeArmored(armored));
+    it.effect("rejects a truncated signature body", () =>
+      Effect.promise(async () => {
+        const key = await Effect.runPromise(generate("t"));
+        const armored = await Effect.runPromise(sign(key, encoder.encode("x"), NAMESPACE));
+        const signed = expectSuccess(decodeArmored(armored));
 
-      const short = encodeArmored({ ...signed, signature: signed.signature.subarray(0, 20) });
-      const failure = await Effect.runPromise(
-        verify(short, encoder.encode("x"), NAMESPACE).pipe(Effect.flip),
-      );
-      assert.equal(failure._tag, "Invalid");
-    });
+        const short = encodeArmored({ ...signed, signature: signed.signature.subarray(0, 20) });
+        const failure = await Effect.runPromise(
+          verify(short, encoder.encode("x"), NAMESPACE).pipe(Effect.flip),
+        );
+        assert.equal(failure._tag, "Invalid");
+      }),
+    );
   });
 
   describe("derivation", () => {
-    it("re-derives exactly the public key the seed was generated with", async () => {
-      // The property key storage repair rests on: the seed alone determines
-      // the public half, so two halves that disagree can always be settled
-      // in the seed's favour — and a signature made with the derived key
-      // verifies, which is the whole point of the repair.
-      const original = await Effect.runPromise(generate("original@example.com"));
-      const derived = await Effect.runPromise(fromSeed(original.seed, "rebuilt"));
-      assert.deepEqual([...derived.publicKey.point], [...original.publicKey.point]);
-      assert.equal(
-        await Effect.runPromise(fingerprint(derived.publicKey)),
-        await Effect.runPromise(fingerprint(original.publicKey)),
-      );
+    it.effect("re-derives exactly the public key the seed was generated with", () =>
+      Effect.promise(async () => {
+        // The property key storage repair rests on: the seed alone determines
+        // the public half, so two halves that disagree can always be settled
+        // in the seed's favour — and a signature made with the derived key
+        // verifies, which is the whole point of the repair.
+        const original = await Effect.runPromise(generate("original@example.com"));
+        const derived = await Effect.runPromise(fromSeed(original.seed, "rebuilt"));
+        assert.deepEqual([...derived.publicKey.point], [...original.publicKey.point]);
+        assert.equal(
+          await Effect.runPromise(fingerprint(derived.publicKey)),
+          await Effect.runPromise(fingerprint(original.publicKey)),
+        );
 
-      const armored = await Effect.runPromise(sign(derived, encoder.encode("m"), NAMESPACE));
-      const verified = await Effect.runPromise(verify(armored, encoder.encode("m"), NAMESPACE));
-      assert.notEqual(verified, null);
+        const armored = await Effect.runPromise(sign(derived, encoder.encode("m"), NAMESPACE));
+        const verified = await Effect.runPromise(verify(armored, encoder.encode("m"), NAMESPACE));
+        assert.notEqual(verified, null);
 
-      // And a *different* seed derives a different key — the mismatch the
-      // storage check exists to catch, not to paper over.
-      const other = await Effect.runPromise(generate("other@example.com"));
-      const stranger = await Effect.runPromise(fromSeed(other.seed, "rebuilt"));
-      assert.notDeepEqual([...stranger.publicKey.point], [...original.publicKey.point]);
-    });
+        // And a *different* seed derives a different key — the mismatch the
+        // storage check exists to catch, not to paper over.
+        const other = await Effect.runPromise(generate("other@example.com"));
+        const stranger = await Effect.runPromise(fromSeed(other.seed, "rebuilt"));
+        assert.notDeepEqual([...stranger.publicKey.point], [...original.publicKey.point]);
+      }),
+    );
 
-    it("refuses a seed that is not thirty-two bytes", async () => {
-      const failure = await Effect.runPromise(
-        fromSeed(new Uint8Array(16), "short").pipe(Effect.flip),
-      );
-      assert.equal(failure._tag, "Invalid");
-    });
+    it.effect("refuses a seed that is not thirty-two bytes", () =>
+      Effect.promise(async () => {
+        const failure = await Effect.runPromise(
+          fromSeed(new Uint8Array(16), "short").pipe(Effect.flip),
+        );
+        assert.equal(failure._tag, "Invalid");
+      }),
+    );
   });
 });

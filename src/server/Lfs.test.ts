@@ -15,6 +15,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
+import { Effect } from "effect";
+
 import { serve, type Server } from "../host/Node.ts";
 import { formatPointer, MEDIA_TYPE, parsePointer } from "./Lfs.ts";
 
@@ -60,100 +62,114 @@ describe("Git LFS", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("round-trips an object through batch, upload and download", async () => {
-    const content = "a large file, notionally\n";
-    const oid = sha256(content);
+  it.effect("round-trips an object through batch, upload and download", () =>
+    Effect.promise(async () => {
+      const content = "a large file, notionally\n";
+      const oid = sha256(content);
 
-    // Upload: not held yet, so the server hands back somewhere to put it.
-    const asked = await batch("r", "upload", [{ oid, size: content.length }]);
-    const action = asked.body.objects[0]!;
-    assert.equal(action.oid, oid);
-    const target = action.actions?.upload?.href;
-    assert.ok(target !== undefined, "the batch reply offers an upload href");
+      // Upload: not held yet, so the server hands back somewhere to put it.
+      const asked = await batch("r", "upload", [{ oid, size: content.length }]);
+      const action = asked.body.objects[0]!;
+      assert.equal(action.oid, oid);
+      const target = action.actions?.upload?.href;
+      assert.ok(target !== undefined, "the batch reply offers an upload href");
 
-    const put = await fetch(target, { method: "PUT", body: content });
-    assert.equal(put.status, 200);
+      const put = await fetch(target, { method: "PUT", body: content });
+      assert.equal(put.status, 200);
 
-    // Asking again offers no action: the object is already here, which is
-    // what makes re-pushing an unchanged file free.
-    const again = await batch("r", "upload", [{ oid, size: content.length }]);
-    assert.equal(again.body.objects[0]!.actions, undefined);
-    assert.equal(again.body.objects[0]!.size, content.length);
+      // Asking again offers no action: the object is already here, which is
+      // what makes re-pushing an unchanged file free.
+      const again = await batch("r", "upload", [{ oid, size: content.length }]);
+      assert.equal(again.body.objects[0]!.actions, undefined);
+      assert.equal(again.body.objects[0]!.size, content.length);
 
-    const download = await batch("r", "download", [{ oid, size: content.length }]);
-    const href = download.body.objects[0]!.actions?.download?.href;
-    assert.ok(href !== undefined, "the batch reply offers a download href");
+      const download = await batch("r", "download", [{ oid, size: content.length }]);
+      const href = download.body.objects[0]!.actions?.download?.href;
+      assert.ok(href !== undefined, "the batch reply offers a download href");
 
-    const got = await fetch(href);
-    assert.equal(got.status, 200);
-    assert.equal(await got.text(), content);
-    assert.equal(got.headers.get("content-length"), String(content.length));
-  });
+      const got = await fetch(href);
+      assert.equal(got.status, 200);
+      assert.equal(await got.text(), content);
+      assert.equal(got.headers.get("content-length"), String(content.length));
+    }),
+  );
 
-  it("refuses content that does not hash to the name it was given", async () => {
-    const oid = sha256("what was promised");
+  it.effect("refuses content that does not hash to the name it was given", () =>
+    Effect.promise(async () => {
+      const oid = sha256("what was promised");
 
-    const asked = await batch("r", "upload", [{ oid, size: 9 }]);
-    const href = asked.body.objects[0]!.actions!.upload!.href;
+      const asked = await batch("r", "upload", [{ oid, size: 9 }]);
+      const href = asked.body.objects[0]!.actions!.upload!.href;
 
-    const put = await fetch(href, { method: "PUT", body: "something else entirely" });
-    assert.equal(put.status, 422);
+      const put = await fetch(href, { method: "PUT", body: "something else entirely" });
+      assert.equal(put.status, 422);
 
-    // And nothing was stored: a rejected upload leaves no trace to serve.
-    const download = await batch("r", "download", [{ oid, size: 9 }]);
-    assert.equal(download.body.objects[0]!.error?.code, 404);
-  });
+      // And nothing was stored: a rejected upload leaves no trace to serve.
+      const download = await batch("r", "download", [{ oid, size: 9 }]);
+      assert.equal(download.body.objects[0]!.error?.code, 404);
+    }),
+  );
 
-  it("reports a missing object rather than inventing an action", async () => {
-    const oid = sha256("never uploaded");
-    const download = await batch("r", "download", [{ oid, size: 4 }]);
-    assert.equal(download.body.objects[0]!.actions, undefined);
-    assert.equal(download.body.objects[0]!.error?.code, 404);
-  });
+  it.effect("reports a missing object rather than inventing an action", () =>
+    Effect.promise(async () => {
+      const oid = sha256("never uploaded");
+      const download = await batch("r", "download", [{ oid, size: 4 }]);
+      assert.equal(download.body.objects[0]!.actions, undefined);
+      assert.equal(download.body.objects[0]!.error?.code, 404);
+    }),
+  );
 
-  it("rejects malformed requests with the LFS media type", async () => {
-    const bad = await batch("r", "download", [{ oid: "not-an-oid", size: 1 }]);
-    assert.equal(bad.body.objects[0]!.error?.code, 422);
+  it.effect("rejects malformed requests with the LFS media type", () =>
+    Effect.promise(async () => {
+      const bad = await batch("r", "download", [{ oid: "not-an-oid", size: 1 }]);
+      assert.equal(bad.body.objects[0]!.error?.code, 422);
 
-    const unsupported = await fetch(`${server.url}/r/info/lfs/objects/batch`, {
-      method: "POST",
-      headers: { "content-type": MEDIA_TYPE },
-      body: JSON.stringify({ operation: "teleport", objects: [] }),
-    });
-    assert.equal(unsupported.status, 422);
+      const unsupported = await fetch(`${server.url}/r/info/lfs/objects/batch`, {
+        method: "POST",
+        headers: { "content-type": MEDIA_TYPE },
+        body: JSON.stringify({ operation: "teleport", objects: [] }),
+      });
+      assert.equal(unsupported.status, 422);
 
-    const wrongMethod = await fetch(`${server.url}/r/info/lfs/objects/batch`);
-    assert.equal(wrongMethod.status, 405);
-  });
+      const wrongMethod = await fetch(`${server.url}/r/info/lfs/objects/batch`);
+      assert.equal(wrongMethod.status, 405);
+    }),
+  );
 
-  it("keeps repositories apart", async () => {
-    const content = "belongs to one repo\n";
-    const oid = sha256(content);
+  it.effect("keeps repositories apart", () =>
+    Effect.promise(async () => {
+      const content = "belongs to one repo\n";
+      const oid = sha256(content);
 
-    const asked = await batch("first", "upload", [{ oid, size: content.length }]);
-    await fetch(asked.body.objects[0]!.actions!.upload!.href, { method: "PUT", body: content });
+      const asked = await batch("first", "upload", [{ oid, size: content.length }]);
+      await fetch(asked.body.objects[0]!.actions!.upload!.href, { method: "PUT", body: content });
 
-    const elsewhere = await batch("second", "download", [{ oid, size: content.length }]);
-    assert.equal(elsewhere.body.objects[0]!.error?.code, 404);
-  });
+      const elsewhere = await batch("second", "download", [{ oid, size: content.length }]);
+      assert.equal(elsewhere.body.objects[0]!.error?.code, 404);
+    }),
+  );
 
-  it("does not shadow the smart-HTTP advertisement it shares a prefix with", async () => {
-    const advertisement = await fetch(`${server.url}/r/info/refs?service=git-upload-pack`);
-    assert.equal(advertisement.status, 200);
-    assert.equal(
-      advertisement.headers.get("content-type"),
-      "application/x-git-upload-pack-advertisement",
-    );
-  });
+  it.effect("does not shadow the smart-HTTP advertisement it shares a prefix with", () =>
+    Effect.promise(async () => {
+      const advertisement = await fetch(`${server.url}/r/info/refs?service=git-upload-pack`);
+      assert.equal(advertisement.status, 200);
+      assert.equal(
+        advertisement.headers.get("content-type"),
+        "application/x-git-upload-pack-advertisement",
+      );
+    }),
+  );
 
-  it("reads and writes pointer files", () => {
-    const pointer = formatPointer({ oid: sha256("x"), size: 1234 });
-    assert.deepEqual(parsePointer(pointer), { oid: sha256("x"), size: 1234 });
+  it.effect("reads and writes pointer files", () =>
+    Effect.sync(() => {
+      const pointer = formatPointer({ oid: sha256("x"), size: 1234 });
+      assert.deepEqual(parsePointer(pointer), { oid: sha256("x"), size: 1234 });
 
-    assert.equal(parsePointer("not a pointer"), null);
-    assert.equal(
-      parsePointer("version https://git-lfs.github.com/spec/v1\noid sha256:short\nsize 1\n"),
-      null,
-    );
-  });
+      assert.equal(parsePointer("not a pointer"), null);
+      assert.equal(
+        parsePointer("version https://git-lfs.github.com/spec/v1\noid sha256:short\nsize 1\n"),
+        null,
+      );
+    }),
+  );
 });

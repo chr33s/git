@@ -69,33 +69,37 @@ describe.skipIf(!hasGit)("Node backend interop with git", () => {
   const git = (root: string, ...args: string[]) =>
     execFileSync("git", [`--git-dir=${root}`, ...args], { encoding: "utf8" }).trim();
 
-  it("passes git fsck", async () => {
-    const { root } = await build();
-    try {
-      // fsck writes complaints to stdout/stderr and exits non-zero on a broken
-      // object, so reaching the assertion at all is most of the test.
-      assert.equal(git(root, "fsck", "--strict"), "");
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+  it.effect("passes git fsck", () =>
+    Effect.promise(async () => {
+      const { root } = await build();
+      try {
+        // fsck writes complaints to stdout/stderr and exits non-zero on a broken
+        // object, so reaching the assertion at all is most of the test.
+        assert.equal(git(root, "fsck", "--strict"), "");
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
 
-  it("is readable by git log, cat-file and ls-tree", async () => {
-    const { commit, root } = await build();
-    try {
-      assert.equal(git(root, "rev-parse", "HEAD"), commit);
-      assert.match(git(root, "log", "--oneline"), /from our store/);
-      assert.match(
-        git(root, "cat-file", "-p", "HEAD"),
-        /author Alice <alice@example\.com> 1700000000 \+0000/,
-      );
-      assert.match(
-        git(root, "ls-tree", "HEAD"),
-        /100644 blob ce013625030ba8dba906f756967f9e9ca394464a\ta\.txt/,
-      );
-      assert.equal(git(root, "show", "HEAD:a.txt"), "hello");
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+  it.effect("is readable by git log, cat-file and ls-tree", () =>
+    Effect.promise(async () => {
+      const { commit, root } = await build();
+      try {
+        assert.equal(git(root, "rev-parse", "HEAD"), commit);
+        assert.match(git(root, "log", "--oneline"), /from our store/);
+        assert.match(
+          git(root, "cat-file", "-p", "HEAD"),
+          /author Alice <alice@example\.com> 1700000000 \+0000/,
+        );
+        assert.match(
+          git(root, "ls-tree", "HEAD"),
+          /100644 blob ce013625030ba8dba906f756967f9e9ca394464a\ta\.txt/,
+        );
+        assert.equal(git(root, "show", "HEAD:a.txt"), "hello");
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
 });
