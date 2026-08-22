@@ -4,45 +4,49 @@
 **Project:** `@chr33s/git`  
 **Target version:** Experimental / pre-1.0  
 **Last updated:** 2026-08-22  
-**Spec revision:** draft-2
+**Spec revision:** draft-3
 
 ## 1. Summary
 
-This specification defines runtime provenance for coding-agent invocations without turning the policy-critical session DAG into a high-frequency trace store.
+This specification defines durable runtime provenance for coding-agent invocations.
 
 [Context Packs](content-pack.md) answer:
 
-> **What Git-grounded repository evidence and semantic ContextRender were associated with an invocation?**
+> **What Git-grounded repository evidence and semantically framed ContextRender were associated with an invocation?**
 
 Invocation Telemetry answers:
 
 > **Under what observable or explicitly reported runtime conditions did that invocation and its resulting operations occur?**
 
-The useful architecture is:
+The preferred runtime capture interface is **harness-native OpenTelemetry (OTel)**. OTel supplies a common trace/log/event transport and correlation model; `git+` selects and normalizes audit-relevant observations into signed Git records.
+
+The architecture is:
 
 ```text
-Repository provenance
-  Repository View
-  Context Pack
+harness / model runtime
+        │
+        │ native OTel when available
+        │ hooks only as fallback
         ↓
-Exposure provenance
-  ContextRender
-  Context Exposure Event
+loss-intolerant Git+ audit ingest
+        │
+        │ normalize stable concepts
         ↓
-Runtime provenance
-  Invocation Telemetry
-  Context Lifecycle
-  Workspace Transitions
-  Tool Telemetry
+refs/hub/trace/<session-id>
+        │
+        └── signed Git-native audit provenance
+
+ordinary OTel export may independently flow to
+observability backends with normal sampling/filtering
 ```
 
-The first two layers and runtime events may be correlated, but runtime telemetry MUST NOT affect Context Pack validity.
+OTel is an **ingestion and correlation layer**, not the durable Git+ protocol. Context Packs, ContextRender commitments, Git reachability, signatures, and immutable trace-record identity remain Git-native.
 
 The goal is an **agent flight recorder**, not an inference-attestation system. Nothing here proves attention, understanding, memory, reasoning, or causation.
 
 ---
 
-## 2. Storage architecture: session index versus audit trace
+## 2. Session index versus audit trace
 
 The existing session namespace remains the distilled record:
 
@@ -52,7 +56,7 @@ refs/hub/session/<session-id>
 
 It is intentionally small and may be consulted by provenance and protected-branch policy.
 
-Per-invocation audit records MUST NOT be added there merely because they are related to a session. A conforming implementation SHOULD use a sibling namespace:
+Detailed runtime provenance belongs in a sibling namespace:
 
 ```text
 refs/hub/trace/<session-id>
@@ -66,67 +70,279 @@ The trace is:
 - independently replicated according to audit-retention policy;
 - **not consulted for authorization, membership, mergeability, protected-branch policy, or `requireProvenance` checks**.
 
-This keeps observability volume from becoming a policy-path cost.
+High-frequency observability MUST NOT turn into policy-path cost.
 
-### 2.1 Session-level summaries remain small
+Existing aggregate fields such as `session.produced.usage` MAY remain in the session DAG as small convenience summaries.
 
-Existing fields such as aggregate `session.produced.usage` MAY remain in the session DAG as a convenience summary.
+### 2.1 Immutable trace identity
 
-The detailed trace is the source for per-invocation investigation when retained. The aggregate summary does not need to reproduce every provider-specific field.
-
-### 2.2 Trace record identity
-
-Each canonical trace event is carried by a signed Git record commit. Later records MUST reference earlier canonical events by qualified record commit OID:
+Each canonical trace record is carried by a signed Git record commit. Later records MUST reference earlier canonical records by qualified Git commit OID:
 
 ```text
 sha1:<hex>
 sha256:<hex>
 ```
 
-Human-facing event IDs MAY be retained for display, but they are not immutable cross-event identity.
+OTel `TraceId` and `SpanId` are correlation identifiers, not durable Git+ record identity.
 
-If an implementation later batches several low-value events into one trace record, it MUST define an equally immutable locator such as `{record:<qualified-oid>, index:<n>}`. V1 integrations SHOULD prefer standalone records for Context Exposure and Invocation Telemetry so their commit OIDs are directly referenceable; high-volume tool detail may be batched or side-stored.
+Human-facing event IDs MAY exist for display/search, but they are not sufficient immutable cross-record references.
+
+If low-value records are batched, a batch entry MUST have an immutable locator such as:
+
+```json
+{
+  "record": "sha1:abc123...",
+  "index": 7
+}
+```
+
+Context Exposure and Invocation Telemetry SHOULD normally remain standalone records so their commit OIDs are directly referenceable.
 
 ---
 
-## 3. Evidence classes
+## 3. Preferred capture source: OpenTelemetry
+
+### 3.1 Why OTel
+
+When a harness already emits OTel, `git+` SHOULD consume that signal rather than reconstructing provider calls, tool operations, retries, timings, and usage from vendor-specific hooks.
+
+Useful OTel properties include:
+
+- trace/span parentage for operation correlation;
+- log records carrying trace/span context;
+- span attributes for model/tool/runtime facts;
+- point-in-time events/logs for context lifecycle changes;
+- OTLP as a common export protocol;
+- compatibility with ordinary observability infrastructure.
+
+This specification does not require one OTel SDK, Collector, backend, or GenAI semantic-convention version.
+
+### 3.2 OTel is not the canonical Git+ schema
+
+OTel semantic conventions evolve independently of this protocol. In particular, GenAI conventions may change names, stability levels, or repositories over time.
+
+Therefore:
+
+```text
+OTel attributes/events
+        ↓
+Git+ normalization adapter
+        ↓
+stable Git+ runtime concepts
+```
+
+A Git+ verifier MUST NOT require a historical OTel semantic-convention package to interpret a persisted trace record.
+
+The normalizer MAY preserve original OTel namespaced attributes for diagnostics, but core fields in this specification retain stable Git+ meaning.
+
+### 3.3 OTel correlation fields
+
+A normalized record MAY preserve its OTel origin:
+
+```json
+{
+  "capture": {
+    "transport": "otel",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "spanId": "00f067aa0ba902b7",
+    "scope": "example.agent-runtime"
+  }
+}
+```
+
+These fields allow correlation with an external OTel backend.
+
+They MUST NOT replace:
+
+- the signed Git record identity;
+- the repository/session binding;
+- Context Pack verification;
+- ContextRender commitments;
+- Git reachability.
+
+### 3.4 Hooks remain a fallback
+
+A harness without suitable OTel MAY use vendor hooks or an embedded adapter.
+
+A normalized record MAY instead say:
+
+```json
+{
+  "capture": {
+    "transport": "hook",
+    "integration": "vendor-hooks-v2"
+  }
+}
+```
+
+The Git+ trace schema MUST NOT depend on vendor hook names.
+
+---
+
+## 4. Loss-intolerant audit ingest
+
+Ordinary observability pipelines are allowed to sample, filter, redact, aggregate, transform, or drop telemetry. Those behaviors are useful for operations but weaken an audit trail.
+
+A Git+ deployment that claims durable per-invocation audit SHOULD therefore use a dedicated audit branch of the OTel pipeline:
+
+```text
+                    ┌── Git+ audit ingest
+harness → OTel SDK ─┤   no intentional lossy sampling/filtering
+                    │
+                    └── normal observability export
+                        sampling/filtering/aggregation allowed
+```
+
+### 4.1 Preferred ingestion point
+
+The strongest capture point is before arbitrary collector processors can drop or mutate audit-relevant fields.
+
+A producer SHOULD identify where normalized input was observed:
+
+```text
+sdk-export
+local-collector
+remote-collector
+hook
+embedded
+other
+```
+
+Example:
+
+```json
+{
+  "capture": {
+    "transport": "otel",
+    "stage": "sdk-export",
+    "traceId": "...",
+    "spanId": "..."
+  }
+}
+```
+
+### 4.2 Sampling and transformation
+
+If the Git+ audit path is known to be sampled, filtered, or transformed before ingestion, the trace MUST NOT claim complete capture for affected classes.
+
+Where known, trace health SHOULD record facts such as:
+
+```json
+{
+  "type": "trace-health",
+  "source": "otel",
+  "stage": "local-collector",
+  "sampling": "none",
+  "transformed": false,
+  "dropped": 0
+}
+```
+
+Values are claims by the capture system, not proofs that an external collector behaved correctly.
+
+### 4.3 No Baggage authority
+
+OTel Baggage MUST NOT be used as an authority or integrity channel for:
+
+- repository identity;
+- member identity;
+- instruction authority;
+- capabilities;
+- Context Pack identity;
+- authorization decisions.
+
+Baggage may propagate across service boundaries and has no built-in integrity guarantee. If a baggage value is useful for correlation, the normalizer MAY copy it into descriptive metadata after validation, but Git+ trust decisions MUST derive from Git-native signed records and repository policy.
+
+---
+
+## 5. Evidence classes
 
 Runtime values have three evidence classes:
 
 ```text
 observed
-  measured directly by the harness at a defined boundary
+  measured directly by the harness/Git+ capture boundary
 
 reported
-  supplied by a provider, tool, or runtime
+  supplied by a provider, tool, model runtime, or upstream instrumentation
 
 derived
   computed from observed or reported values
 ```
+
+OTel is a transport and does not determine the evidence class by itself.
+
+For example, a provider input-token count transported through an OTel span remains **provider-reported**; it does not become harness-observed merely because OTel carried it.
 
 A consumer MUST NOT silently promote `reported` or `derived` values to `observed` facts.
 
 Examples:
 
 ```text
-ContextRender bytes             observed
-wall-clock duration             observed
-provider token count            reported
-provider model revision         reported
-context utilization ratio       derived
-estimated dollar cost           derived
+ContextRender body byte length       observed
+harness wall-clock duration          observed
+provider token count via OTel        reported
+provider model revision via OTel     reported
+context utilization ratio            derived
+estimated dollar cost                derived
 ```
 
 ---
 
-## 4. Invocation Telemetry
+## 6. Signal mapping
 
-A minimal record is:
+### 6.1 Spans
+
+Operations with meaningful duration SHOULD map naturally from OTel spans, for example:
+
+```text
+model invocation
+tool invocation
+remote repository operation
+sub-agent execution
+```
+
+Git+ does not need to persist every span. The ingester selects audit-relevant facts and may summarize repetitive successful operations.
+
+### 6.2 Events and logs
+
+Point-in-time state transitions MAY arrive as OTel Events or structured LogRecords correlated to a span, for example:
+
+```text
+context exposed
+context compacted
+context truncated
+workspace transitioned
+retry selected
+fallback selected
+```
+
+Git+ normalizes their meaning into its own trace record types.
+
+### 6.3 Metrics
+
+OTel metrics are useful for fleet-level operational dashboards such as token rates, latency distributions, or tool-failure counts.
+
+Metrics MUST NOT be used as the sole source for reconstructing one historical invocation because aggregation loses event identity and causal detail.
+
+The durable audit trail is built from selected spans/events/logs plus Git-native Context Pack/exposure records.
+
+---
+
+## 7. Invocation Telemetry record
+
+A minimal normalized record is:
 
 ```json
 {
   "type": "invocation-telemetry",
   "exposure": "sha1:abc123...",
+  "capture": {
+    "transport": "otel",
+    "stage": "sdk-export",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "spanId": "00f067aa0ba902b7"
+  },
   "model": {
     "provider": "example",
     "id": "model-x"
@@ -147,7 +363,7 @@ A minimal record is:
 
 `exposure` is the qualified Git commit OID of the prior Context Exposure trace record.
 
-### 4.1 Model identity
+### 7.1 Model identity
 
 A producer MAY record:
 
@@ -159,9 +375,9 @@ A producer MAY record:
 }
 ```
 
-These are operational labels. A stable model name is not proof of stable model weights or infrastructure. `revision` MUST be omitted when the provider/runtime does not supply one.
+These are operational labels. A stable model name is not proof of stable model weights or infrastructure. `revision` MUST be omitted when the provider/runtime did not report one.
 
-### 4.2 Usage
+### 7.2 Usage
 
 Core fields are:
 
@@ -173,7 +389,7 @@ cachedInputTokens
 
 Each is a non-negative integer when present.
 
-`usage.source` SHOULD be:
+`usage.source` SHOULD distinguish at least:
 
 ```text
 provider
@@ -184,13 +400,13 @@ Estimated usage SHOULD include an estimator identifier and MUST NOT be presented
 
 Whole-invocation `inputTokens` MUST NOT be described as the token size of repository ContextRender alone.
 
-### 4.3 ContextRender size
+### 7.3 ContextRender size
 
-`context.renderBytes` is the harness-observed body-byte total across ContextRender segments. It is tokenizer-independent and can remain useful across model migrations.
+`context.renderBytes` is the harness-observed body-byte total across ContextRender segments. It is tokenizer-independent.
 
 A producer MAY additionally estimate repository-context tokens, but the estimate MUST be labeled estimated.
 
-### 4.4 Context-window semantics
+### 7.4 Context-window semantics
 
 Two limits are distinct:
 
@@ -200,31 +416,18 @@ contextWindowTokens
 
 effectiveInputLimitTokens
   maximum input token budget the harness believes is actually usable for this invocation
-  after any reserved output budget or other harness/provider constraint
+  after reserved output budget or other harness/provider constraints
 ```
 
 A producer MUST NOT use one name for the other.
 
-Each recorded limit SHOULD carry its source:
+Each limit SHOULD carry a source:
 
 ```text
 provider
 model-catalog
 harness-config
 runtime
-```
-
-Example:
-
-```json
-{
-  "context": {
-    "contextWindowTokens": 200000,
-    "contextWindowSource": "provider",
-    "effectiveInputLimitTokens": 180000,
-    "effectiveInputLimitSource": "harness-config"
-  }
-}
 ```
 
 If a limit is unknown or ambiguous, omit it rather than guessing.
@@ -236,12 +439,10 @@ inputTokens / contextWindowTokens
   share of total context window occupied by reported input
 
 inputTokens / effectiveInputLimitTokens
-  input pressure, only when an effective input limit with compatible semantics is known
+  input pressure, only when a compatible effective input ceiling is known
 ```
 
-A UI MUST NOT label the first ratio "input pressure" unless the denominator really is an effective input ceiling.
-
-### 4.5 Timing and finish status
+### 7.5 Timing and finish status
 
 A producer MAY record harness-observed duration and SHOULD record a coarse finish status when known:
 
@@ -255,13 +456,11 @@ provider-error
 other
 ```
 
-Provider-specific finish reasons may be namespaced metadata.
+### 7.6 Retries and fallbacks
 
-### 4.6 Retries and fallbacks
+Distinct provider invocations remain distinct canonical records when retained.
 
-Distinct provider invocations remain distinct trace records.
-
-A later invocation references the prior invocation record by commit OID:
+A later record references the prior invocation by Git commit OID:
 
 ```json
 {
@@ -273,19 +472,26 @@ A later invocation references the prior invocation record by commit OID:
 }
 ```
 
+OTel parentage MAY help the ingester discover the relationship, but the persisted Git+ relationship uses immutable Git record identity.
+
 A harness MUST NOT collapse several behaviorally or billably distinct provider calls into one telemetry record merely because they produced one final agent response.
 
 ---
 
-## 5. Context lifecycle
+## 8. Context lifecycle
 
-### 5.1 Compaction
+### 8.1 Compaction
 
-A harness MAY record:
+A normalized record MAY be:
 
 ```json
 {
   "type": "context-compaction",
+  "capture": {
+    "transport": "otel",
+    "traceId": "...",
+    "spanId": "..."
+  },
   "strategy": "summary",
   "reason": "context-window"
 }
@@ -301,9 +507,7 @@ provider-managed
 other
 ```
 
-### 5.2 Truncation
-
-A harness MAY record:
+### 8.2 Truncation
 
 ```json
 {
@@ -316,19 +520,19 @@ A harness MAY record:
 }
 ```
 
-Dropped counts are diagnostics, not exact item identity. Exact repository exposure is determined from surrounding Context Packs/ContextRender artifacts.
+Dropped counts are diagnostics, not exact item identity. Exact repository exposure comes from surrounding Context Packs and ContextRender records.
 
-### 5.3 Observable language
+### 8.3 Observable language
 
 Lifecycle records describe what the harness/runtime did. They MUST NOT be phrased as "the model forgot" or equivalent cognitive claims.
 
 ---
 
-## 6. Tool telemetry
+## 9. Tool telemetry
 
 Detailed tool traces are high-volume and frequently sensitive.
 
-A canonical audit trace MAY retain compact tool facts, especially failures, truncation, and repository mutations:
+A canonical trace MAY retain compact audit facts, especially failures, truncation, and repository mutation:
 
 ```json
 {
@@ -346,15 +550,15 @@ A canonical audit trace MAY retain compact tool facts, especially failures, trun
 
 The canonical record SHOULD contain metadata and digests, not raw result bodies.
 
-Bulky tool traces MAY be batched or retained as disposable side objects. Their expiry MUST NOT invalidate canonical repository provenance.
+Repetitive successful spans MAY be batched or summarized; raw tool bodies MAY remain disposable side objects or only in the external OTel backend.
 
-A successful tool call does not prove its result entered a later model invocation. Repository evidence that later crossed the invocation boundary should appear in the later Context Pack where representable.
+A successful tool call does not prove its result entered a later model invocation. Repository evidence that crossed the later invocation boundary should appear in that invocation's Context Pack where representable.
 
 ---
 
-## 7. Workspace transitions
+## 10. Workspace transitions
 
-When a repository-mutating operation changes the effective tree, a trace MAY record:
+When a repository-mutating operation changes the effective tree, Git+ MAY record:
 
 ```json
 {
@@ -367,7 +571,7 @@ When a repository-mutating operation changes the effective tree, a trace MAY rec
 
 Both OIDs SHOULD remain reachable for the intended audit-retention period.
 
-V1 does not require a tree after every filesystem syscall. Capture at meaningful boundaries:
+The implementation does not need a tree after every filesystem syscall. Capture at meaningful boundaries:
 
 - after an agent edit tool completes;
 - before the next repository-affecting model invocation;
@@ -378,45 +582,35 @@ The next Context Pack `view.tree` remains authoritative for retrieval.
 
 ---
 
-## 8. Capture capability versus actual coverage
+## 11. Capture capability versus actual coverage
 
-An integration may know what it is **capable of observing** without proving every event in that class was captured.
+An integration may know what it is capable of observing without proving every event was captured.
 
-Therefore use distinct concepts:
+Therefore distinguish:
 
 ```text
 capture capability
-  what hooks / runtime boundaries this integration can observe
+  which runtime classes the instrumentation can observe
 
 trace coverage
-  what records actually arrived and whether known loss occurred
+  what audit records actually arrived and whether known loss/transformation occurred
 ```
 
-A session-start or adapter declaration MAY say:
+An OTel integration MAY declare:
 
 ```json
 {
   "visibility": {
-    "integration": "claude-code-hooks",
-    "capabilities": ["session", "tools", "workspace"]
+    "integration": "otel",
+    "stage": "sdk-export",
+    "capabilities": ["invocation", "tools", "lifecycle", "workspace"]
   }
 }
 ```
 
-This MUST NOT be presented as proof that every tool or workspace event was captured.
+This MUST NOT be presented as proof of complete capture.
 
-Where the adapter can detect loss, it SHOULD record trace health such as:
-
-```json
-{
-  "type": "trace-health",
-  "source": "claude-code-hooks",
-  "sequence": 42,
-  "dropped": 0
-}
-```
-
-A projection may then classify a telemetry class as:
+Where loss can be detected, record trace health or exporter health. A projection may classify each class as:
 
 ```text
 available
@@ -424,71 +618,25 @@ partial
 unknown
 ```
 
-A boolean `complete: true` SHOULD be used only when the integration has a defined completeness mechanism sufficient to support that claim.
+`complete` SHOULD be used only when the capture path has a defined completeness mechanism, no intentional sampling/filtering for that class, and no known loss.
 
 > **No compaction record exists** is not equivalent to **the harness proves no compaction occurred**.
 
 ---
 
-## 9. Logical capture points
+## 12. Security and retention
 
-The protocol is independent of vendor hook names.
+Provider envelopes, raw tool bodies, prompts, and transcript-like payloads SHOULD NOT become canonical trace records by default.
 
-### `beforeInvocation`
+OTel attributes themselves may contain source, paths, prompts, user identifiers, or secrets. The audit ingester MUST apply repository secret-handling and access policy before persistence.
 
-```text
-capture/verify repository view
-construct Context Pack
-construct final ContextRender
-append Context Exposure trace record
-```
+The normal observability branch MAY apply stronger redaction, aggregation, or retention rules independently.
 
-### `afterInvocation`
-
-```text
-capture model/provider
-capture provider-reported usage
-capture limits and their sources
-capture finish status and duration
-append Invocation Telemetry trace record
-```
-
-### `beforeTool` / `afterTool`
-
-```text
-bind to originating invocation record
-record failure/truncation/result size
-hash retained result bytes when useful
-mark repository mutation
-```
-
-### `beforeContextCompaction` / `afterContextCompaction`
-
-```text
-record strategy/reason
-record coarse dropped counts if known
-```
-
-### `before next invocation` / `afterWorkspaceMutation`
-
-```text
-materialize effective tree at an audit-relevant boundary
-append beforeTree → afterTree when changed
-```
+The audit trace MUST remain policy-invisible: losing or expiring optional trace detail may reduce auditability but MUST NOT retroactively change whether a source push, review, membership grant, or merge was authorized.
 
 ---
 
-## 10. Security, retention, and policy isolation
-
-Provider envelopes and raw tool/result bodies SHOULD NOT be canonical trace events by default. They are high-volume, provider-specific, and likely to contain secrets or source.
-
-All trace data follows repository access control, secret handling, redaction, and retention policy.
-
-The audit trace MUST remain **policy-invisible**: losing, corrupting, or expiring optional trace detail may reduce auditability but MUST NOT retroactively change whether a source push, review, membership grant, or merge was authorized.
-
----
-
-## 11. Product surface
+## 13. Product surface
 
 Useful read surfaces include:
 
@@ -498,43 +646,65 @@ git+ trace show <session>
 git+ context audit <operation-or-trace-record>
 ```
 
-A product may project:
+A product may correlate:
 
 ```text
 repository view/tree
 Context Pack and ContextRender
+OTel trace/span correlation
 model/provider
 input/output/cache tokens
-window and effective input limits with sources
+window/effective input limits and their sources
 retries/fallbacks
 context lifecycle events
 tool failures/truncation
 workspace transitions
 resulting commits/refs
-trace capability / actual coverage
+capture capability / actual coverage
 ```
 
 Derived values MUST be labeled derived.
 
 ---
 
-## 12. Recommended V1 profile
+## 14. Recommended V1 profile
 
 Start with:
 
 ```text
-1. Context Exposure records in refs/hub/trace/<session>
-2. provider-reported input/output/cache usage
-3. contextWindowTokens and/or effectiveInputLimitTokens with explicit source
-4. retries/fallbacks as distinct invocations
-5. compaction/truncation events when observable
-6. compact tool failure/truncation diagnostics
-7. beforeTree → afterTree at meaningful repository boundaries
-8. capture capability plus detectable trace-loss markers
+1. native OTel ingestion when the harness provides it
+2. hooks/embedded capture only as fallback
+3. a dedicated loss-intolerant audit export branch
+4. Context Exposure records in refs/hub/trace/<session>
+5. provider-reported input/output/cache usage
+6. contextWindowTokens and/or effectiveInputLimitTokens with explicit source
+7. retries/fallbacks as distinct invocations
+8. compaction/truncation events when observable
+9. compact tool failure/truncation diagnostics
+10. beforeTree → afterTree at meaningful repository boundaries
+11. capture capability plus detectable trace-loss/transformation markers
 ```
+
+Git+ SHOULD preserve external OTel correlation identifiers where useful while treating Git record OIDs as the canonical durable identity.
+
+---
+
+## 15. OpenTelemetry compatibility guidance
+
+The OTel specifications and semantic conventions evolve independently of Git+.
+
+Useful upstream references include:
+
+- OpenTelemetry Logs and trace correlation: `https://opentelemetry.io/docs/specs/otel/logs/`
+- OTel LogRecord trace-context fields: `https://opentelemetry.io/docs/specs/otel/logs/data-model/`
+- Semantic conventions: `https://opentelemetry.io/docs/specs/otel/semantic-conventions/`
+- Collector transformations/filtering: `https://opentelemetry.io/docs/collector/transforming-telemetry/`
+- Baggage security considerations: `https://opentelemetry.io/docs/concepts/signals/baggage/`
+
+An implementation SHOULD pin and report the instrumentation/semantic-convention version it understands, but a persisted Git+ record MUST remain interpretable without replaying the original OTel pipeline.
 
 ---
 
 ## Final invariant
 
-> **Invocation Telemetry is signed runtime provenance in a sibling audit trace, not policy-critical session history. It records harness-observed and provider-reported conditions, references canonical events by immutable Git record identity, distinguishes capability from actual coverage, and keeps token/window semantics explicit. It can explain where context may have been lost without claiming model cognition or causation.**
+> **OpenTelemetry is the preferred runtime capture and correlation layer; Git+ is the durable audit projection. Audit-relevant OTel observations are normalized into signed, policy-invisible Git records whose canonical identity is their Git record OID. The audit path avoids silent observability sampling/filtering, preserves evidence-class and token-window semantics, and never substitutes OTel correlation or Baggage for Git-native trust, Context Pack verification, or ContextRender commitments.**
