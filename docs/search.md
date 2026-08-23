@@ -388,6 +388,57 @@ host store should come only after measuring startup/index cost. A persistent
 index needs a version header so representation changes can invalidate it with a
 rebuild instead of migration complexity.
 
+## Runtime portability
+
+The search semantics belong to `Repository`, not to one host. Browser-local,
+Node-hosted, and Cloudflare-hosted repositories should all expose the same
+operation:
+
+```text
+Browser LocalGitApi ─┐
+Node HTTP API ────────┼──► Repository.search(pattern, ref)
+Cloudflare API ───────┘
+                           │
+                           ├── ObjectStore
+                           └── SearchIndex
+                                ↑
+                         host-specific cache
+```
+
+The object store already varies by runtime. The search index should vary the
+same way while remaining derived state behind one platform-neutral port. An
+initial implementation can keep it entirely in memory everywhere. If
+persistence later pays for itself, likely host choices are:
+
+| runtime | Git object storage | possible search-index persistence |
+| --- | --- | --- |
+| browser | OPFS | OPFS or IndexedDB |
+| local / hosted Node | filesystem-backed store | filesystem cache or SQLite |
+| Cloudflare | R2 + Durable Object storage | Durable Object SQLite or R2 |
+
+Persistence must not become a correctness requirement. A fresh browser
+session, restarted Node process, evicted Durable Object, missing cache, corrupt
+cache, or index-version mismatch must all degrade to rebuilding and/or scanning
+unindexed blobs. Search may get colder; it may not return a different answer.
+
+Blob ordinals and posting bitsets are private to one index instance. Never put
+those implementation details on the wire or make one runtime depend on another
+runtime's index numbering. The transport contract stays conceptual and stable:
+
+```text
+pattern + ref  ->  path + line matches
+```
+
+For remote search the server owns its index and receives only the query and
+revision. For browser-local search `LocalGitApi` uses the local repository and
+local index. Both paths call the same repository-domain behavior; neither
+should reimplement search policy in the transport adapter.
+
+This also means Cloudflare's ephemeral memory is not a special case. A Durable
+Object can answer from a warm in-memory index, restore a persisted index, or
+rebuild lazily after eviction. Because candidates are always verified and
+unknown blobs are scanned, those lifecycle differences affect latency only.
+
 ## Rollout
 
 Prefer small independently measurable steps.
