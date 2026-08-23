@@ -908,11 +908,16 @@ export const layerWithSearchIndex = Layer.effect(
         return (yield* readCommit(oid)).tree;
       });
 
-    const listFilesOf = Effect.fn("Repository.listFiles")(function* (
+    const walkFiles = Effect.fn("Repository.listFiles")(function* (
       tree: Oid,
-      options?: { readonly prefix?: string; readonly signal?: AbortSignal },
+      options?: {
+        readonly prefix?: string;
+        readonly signal?: AbortSignal;
+        readonly deadline?: number;
+      },
     ) {
       const files: TreeFile[] = [];
+      let incomplete = false;
       // Depth-first with an explicit stack rather than recursion: a deep tree
       // is data, and data should not size the call stack.
       const stack: Array<{ oid: Oid; prefix: string }> = [
@@ -922,8 +927,16 @@ export const layerWithSearchIndex = Layer.effect(
       const aborted = () => options?.signal?.aborted === true;
       while (stack.length > 0) {
         // Tree walks can be much larger than the blob reads that follow them;
-        // honour a local abort before every tree object and entry expansion.
+        // honour a local abort and the caller's time budget before every tree
+        // object rather than only once the flat list exists.
         if (aborted()) return yield* Effect.interrupt;
+        if (
+          options?.deadline !== undefined &&
+          (yield* Clock.currentTimeMillis) >= options.deadline
+        ) {
+          incomplete = true;
+          break;
+        }
         const { oid, prefix } = stack.pop()!;
         for (const entry of yield* readTreeEntries(oid)) {
           if (aborted()) return yield* Effect.interrupt;
@@ -939,8 +952,16 @@ export const layerWithSearchIndex = Layer.effect(
         }
       }
 
-      return files.sort((left, right) => left.path.localeCompare(right.path));
+      return {
+        files: files.sort((left, right) => left.path.localeCompare(right.path)),
+        incomplete,
+      };
     });
+
+    const listFilesOf = (
+      tree: Oid,
+      options?: { readonly prefix?: string; readonly signal?: AbortSignal },
+    ) => walkFiles(tree, options).pipe(Effect.map((walked) => walked.files));
 
     /** Every commit reachable from `roots`, the commit graph only. */
     const ancestry = (roots: ReadonlyArray<Oid>) =>
@@ -1836,6 +1857,9 @@ export const layerWithSearchIndex = Layer.effect(
         let work = 0;
         let truncated = false;
         let continuation: string | undefined;
+        /** Last fully processed file; the resume point when a walk stops early. */
+        let lastPath = "";
+        let lastLine = -1;
 
         const interrupted = () =>
           Effect.suspend(() => (input.signal?.aborted === true ? Effect.interrupt : Effect.void));
@@ -1851,7 +1875,11 @@ export const layerWithSearchIndex = Layer.effect(
             afterLine,
           });
 
-        for (const file of yield* listFilesOf(tree, { signal: input.signal })) {
+        const walked = yield* walkFiles(tree, {
+          signal: input.signal,
+          deadline: deadline ?? undefined,
+        });
+        for (const file of walked.files) {
           // The HTTP adapter interrupts its request fiber on disconnect; the
           // signal covers browser-local callers. Check before each storage hop.
           yield* interrupted();
@@ -1908,6 +1936,14 @@ export const layerWithSearchIndex = Layer.effect(
             }
           }
           if (truncated) break;
+          lastPath = file.path;
+          lastLine = Number.MAX_SAFE_INTEGER;
+        }
+        // A deadline that stopped the tree walk mid-way must not drop the
+        // unvisited half silently: resume re-walks and skips what was verified.
+        if (walked.incomplete && !truncated) {
+          truncated = true;
+          continuation = cursorFor(lastPath, lastLine);
         }
 
         let suggestions: ReadonlyArray<Search.FuzzyMatch> | undefined;
@@ -1915,7 +1951,11 @@ export const layerWithSearchIndex = Layer.effect(
         // literal miss. A partial answer must be resumed, not guessed at.
         if (wantsFuzzy && matches.length === 0 && !truncated) {
           const fuzzyMatches: Search.FuzzyMatch[] = [];
-          for (const file of yield* listFilesOf(tree, { signal: input.signal })) {
+          const walkedFuzzy = yield* walkFiles(tree, {
+            signal: input.signal,
+            deadline: deadline ?? undefined,
+          });
+          for (const file of walkedFuzzy.files) {
             yield* interrupted();
             if (isGitlink(file.mode) || !Search.underPath(file.path, input.path)) continue;
             let blob = searchIndex.get(file.oid);

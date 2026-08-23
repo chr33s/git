@@ -1,5 +1,9 @@
 # Search follow-up implementation pass
 
+> **Status: landed.** Every scope item below shipped; measurements are in
+> [`search-benchmarks.md`](search-benchmarks.md). The host size limits remain
+> the initial hypotheses — no measured corpus has approached a soft limit yet.
+
 This pass completes the operational hardening and optional fuzzy fallback left
 outside the initial Git-native literal-search implementation.
 

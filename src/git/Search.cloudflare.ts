@@ -3,17 +3,22 @@ import { Effect } from "effect";
 
 import { StorageFailure } from "./Error.ts";
 import * as Search from "./Search.ts";
+import type { PersistenceLimits } from "./Search.ts";
 
 /**
  * One value per chunk, keyed under the repository. DO storage has no multi-key
  * atomic batch on this path, so ordering is the atomicity story: the manifest
  * value is written last and is the only key a reader trusts.
  */
-export const durable = (storage: DurableObjectStorage, repo: string) => {
+export const durable = (
+  storage: DurableObjectStorage,
+  repo: string,
+  limits?: PersistenceLimits,
+) => {
   const root = `search-index-v3:${repo}`;
   return Search.persistent({
-    softLimitBytes: 10 * 1024 * 1024,
-    hardLimitBytes: 20 * 1024 * 1024,
+    softLimitBytes: limits?.softLimitBytes ?? 10 * 1024 * 1024,
+    hardLimitBytes: limits?.hardLimitBytes ?? 20 * 1024 * 1024,
     read: (name) =>
       Effect.tryPromise({
         try: async () => (await storage.get<Uint8Array>(`${root}:${name}`)) ?? null,
@@ -24,5 +29,17 @@ export const durable = (storage: DurableObjectStorage, repo: string) => {
         try: () => storage.put(`${root}:${name}`, bytes),
         catch: () => new StorageFailure({ operation: "search.write", path: `${root}:${name}` }),
       }).pipe(Effect.ignore),
+    remove: (name) =>
+      Effect.tryPromise({
+        try: () => storage.delete(`${root}:${name}`),
+        catch: () => new StorageFailure({ operation: "search.remove", path: `${root}:${name}` }),
+      }).pipe(Effect.ignore),
+    list: Effect.tryPromise({
+      try: async () => {
+        const keys = await storage.list({ prefix: `${root}:` });
+        return [...keys.keys()].map((key) => key.slice(root.length + 1));
+      },
+      catch: () => new StorageFailure({ operation: "search.list", path: root }),
+    }).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])),
   });
 };

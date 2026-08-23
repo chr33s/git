@@ -37,4 +37,27 @@ describe("Node SearchIndex", () => {
       }
     }),
   );
+
+  it.effect("keeps the index in memory only past the host hard limit", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-search-"));
+      try {
+        const data = new TextEncoder().encode("Repository search\n");
+        const oid = await Effect.runPromise(hashObject({ type: "blob", data }));
+        const candidates = await Effect.runPromise(
+          Effect.gen(function* () {
+            const index = yield* SearchIndex;
+            yield* index.observe(oid, data);
+            yield* index.flush;
+            return yield* index.candidates("repository", true);
+          }).pipe(Effect.provide(file(root, { hardLimitBytes: 64 }))),
+        );
+        // Nothing persisted; the warm in-memory index still answers.
+        assert.equal(candidates?.size, 1);
+        assert.equal(await fs.stat(path.join(root, "search-index-v3")).catch(() => null), null);
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
 });

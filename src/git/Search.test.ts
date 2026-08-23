@@ -14,21 +14,30 @@ import {
 } from "./Search.ts";
 
 /** In-memory chunk storage, so the shared host persistence runs in unit tests. */
-const fakeIo = (hardLimitBytes = 250 * 1024 * 1024) => {
+const fakeIo = (hardLimitBytes = 250 * 1024 * 1024, chunkTargetBytes?: number) => {
   const files = new Map<string, Uint8Array>();
   const reads: string[] = [];
+  const writes = new Map<string, number>();
   return {
     files,
     reads,
+    writes,
     io: {
       softLimitBytes: Math.floor(hardLimitBytes / 2),
       hardLimitBytes,
+      chunkTargetBytes,
       read: (name: string) =>
         Effect.sync(() => {
           reads.push(name);
           return files.get(name) ?? null;
         }),
-      write: (name: string, bytes: Uint8Array) => Effect.sync(() => void files.set(name, bytes)),
+      write: (name: string, bytes: Uint8Array) =>
+        Effect.sync(() => {
+          writes.set(name, (writes.get(name) ?? 0) + 1);
+          files.set(name, bytes);
+        }),
+      remove: (name: string) => Effect.sync(() => void files.delete(name)),
+      list: Effect.sync(() => [...files.keys()]),
     },
   };
 };
@@ -157,6 +166,58 @@ describe("Search", () => {
         assert.equal(index.index.candidates("oversized", true)?.size, 1);
       }).pipe(Effect.provide(persistent(store.io)));
       assert.equal(store.files.size, 0);
+    }),
+  );
+
+  it.effect("rewrites only the chunks new blobs landed in", () =>
+    Effect.gen(function* () {
+      // A 120-byte target gives each ~70-byte blob row its own chunk, so an
+      // appended blob must leave the earlier chunk files untouched.
+      const store = fakeIo(undefined, 120);
+      const observe = (content: string) =>
+        Effect.gen(function* () {
+          const data = new TextEncoder().encode(content);
+          const index = yield* SearchIndex;
+          yield* index.observe(yield* hashObject({ type: "blob", data }), data);
+          yield* index.flush;
+        });
+      const layer = persistent(store.io);
+      yield* observe("first blob content\n").pipe(Effect.provide(layer));
+      yield* observe("second blob content\n").pipe(Effect.provide(layer));
+      const before = new Map(store.writes);
+      yield* observe("third blob content\n").pipe(Effect.provide(layer));
+      assert.equal(store.writes.get("blobs-0"), before.get("blobs-0"));
+      assert.equal(store.writes.get("blobs-1"), before.get("blobs-1"));
+      assert.equal(
+        (store.writes.get("manifest.json") ?? 0) > (before.get("manifest.json") ?? 0),
+        true,
+      );
+    }),
+  );
+
+  it.effect("deletes chunks a compacted snapshot no longer references", () =>
+    Effect.gen(function* () {
+      const store = fakeIo(undefined, 120);
+      const layer = persistent(store.io);
+      const data = (content: string) => new TextEncoder().encode(content);
+      const oid = (content: string) => hashObject({ type: "blob", data: data(content) });
+      yield* Effect.gen(function* () {
+        const index = yield* SearchIndex;
+        yield* index.observe(yield* oid("keep me\n"), data("keep me\n"));
+        yield* index.observe(yield* oid("collect me\n"), data("collect me\n"));
+        yield* index.flush;
+      }).pipe(Effect.provide(layer));
+      assert.equal(store.files.has("blobs-1"), true);
+
+      // What GC does: forget the collected blob, then the next flush publishes
+      // a smaller snapshot whose manifest no longer names `blobs-1`.
+      yield* Effect.gen(function* () {
+        const index = yield* SearchIndex;
+        yield* index.forget([yield* oid("collect me\n")]);
+        yield* index.flush;
+      }).pipe(Effect.provide(layer));
+      assert.equal(store.files.has("blobs-1"), false);
+      assert.equal(store.files.has("manifest.json"), true);
     }),
   );
 

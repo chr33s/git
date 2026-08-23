@@ -180,7 +180,12 @@ const PersistedPostingRows = Schema.Array(
 
 export interface IndexSnapshot {
   readonly manifest: Uint8Array;
-  readonly chunks: ReadonlyArray<{ readonly name: string; readonly bytes: Uint8Array }>;
+  readonly chunks: ReadonlyArray<{
+    readonly name: string;
+    readonly bytes: Uint8Array;
+    /** SHA-1 of the raw bytes, matching the manifest entry — used to skip unchanged chunk writes. */
+    readonly checksum: string;
+  }>;
 }
 
 const PERSISTED_VERSION = 3;
@@ -446,6 +451,7 @@ export class BlobIndex {
    */
   async persisted(
     compress?: (bytes: Uint8Array) => Promise<Uint8Array>,
+    targetBytes: number = CHUNK_TARGET_BYTES,
   ): Promise<IndexSnapshot | null> {
     if (this.#unloadedRanges.length > 0) return null;
     const blobs = [...this.#byOid.values()].map((blob) => ({
@@ -464,7 +470,7 @@ export class BlobIndex {
       let bytes = 2;
       for (const row of rows) {
         const size = new TextEncoder().encode(JSON.stringify(row)).length + 1;
-        if (bytes + size > CHUNK_TARGET_BYTES && current.length > 0) {
+        if (bytes + size > targetBytes && current.length > 0) {
           groups.push(current);
           current = [];
           bytes = 2;
@@ -538,7 +544,14 @@ export class BlobIndex {
         chunks: parts.map(({ bytes: _bytes, ...part }) => part),
       }),
     );
-    return { manifest, chunks: parts.map(({ name, bytes }) => ({ name, bytes })) };
+    return {
+      manifest,
+      chunks: parts.map(({ name, bytes, checksum: rawChecksum }) => ({
+        name,
+        bytes,
+        checksum: rawChecksum,
+      })),
+    };
   }
 
   /**
@@ -598,12 +611,13 @@ export class BlobIndex {
     for (const row of rows.value) {
       for (const ordinal of row.ordinals) {
         const blob = this.#byOrdinal.get(ordinal);
-        if (blob === undefined || blob.state !== "searchable") return false;
+        // Unknown ordinals are blobs GC forgot after the snapshot: skip them.
+        if (blob !== undefined && blob.state !== "searchable") return false;
       }
       const posting = this.#byBigram.get(row.bigram) ?? new BitSet();
       for (const ordinal of row.ordinals) {
         const blob = this.#byOrdinal.get(ordinal);
-        if (blob === undefined) return false;
+        if (blob === undefined) continue;
         posting.add(ordinal);
         const keys = this.#keysByOid.get(blob.oid) ?? [];
         this.#keysByOid.set(blob.oid, [...keys, row.bigram]);
@@ -689,14 +703,25 @@ export const memory = Layer.sync(SearchIndex, () => {
   });
 });
 
+/** Per-host cache caps; both default per platform when the adapter omits them. */
+export interface PersistenceLimits {
+  readonly softLimitBytes?: number;
+  readonly hardLimitBytes?: number;
+}
+
 export interface PersistenceIo {
   /** `null` for a missing chunk or manifest; failures are caught by the host. */
   readonly read: (name: string) => Effect.Effect<Uint8Array | null>;
   readonly write: (name: string, bytes: Uint8Array) => Effect.Effect<void>;
+  readonly remove: (name: string) => Effect.Effect<void>;
+  /** Chunk and manifest names currently stored, for orphan cleanup. */
+  readonly list: Effect.Effect<ReadonlyArray<string>>;
   /** Past this, a checkpoint warns and still persists: derived data is useful. */
   readonly softLimitBytes: number;
   /** Past this, the host keeps the index in memory only. */
   readonly hardLimitBytes: number;
+  /** Test and tuning seam; defaults to 256 KiB. */
+  readonly chunkTargetBytes?: number;
 }
 
 /**
@@ -728,6 +753,12 @@ export const persistent = (io: PersistenceIo): Layer.Layer<SearchIndex> =>
       let current = new BlobIndex();
       let manifestInfo: PersistedManifestInfo | null = null;
       const loadedPostings = new Set<string>();
+      /**
+       * Raw checksum of every chunk the published manifest names. Seeded from
+       * a same-codec manifest, this is what lets a flush skip chunks whose
+       * content did not change — the incremental-write half of chunking.
+       */
+      const published = new Map<string, string>();
       if (manifestBytes !== null && info !== null) {
         const blobChunks = new Map<string, Uint8Array>();
         let readable = true;
@@ -744,6 +775,9 @@ export const persistent = (io: PersistenceIo): Layer.Layer<SearchIndex> =>
         if (restored !== null) {
           current = restored;
           manifestInfo = info;
+          if (info.codec === "deflate") {
+            for (const chunk of info.chunks) published.set(chunk.name, chunk.checksum);
+          }
         }
       }
       const postingChunks = (manifestInfo?.chunks ?? []).filter(
@@ -786,7 +820,19 @@ export const persistent = (io: PersistenceIo): Layer.Layer<SearchIndex> =>
         if (!dirty) return Effect.void;
         dirty = false;
         return Effect.gen(function* () {
-          const snapshot = yield* Effect.promise(() => current.persisted(compress));
+          // A lazily restored index cannot publish partial postings: the first
+          // checkpoint after a restart completes the restore, then persists.
+          if (manifestInfo !== null) {
+            for (const chunk of postingChunks) {
+              if (loadedPostings.has(chunk.name)) continue;
+              const bytes = yield* readChunk(manifestInfo.codec, chunk.name);
+              if (bytes === null || !current.loadPostings(chunk, bytes)) return;
+              loadedPostings.add(chunk.name);
+            }
+          }
+          const snapshot = yield* Effect.promise(() =>
+            current.persisted(compress, io.chunkTargetBytes ?? CHUNK_TARGET_BYTES),
+          );
           // A partially restored index has nothing safe to publish yet.
           if (snapshot === null) return;
           const size =
@@ -803,11 +849,23 @@ export const persistent = (io: PersistenceIo): Layer.Layer<SearchIndex> =>
               `search index is ${size} bytes, past the ${io.softLimitBytes} soft limit`,
             );
           }
-          // Chunks first, manifest last: the manifest is the publish.
+          // Chunks first, manifest last: the manifest is the publish. A chunk
+          // whose checksum the published manifest already carries is skipped —
+          // indexing a few new blobs rewrites only the chunks they landed in.
+          const names = new Set(snapshot.chunks.map((chunk) => chunk.name));
           for (const chunk of snapshot.chunks) {
-            yield* io.write(chunk.name, chunk.bytes).pipe(Effect.ignore);
+            if (published.get(chunk.name) === chunk.checksum) continue;
+            yield* io.write(chunk.name, chunk.bytes);
           }
-          yield* io.write("manifest.json", snapshot.manifest).pipe(Effect.ignore);
+          yield* io.write("manifest.json", snapshot.manifest);
+          published.clear();
+          for (const chunk of snapshot.chunks) published.set(chunk.name, chunk.checksum);
+          // Chunks a smaller or compacted snapshot no longer references —
+          // including orphans from an interrupted checkpoint — are deleted.
+          const stored = yield* io.list.pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+          for (const name of stored) {
+            if (name !== "manifest.json" && !names.has(name)) yield* io.remove(name);
+          }
         });
       });
       return SearchIndex.of({ index: current, observe, forget, candidates, flush });

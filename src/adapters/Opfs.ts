@@ -475,14 +475,15 @@ export const stores = (root: FileSystemDirectoryHandle | Promise<FileSystemDirec
  */
 export const searchIndex = (
   rootHandle: FileSystemDirectoryHandle | Promise<FileSystemDirectoryHandle>,
+  limits?: Search.PersistenceLimits,
 ) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const root = yield* Effect.promise(() => Promise.resolve(rootHandle));
       const prefix = "search/index-v3";
       return Search.persistent({
-        softLimitBytes: 25 * 1024 * 1024,
-        hardLimitBytes: 50 * 1024 * 1024,
+        softLimitBytes: limits?.softLimitBytes ?? 25 * 1024 * 1024,
+        hardLimitBytes: limits?.hardLimitBytes ?? 50 * 1024 * 1024,
         read: (name) =>
           Effect.tryPromise({
             try: () => readBytes(root, `${prefix}/${name}`),
@@ -495,6 +496,23 @@ export const searchIndex = (
             catch: () =>
               new StorageFailure({ operation: "search.write", path: `${prefix}/${name}` }),
           }).pipe(Effect.ignore),
+        remove: (name) =>
+          Effect.tryPromise({
+            try: () => removePath(root, `${prefix}/${name}`),
+            catch: () =>
+              new StorageFailure({ operation: "search.remove", path: `${prefix}/${name}` }),
+          }).pipe(Effect.ignore),
+        list: Effect.tryPromise({
+          try: async () => {
+            const names: string[] = [];
+            const { directory } = await parentOf(root, `${prefix}/manifest.json`, false);
+            for await (const [name, entry] of directory.entries()) {
+              if (entry.kind === "file") names.push(name);
+            }
+            return names;
+          },
+          catch: () => new StorageFailure({ operation: "search.list", path: prefix }),
+        }).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])),
       });
     }),
   );

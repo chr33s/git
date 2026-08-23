@@ -6,20 +6,23 @@ import { Effect } from "effect";
 
 import { StorageFailure } from "./Error.ts";
 import * as Search from "./Search.ts";
+import type { PersistenceLimits } from "./Search.ts";
 
 const failure = (operation: string, target: string) =>
   new StorageFailure({ operation, path: target });
+
+export type { PersistenceLimits };
 
 /**
  * Chunks under one directory beside the bare repository; never Git object
  * state. Soft limit warns, hard limit keeps the index in memory only — both
  * are initial values to be tuned by `bench:search`, not measured truths yet.
  */
-export const file = (directory: string) => {
+export const file = (directory: string, limits?: PersistenceLimits) => {
   const root = path.join(directory, "search-index-v3");
   return Search.persistent({
-    softLimitBytes: 100 * 1024 * 1024,
-    hardLimitBytes: 250 * 1024 * 1024,
+    softLimitBytes: limits?.softLimitBytes ?? 100 * 1024 * 1024,
+    hardLimitBytes: limits?.hardLimitBytes ?? 250 * 1024 * 1024,
     read: (name) =>
       Effect.tryPromise({
         try: async () => new Uint8Array(await fs.readFile(path.join(root, name))),
@@ -41,5 +44,14 @@ export const file = (directory: string) => {
         },
         catch: () => failure("search.write", path.join(root, name)),
       }).pipe(Effect.ignore),
+    remove: (name) =>
+      Effect.tryPromise({
+        try: () => fs.rm(path.join(root, name), { force: true }),
+        catch: () => failure("search.remove", path.join(root, name)),
+      }).pipe(Effect.ignore),
+    list: Effect.tryPromise({
+      try: async () => (await fs.readdir(root)).filter((name) => !name.endsWith(".tmp")),
+      catch: () => failure("search.list", root),
+    }).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])),
   });
 };
