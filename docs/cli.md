@@ -1,295 +1,398 @@
-# CLI Reference & Design Guidelines
+# Git+ CLI
 
-This document defines the CLI specification, command reference, and design guidelines for `@chr33s/git` (Universal Git smart-HTTP protocol server, browser client & Unix CLI built on Effect v4 and Web APIs).
+The executable is the syntax reference:
 
----
+```bash
+git+ --help
+git+ <command> --help
+git+ <command> <subcommand> --help
+```
 
-## 1. Design & Authoring Principles
+This guide covers the conventions and workflows that span Git+'s **Work**, **Knowledge**, and **Audit** planes. It does not duplicate every flag table.
 
-This documentation structure and command architecture synthesize key design patterns from leading developer documentation standards:
+The generated top-level help snapshot comes from:
 
-### Stripe Docs Design Principles
-
-- **Developer-First DX & Runnable Snippets:** Every command, parameter, and flag is paired with real-world, executable code snippets and terminal commands.
-- **Interactive & Self-Documenting:** Commands support localized interactive execution modes, JSON output for scriptability, and instant local verification without third-party dependencies.
-- **Structured Command Hierarchy:** Clear separation between standard Git plumbing/porcelain actions and Hub-level collaboration primitives (identity, trust, pull requests, checks).
-- **Rich Status & Error Handling:** Standardized error formats with granular exit codes and action-oriented error output.
-
-### Dropbox Developer Docs Guidelines
-
-- **Explicit Scope & Capability Matrices:** Clear designation of required cryptographic scopes (`source:push`, `hub:check`, `hub:review`, etc.) and authority levels (plain repo vs. genesis-guarded repo).
-- **Comprehensive Parameter Tables:** Technical, tabular breakdown of flags, environment variables, argument types, defaults, and necessity.
-- **Universal API-to-CLI Parity:** Every CLI subcommand maps 1:1 to the internal `@chr33s/git` Effect `HttpApi` schema and JSON endpoints.
+```bash
+npm run docs:cli
+```
 
 ---
 
-## 2. Global Architecture & Options
-
-The `@chr33s/git` CLI (invoked via `git+` or `npx @chr33s/git`) executes the exact same underlying TypeScript core engine across platforms (Node.js, Cloudflare Workers, browser runtime, native CLI).
+## 1. Product model
 
 ```text
-git+ [global-flags] <command> [subcommand] [arguments] [command-flags]
+WORK
+  tasks / PRs / sessions / decisions
+
+KNOWLEDGE
+  .gitplus/knowledge
+  Repository Memory
+
+AUDIT
+  Invocations
+  repository context
+  runtime telemetry
 ```
 
-### Global Flags & Options
+All three use the same Git object store, repository identity, signed membership, and capability model.
 
-| Flag        | Short | Type      | Default | Description                                                         |
-| :---------- | :---- | :-------- | :------ | :------------------------------------------------------------------ |
-| `--help`    | `-h`  | `boolean` | `false` | Display help and usage information for command or subcommand.       |
-| `--version` | `-v`  | `boolean` | `false` | Output current CLI engine version.                                  |
-| `--json`    |       | `boolean` | `false` | Return structured JSON output to `stdout` for programmatic parsing. |
-| `--quiet`   | `-q`  | `boolean` | `false` | Suppress non-essential informational output.                        |
-| `--verbose` |       | `boolean` | `false` | Output detailed Effect trace logs and HTTP protocol frames.         |
-| `--config`  | `-c`  | `string`  | `""`    | Path to custom repository/hub configuration file.                   |
-
-### Environment Variables
-
-| Variable         | Description                                                                           |
-| :--------------- | :------------------------------------------------------------------------------------ |
-| `GIT_ROOT`       | Base directory path for repository storage when running server or local operations.   |
-| `GIT_AUTH_TOKEN` | Bearer/Capability token for authenticating against remote `@chr33s/git` endpoints.    |
-| `SSH_AUTH_SOCK`  | Path to active SSH agent socket for signing cryptographic membership and review logs. |
+Users normally work with sessions and Invocations. Context Exposure and trace records stay visible for protocol debugging, but they are not the primary product vocabulary.
 
 ---
 
-## 3. Core Commands Reference
+## 2. Repository discovery
 
-### `git+ init`
-
-Initialize a new Git repository or convert an existing repository into a cryptographic hub.
+Repo-scoped commands follow ordinary Git ergonomics:
 
 ```bash
-git+ init [path] [--genesis]
+cd project
+
+git+ session show --branch=HEAD --audit
+git+ context for --task="fix authentication policy"
+git+ knowledge check
 ```
 
-#### Options
+The current checkout is the default repository context. Explicit root/repository selection remains available for bare repositories, servers, automation, and administration.
 
-| Flag        | Short | Type      | Default | Required | Description                                                                      |
-| :---------- | :---- | :-------- | :------ | :------- | :------------------------------------------------------------------------------- |
-| `--genesis` | `-g`  | `boolean` | `false` | No       | Creates `refs/meta/trust/genesis` guarded by your active SSH key membership log. |
-| `--bare`    |       | `boolean` | `false` | No       | Create a bare repository without a working directory.                            |
+Human-facing arguments may use normal Git spelling:
 
-#### Example Usage
-
-```bash
-# Initialize standard local repository
-git+ init my-repo
-
-# Initialize an agent-first cryptographic hub guarded by SSH authority
-git+ init my-secured-repo --genesis
+```text
+HEAD
+main
+refs/heads/main
+abc123
 ```
+
+Commands resolve unambiguous revisions and abbreviated OIDs. Canonical serialized records still use algorithm-qualified OIDs such as `sha1:<hex>` or `sha256:<hex>`.
 
 ---
 
-### `git+ serve`
+## 3. Global behavior
 
-Start an embedded universal Smart-HTTP protocol server and web interface.
+The CLI shape is:
 
-```bash
-git+ serve [--port=<port>] [--host=<host>] [--open]
+```text
+git+ [global-options] <command> [subcommand] [arguments]
 ```
 
-#### Options
+Conventions:
 
-| Flag     | Short | Type      | Default       | Required | Description                                                                          |
-| :------- | :---- | :-------- | :------------ | :------- | :----------------------------------------------------------------------------------- |
-| `--port` | `-p`  | `number`  | `8080`        | No       | Port number to bind the HTTP server.                                                 |
-| `--host` | `-H`  | `string`  | `"127.0.0.1"` | No       | Network host address to bind.                                                        |
-| `--open` | `-o`  | `boolean` | `false`       | No       | Permit write/push operations to un-guarded repos (useful for local scratch testing). |
-
-#### Example Usage
-
-```bash
-# Start local server on port 8080
-GIT_ROOT=./repos git+ serve --port=8080 --open
-```
+- human-readable output is the default;
+- `--json` returns structured output for harnesses and scripts;
+- diagnostics go to stderr so stdout stays parseable;
+- commands that create durable records print a stable identifier suitable for later commands;
+- missing telemetry or usage stays unknown/absent and is never silently rewritten as zero;
+- content relevance never grants repository authority;
+- causal record joins use Git identity, not timestamp proximity.
 
 ---
 
-### `git+ clone`
+## 4. Generated top-level help
 
-Fetch and clone a repository over Smart-HTTP (v0/v2).
+`npm run docs:cli` replaces the block below with the executable's `--help` output.
 
-```bash
-git+ clone <url> [destination]
+<!-- BEGIN GENERATED CLI HELP -->
+```text
+git+ --help
+
+Core Git
+  init clone fetch pull push
+  add rm mv restore status switch commit
+  log history show diff grep files bisect
+  branch tag refs reflog reset
+  merge cherry-pick rebase
+  archive fsck gc
+
+Collaboration / Work
+  hub id credential credential-helper
+  pr task queue session wake
+  social remote webhook serve
+
+Knowledge / Audit
+  context knowledge
+
+Harness plumbing
+  trace
 ```
-
-#### Example Usage
-
-```bash
-git+ clone http://127.0.0.1:8080/my-repo ./my-copy
-```
+<!-- END GENERATED CLI HELP -->
 
 ---
 
-## 4. Advanced Collaboration & Capabilities
+## 5. Work
 
-The following subcommands represent features that have been successfully merged into `main` and are now available in the core CLI.
+### 5.1 Tasks
+
+Tasks coordinate work through signed task refs. Claims are advisory leases, not locks.
+
+```bash
+git+ task list
+git+ task claim <task> --ttl=15m
+# work
+git+ task close <task> --commit=HEAD
+```
+
+Run `git+ task --help` for the exact verbs and flags.
+
+### 5.2 Sessions
+
+A session keeps the compact work record:
+
+```text
+what the agent was asked
+what decisions were requested/resolved
+what the session produced
+compact reusable learning
+aggregate usage when available
+```
+
+Typical harness flow:
+
+```bash
+session=$(git+ session open \
+  --key ~/.ssh/id_ed25519 \
+  --agent claude-code \
+  --model model-x \
+  --prompt "Fix auth policy")
+
+# work
+
+git+ session produce \
+  --key ~/.ssh/id_ed25519 \
+  --session "$session" \
+  --commit HEAD \
+  --note "Worker auth tests require the production policy fixture"
+```
+
+Inspect a session by ID or by the branch it produced:
+
+```bash
+git+ session show "$session"
+git+ session show --branch=feature/auth
+```
+
+### 5.3 Session audit
+
+The session is also the normal audit entry point:
+
+```bash
+git+ session show "$session" --audit
+git+ session show --branch=feature/auth --audit
+```
+
+`--audit` joins the policy-visible session record with its policy-invisible Invocation history.
+
+Example projection:
+
+```text
+Invocation abc123
+
+Context
+  tree      79ad…
+  evidence  7 blobs · 1 gitlink
+  render    ✓ verified
+
+Runtime
+  chat · anthropic / model-x
+  118k input · 4.2k output
+  finish stop
+
+Workspace
+  79ad… → a130…
+
+Capture
+  OTel GenAI · complete
+```
+
+The separate pre-call Context Exposure and post-call Invocation Telemetry records only matter when debugging the audit protocol itself.
+
+### 5.4 Decisions
+
+When the agent reaches a question that needs human judgement:
+
+```bash
+git+ session ask \
+  --session "$session" \
+  --question "Which compatibility behavior should remain?" \
+  --option="strict,legacy"
+
+git+ session answer \
+  --session "$session" \
+  --decision <decision-id> \
+  --chose strict
+```
+
+The answer becomes signed causal provenance instead of an ephemeral chat message.
 
 ---
 
-### Distributed Agent Collaboration & Review (`git+ pr` / `git+ hub`)
+## 6. Knowledge
 
-**Status:** Merged (Formerly PR #1: _Agent-Native Collaboration DAG & Event Synthesis_)  
-**Scope / Capabilities Required:** `hub:review`, `hub:check`, `hub:merge`
+The knowledge corpus is ordinary repository content under `.gitplus/knowledge/`. Each Concept is directly OKF-compatible Markdown/YAML with optional stronger Git+ provenance under `gitplus:` frontmatter.
 
-#### Overview
-
-Extends standard Git with an offline-first, append-only event DAG stored natively inside `refs/meta/pull-requests/`. This allows parallel agents and humans to submit code reviews, attestations, and automated checks without relying on centralized API web hosts. All events are SSH-signed and bound to exact commit SHAs.
-
-#### Commands & Syntax
-
-##### `git+ pr list`
-
-List active pull requests, approval statuses, and target branches.
+Use normal file and Git operations to edit and inspect it:
 
 ```bash
-git+ pr list [--state=<open|closed|all>]
+$EDITOR .gitplus/knowledge/gotchas/worker-auth.md
+git diff .gitplus/knowledge
+git log -- .gitplus/knowledge/gotchas/worker-auth.md
 ```
 
-##### `git+ pr create`
+The directory already is the portable interchange artifact, so Git+ does not require a list/show/import/export layer.
 
-Open a new pull request by appending a PR genesis event to the DAG.
+### 6.1 Verify knowledge
+
+Git+ adds the check ordinary file tools cannot perform:
 
 ```bash
-git+ pr create --title=<title> --target=<branch> [--body=<body>]
+# Check the entire bundle
+git+ knowledge check
+
+# Check one Concept
+git+ knowledge check gotchas/worker-auth
 ```
 
-##### `git+ pr review`
+The check keeps these dimensions separate:
 
-Cryptographically sign and submit a review attestation (approve, request changes, or comment).
+```text
+OKF structure
+status / stale_after
+signed Git+ citations
+blob dependency state
+gitlink dependency state
+external captured-source state
+signed verification provenance
+```
+
+Changed evidence means **revalidate**, not **false**.
+
+Portable OKF `verified` metadata is editorial metadata. It never grants Git+ membership, capability, review authority, or instruction authority.
+
+### 6.2 Repository Memory
+
+Repository Memory is the bounded projection suitable for every session start:
 
 ```bash
-git+ pr review <pr-id> --status=<approve|reject|comment> [--message=<text>]
+# Read current Memory
+git+ session memory
+
+# Rebuild from durable provenance / current knowledge first
+git+ session memory --distill
 ```
 
-##### `git+ pr merge`
-
-Perform a compare-and-swap atomic merge against the target ref if all cryptographic checks pass.
-
-```bash
-git+ pr merge <pr-id> [--strategy=<squash|rebase|merge>]
-```
-
-#### Options Matrix
-
-| Flag         | Type     | Default    | Required     | Description                                        |
-| :----------- | :------- | :--------- | :----------- | :------------------------------------------------- |
-| `--title`    | `string` | —          | Yes (create) | Title summary of the pull request.                 |
-| `--target`   | `string` | `"main"`   | No           | Target branch to merge into.                       |
-| `--status`   | `string` | —          | Yes (review) | Review verdict: `approve`, `reject`, or `comment`. |
-| `--strategy` | `string` | `"squash"` | No           | Merge strategy for combining commit DAGs.          |
-
-#### Example Usage
-
-```bash
-# Create a new agent PR targeting main
-git+ pr create --title="feat: Add WebCrypto signature verification" --target="main"
-
-# Submit SSH-signed approval for PR #42
-git+ pr review 42 --status=approve --message="Verified Effect v4 schema compatibility"
-
-# Execute atomic compare-and-swap merge
-git+ pr merge 42 --strategy=rebase
-```
+Memory is a cache. Eviction does not delete Knowledge Concepts or their signed source records.
 
 ---
 
-### Capability-Scoped Credential Minting (`git+ credential`)
+## 7. Audit: repository context
 
-**Status:** Merged (Formerly PR #2: _Delegated Cryptographic Capability Credentials_)  
-**Scope / Capabilities Required:** `source:push`, `hub:check:test`, `hub:admin`
+Context commands expose the Git-native repository-context protocol in [context-pack.md](context-pack.md):
 
-#### Overview
-
-Introduces zero-trust, capability-scoped temporary credential generation. Rather than using long-lived personal access tokens or global SSH keys, developers and agents mint short-lived tokens scoped to specific actions (e.g., pushing to a single branch or posting a CI check) and pinned to the repository's SSH key log.
-
-#### Commands & Syntax
-
-##### `git+ credential mint`
-
-Mint a short-lived, capability-restricted delegation token.
-
-```bash
-git+ credential mint --capability=<cap> [--ttl=<duration>] [--repo=<repo-id>]
+```text
+git+ context for --task <text>
+git+ context why <pack> [item]
+git+ context audit <invocation-or-exposure>
 ```
 
-##### `git+ credential verify`
-
-Validate a token against a repository's membership authority log.
+### 7.1 Build context
 
 ```bash
-git+ credential verify --token=<token>
+git+ context for --task="fix authentication policy"
 ```
 
-##### `git+ credential revoke`
+The output identifies one Repository View and typed evidence:
 
-Publish a tombstone event revoking an agent key or minted credential across the DAG.
+```text
+blob
+  path + blob OID + optional byte range
+
+gitlink
+  path + mode 160000 + submodule commit OID
+```
+
+Retrieval scores, indexes, or graph paths may appear as diagnostics. They are not evidence identity.
+
+### 7.2 Explain selection
 
 ```bash
-git+ credential revoke --key-id=<ssh-key-fingerprint>
+git+ context why <pack> src/auth.ts
 ```
 
-#### Options Matrix
+The command separates verified Git evidence from descriptive selector explanations.
 
-| Flag           | Type     | Default | Required     | Description                                                |
-| :------------- | :------- | :------ | :----------- | :--------------------------------------------------------- |
-| `--capability` | `string` | —       | Yes (mint)   | Scoped capability (e.g., `source:push`, `hub:check:test`). |
-| `--ttl`        | `string` | `"1h"`  | No           | Token lifetime validity (e.g., `30m`, `2h`, `1d`).         |
-| `--key-id`     | `string` | —       | Yes (revoke) | SSH key fingerprint to retroactively revoke.               |
-
-#### Example Usage
+### 7.3 Audit exposure
 
 ```bash
-# Mint a 30-minute token for CI bot restricted to publishing test checks
-git+ credential mint --capability="hub:check:test" --ttl="30m"
-
-# Clone and push using minted capability token
-git+ clone http://@host/repo --token="mnt_987654321xyz"
-
-# Revoke a compromised agent key retroactively
-git+ credential revoke --key-id="SHA256:abc123xyz789..."
+git+ context audit <invocation-or-exposure>
 ```
+
+The audit checks each dimension independently:
+
+```text
+signed trace record
+pack blob identity
+retained view.tree
+blob path/OID/range
+mode-160000 gitlinks
+ContextRender digest when retained
+semantic segment placements
+instruction-provenance annotations
+bound Invocation
+optional OTel correlation
+```
+
+A missing retained render body can coexist with a valid historical render commitment.
 
 ---
 
-## 5. Output Schemas & Errors
+## 8. Harness telemetry
 
-When invoking commands with the `--json` flag, responses adhere to standard JSON structures.
+Harness-native OpenTelemetry GenAI is the preferred runtime capture path. Users read the resulting Invocations through:
 
-### Success Response Format
-
-```json
-{
-  "success": true,
-  "data": {
-    "command": "pr review",
-    "prId": 42,
-    "status": "approved",
-    "signature": "SSH-SIG-SHA256:...",
-    "headCommit": "e2a1b0c93710bf3f0a"
-  },
-  "timestamp": "2026-08-21T11:00:25Z"
-}
+```bash
+git+ session show --audit
 ```
 
-### Error Response Format & Exit Codes
+Raw trace writing exists for integrations without suitable native OTel:
 
-| Exit Code | Meaning             | Description                                                    |
-| :-------- | :------------------ | :------------------------------------------------------------- |
-| `0`       | Success             | Command executed without errors.                               |
-| `1`       | General Failure     | Invalid invocation, flag parse error, or missing repository.   |
-| `2`       | Auth / Scope Denied | Key not present in `refs/meta/trust/` log or token expired.    |
-| `3`       | DAG CAS Conflict    | Compare-and-swap failed due to target ref moving concurrently. |
-
-```json
-{
-  "success": false,
-  "error": {
-    "code": "AUTH_SCOPE_DENIED",
-    "exitCode": 2,
-    "message": "Key 'SHA256:...' lacks capability 'hub:merge' for target branch 'main'.",
-    "hint": "Mint a token with 'hub:merge' or request owner signature."
-  }
-}
+```bash
+git+ trace record \
+  --session <session-id> \
+  --key <private-key> \
+  --event <event.json>
 ```
+
+The recorder binds the repository and session, validates the normalized event, signs it, appends it under `refs/hub/trace/<session>`, and returns the Git record OID.
+
+There is no normal `trace show` workflow. The session/Invocation projection is the human-facing read path.
+
+See [telemetry.md](telemetry.md) for GenAI semantic-convention mapping, attempts, capture coverage, trace health, and retention rules.
+
+---
+
+## 9. JSON output
+
+Machine consumers should use `--json` instead of parsing terminal formatting.
+
+Structured responses preserve distinctions such as:
+
+```text
+observed vs reported vs derived
+known vs unknown
+current vs stale
+complete vs partial capture
+portable editorial verification vs signed Git+ provenance
+```
+
+Unknown fields are omitted or represented explicitly according to the command schema; commands must not fabricate zero/false values.
+
+---
+
+## 10. Command-documentation rule
+
+The executable owns syntax. After a command definition changes, run:
+
+```bash
+npm run docs:cli
+```
+
+That command updates the generated top-level help snapshot in this file. The hand-written sections explain workflows and concepts only.
