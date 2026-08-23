@@ -79,8 +79,15 @@ class FakeDirectory {
     return Promise.resolve(file);
   }
 
-  removeEntry(name: string) {
-    return this.#entries.delete(name) ? Promise.resolve() : Promise.reject(missing(name));
+  removeEntry(name: string, options?: { recursive?: boolean }) {
+    const entry = this.#entries.get(name);
+    if (entry === undefined) return Promise.reject(missing(name));
+    // The real API refuses to remove a non-empty directory without `recursive`.
+    if (entry instanceof FakeDirectory && entry.#entries.size > 0 && options?.recursive !== true) {
+      return Promise.reject(new DOMException(`'${name}' is not empty`, "InvalidModificationError"));
+    }
+    this.#entries.delete(name);
+    return Promise.resolve();
   }
 
   async *entries(): AsyncIterableIterator<[string, FakeDirectory | FakeFile]> {

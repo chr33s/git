@@ -139,6 +139,44 @@ describe("Repository", () => {
     }),
   );
 
+  it.effect("pages through every file across stack-based continuations", () =>
+    Effect.promise(async () => {
+      const paths = ["a/x.txt", "a/y.txt", "b/z.txt"];
+      const found = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const tree = yield* repository.writeFiles({
+            changes: paths.map((path) => ({
+              path,
+              content: new TextEncoder().encode("needle\n"),
+            })),
+          });
+          yield* repository.commit({ branch: "main", tree, message: "search", author: alice });
+          const seen: string[] = [];
+          let cursor: string | undefined;
+          // One blob per page forces each resume to pick up exactly where the
+          // last stopped, including mid-walk positions.
+          for (;;) {
+            const page = yield* repository.search({
+              ref: "refs/heads/main",
+              pattern: "needle",
+              fixed: true,
+              ignoreCase: true,
+              maxWork: 1,
+              continuation: cursor,
+            });
+            seen.push(...page.matches.map((match) => match.path));
+            if (page.continuation === undefined) break;
+            cursor = page.continuation;
+          }
+          return seen;
+        }),
+      );
+      assert.deepEqual(found.sort(), paths);
+      assert.equal(new Set(found).size, paths.length);
+    }),
+  );
+
   it.effect("a zero time budget truncates at the first file with a continuation", () =>
     Effect.promise(async () => {
       const found = await scenario(

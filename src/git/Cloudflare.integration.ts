@@ -232,23 +232,21 @@ describe("persisted Durable Object search", () => {
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ pattern: "needle", fixed: true, ignore_case: true }),
           });
-        // R2's local workerd binding exposes a newly committed object on the
-        // next turn, so the first pass establishes the unindexed verifier's
-        // answer and the second is the warm indexed baseline.
-        await grep();
-        const warm = await json<{ matches: Array<{ path: string; line: number }> }>(await grep());
-        await persistent.getWorker().evictDurableObject("GIT_REPO", { name: repo });
-        const restored = await json<{ matches: Array<{ path: string; line: number }> }>(
-          await grep(),
-        );
-        assert.deepEqual(restored.matches, warm.matches);
+        // The first grep builds and persists the index; eviction then proves
+        // the restored chunk manifest answers exactly what the verifier did.
+        const first = await json<{ matches: Array<{ path: string; line: number }> }>(await grep());
         assert.deepEqual(
-          restored.matches.map((match) => [match.path, match.line]),
+          first.matches.map((match) => [match.path, match.line]),
           [
             ["a.txt", 1],
             ["b.txt", 1],
           ],
         );
+        await persistent.getWorker().evictDurableObject("GIT_REPO", { name: repo });
+        const restored = await json<{ matches: Array<{ path: string; line: number }> }>(
+          await grep(),
+        );
+        assert.deepEqual(restored.matches, first.matches);
       } finally {
         await persistent.close();
       }

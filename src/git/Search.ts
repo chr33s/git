@@ -928,6 +928,13 @@ const Continuation = Schema.Struct({
   fuzzy: Schema.Boolean,
   afterPath: Schema.String,
   afterLine: Schema.Finite,
+  /**
+   * Unvisited subtrees when a time/work budget stopped the tree walk itself:
+   * the resume seeds its stack from these instead of re-walking from the root.
+   */
+  pending: Schema.optional(
+    Schema.Array(Schema.Struct({ oid: Schema.String, prefix: Schema.String })),
+  ),
 });
 
 type Continuation = (typeof Continuation)["Type"];
@@ -956,6 +963,9 @@ export const continuation = (input: {
     return Result.fail(new Invalid({ field: "continuation", reason: "invalid cursor" }));
   }
   const value = parsed.value;
+  if (value.pending !== undefined && value.pending.some((entry) => !isOid(entry.oid))) {
+    return Result.fail(new Invalid({ field: "continuation", reason: "invalid cursor" }));
+  }
   if (
     value.pattern !== input.pattern ||
     value.revision !== input.revision ||

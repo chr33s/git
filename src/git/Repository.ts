@@ -914,15 +914,21 @@ export const layerWithSearchIndex = Layer.effect(
         readonly prefix?: string;
         readonly signal?: AbortSignal;
         readonly deadline?: number;
+        /**
+         * A continuation's saved walk position: unvisited subtrees, in the
+         * order they were stacked. Absent walks the whole tree from the root.
+         */
+        readonly stack?: ReadonlyArray<{ readonly oid: Oid; readonly prefix: string }>;
       },
     ) {
       const files: TreeFile[] = [];
       let incomplete = false;
       // Depth-first with an explicit stack rather than recursion: a deep tree
       // is data, and data should not size the call stack.
-      const stack: Array<{ oid: Oid; prefix: string }> = [
-        { oid: tree, prefix: options?.prefix ?? "" },
-      ];
+      const stack: Array<{ oid: Oid; prefix: string }> =
+        options?.stack !== undefined
+          ? [...options.stack]
+          : [{ oid: tree, prefix: options?.prefix ?? "" }];
 
       const aborted = () => options?.signal?.aborted === true;
       while (stack.length > 0) {
@@ -955,6 +961,9 @@ export const layerWithSearchIndex = Layer.effect(
       return {
         files: files.sort((left, right) => left.path.localeCompare(right.path)),
         incomplete,
+        // `stack` holds exactly the subtrees never visited: the deadline is
+        // checked between trees, so none is half-expanded.
+        pending: stack,
       };
     });
 
@@ -1863,8 +1872,12 @@ export const layerWithSearchIndex = Layer.effect(
 
         const interrupted = () =>
           Effect.suspend(() => (input.signal?.aborted === true ? Effect.interrupt : Effect.void));
-        const cursorFor = (afterPath: string, afterLine: number) =>
-          Search.nextContinuation({
+        const cursorFor = (
+          afterPath: string,
+          afterLine: number,
+          pending?: ReadonlyArray<{ readonly oid: Oid; readonly prefix: string }>,
+        ) => {
+          const base = {
             pattern: input.pattern,
             revision: oid,
             path: input.path,
@@ -1873,18 +1886,40 @@ export const layerWithSearchIndex = Layer.effect(
             fuzzy: wantsFuzzy,
             afterPath,
             afterLine,
-          });
+          };
+          return Search.nextContinuation(
+            pending !== undefined && pending.length > 0 ? { ...base, pending } : base,
+          );
+        };
 
-        const walked = yield* walkFiles(tree, {
-          signal: input.signal,
-          deadline: deadline ?? undefined,
-        });
+        // A cursor that caught the walk mid-way carries the subtrees it never
+        // visited; resume from them rather than re-reading every tree object.
+        const resumeStack: Array<{ oid: Oid; prefix: string }> = [];
+        for (const entry of cursor?.pending ?? []) {
+          // Double-checked here: `Search.continuation` validates the same
+          // shape, and the type follows from the guard, not a cast.
+          if (!isOid(entry.oid)) {
+            return yield* new Invalid({ field: "continuation", reason: "invalid cursor" });
+          }
+          resumeStack.push({ oid: entry.oid, prefix: entry.prefix });
+        }
+        const resuming = resumeStack.length > 0;
+
+        const walked = yield* walkFiles(
+          tree,
+          resuming
+            ? { signal: input.signal, deadline: deadline ?? undefined, stack: resumeStack }
+            : { signal: input.signal, deadline: deadline ?? undefined },
+        );
         for (const file of walked.files) {
           // The HTTP adapter interrupts its request fiber on disconnect; the
           // signal covers browser-local callers. Check before each storage hop.
           yield* interrupted();
           if (isGitlink(file.mode) || !Search.underPath(file.path, input.path)) continue;
+          // A stack resume visits only unvisited subtrees, so its paths may
+          // sort before `afterPath`; the skip filter is only for re-walks.
           if (
+            !resuming &&
             cursor !== null &&
             (file.path < cursor.afterPath ||
               (file.path === cursor.afterPath && cursor.afterLine === Number.MAX_SAFE_INTEGER))
@@ -1913,10 +1948,17 @@ export const layerWithSearchIndex = Layer.effect(
             continue;
           }
           if (blob.state === "binary") continue;
-          // A miss was read above and must be verified. Unicode blobs remain
-          // verifier-only because JavaScript case folding is wider than ASCII;
-          // only an ASCII-indexed blob may be rejected by the prefilter.
-          if (blob.state === "searchable" && candidates !== null && !candidates.has(blob.ordinal))
+          // A miss was read above and must be verified: the candidate set was
+          // computed before this search observed anything, so it says nothing
+          // about a blob indexed during this very walk. Unicode blobs remain
+          // verifier-only (JavaScript case folding is wider than ASCII); only
+          // a previously indexed ASCII blob may be rejected by the prefilter.
+          if (
+            data === undefined &&
+            blob.state === "searchable" &&
+            candidates !== null &&
+            !candidates.has(blob.ordinal)
+          )
             continue;
 
           let lines = verified.get(file.oid);
@@ -1926,7 +1968,12 @@ export const layerWithSearchIndex = Layer.effect(
             verified.set(file.oid, lines);
           }
           for (const line of lines) {
-            if (cursor !== null && file.path === cursor.afterPath && line.line <= cursor.afterLine)
+            if (
+              !resuming &&
+              cursor !== null &&
+              file.path === cursor.afterPath &&
+              line.line <= cursor.afterLine
+            )
               continue;
             matches.push({ path: file.path, line: line.line, text: line.text });
             if (matches.length >= limit) {
@@ -1943,7 +1990,7 @@ export const layerWithSearchIndex = Layer.effect(
         // unvisited half silently: resume re-walks and skips what was verified.
         if (walked.incomplete && !truncated) {
           truncated = true;
-          continuation = cursorFor(lastPath, lastLine);
+          continuation = cursorFor(lastPath, lastLine, walked.pending);
         }
 
         let suggestions: ReadonlyArray<Search.FuzzyMatch> | undefined;
@@ -1957,6 +2004,7 @@ export const layerWithSearchIndex = Layer.effect(
           });
           for (const file of walkedFuzzy.files) {
             yield* interrupted();
+            if (deadline !== null && (yield* Clock.currentTimeMillis) >= deadline) break;
             if (isGitlink(file.mode) || !Search.underPath(file.path, input.path)) continue;
             let blob = searchIndex.get(file.oid);
             const data = yield* readBlobAt(file.oid);
@@ -1966,6 +2014,14 @@ export const layerWithSearchIndex = Layer.effect(
             let start = 0;
             let line = 0;
             while (start <= data.length) {
+              // Suggestions are approximate, so a spent budget just ends the
+              // pass; the check is periodic rather than per line.
+              if (
+                line % 1024 === 0 &&
+                deadline !== null &&
+                (yield* Clock.currentTimeMillis) >= deadline
+              )
+                break;
               const newline = data.indexOf(0x0a, start);
               const end = newline === -1 ? data.length : newline;
               line += 1;

@@ -1631,6 +1631,31 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   );
   await shot(page, "live-search");
 
+  // --- fuzzy suggestions, only after an exact miss ------------------------
+  await page.goto(`${origin}/#/search`, { waitUntil: "networkidle" });
+  await page.click(".gp-search input");
+  // "exort": a subsequence of "export" but not a substring, so the literal
+  // pass misses every fixture file and the fuzzy pass should answer instead.
+  await page.keyboard.type("exort");
+  await page.waitForTimeout(1800);
+  check(
+    "an exact miss renders separate approximate suggestions",
+    (await page.locator(".gp-search-suggestion").count()) >= 1,
+  );
+  check(
+    "and labels them approximate",
+    ((await page.textContent(".gp-screen")) ?? "").includes("Possible matches"),
+  );
+  check(
+    "highlighting the matched ranges",
+    (await page.locator(".gp-search-suggestion mark").count()) >= 1,
+  );
+  check(
+    "without inventing exact hits",
+    (await page.locator(".gp-search-hit:not(.gp-search-suggestion)").count()) === 0,
+  );
+  await shot(page, "live-search-fuzzy");
+
   // --- Settings, the administration surface ------------------------------
   await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);

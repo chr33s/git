@@ -6,9 +6,9 @@ chunks). These are regression reference points, not capacity limits.
 
 | host                   | corpus                                            | cold build | restart query |                     persisted |        candidates |
 | ---------------------- | ------------------------------------------------- | ---------: | ------------: | ----------------------------: | ----------------: |
-| Node filesystem        | this checkout's `.git` (329 reachable blobs)      |  105.39 ms |      73.08 ms |     272,939 bytes in 2 chunks | 64 / 329 (19.45%) |
-| Chromium OPFS          | generated 100 text blobs                          |   74.30 ms |       8.00 ms | v3 manifest + deflated chunks |  n/a (miss query) |
-| workerd Durable Object | generated 100 text blobs, eviction between passes |   45.03 ms |      10.67 ms | v3 manifest + deflated chunks |  n/a (miss query) |
+| Node filesystem        | this checkout's `.git` (330 reachable blobs)      |  107.19 ms |      66.89 ms |     273,672 bytes in 2 chunks | 64 / 330 (19.39%) |
+| Chromium OPFS          | generated 100 text blobs                          |   67.30 ms |       7.80 ms | v3 manifest + deflated chunks |  n/a (miss query) |
+| workerd Durable Object | generated 100 text blobs, eviction between passes |   40.68 ms |       9.53 ms | v3 manifest + deflated chunks |  n/a (miss query) |
 
 Commands:
 

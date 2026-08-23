@@ -481,6 +481,15 @@ export const searchIndex = (
     Effect.gen(function* () {
       const root = yield* Effect.promise(() => Promise.resolve(rootHandle));
       const prefix = "search/index-v3";
+      // Superseded formats are never read again; keeping them spends quota.
+      yield* Effect.tryPromise({
+        try: async () => {
+          await removePath(root, "search/index-v1.json");
+          const { directory, leaf } = await parentOf(root, "search/index-v2", false);
+          await directory.removeEntry(leaf, { recursive: true });
+        },
+        catch: () => new StorageFailure({ operation: "search.clean", path: "search" }),
+      }).pipe(Effect.ignore);
       return Search.persistent({
         softLimitBytes: limits?.softLimitBytes ?? 25 * 1024 * 1024,
         hardLimitBytes: limits?.hardLimitBytes ?? 50 * 1024 * 1024,
