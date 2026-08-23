@@ -43,7 +43,7 @@ const fakeIo = (hardLimitBytes = 250 * 1024 * 1024, chunkTargetBytes?: number) =
 };
 
 describe("Search", () => {
-  it.effect("round-trips versioned postings and rejects a changed snapshot", () =>
+  it.effect("round-trips versioned chunks and rejects corrupt data", () =>
     Effect.gen(function* () {
       const oid = yield* hashObject({
         type: "blob",
@@ -51,17 +51,6 @@ describe("Search", () => {
       });
       const index = new BlobIndex();
       index.observe(oid, new TextEncoder().encode("Repository search\n"));
-      const restored = BlobIndex.restore(index.snapshot());
-      if (restored === null) assert.fail("expected a valid snapshot");
-      assert.equal(restored.candidates("repository", true)?.has(0), true);
-      assert.equal(restored.forget(oid), true);
-      assert.equal(restored.candidates("repository", true)?.size, 0);
-
-      const corrupt = index.snapshot().slice();
-      const position = corrupt.length - 2;
-      corrupt[position] = (corrupt[position] ?? 0) ^ 1;
-      assert.equal(BlobIndex.restore(corrupt), null);
-
       const chunked = yield* Effect.promise(() => index.persisted());
       if (chunked === null) assert.fail("expected a persistable index");
       const chunks = new Map(chunked.chunks.map((chunk) => [chunk.name, chunk.bytes]));

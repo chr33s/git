@@ -48,7 +48,8 @@ export interface SearchResult {
 
 export type LineMatcher = (line: string) => boolean;
 
-export const INDEX_VERSION = 1;
+/** Opaque cursors are independently versioned from disposable index storage. */
+const CONTINUATION_VERSION = 1;
 
 /**
  * The existing grep syntax, isolated from transport handling. The index is
@@ -123,25 +124,11 @@ export interface IndexedBlob {
 export interface BlobIndexStats {
   readonly blobs: number;
   readonly bigrams: number;
-  readonly snapshotBytes: number;
 }
 
 const hex = (bytes: Uint8Array): string =>
   [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 const checksum = (bytes: Uint8Array): string => hex(new Sha1().update(bytes).digest());
-
-const Snapshot = Schema.Struct({
-  version: Schema.Literal(INDEX_VERSION),
-  blobs: Schema.Array(
-    Schema.Struct({
-      oid: Schema.String,
-      state: Schema.Literals(["searchable", "unindexed", "binary", "too-large"]),
-      bigrams: Schema.Array(Schema.Finite),
-    }),
-  ),
-});
-
-const SnapshotFile = Schema.Struct({ payload: Schema.String, checksum: Schema.String });
 
 const PersistedChunk = Schema.Struct({
   name: Schema.String,
@@ -383,64 +370,7 @@ export class BlobIndex {
   }
 
   stats(): BlobIndexStats {
-    return {
-      blobs: this.#byOid.size,
-      bigrams: this.#byBigram.size,
-      snapshotBytes: this.snapshot().length,
-    };
-  }
-
-  snapshot(): Uint8Array {
-    const payload = JSON.stringify({
-      version: INDEX_VERSION,
-      blobs: [...this.#byOid.values()].map((blob) => ({
-        oid: blob.oid,
-        state: blob.state,
-        bigrams: this.#keysByOid.get(blob.oid) ?? [],
-      })),
-    });
-    const bytes = new TextEncoder().encode(payload);
-    return new TextEncoder().encode(JSON.stringify({ payload, checksum: checksum(bytes) }));
-  }
-
-  /** A corrupt or old derived cache is discarded, never trusted. */
-  static restore(bytes: Uint8Array): BlobIndex | null {
-    let envelope: unknown;
-    try {
-      envelope = JSON.parse(new TextDecoder().decode(bytes));
-    } catch {
-      return null;
-    }
-    const file = Schema.decodeUnknownOption(SnapshotFile)(envelope);
-    if (file._tag === "None") return null;
-    const payload = new TextEncoder().encode(file.value.payload);
-    if (checksum(payload) !== file.value.checksum) return null;
-    let value: unknown;
-    try {
-      value = JSON.parse(file.value.payload);
-    } catch {
-      return null;
-    }
-    const decoded = Schema.decodeUnknownOption(Snapshot)(value);
-    if (decoded._tag === "None") return null;
-    const index = new BlobIndex();
-    for (const row of decoded.value.blobs) {
-      if (!isOid(row.oid)) return null;
-      const blob: IndexedBlob = { oid: row.oid, ordinal: index.#nextOrdinal, state: row.state };
-      index.#nextOrdinal += 1;
-      index.#byOid.set(blob.oid, blob);
-      if (blob.state !== "searchable") continue;
-      index.#keysByOid.set(blob.oid, row.bigrams);
-      for (const bigram of row.bigrams) {
-        let posting = index.#byBigram.get(bigram);
-        if (posting === undefined) {
-          posting = new BitSet();
-          index.#byBigram.set(bigram, posting);
-        }
-        posting.add(blob.ordinal);
-      }
-    }
-    return index;
+    return { blobs: this.#byOid.size, bigrams: this.#byBigram.size };
   }
 
   /**
@@ -919,7 +849,7 @@ export const fuzzy = (
 };
 
 const Continuation = Schema.Struct({
-  version: Schema.Literal(INDEX_VERSION),
+  version: Schema.Literal(CONTINUATION_VERSION),
   pattern: Schema.String,
   revision: Schema.String,
   path: Schema.optional(Schema.String),
@@ -980,4 +910,4 @@ export const continuation = (input: {
 };
 
 export const nextContinuation = (input: Omit<Continuation, "version">): string =>
-  encodeContinuation({ ...input, version: INDEX_VERSION });
+  encodeContinuation({ ...input, version: CONTINUATION_VERSION });

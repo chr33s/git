@@ -50,6 +50,7 @@ const flag = (name: string): string | undefined => {
 
 const shots = flag("--shots");
 const executable = flag("--executable") ?? process.env["CHROMIUM_PATH"];
+const sourceEditor = ".gp-source-host [contenteditable='true']";
 
 const failures: string[] = [];
 
@@ -142,6 +143,7 @@ const MergePayload = Schema.Struct({
 const GrepPayload = Schema.Struct({
   pattern: Schema.String,
   ref: Schema.optional(Schema.String),
+  fuzzy: Schema.optional(Schema.Boolean),
 });
 const RemoteAddPayload = Schema.Struct({
   name: Schema.String,
@@ -514,7 +516,47 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
               }
             });
           }
-          return json(Contract.GrepResponse, { matches, truncated: false, skipped: [] });
+          const suggestions =
+            matches.length === 0 && payload.fuzzy === true
+              ? [...target].flatMap(([path, content]) =>
+                  content.split("\n").flatMap((text, index) => {
+                    const positions: number[] = [];
+                    let at = 0;
+                    for (const character of needle) {
+                      const found = text.toLowerCase().indexOf(character, at);
+                      if (found === -1) return [];
+                      positions.push(found);
+                      at = found + character.length;
+                    }
+                    const ranges = positions.reduce<Array<{ start: number; end: number }>>(
+                      (found, position) => {
+                        const last = found.at(-1);
+                        if (last !== undefined && last.end === position) last.end += 1;
+                        else found.push({ start: position, end: position + 1 });
+                        return found;
+                      },
+                      [],
+                    );
+                    return [
+                      {
+                        path,
+                        line: index + 1,
+                        text,
+                        ranges,
+                        score:
+                          (positions.length - ranges.length) * 10_000 -
+                          ((positions.at(-1) ?? 0) - (positions[0] ?? 0)),
+                      },
+                    ];
+                  }),
+                )
+              : undefined;
+          return json(Contract.GrepResponse, {
+            matches,
+            suggestions,
+            truncated: false,
+            skipped: [],
+          });
         }
         if (path.startsWith("/core/history/")) {
           return json(Contract.HistoryPage, {
@@ -686,7 +728,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             const payload = Schema.decodeUnknownSync(Contract.DiffRequest)(input);
             // CR-15 is the valid empty-diff case. CR-14 is deliberately slower
             // so the live suite can prove an older request cannot overwrite it.
-            if (branchOf(payload.to) === "atran/login-ui") {
+            if (payload.to === "atran/login-ui") {
               return json(Contract.DiffResponse, { files: [] });
             }
             await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1311,13 +1353,15 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await shot(page, "live-code");
 
   // --- editing, through POST /commit --------------------------------------
+  // The editor is the @pierre/diffs session attached to the source pane — a
+  // contenteditable surface, not the old textarea.
   await page.click('.gp-file-card button[aria-label="Edit file"]');
-  await page.waitForTimeout(300);
+  await page.waitForSelector(sourceEditor);
   check(
     "the pencil opens the blob in an editor",
-    (await page.inputValue(".gp-editor")).includes("Live from the API."),
+    ((await page.textContent(sourceEditor)) ?? "").includes("Live from the API."),
   );
-  await page.fill(".gp-editor", "# core\n\nEdited from the UI.\n");
+  await page.fill(sourceEditor, "# core\n\nEdited from the UI.\n");
   await page.fill(".gp-editor-message", "update the README from the browser");
   await page.click(".gp-editor-bar .gp-btn-primary");
   await page.waitForTimeout(1500);
@@ -1340,9 +1384,13 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await page.click('.gp-explorer button[aria-label="New file"]');
   await page.waitForTimeout(300);
   await page.fill(".gp-editor-path", "docs/notes.md");
-  await page.fill(".gp-editor", "# Notes\n");
+  await page.fill(sourceEditor, "# Notes\n");
   await page.click(".gp-editor-bar .gp-btn-primary");
   await page.waitForTimeout(1500);
+  // A newly created parent is initially collapsed; open it before checking
+  // that the committed leaf joined the explorer.
+  if ((await page.locator('[data-item-path="docs/notes.md"]').count()) === 0)
+    await page.click('[data-item-path="docs/"]');
   check(
     "a new file lands in the explorer",
     (await page.locator('[data-item-path="docs/notes.md"]').count()) > 0,
@@ -1371,7 +1419,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await page.unroute("**/core/commit");
 
   // --- deleting: the same request, with `content: null` -------------------
-  await page.click(".gp-editor-bar button:has-text('Delete file')");
+  await page.click('.gp-file-card button[aria-label="Delete file"]');
   await page.waitForTimeout(1500);
   check(
     "deleting removes the file and falls back to the README",
@@ -1633,10 +1681,10 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
 
   // --- fuzzy suggestions, only after an exact miss ------------------------
   await page.goto(`${origin}/#/search`, { waitUntil: "networkidle" });
-  await page.click(".gp-search input");
   // "exort": a subsequence of "export" but not a substring, so the literal
   // pass misses every fixture file and the fuzzy pass should answer instead.
-  await page.keyboard.type("exort");
+  // The rail preserves its last query through navigation, so replace it.
+  await page.fill(".gp-search input", "exort");
   await page.waitForTimeout(1800);
   check(
     "an exact miss renders separate approximate suggestions",
@@ -1910,8 +1958,8 @@ const localMode = async (browser: Browser): Promise<void> => {
 
     // Edit and commit — locally: the tip moves in OPFS, not on the server.
     await page.click('.gp-file-card button[aria-label="Edit file"]');
-    await page.waitForTimeout(400);
-    await page.fill(".gp-editor", "# core\n\nEdited in the browser, committed to OPFS.\n");
+    await page.waitForSelector(sourceEditor);
+    await page.fill(sourceEditor, "# core\n\nEdited in the browser, committed to OPFS.\n");
     await page.fill(".gp-editor-message", "edit readme locally");
     await page.click(".gp-editor-bar .gp-btn-primary");
     await page.waitForTimeout(1200);
@@ -2057,11 +2105,11 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.click('.gp-menu-item[value="__new-branch"]');
     await page.waitForTimeout(400);
     await page.fill("#gp-new-branch-name", "topic");
-    await page.click(".gp-new-branch button[type='submit']");
+    await page.click('.gp-new-branch button[type="submit"]');
     await page.waitForTimeout(1500);
     await page.click('.gp-file-card button[aria-label="Edit file"]');
-    await page.waitForTimeout(400);
-    await page.fill(".gp-editor", "# core\n\nProposed from the browser.\n");
+    await page.waitForSelector(sourceEditor);
+    await page.fill(sourceEditor, "# core\n\nProposed from the browser.\n");
     await page.fill(".gp-editor-message", "propose from the browser");
     await page.click(".gp-editor-bar .gp-btn-primary");
     await page.waitForTimeout(1200);
