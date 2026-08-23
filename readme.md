@@ -70,7 +70,9 @@ git+ --help
 git+ <command> --help
 ```
 
-[`docs/cli.md`](docs/cli.md) is a generated top-level help snapshot.
+[`docs/cli.md`](docs/cli.md) is a generated top-level help snapshot. The
+phased Git command-line compatibility contract is
+[`docs/core-cli-compat.md`](docs/core-cli-compat.md).
 
 ### Core Subcommands
 
@@ -147,6 +149,9 @@ npm run test:unit
 
 # Integration suite only (workerd)
 npm run test:integration
+
+# Pinned stock-Git and SEA compatibility suite
+npm run test:interop
 
 # Everything
 npm test

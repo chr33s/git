@@ -47,7 +47,7 @@ SUBCOMMANDS
   rebase              Replay a branch's commits onto another
   reflog              Where a ref has been: every move, newest first
   refs                Every ref and the object it points at
-  remote              Administer a server's stored remotes over its JSON API
+  server              Server JSON-API administration extensions
   reset               Move a ref, optionally compare-and-swap
   restore             Restore a path from the index or a commit
   rm                  Unstage a path, and delete it unless --cached

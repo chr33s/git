@@ -34,6 +34,7 @@ export default defineConfig({
           name: "unit",
           env: gitConfig,
           include: ["src/**/*.test.ts"],
+          exclude: ["src/**/*.interop.test.ts"],
           // Real `git`, Chromium and a bundler all appear in these suites,
           // and the git-heavy ones (PackFile, Bisect) run dozens of child
           // processes each. Fine alone, but the parallel run oversubscribes
@@ -49,6 +50,16 @@ export default defineConfig({
           env: gitConfig,
           include: ["src/**/*.integration.ts"],
           // One workerd instance, shared by the file's tests.
+          fileParallelism: false,
+          testTimeout: 120_000,
+          hookTimeout: 120_000,
+        },
+      },
+      {
+        test: {
+          name: "interop",
+          env: gitConfig,
+          include: ["src/**/*.interop.test.ts"],
           fileParallelism: false,
           testTimeout: 120_000,
           hookTimeout: 120_000,

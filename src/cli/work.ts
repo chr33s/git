@@ -11,11 +11,14 @@ import { Console, Effect, Layer } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import * as Checkout from "../git/Checkout.ts";
+import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { IndexStore, WorkTree } from "../git/Work.ts";
 import { workspace } from "../git/Work.node.ts";
+import { GitInvocation } from "./GitCompat.ts";
+import { discoverRepository } from "./GitCompat.node.ts";
 import { cliSignature } from "./shared.ts";
 
 /**
@@ -27,23 +30,43 @@ import { cliSignature } from "./shared.ts";
  * pointed at the same directory.
  */
 const workFlag = Flag.string("work").pipe(
-  Flag.withDefault("."),
-  Flag.withDescription("A checkout: a work tree whose repository is .git inside it"),
+  Flag.optional,
+  Flag.withDescription("Explicit checkout selector for extension commands"),
 );
 
 const withWork = <A, E>(
-  work: string,
+  work: { readonly _tag: "None" } | { readonly _tag: "Some"; readonly value: string },
   effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore>,
 ) =>
-  effect.pipe(
-    Effect.provide(
-      GitRepository.layer.pipe(
-        Layer.provide(GitRepository.hooksNoop),
-        Layer.provide(stores(path.join(work, ".git"))),
-        Layer.provideMerge(workspace(work)),
+  Effect.gen(function* () {
+    const invocation = yield* GitInvocation;
+    if (invocation.bare) {
+      return yield* new Invalid({
+        field: "bare",
+        reason: "this command requires a work tree",
+      });
+    }
+    const selected =
+      invocation.workTree !== undefined || work._tag === "None"
+        ? invocation
+        : { ...invocation, workTree: path.resolve(invocation.cwd, work.value) };
+    const found = yield* discoverRepository(selected);
+    if (found === null || found.workTree === null) {
+      return yield* new Invalid({
+        field: "repository",
+        reason: "not a Git work tree",
+      });
+    }
+    return yield* effect.pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provide(stores(found.gitDir)),
+          Layer.provideMerge(workspace(found.workTree)),
+        ),
       ),
-    ),
-  );
+    );
+  });
 
 /**
  * `git status --porcelain`, deliberately.

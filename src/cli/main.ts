@@ -45,6 +45,8 @@ import * as Redaction from "../hub/Redaction.ts";
 import * as Archive from "../server/Archive.ts";
 import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
+import { GitInvocation } from "./GitCompat.ts";
+import { parseInvocation, runCoreCompatibility } from "./GitCompat.node.ts";
 import { hubCommand } from "./hub.ts";
 import { idCommand } from "./id.ts";
 import * as replay from "./replay.ts";
@@ -952,13 +954,23 @@ const remoteRemove = Command.make(
     }).pipe(Effect.scoped),
 );
 
-const remoteCommand = Command.make("remote", {}, () =>
-  Console.log("git+ remote <add|list|rm> --server <url> — see --help"),
+const serverRemoteCommand = Command.make("remote", {}, () =>
+  Console.log("git+ server remote <add|list|rm> --server <url> — see --help"),
 ).pipe(
   Command.withSubcommands([
     remoteAdd.pipe(Command.withDescription("Register a remote on the server")),
     remoteList.pipe(Command.withDescription("The server's stored remotes, secrets redacted")),
     remoteRemove.pipe(Command.withDescription("Forget a stored remote")),
+  ]),
+);
+
+const serverCommand = Command.make("server", {}, () =>
+  Console.log("git+ server <remote> — see --help"),
+).pipe(
+  Command.withSubcommands([
+    serverRemoteCommand.pipe(
+      Command.withDescription("Administer a server's stored remotes over its JSON API"),
+    ),
   ]),
 );
 
@@ -1043,9 +1055,7 @@ const git = Command.make("git+").pipe(
     replay.rebaseCommand.pipe(Command.withDescription("Replay a branch's commits onto another")),
     reflogCommand.pipe(Command.withDescription("Where a ref has been: every move, newest first")),
     refs.pipe(Command.withDescription("Every ref and the object it points at")),
-    remoteCommand.pipe(
-      Command.withDescription("Administer a server's stored remotes over its JSON API"),
-    ),
+    serverCommand.pipe(Command.withDescription("Server JSON-API administration extensions")),
     reset.pipe(Command.withDescription("Move a ref, optionally compare-and-swap")),
     work.restore.pipe(Command.withDescription("Restore a path from the index or a commit")),
     work.rm.pipe(Command.withDescription("Unstage a path, and delete it unless --cached")),
@@ -1094,11 +1104,36 @@ const rendered = <E>(error: E): E | Error => {
   return error;
 };
 
-/** Parse `process.argv` and run: the entry for both `bin` and the SEA build. */
-const run = () =>
+/**
+ * Parse Git's global invocation before command-local Effect CLI parsing.
+ *
+ * `-C` has to change the process directory before file-backed command layers
+ * are built; `--git-dir` and `--work-tree` travel as `GitInvocation` so work
+ * commands bind the same stores Git selected rather than a private `--work`.
+ */
+const run = (argv: ReadonlyArray<string> = process.argv.slice(2)) => {
+  const parsed = parseInvocation({
+    argv,
+    cwd: process.cwd(),
+    environment: process.env,
+  });
+  if (parsed._tag === "InvalidInvocation") {
+    process.stderr.write(`git+: ${parsed.message}\n`);
+    process.exitCode = 129;
+    return;
+  }
+  try {
+    process.chdir(parsed.invocation.cwd);
+  } catch {
+    process.stderr.write(`git+: cannot change to '${parsed.invocation.cwd}'\n`);
+    process.exitCode = 128;
+    return;
+  }
+  if (runCoreCompatibility(parsed.invocation)) return;
   NodeRuntime.runMain(
-    main(process.argv.slice(2)).pipe(
+    main(parsed.invocation.argv).pipe(
       Effect.mapError(rendered),
+      Effect.provideService(GitInvocation, parsed.invocation),
       // Diagnostics on stderr, because stdout is a result. Several verbs print
       // JSON there and are read by something that parses it, and the default
       // logger writes to stdout — so one warning from anything the verb touched
@@ -1108,6 +1143,7 @@ const run = () =>
       Effect.provide(NodeServices.layer),
     ),
   );
+};
 
 if (import.meta.main) run();
 

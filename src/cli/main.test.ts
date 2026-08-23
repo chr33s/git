@@ -85,6 +85,50 @@ describe("cli", () => {
     }),
   );
 
+  it.effect("accepts Git global invocation before command parsing", () =>
+    Effect.promise(async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cli-global-"));
+      try {
+        const help = await cli([
+          "-C",
+          directory,
+          "--git-dir",
+          ".git",
+          "--work-tree",
+          ".",
+          "-c",
+          "color.ui=false",
+          "--bare",
+          "--no-pager",
+          "--help",
+        ]);
+        assert.match(help, /USAGE/);
+      } finally {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("binds a work command through --git-dir and --work-tree", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-global-work-"));
+      try {
+        const workTree = path.join(root, "work");
+        await execFileAsync("git", ["init", "--quiet", "--initial-branch=main", workTree]);
+        const status = await cli([
+          "--git-dir",
+          path.join(workTree, ".git"),
+          "--work-tree",
+          workTree,
+          "status",
+        ]);
+        assert.match(status, /On branch main/);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.effect("init, refs and log against a seeded repository", () =>
     Effect.promise(async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-basic-"));
