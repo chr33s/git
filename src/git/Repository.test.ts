@@ -54,6 +54,44 @@ describe("Repository", () => {
     }),
   );
 
+  it.effect("searches literal text through the OID index without narrowing Unicode folds", () =>
+    Effect.promise(async () => {
+      const found = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const tree = yield* repository.writeFiles({
+            changes: [
+              { path: "a.txt", content: new TextEncoder().encode("Repository\\n") },
+              { path: "unicode.txt", content: new TextEncoder().encode("Kelvin\\n") },
+            ],
+          });
+          yield* repository.commit({ branch: "main", tree, message: "search", author: alice });
+
+          // The first query warms the ASCII posting lists. The second must
+          // still scan Kelvin sign: JavaScript folds it to ASCII `k`, while a
+          // byte-only prefilter cannot prove that relationship.
+          yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "repository",
+            fixed: true,
+            ignoreCase: true,
+          });
+          return yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "kelvin",
+            fixed: true,
+            ignoreCase: true,
+          });
+        }),
+      );
+
+      assert.deepEqual(
+        found.matches.map((match) => [match.path, match.line]),
+        [["unicode.txt", 1]],
+      );
+    }),
+  );
+
   it.effect("answers a whole list of revisions from one ancestry walk", () =>
     Effect.promise(async () => {
       // What `isAncestor` asks once, offered to a caller with a list: same

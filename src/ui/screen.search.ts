@@ -41,6 +41,7 @@ export class GpSearch extends GitPlusElement {
   @state() private accessor code: CodeResults = { tag: "idle" };
 
   #generation = 0;
+  #abort: AbortController | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -51,7 +52,16 @@ export class GpSearch extends GitPlusElement {
     if (changed.has("query")) void this.#grep();
   }
 
+  override disconnectedCallback(): void {
+    this.#abort?.abort();
+    this.#abort = null;
+    super.disconnectedCallback();
+  }
+
   async #grep(): Promise<void> {
+    this.#abort?.abort();
+    const abort = new AbortController();
+    this.#abort = abort;
     const generation = ++this.#generation;
     const pattern = this.query.trim();
     if (pattern === "") {
@@ -74,11 +84,12 @@ export class GpSearch extends GitPlusElement {
         }
         return;
       }
-      const found = await api.grep(pattern, main.name);
+      const found = await api.grep(pattern, main.name, undefined, abort.signal);
       if (generation === this.#generation) {
         this.code = { tag: "loaded", matches: found.matches, truncated: found.truncated };
       }
     } catch (error) {
+      if (abort.signal.aborted) return;
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
       if (generation === this.#generation) {
         this.code = { tag: "unavailable", reason: describe(error) };

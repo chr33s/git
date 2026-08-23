@@ -326,11 +326,13 @@ export class GitApi {
     path: string,
     payload: P,
     schema: S,
+    signal?: AbortSignal,
   ): Promise<S["Type"]> {
     return await this.#json(this.#url(path), schema, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
+      signal,
     });
   }
 
@@ -346,7 +348,12 @@ export class GitApi {
    * Literal and case-insensitive, because this backs the UI's search box —
    * a reader types text, not a regular expression.
    */
-  async grep(pattern: string, ref: string, maxMatches = 50): Promise<GrepResponse> {
+  async grep(
+    pattern: string,
+    ref: string,
+    maxMatches = 50,
+    signal?: AbortSignal,
+  ): Promise<GrepResponse> {
     const payload: Contract.GrepRequest = {
       pattern,
       ref,
@@ -354,7 +361,7 @@ export class GitApi {
       ignore_case: true,
       max_matches: maxMatches,
     };
-    return await this.#post("/grep", payload, Contract.GrepResponse);
+    return await this.#post("/grep", payload, Contract.GrepResponse, signal);
   }
 
   /** Create a branch at `base` (a ref or an oid). */
@@ -576,7 +583,12 @@ export interface CodeApi {
 export interface SearchApi {
   readonly repo: string;
   refs(): Promise<readonly Ref[]>;
-  grep(pattern: string, ref: string, maxMatches?: number): Promise<GrepResponse>;
+  grep(
+    pattern: string,
+    ref: string,
+    maxMatches?: number,
+    signal?: AbortSignal,
+  ): Promise<GrepResponse>;
 }
 
 /** Where a branch stands against origin's copy of it; see `local.ts`. */

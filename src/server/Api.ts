@@ -463,21 +463,6 @@ const writeFilesOf = (
  */
 const PAGE_MAX = 100;
 
-/** The most matched lines one grep will hold, whatever the caller asks for. */
-const GREP_MAX_MATCHES = 2_000;
-
-/**
- * The largest file grep will scan.
- *
- * Bounding the matches bounds what is *kept*, not what is read: a repository
- * holding one 200 MB log had it read whole, decoded to a string of the same
- * size again, and split into an array of several hundred megabytes of line
- * objects — all before the first match was counted, and all inside a Durable
- * Object with 128 MiB. A file larger than this is reported as skipped rather
- * than scanned, which is also roughly what `git grep` does with one.
- */
-const GREP_MAX_FILE_BYTES = 4 * 1024 * 1024;
-
 /**
  * Whether a path is under a caller's prefix, on path boundaries.
  *
@@ -613,65 +598,6 @@ const subtreeAt = (repository: Repository["Service"], tree: Oid, path: string) =
         : Effect.succeed(entry.oid),
     ),
   );
-
-/**
- * A grep predicate. A bad pattern is the caller's mistake and says so, rather
- * than arriving as a 500 from deep inside the walk.
- */
-const matcher = (payload: {
-  readonly pattern: string;
-  readonly fixed?: boolean | undefined;
-  readonly ignore_case?: boolean | undefined;
-}) =>
-  Effect.suspend((): Effect.Effect<(line: string) => boolean, Invalid> => {
-    if (payload.fixed === true) {
-      const needle = payload.ignore_case === true ? payload.pattern.toLowerCase() : payload.pattern;
-      return Effect.succeed((line) =>
-        (payload.ignore_case === true ? line.toLowerCase() : line).includes(needle),
-      );
-    }
-    try {
-      /**
-       * A repeated group is the shape that backtracks.
-       *
-       * `(a+)+$`, `(a|a)+$` and `([ab])*c` all take exponential time on a run
-       * of thirty characters, and this runs per line of every blob in the
-       * tree on the one thread serving the repository. Enumerating the bad
-       * forms is a losing game — an earlier version's list let `(a|a)+$`
-       * straight through — so the rule is the general one: a group may not be
-       * quantified. `foo|bar`, `[a-z]+` and `\d{3}` are unaffected.
-       */
-      /**
-       * At most one repetition, and no groups.
-       *
-       * Catastrophic backtracking needs two repetitions that can match the
-       * same text — `(a+)+`, `(a|a)+`, or plain `aa*aa*aa*b` with no
-       * parenthesis at all. Two earlier versions of this guard tried to
-       * enumerate the dangerous shapes and were wrong both times, so the rule
-       * is the conservative one that admits no combination: a single
-       * quantifier cannot pair with anything. `foo.*bar` and `\d{3}` pass;
-       * anything needing more asks for `regex: false` and a literal search.
-       */
-      const quantifiers = payload.pattern.replace(/\\./g, "").match(/[*+?]|\{\d/g)?.length ?? 0;
-      const grouped = /\((?!\?:)/.test(payload.pattern.replace(/\\./g, ""));
-      if (quantifiers > 1 || grouped || payload.pattern.length > 200) {
-        return Effect.fail(
-          new Invalid({
-            field: "pattern",
-            reason:
-              "this endpoint accepts at most one repetition and no groups, because more " +
-              "can take unbounded time to match; use `regex: false` for a literal search",
-          }),
-        );
-      }
-      const expression = new RegExp(payload.pattern, payload.ignore_case === true ? "i" : "");
-      return Effect.succeed((line) => expression.test(line));
-    } catch (cause) {
-      return Effect.fail(
-        new Invalid({ field: "pattern", reason: cause instanceof Error ? cause.message : "bad" }),
-      );
-    }
-  });
 
 /**
  * Which remote an operation acts on: a stored `name`, or a `url` outright.
@@ -2018,65 +1944,17 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
     .handle("grep", ({ payload }) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
-
-        const test = yield* matcher(payload);
-        const tree = yield* treeOfRef(repository, payload.ref);
-        const files = yield* repository
-          .listFiles(tree)
+        const ref = payload.ref === undefined ? undefined : revisionOf(payload.ref);
+        return yield* repository
+          .search({
+            ref,
+            pattern: payload.pattern,
+            path: payload.path,
+            fixed: payload.fixed,
+            ignoreCase: payload.ignore_case,
+            maxMatches: payload.max_matches,
+          })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
-
-        // Clamped, not taken: the caller picks how much of the budget to use,
-        // not how large it is — `max_matches: 1e9` otherwise fills memory one
-        // matched line at a time.
-        const limit = Math.max(1, Math.min(payload.max_matches ?? 200, GREP_MAX_MATCHES));
-        const matches: Array<{ path: string; line: number; text: string }> = [];
-        const skipped: Array<string> = [];
-        let truncated = false;
-
-        for (const file of files) {
-          if (matches.length >= limit) {
-            truncated = true;
-            break;
-          }
-          if (!under(file.path, payload.path)) continue;
-          // A gitlink names a commit in another repository: there is nothing
-          // here to read, let alone to search.
-          if (isGitlink(file.mode)) continue;
-
-          const data = yield* repository
-            .readBlob(file.oid)
-            .pipe(Effect.catchTag("StorageFailure", Effect.die));
-          if (data.length > GREP_MAX_FILE_BYTES) {
-            skipped.push(file.path);
-            continue;
-          }
-          // A binary file has no lines worth reporting, and git skips them
-          // for the same reason.
-          if (isBinary(data)) continue;
-
-          // One line decoded at a time. Decoding the whole blob and splitting
-          // it holds three copies of the file at once — the bytes, the string
-          // and the array — where this holds the bytes and one line.
-          let start = 0;
-          let line = 0;
-          while (start <= data.length) {
-            const newline = data.indexOf(0x0a, start);
-            const end = newline === -1 ? data.length : newline;
-            line++;
-            const text = decoder.decode(data.subarray(start, end));
-            if (test(text)) {
-              matches.push({ path: file.path, line, text });
-              if (matches.length >= limit) {
-                truncated = true;
-                break;
-              }
-            }
-            if (newline === -1) break;
-            start = newline + 1;
-          }
-        }
-
-        return { matches, truncated, skipped };
       }),
     )
     .handle("gc", ({ payload }) =>

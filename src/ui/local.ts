@@ -20,13 +20,13 @@
  * runtime stay off the boot path, and a browser without OPFS (or a page not
  * in a secure context) simply never swaps away from the HTTP client.
  */
-import { Effect, Layer, Stream } from "effect";
+import { Effect, Layer, ManagedRuntime, Stream } from "effect";
 
 import * as Opfs from "../adapters/Opfs.ts";
 import * as Client from "../client/Client.ts";
 import { fetchRepository } from "../client/Fetch.ts";
 import { push as pushBranches, type PushResult } from "../client/Push.ts";
-import { isBinary, unified } from "../git/Diff.ts";
+import { unified } from "../git/Diff.ts";
 import { isGitlink, isTree, type Signature } from "../git/Format.ts";
 import { cherryPick as replayCommit, rebase as replayBranch } from "../git/Rebase.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
@@ -120,6 +120,7 @@ export class LocalGitApi {
   author: { name: string; email: string };
 
   readonly #root: FileSystemDirectoryHandle;
+  readonly #runtime: ManagedRuntime.ManagedRuntime<Repository | ObjectStore | RefStore, never>;
 
   private constructor(options: {
     readonly repo: string;
@@ -129,6 +130,8 @@ export class LocalGitApi {
     this.repo = options.repo;
     this.cloneUrl = options.cloneUrl;
     this.#root = options.root;
+    const stores = Opfs.stores(this.#root);
+    this.#runtime = ManagedRuntime.make(Layer.mergeAll(Client.local(stores), stores));
     this.author = { name: "git+ browser", email: `local@${location.hostname}` };
   }
 
@@ -195,16 +198,6 @@ export class LocalGitApi {
   }
 
   /**
-   * The repository service plus the bare stores, per call — `Repository` for
-   * the read/write surface, the stores themselves for `fetchRepository`,
-   * which streams a pack straight into them.
-   */
-  get #layer() {
-    const stores = Opfs.stores(this.#root);
-    return Layer.mergeAll(Client.local(stores), stores);
-  }
-
-  /**
    * One writer at a time, across tabs.
    *
    * OPFS writes are atomic per file, but a ref update is a read-check-write
@@ -221,9 +214,8 @@ export class LocalGitApi {
   async #run<A, E extends TaggedFailure>(
     effect: Effect.Effect<A, E, Repository | ObjectStore | RefStore>,
   ): Promise<A> {
-    const outcome = await Effect.runPromise(
+    const outcome = await this.#runtime.runPromise(
       effect.pipe(
-        Effect.provide(this.#layer),
         Effect.map((value) => ({ ok: true as const, value })),
         Effect.catch((error: E) => Effect.succeed({ ok: false as const, error })),
       ),
@@ -570,55 +562,23 @@ export class LocalGitApi {
    * Search blob contents at a ref — literal and case-insensitive, exactly
    * the promise the server's `/grep` makes to the same search box.
    */
-  async grep(pattern: string, ref: string, maxMatches = 50): Promise<GrepResponse> {
-    const needle = pattern.toLowerCase();
+  async grep(
+    pattern: string,
+    ref: string,
+    maxMatches = 50,
+    signal?: AbortSignal,
+  ): Promise<GrepResponse> {
     return await this.#run(
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const start = yield* repository.resolve(qualify(ref));
-        if (start === null) return { matches: [], truncated: false, skipped: [] };
-        const tree = yield* treeAt(repository, start);
-
-        const matches: Array<{ path: string; line: number; text: string }> = [];
-        const skipped: Array<string> = [];
-        let truncated = false;
-
-        const walk: Array<{ readonly oid: Oid; readonly prefix: string }> = [
-          { oid: tree, prefix: "" },
-        ];
-        while (walk.length > 0 && !truncated) {
-          const at = walk.pop();
-          if (at === undefined) break;
-          for (const entry of yield* repository.readTree(at.oid)) {
-            if (truncated) break;
-            if (isGitlink(entry.mode)) continue;
-            const path = `${at.prefix}${entry.name}`;
-            if (isTree(entry.mode)) {
-              walk.push({ oid: entry.oid, prefix: `${path}/` });
-              continue;
-            }
-            const bytes = yield* repository.readBlob(entry.oid);
-            // The same bound the server applies, for the same reason: a
-            // 200 MB log decoded to a string is the tab's memory, not an
-            // answer.
-            if (bytes.length > 4 * 1024 * 1024) {
-              skipped.push(path);
-              continue;
-            }
-            if (isBinary(bytes)) continue;
-            const lines = decoder.decode(bytes).split("\n");
-            for (let index = 0; index < lines.length; index += 1) {
-              const text = lines[index] ?? "";
-              if (!text.toLowerCase().includes(needle)) continue;
-              matches.push({ path, line: index + 1, text });
-              if (matches.length >= maxMatches) {
-                truncated = true;
-                break;
-              }
-            }
-          }
-        }
-        return { matches, truncated, skipped };
+        return yield* repository.search({
+          ref: qualify(ref),
+          pattern,
+          fixed: true,
+          ignoreCase: true,
+          maxMatches,
+          signal,
+        });
       }),
     );
   }

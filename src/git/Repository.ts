@@ -45,6 +45,7 @@ import * as Maintenance from "./Maintenance.ts";
 import { reachable } from "./Maintenance.ts";
 import * as Pack from "./Pack.ts";
 import { PackStore } from "./Packed.ts";
+import * as Search from "./Search.ts";
 import {
   isOid,
   ObjectStore,
@@ -474,6 +475,21 @@ export class Repository extends Context.Service<
     /** The reflog for a ref, newest last, as the stores recorded it. */
     readonly reflog: (name: string) => Effect.Effect<ReadonlyArray<ReflogEntry>, StorageFailure>;
 
+    /**
+     * Search one revision with a derived, OID-keyed bigram prefilter.
+     * Candidates are always verified from the object store before becoming results.
+     */
+    readonly search: (input: {
+      /** A ref name or oid; omitted means HEAD. */
+      readonly ref?: string;
+      readonly pattern: string;
+      readonly path?: string;
+      readonly fixed?: boolean;
+      readonly ignoreCase?: boolean;
+      readonly maxMatches?: number;
+      readonly signal?: AbortSignal;
+    }) => Effect.Effect<Search.SearchResult, ObjectNotFound | StorageFailure | Invalid>;
+
     /** A commit object with any number of parents — a merge has two. */
     readonly commitTree: (input: {
       readonly tree: Oid;
@@ -581,6 +597,7 @@ export const layer = Layer.effect(
     const refs = yield* RefStore;
     const hooks = yield* Hooks;
     const packs = yield* PackStore;
+    const indexed = yield* Search.SearchIndex;
 
     const readTyped = <A>(
       oid: Oid,
@@ -869,6 +886,20 @@ export const layer = Layer.effect(
               : Effect.fail(new ObjectNotFound({ oid })),
           ),
         );
+
+    // Immutable blob OIDs make this append-only cache safe. It is disposable:
+    // losing a Repository instance merely makes the next query cold.
+    const searchIndex = indexed.index;
+
+    /** The tree a search revision names, without making routes read stores. */
+    const searchTree = (oid: Oid) =>
+      Effect.gen(function* () {
+        const object = yield* objects.read(oid);
+        if (object.type === "tree") return oid;
+        if (object.type === "tag")
+          return (yield* readCommit((yield* readTyped(oid, "tag", parseTag)).object)).tree;
+        return (yield* readCommit(oid)).tree;
+      });
 
     const listFilesOf = Effect.fn("Repository.listFiles")(function* (
       tree: Oid,
@@ -1745,6 +1776,81 @@ export const layer = Layer.effect(
 
       listFiles: listFilesOf,
 
+      search: Effect.fn("Repository.search")(function* (input: {
+        readonly ref?: string;
+        readonly pattern: string;
+        readonly path?: string;
+        readonly fixed?: boolean;
+        readonly ignoreCase?: boolean;
+        readonly maxMatches?: number;
+        readonly signal?: AbortSignal;
+      }) {
+        const revision = input.ref ?? "HEAD";
+        const oid = isOid(revision) ? revision : yield* refs.resolve(revision);
+        if (oid === null) {
+          return yield* new Invalid({ field: "ref", reason: `unknown ref '${revision}'` });
+        }
+        const tree = yield* searchTree(oid);
+        const test = yield* Effect.fromResult(
+          Search.compileMatcher({
+            pattern: input.pattern,
+            fixed: input.fixed,
+            ignoreCase: input.ignoreCase,
+          }),
+        );
+        const limit = Math.max(1, Math.min(input.maxMatches ?? 200, Search.MAX_MATCHES));
+        const candidates = searchIndex.candidates(
+          input.pattern,
+          input.fixed === true && input.ignoreCase === true,
+        );
+        const matches: Search.SearchMatch[] = [];
+        const skipped: string[] = [];
+        const verified = new Map<Oid, ReadonlyArray<Search.LineMatch>>();
+        let truncated = false;
+
+        for (const file of yield* listFilesOf(tree)) {
+          // A browser's superseded query stops between tree/blob reads. Server
+          // request interruption reaches this Effect through its own scope.
+          yield* Effect.suspend(() =>
+            input.signal?.aborted === true ? Effect.interrupt : Effect.void,
+          );
+          if (isGitlink(file.mode) || !Search.underPath(file.path, input.path)) continue;
+
+          let blob = searchIndex.get(file.oid);
+          let data: Uint8Array | undefined;
+          if (blob === undefined) {
+            data = yield* readBlobAt(file.oid);
+            blob = searchIndex.observe(file.oid, data);
+          }
+          if (blob.state === "too-large") {
+            skipped.push(file.path);
+            continue;
+          }
+          if (blob.state === "binary") continue;
+          // A miss was read above and must be verified. Unicode blobs remain
+          // verifier-only because JavaScript case folding is wider than ASCII;
+          // only an ASCII-indexed blob may be rejected by the prefilter.
+          if (blob.state === "searchable" && candidates !== null && !candidates.has(blob.ordinal)) {
+            continue;
+          }
+
+          let lines = verified.get(file.oid);
+          if (lines === undefined) {
+            lines = Search.verify(data ?? (yield* readBlobAt(file.oid)), test, limit);
+            verified.set(file.oid, lines);
+          }
+          for (const line of lines) {
+            matches.push({ path: file.path, line: line.line, text: line.text });
+            if (matches.length >= limit) {
+              truncated = true;
+              break;
+            }
+          }
+          if (truncated) break;
+        }
+        return { matches, truncated, skipped };
+      }),
+
       findPath: Effect.fn("Repository.findPath")(function* (tree, path) {
         const segments = path.split("/").filter((segment) => segment !== "");
         let current = tree;
@@ -1862,4 +1968,4 @@ export const layer = Layer.effect(
       gc: (options) => Maintenance.gc({ objects, packs, refs }, options),
     });
   }),
-);
+).pipe(Layer.provide(Search.memory));
