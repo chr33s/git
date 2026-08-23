@@ -33,6 +33,7 @@ import { stores } from "./Cloudflare.ts";
 import { collector } from "./Conformance.ts";
 import { type GitError, statusOf } from "./Error.ts";
 import * as GitRepository from "./Repository.ts";
+import { durable as searchIndex } from "./Search.cloudflare.ts";
 import { Repository } from "./Repository.ts";
 import { storeContract } from "./Store.contract.ts";
 
@@ -155,9 +156,10 @@ export class GitRepo extends DurableObject<TestEnv> {
             using: (effect) =>
               effect.pipe(
                 Effect.provide(
-                  GitRepository.layer.pipe(
+                  GitRepository.layerWithSearchIndex.pipe(
                     Layer.provide(GitRepository.hooksNoop),
                     Layer.provideMerge(stores({ bucket, repo, storage })),
+                    Layer.provide(searchIndex(storage, repo)),
                   ),
                 ),
               ),
@@ -171,11 +173,12 @@ export class GitRepo extends DurableObject<TestEnv> {
       ),
     );
 
-    this.#layer ??= GitRepository.layer.pipe(
+    this.#layer ??= GitRepository.layerWithSearchIndex.pipe(
       Layer.provide(afterPush),
       // `provideMerge`: `provide` would swallow the `Storage` identity the
       // cross-request memos key on.
       Layer.provideMerge(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
+      Layer.provide(searchIndex(this.ctx.storage, repo)),
     );
     return this.#layer;
   }

@@ -14,6 +14,7 @@ import { HttpApiClient } from "effect/unstable/httpapi";
 
 import { noPacks, type PackStore } from "../git/Packed.ts";
 import * as GitRepository from "../git/Repository.ts";
+import * as Search from "../git/Search.ts";
 import type { Repository } from "../git/Repository.ts";
 import type { ObjectStore, RefStore } from "../git/Store.ts";
 import * as Api from "../server/Api.ts";
@@ -55,9 +56,11 @@ export const local = (
    * a repack unavailable rather than wrong.
    */
   packs: Layer.Layer<PackStore> = noPacks,
+  search: Layer.Layer<Search.SearchIndex> = Search.memory,
 ): Layer.Layer<Repository> =>
-  GitRepository.layer.pipe(
+  GitRepository.layerWithSearchIndex.pipe(
     Layer.provide(GitRepository.hooksNoop),
     Layer.provide(stores),
     Layer.provide(packs),
+    Layer.provide(search),
   );

@@ -20,6 +20,7 @@ import {
   parseReflogLine,
 } from "../git/Format.ts";
 import { noPacks } from "../git/Packed.ts";
+import * as Search from "../git/Search.ts";
 import {
   checkHeadTarget,
   checkRefAddress,
@@ -465,3 +466,48 @@ export const stores = (root: FileSystemDirectoryHandle | Promise<FileSystemDirec
   // browser the same key-count saving they buy R2, and the read path is
   // already shared — it is the write side that has no caller here yet.
   Layer.mergeAll(objectStore(root), refStore(root)).pipe(Layer.provideMerge(noPacks));
+
+/**
+ * A best-effort, versioned snapshot beside OPFS Git state. Each update
+ * replaces one atomic snapshot. A failed write only makes a later search cold,
+ * because Repository still verifies every candidate.
+ */
+export const searchIndex = (
+  rootHandle: FileSystemDirectoryHandle | Promise<FileSystemDirectoryHandle>,
+) =>
+  Layer.effect(
+    Search.SearchIndex,
+    Effect.gen(function* () {
+      const root = yield* Effect.promise(() => Promise.resolve(rootHandle));
+      const saved = yield* Effect.tryPromise({
+        try: () => readBytes(root, "search/index-v1.json"),
+        catch: () => new StorageFailure({ operation: "search.read", path: "search/index-v1.json" }),
+      }).pipe(Effect.orElseSucceed(() => null));
+      const index = saved === null ? new Search.BlobIndex() : Search.BlobIndex.restore(saved);
+      const current = index ?? new Search.BlobIndex();
+      const checkpoint = () =>
+        Effect.tryPromise({
+          try: () => writeBytes(root, "search/index-v1.json", current.snapshot()),
+          catch: () => undefined,
+        }).pipe(Effect.ignore);
+      let dirty = false;
+      const observe = Effect.fn("Opfs.SearchIndex.observe")((oid: Oid, data: Uint8Array) =>
+        Effect.sync(() => {
+          const known = current.get(oid);
+          const blob = current.observe(oid, data);
+          if (known === undefined) dirty = true;
+          return blob;
+        }),
+      );
+      const forget = (oids: ReadonlyArray<Oid>) =>
+        Effect.sync(() => {
+          for (const oid of oids) dirty = current.forget(oid) || dirty;
+        });
+      const flush = Effect.suspend(() => {
+        if (!dirty) return Effect.void;
+        dirty = false;
+        return checkpoint();
+      });
+      return Search.SearchIndex.of({ index: current, observe, forget, flush });
+    }),
+  );

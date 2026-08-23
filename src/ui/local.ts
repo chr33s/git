@@ -131,7 +131,9 @@ export class LocalGitApi {
     this.cloneUrl = options.cloneUrl;
     this.#root = options.root;
     const stores = Opfs.stores(this.#root);
-    this.#runtime = ManagedRuntime.make(Layer.mergeAll(Client.local(stores), stores));
+    this.#runtime = ManagedRuntime.make(
+      Layer.mergeAll(Client.local(stores, undefined, Opfs.searchIndex(this.#root)), stores),
+    );
     this.author = { name: "git+ browser", email: `local@${location.hostname}` };
   }
 

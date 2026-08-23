@@ -19,6 +19,9 @@
   "type": "module",
   "scripts": {
     "build:sea": "npm run codegen && node src/cli/sea.build.ts",
+    "bench:search": "node src/git/Search.bench.node.ts",
+    "bench:search:opfs": "node src/git/Search.opfs.bench.node.ts",
+    "bench:search:durable": "node src/git/Search.cloudflare.bench.node.ts",
     "build:ui": "node src/ui/build.ts",
     "check": "oxfmt --check && oxlint",
     "codegen": "node tools/generate-version.ts && wrangler types -c wrangler.test.json",

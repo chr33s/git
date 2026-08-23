@@ -23,6 +23,7 @@ import { HttpRouter } from "effect/unstable/http";
 import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
+import { file as searchIndexFile } from "../git/Search.node.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as SocialLog from "../social/Log.ts";
 import { SocialWeb } from "../social/Projection.ts";
@@ -61,6 +62,8 @@ export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname"> {
    * where saying so out loud is the point.
    */
   readonly allowAnonymousWrites?: boolean;
+  /** Persist the derived search index; disabled until a host opts in. */
+  readonly searchPersistence?: boolean;
   /**
    * Directory of a built UI to serve from this origin, if any.
    *
@@ -367,14 +370,14 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         ? AfterPush.chain({ root: options.root, repo, wake: true })
         : AfterPush.chain({ root: options.root, repo });
 
-    const layer = GitRepository.layer.pipe(
-      // Real hooks, not `hooksNoop`: this is what makes a push deliver.
-      // `forkDetach` is the node stand-in for `waitUntil` — delivery outlives
-      // the response without the push waiting on a slow receiver.
-      Layer.provide(afterPush),
-      // As `guardLayer` above: `provide` would swallow `Storage`.
-      Layer.provideMerge(stores(directory)),
-    );
+    const layer =
+      options.searchPersistence === true
+        ? GitRepository.layerWithSearchIndex.pipe(
+            Layer.provide(afterPush),
+            Layer.provideMerge(stores(directory)),
+            Layer.provide(searchIndexFile(directory)),
+          )
+        : GitRepository.layer.pipe(Layer.provide(afterPush), Layer.provideMerge(stores(directory)));
 
     // Built once per repository, not once per request. The requester stays
     // *out* of the graph and arrives as a per-request context instead, which

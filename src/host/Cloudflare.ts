@@ -26,6 +26,7 @@ import { stores } from "../git/Cloudflare.ts";
 import { type GitError, statusOf, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
+import { durable as searchIndex } from "../git/Search.cloudflare.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
@@ -133,11 +134,12 @@ export default Repo.make(
                 using: (effect) =>
                   effect.pipe(
                     Effect.provide(
-                      GitRepository.layer.pipe(
+                      GitRepository.layerWithSearchIndex.pipe(
                         Layer.provide(GitRepository.hooksNoop),
                         Layer.provideMerge(
                           stores({ bucket: r2, repo, storage: state.raw.storage }),
                         ),
+                        Layer.provide(searchIndex(state.raw.storage, repo)),
                       ),
                     ),
                   ),
@@ -149,12 +151,13 @@ export default Repo.make(
           Layer.provide(Layer.mergeAll(subscribers(repo), remotes(repo), FetchHttpClient.layer)),
         );
 
-        const built = GitRepository.layer.pipe(
+        const built = GitRepository.layerWithSearchIndex.pipe(
           Layer.provide(afterPush),
           // `provideMerge`: `provide` would swallow the `Storage` identity the
           // cross-request memos key on, and two repositories in one namespace
           // would share every entry.
           Layer.provideMerge(stores({ bucket: r2, repo, storage: state.raw.storage })),
+          Layer.provide(searchIndex(state.raw.storage, repo)),
         );
         layers.set(repo, built);
         return built;

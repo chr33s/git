@@ -4,11 +4,12 @@
  * Blob ordinals belong only to one Repository instance. Object storage remains
  * authoritative: postings only decide which blobs merit exact verification.
  */
-import { Context, Layer, Result } from "effect";
+import { Context, Effect, Layer, Result, Schema } from "effect";
 
 import { isBinary } from "./Diff.ts";
 import { Invalid } from "./Error.ts";
-import type { Oid } from "./Store.ts";
+import { Sha1 } from "./Sha1.ts";
+import { isOid, type Oid } from "./Store.ts";
 
 export const MAX_MATCHES = 2_000;
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -102,6 +103,29 @@ export interface IndexedBlob {
   readonly state: BlobState;
 }
 
+export interface BlobIndexStats {
+  readonly blobs: number;
+  readonly bigrams: number;
+  readonly snapshotBytes: number;
+}
+
+const hex = (bytes: Uint8Array): string =>
+  [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+const checksum = (bytes: Uint8Array): string => hex(new Sha1().update(bytes).digest());
+
+const Snapshot = Schema.Struct({
+  version: Schema.Literal(1),
+  blobs: Schema.Array(
+    Schema.Struct({
+      oid: Schema.String,
+      state: Schema.Literals(["searchable", "unindexed", "binary", "too-large"]),
+      bigrams: Schema.Array(Schema.Finite),
+    }),
+  ),
+});
+
+const SnapshotFile = Schema.Struct({ payload: Schema.String, checksum: Schema.String });
+
 /** A small growable bitset; its private layout is never shared between hosts. */
 class BitSet {
   #words = new Uint32Array(0);
@@ -124,6 +148,12 @@ class BitSet {
     }
     result.#words = words;
     return result;
+  }
+
+  remove(bit: number): void {
+    const word = Math.floor(bit / 32);
+    if (word >= this.#words.length) return;
+    this.#words[word] = (this.#words[word] ?? 0) & ~(1 << (bit % 32));
   }
 
   values(): ReadonlySet<number> {
@@ -162,6 +192,7 @@ export class BlobIndex {
   #byOid = new Map<Oid, IndexedBlob>();
   #byBigram = new Map<number, BitSet>();
   #nextOrdinal = 0;
+  #keysByOid = new Map<Oid, ReadonlyArray<number>>();
 
   get(oid: Oid): IndexedBlob | undefined {
     return this.#byOid.get(oid);
@@ -199,7 +230,79 @@ export class BlobIndex {
       }
       posting.add(blob.ordinal);
     }
+    this.#keysByOid.set(oid, [...seen]);
     return blob;
+  }
+
+  forget(oid: Oid): boolean {
+    const blob = this.#byOid.get(oid);
+    if (blob === undefined) return false;
+    this.#byOid.delete(oid);
+    const bigrams = this.#keysByOid.get(oid) ?? [];
+    this.#keysByOid.delete(oid);
+    for (const bigram of bigrams) this.#byBigram.get(bigram)?.remove(blob.ordinal);
+    return true;
+  }
+
+  stats(): BlobIndexStats {
+    return {
+      blobs: this.#byOid.size,
+      bigrams: this.#byBigram.size,
+      snapshotBytes: this.snapshot().length,
+    };
+  }
+
+  snapshot(): Uint8Array {
+    const payload = JSON.stringify({
+      version: 1,
+      blobs: [...this.#byOid.values()].map((blob) => ({
+        oid: blob.oid,
+        state: blob.state,
+        bigrams: this.#keysByOid.get(blob.oid) ?? [],
+      })),
+    });
+    const bytes = new TextEncoder().encode(payload);
+    return new TextEncoder().encode(JSON.stringify({ payload, checksum: checksum(bytes) }));
+  }
+
+  /** A corrupt or old derived cache is discarded, never trusted. */
+  static restore(bytes: Uint8Array): BlobIndex | null {
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      return null;
+    }
+    const file = Schema.decodeUnknownOption(SnapshotFile)(envelope);
+    if (file._tag === "None") return null;
+    const payload = new TextEncoder().encode(file.value.payload);
+    if (checksum(payload) !== file.value.checksum) return null;
+    let value: unknown;
+    try {
+      value = JSON.parse(file.value.payload);
+    } catch {
+      return null;
+    }
+    const decoded = Schema.decodeUnknownOption(Snapshot)(value);
+    if (decoded._tag === "None") return null;
+    const index = new BlobIndex();
+    for (const row of decoded.value.blobs) {
+      if (!isOid(row.oid)) return null;
+      const blob: IndexedBlob = { oid: row.oid, ordinal: index.#nextOrdinal, state: row.state };
+      index.#nextOrdinal += 1;
+      index.#byOid.set(blob.oid, blob);
+      if (blob.state !== "searchable") continue;
+      index.#keysByOid.set(blob.oid, row.bigrams);
+      for (const bigram of row.bigrams) {
+        let posting = index.#byBigram.get(bigram);
+        if (posting === undefined) {
+          posting = new BitSet();
+          index.#byBigram.set(bigram, posting);
+        }
+        posting.add(blob.ordinal);
+      }
+    }
+    return index;
   }
 
   /** `null` asks callers to use the full verifier path. */
@@ -217,13 +320,27 @@ export class BlobIndex {
   }
 }
 
-/** Derived-state port. Hosts may later replace `memory` with persistent cache. */
-export class SearchIndex extends Context.Service<SearchIndex, { readonly index: BlobIndex }>()(
-  "git/SearchIndex",
-) {}
+/** Derived-state port. Hosts may replace `memory` with persistent cache. */
+export class SearchIndex extends Context.Service<
+  SearchIndex,
+  {
+    readonly index: BlobIndex;
+    readonly observe: (oid: Oid, data: Uint8Array) => Effect.Effect<IndexedBlob>;
+    readonly forget: (oids: ReadonlyArray<Oid>) => Effect.Effect<void>;
+    readonly flush: Effect.Effect<void>;
+  }
+>()("git/SearchIndex") {}
 
 /** The default is intentionally disposable and needs no storage capability. */
-export const memory = Layer.sync(SearchIndex, () => SearchIndex.of({ index: new BlobIndex() }));
+export const memory = Layer.sync(SearchIndex, () => {
+  const index = new BlobIndex();
+  return SearchIndex.of({
+    index,
+    observe: (oid, data) => Effect.sync(() => index.observe(oid, data)),
+    forget: (oids) => Effect.sync(() => oids.forEach((oid) => index.forget(oid))),
+    flush: Effect.void,
+  });
+});
 
 export const underPath = (path: string, prefix: string | undefined): boolean => {
   if (prefix === undefined || prefix === "") return true;

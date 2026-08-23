@@ -590,7 +590,7 @@ type RefUpdateDraft = {
   reason?: string;
 };
 
-export const layer = Layer.effect(
+export const layerWithSearchIndex = Layer.effect(
   Repository,
   Effect.gen(function* () {
     const objects = yield* ObjectStore;
@@ -1820,7 +1820,7 @@ export const layer = Layer.effect(
           let data: Uint8Array | undefined;
           if (blob === undefined) {
             data = yield* readBlobAt(file.oid);
-            blob = searchIndex.observe(file.oid, data);
+            blob = yield* indexed.observe(file.oid, data);
           }
           if (blob.state === "too-large") {
             skipped.push(file.path);
@@ -1848,6 +1848,7 @@ export const layer = Layer.effect(
           }
           if (truncated) break;
         }
+        yield* indexed.flush;
         return { matches, truncated, skipped };
       }),
 
@@ -1965,7 +1966,15 @@ export const layer = Layer.effect(
 
       ancestry,
 
-      gc: (options) => Maintenance.gc({ objects, packs, refs }, options),
+      gc: Effect.fn("Repository.gc")(function* (options) {
+        const report = yield* Maintenance.gc({ objects, packs, refs }, options);
+        yield* indexed.forget(report.removed);
+        yield* indexed.flush;
+        return report;
+      }),
     });
   }),
-).pipe(Layer.provide(Search.memory));
+);
+
+/** The portable default; hosts may provide a durable SearchIndex instead. */
+export const layer = layerWithSearchIndex.pipe(Layer.provide(Search.memory));

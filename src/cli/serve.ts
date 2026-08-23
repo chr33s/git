@@ -36,6 +36,10 @@ export const serveCommand = Command.make(
       Flag.withDefault(false),
       Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
     ),
+    searchPersistence: Flag.boolean("search-persistence").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Persist the derived search index for this Node host"),
+    ),
     ui: Flag.boolean("ui").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Serve the built browser UI from this origin as well"),
@@ -45,7 +49,7 @@ export const serveCommand = Command.make(
       Flag.withDescription("Where the built UI is, if not the one built beside this install"),
     ),
   },
-  ({ hostname, open, port, root, ui, uiDir, wake }) =>
+  ({ hostname, open, port, root, searchPersistence, ui, uiDir, wake }) =>
     Effect.gen(function* () {
       const options = yield* resolve({
         root: root._tag === "Some" ? root.value : undefined,
@@ -61,7 +65,13 @@ export const serveCommand = Command.make(
       }
       const server = yield* Effect.promise(() =>
         import("../host/Node.ts").then(({ serve }) =>
-          serve({ ...options, allowAnonymousWrites: open, wake, ui: assets }),
+          serve({
+            ...options,
+            allowAnonymousWrites: open,
+            searchPersistence,
+            wake,
+            ui: assets,
+          }),
         ),
       );
       yield* Console.log(
