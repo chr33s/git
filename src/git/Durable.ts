@@ -34,6 +34,7 @@ import { collector } from "./Conformance.ts";
 import { type GitError, statusOf } from "./Error.ts";
 import * as GitRepository from "./Repository.ts";
 import { durable as searchIndex } from "./Search.cloudflare.ts";
+import * as Search from "./Search.ts";
 import { Repository } from "./Repository.ts";
 import { storeContract } from "./Store.contract.ts";
 
@@ -53,6 +54,8 @@ interface TestEnv {
    * an open write endpoint nobody asked for.
    */
   readonly ALLOW_ANONYMOUS_WRITES?: string;
+  /** Persist the derived index across Durable Object eviction; off by default. */
+  readonly SEARCH_PERSISTENCE?: string;
   readonly GIT_OBJECTS: R2Bucket;
   readonly GIT_REPO: DurableObjectNamespace<GitRepo>;
 }
@@ -118,8 +121,15 @@ export class GitRepo extends DurableObject<TestEnv> {
     return this.#nonceStore;
   }
 
+  #searchIndex(repo: string): Layer.Layer<Search.SearchIndex> {
+    return ["true", "yes", "on", "1", "y"].includes(this.env.SEARCH_PERSISTENCE ?? "")
+      ? searchIndex(this.ctx.storage, repo)
+      : Search.memory;
+  }
+
   /** Built once per instance: the DO is the unit of isolation, not the request. */
   #live(repo: string): Layer.Layer<Repository> {
+    const index = this.#searchIndex(repo);
     // Delivery runs in `waitUntil`, and so does forwarding: a remote that is
     // down must not touch a push that has already been accepted.
     const detached = <A, E>(effect: Effect.Effect<A, E>) =>
@@ -159,7 +169,7 @@ export class GitRepo extends DurableObject<TestEnv> {
                   GitRepository.layerWithSearchIndex.pipe(
                     Layer.provide(GitRepository.hooksNoop),
                     Layer.provideMerge(stores({ bucket, repo, storage })),
-                    Layer.provide(searchIndex(storage, repo)),
+                    Layer.provide(index),
                   ),
                 ),
               ),
@@ -178,7 +188,7 @@ export class GitRepo extends DurableObject<TestEnv> {
       // `provideMerge`: `provide` would swallow the `Storage` identity the
       // cross-request memos key on.
       Layer.provideMerge(stores({ bucket: this.env.GIT_OBJECTS, repo, storage: this.ctx.storage })),
-      Layer.provide(searchIndex(this.ctx.storage, repo)),
+      Layer.provide(index),
     );
     return this.#layer;
   }

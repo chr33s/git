@@ -93,6 +93,18 @@ been seen.
 The ref still decides _which paths are in scope_. The blob index only decides
 _which contents could match_.
 
+## Status
+
+Shipped: the OID-keyed bigram prefilter, exact-first verification, cancellation
+below the route boundary, `max_matches`/`max_work`/`max_time_ms` budgets with
+opaque scoped continuations, opt-in fuzzy suggestions as a separate answer, and
+chunked deflate-compressed persistence (v3 manifest + independently checksummed
+blob/posting chunks, manifest published last) behind `Search.persistent` for
+OPFS, Node, and — opt-in via `SEARCH_PERSISTENCE` — Durable Objects. Posting
+chunks load on demand: startup reads the manifest and blob table only, and a
+query reads the chunks whose bigram ranges it touches. Benchmarks are recorded
+in [`search-benchmarks.md`](search-benchmarks.md).
+
 ## Proposed shape
 
 Keep four concerns separate:
@@ -441,7 +453,8 @@ unknown blobs are scanned, those lifecycle differences affect latency only.
 
 ## Rollout
 
-Prefer small independently measurable steps.
+The steps below ran in order; the list is kept as the record of how the feature
+landed.
 
 1. **Cancel stale searches.** Add end-to-end cancellation while preserving the
    current brute-force verifier.

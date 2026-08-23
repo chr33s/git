@@ -203,6 +203,59 @@ describe("GitRepo over HTTP", () => {
   );
 });
 
+describe("persisted Durable Object search", () => {
+  it.effect("rebuilds the same exact answer from its chunk manifest after eviction", () =>
+    Effect.promise(async () => {
+      const persistent = createTestHarness({
+        workers: [{ configPath: "./wrangler.search.test.json" }],
+      });
+      try {
+        await persistent.listen();
+        const repo = repoName();
+        const created = await persistent.fetch(`/${repo}/commit`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            author: alice,
+            branch: "main",
+            message: "search",
+            files: [
+              { path: "a.txt", content: "needle one\\n" },
+              { path: "b.txt", content: "needle two\\n" },
+            ],
+          }),
+        });
+        assert.equal(created.status, 200);
+        const grep = () =>
+          persistent.fetch(`/${repo}/grep`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pattern: "needle", fixed: true, ignore_case: true }),
+          });
+        // R2's local workerd binding exposes a newly committed object on the
+        // next turn, so the first pass establishes the unindexed verifier's
+        // answer and the second is the warm indexed baseline.
+        await grep();
+        const warm = await json<{ matches: Array<{ path: string; line: number }> }>(await grep());
+        await persistent.getWorker().evictDurableObject("GIT_REPO", { name: repo });
+        const restored = await json<{ matches: Array<{ path: string; line: number }> }>(
+          await grep(),
+        );
+        assert.deepEqual(restored.matches, warm.matches);
+        assert.deepEqual(
+          restored.matches.map((match) => [match.path, match.line]),
+          [
+            ["a.txt", 1],
+            ["b.txt", 1],
+          ],
+        );
+      } finally {
+        await persistent.close();
+      }
+    }),
+  );
+});
+
 describe.skipIf(!hasGit)("smart HTTP against workerd", () => {
   it.effect("clones from and pushes to the Durable Object with the real git binary", () =>
     Effect.promise(async () => {

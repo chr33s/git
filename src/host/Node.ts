@@ -571,7 +571,14 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         if (Predicate.isString(value)) headers.set(name, value);
       }
       const method = incoming.method ?? "GET";
-      const init: StreamingRequestInit = { method, headers };
+      // Node's IncomingMessage does not become a Fetch Request with a signal
+      // by itself. Bind both sides of the socket lifetime before handing it to
+      // the HTTP adapter, so an abandoned `/grep` interrupts its request fiber.
+      const aborted = new AbortController();
+      const abort = () => aborted.abort();
+      incoming.once("aborted", abort);
+      outgoing.once("close", abort);
+      const init: StreamingRequestInit = { method, headers, signal: aborted.signal };
       if (method !== "GET" && method !== "HEAD") {
         // Streamed, not buffered: a push flows straight into the pack parser.
         // SAFETY: node's web stream and the fetch body type are the same
@@ -607,8 +614,13 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           await pipeline(Readable.fromWeb(response.body as WebReadableStream), outgoing);
         }
       };
-      if (denied.denied !== null) await deliver(denied.denied);
-      else await dispatch(repo, request, deliver, denied.authenticated);
+      try {
+        if (denied.denied !== null) await deliver(denied.denied);
+        else await dispatch(repo, request, deliver, denied.authenticated);
+      } finally {
+        incoming.removeListener("aborted", abort);
+        outgoing.removeListener("close", abort);
+      }
     })().catch((cause: unknown) => {
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end(String(cause));

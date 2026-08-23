@@ -55,6 +55,7 @@ export type FileEntry = Contract.FileEntry;
 export type FileWrite = Contract.FileWrite;
 export type CommitCreated = Contract.CommitCreated;
 export type GrepMatch = Contract.GrepMatch;
+export type FuzzyMatch = Contract.FuzzyMatch;
 export type GrepResponse = Contract.GrepResponse;
 export type MergeResult = Contract.MergeResult;
 export type ResetResult = Contract.ResetResult;
@@ -353,14 +354,11 @@ export class GitApi {
     ref: string,
     maxMatches = 50,
     signal?: AbortSignal,
+    fuzzy = false,
   ): Promise<GrepResponse> {
-    const payload: Contract.GrepRequest = {
-      pattern,
-      ref,
-      fixed: true,
-      ignore_case: true,
-      max_matches: maxMatches,
-    };
+    const payload: Contract.GrepRequest = fuzzy
+      ? { pattern, ref, fixed: true, ignore_case: true, max_matches: maxMatches, fuzzy: true }
+      : { pattern, ref, fixed: true, ignore_case: true, max_matches: maxMatches };
     return await this.#post("/grep", payload, Contract.GrepResponse, signal);
   }
 
@@ -588,6 +586,7 @@ export interface SearchApi {
     ref: string,
     maxMatches?: number,
     signal?: AbortSignal,
+    fuzzy?: boolean,
   ): Promise<GrepResponse>;
 }
 

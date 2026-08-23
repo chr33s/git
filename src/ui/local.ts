@@ -569,6 +569,7 @@ export class LocalGitApi {
     ref: string,
     maxMatches = 50,
     signal?: AbortSignal,
+    fuzzy = false,
   ): Promise<GrepResponse> {
     return await this.#run(
       Effect.gen(function* () {
@@ -580,6 +581,7 @@ export class LocalGitApi {
           ignoreCase: true,
           maxMatches,
           signal,
+          fuzzy,
         });
       }),
     );

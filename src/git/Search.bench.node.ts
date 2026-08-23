@@ -77,27 +77,31 @@ try {
       const repository = yield* GitRepository.Repository;
       const index = yield* SearchIndex;
       const head = yield* repository.resolve("HEAD");
-      if (head === null)
-        return {
-          snapshot: index.index.snapshot(),
-          files: 0,
-          candidates: 0,
-          stats: index.index.stats(),
-        };
+      const snapshot = yield* Effect.promise(() => index.index.persisted());
+      if (snapshot === null) {
+        return { snapshot: null, files: 0, candidates: 0, stats: index.index.stats() };
+      }
+      if (head === null) return { snapshot, files: 0, candidates: 0, stats: index.index.stats() };
       const files = yield* repository.listFiles(yield* treeAt(repository, head));
-      const candidates = index.index.candidates(pattern, true);
+      const candidates = yield* index.candidates(pattern, true);
       return {
-        snapshot: index.index.snapshot(),
+        snapshot,
         files: files.filter((file) => !isGitlink(file.mode)).length,
         candidates: candidates?.size ?? files.length,
         stats: index.index.stats(),
       };
     }),
   );
+  if (indexData.snapshot === null) throw new Error("index was not persistable");
   const snapshot = indexData.snapshot;
   // Restore timing excludes filesystem I/O: hosts differ there, while
-  // snapshot validation and posting reconstruction are portable.
-  const validation = await elapsed(async () => BlobIndex.restore(snapshot));
+  // manifest validation and posting reconstruction are portable.
+  const validation = await elapsed(async () =>
+    BlobIndex.restorePersisted(
+      snapshot.manifest,
+      new Map(snapshot.chunks.map((chunk) => [chunk.name, chunk.bytes])),
+    ),
+  );
 
   const cacheDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "git-search-bench-"));
   try {
@@ -130,7 +134,10 @@ try {
           reachable_blobs: indexData.files,
           candidate_blobs: indexData.candidates,
           candidate_ratio: indexData.files === 0 ? 0 : indexData.candidates / indexData.files,
-          snapshot_bytes: snapshot.length,
+          persisted_bytes:
+            snapshot.manifest.length +
+            snapshot.chunks.reduce((total, chunk) => total + chunk.bytes.length, 0),
+          persisted_chunks: snapshot.chunks.length,
           snapshot_restore_ms: validation.milliseconds,
           node_persistent_first_search_ms: persistedBuild.milliseconds,
           node_persistent_restart_search_ms: persistedRestart.milliseconds,

@@ -99,6 +99,45 @@ describe("the per-repository gate", () => {
   );
 });
 
+describe("request cancellation", () => {
+  it.effect("stops a search when the client disconnects", () =>
+    Effect.promise(async () => {
+      const base = `${server.url}/cancelled`;
+      const committed = await fetch(`${base}/commit`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          author: { name: "Test", email: "test@example.com", at: new Date(0).toISOString() },
+          branch: "main",
+          message: "seed",
+          files: Array.from({ length: 50 }, (_, index) => ({
+            path: `src/file-${index}.txt`,
+            content: `needle ${index}\n`,
+          })),
+        }),
+      });
+      assert.equal(committed.status, 200);
+
+      // Abort before the response: the socket close is bridged to the request
+      // signal, which interrupts the search fiber below the route boundary.
+      const controller = new AbortController();
+      const pending = fetch(`${base}/grep`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pattern: "needle", fixed: true, ignore_case: true }),
+        signal: controller.signal,
+      });
+      controller.abort();
+      await assert.rejects(pending, (error: Error) => error.name === "AbortError");
+
+      // The teardown must not wedge the repository's gate for later requests.
+      const refs = await fetch(`${base}/refs`, { signal: AbortSignal.timeout(5_000) });
+      assert.equal(refs.status, 200);
+      await refs.json();
+    }),
+  );
+});
+
 /**
  * The router is built once per repository and the requester arrives with each
  * call. That is only safe if the second caller is judged as themselves, so

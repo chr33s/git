@@ -2,54 +2,44 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 
 import { StorageFailure } from "./Error.ts";
 import * as Search from "./Search.ts";
-import type { Oid } from "./Store.ts";
 
 const failure = (operation: string, target: string) =>
   new StorageFailure({ operation, path: target });
 
-/** One atomic snapshot per bare repository; it is never Git object state. */
-export const file = (directory: string) =>
-  Layer.effect(
-    Search.SearchIndex,
-    Effect.gen(function* () {
-      const target = path.join(directory, "search-index-v1.json");
-      const temporary = `${target}.tmp`;
-      const bytes = yield* Effect.tryPromise({
-        try: () => fs.readFile(target),
-        catch: () => failure("search.read", target),
-      }).pipe(Effect.orElseSucceed(() => null));
-      const index = bytes === null ? new Search.BlobIndex() : Search.BlobIndex.restore(bytes);
-      const current = index ?? new Search.BlobIndex();
-      const checkpoint = () =>
-        Effect.tryPromise({
-          try: async () => {
-            await fs.writeFile(temporary, current.snapshot());
+/**
+ * Chunks under one directory beside the bare repository; never Git object
+ * state. Soft limit warns, hard limit keeps the index in memory only — both
+ * are initial values to be tuned by `bench:search`, not measured truths yet.
+ */
+export const file = (directory: string) => {
+  const root = path.join(directory, "search-index-v3");
+  return Search.persistent({
+    softLimitBytes: 100 * 1024 * 1024,
+    hardLimitBytes: 250 * 1024 * 1024,
+    read: (name) =>
+      Effect.tryPromise({
+        try: async () => new Uint8Array(await fs.readFile(path.join(root, name))),
+        catch: () => failure("search.read", path.join(root, name)),
+      }).pipe(Effect.orElseSucceed(() => null)),
+    write: (name, bytes) =>
+      Effect.tryPromise({
+        try: async () => {
+          await fs.mkdir(root, { recursive: true });
+          const target = path.join(root, name);
+          // The manifest publishes the checkpoint; it alone needs atomic rename.
+          if (name === "manifest.json") {
+            const temporary = `${target}.tmp`;
+            await fs.writeFile(temporary, bytes);
             await fs.rename(temporary, target);
-          },
-          catch: () => failure("search.write", target),
-        }).pipe(Effect.ignore);
-      let dirty = false;
-      const observe = Effect.fn("Node.SearchIndex.observe")((oid: Oid, data: Uint8Array) =>
-        Effect.sync(() => {
-          const known = current.get(oid);
-          const blob = current.observe(oid, data);
-          if (known === undefined) dirty = true;
-          return blob;
-        }),
-      );
-      const forget = (oids: ReadonlyArray<Oid>) =>
-        Effect.sync(() => {
-          for (const oid of oids) dirty = current.forget(oid) || dirty;
-        });
-      const flush = Effect.suspend(() => {
-        if (!dirty) return Effect.void;
-        dirty = false;
-        return checkpoint();
-      });
-      return Search.SearchIndex.of({ index: current, observe, forget, flush });
-    }),
-  );
+          } else {
+            await fs.writeFile(target, bytes);
+          }
+        },
+        catch: () => failure("search.write", path.join(root, name)),
+      }).pipe(Effect.ignore),
+  });
+};

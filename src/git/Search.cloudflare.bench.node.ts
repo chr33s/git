@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 
 import { createTestHarness } from "wrangler";
 
-const harness = createTestHarness({ workers: [{ configPath: "./wrangler.test.json" }] });
+const harness = createTestHarness({ workers: [{ configPath: "./wrangler.search.test.json" }] });
 const repo = `search-benchmark-${crypto.randomUUID()}`;
 const author = {
   name: "benchmark",

@@ -1953,6 +1953,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
             fixed: payload.fixed,
             ignoreCase: payload.ignore_case,
             maxMatches: payload.max_matches,
+            maxWork: payload.max_work,
+            maxTimeMs: payload.max_time_ms,
+            continuation: payload.continuation,
+            fuzzy: payload.fuzzy,
           })
           .pipe(Effect.catchTag("StorageFailure", Effect.die));
       }),

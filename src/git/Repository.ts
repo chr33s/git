@@ -15,7 +15,7 @@
  * `Maintenance.ts`, and replay/bisect/path-history in their own modules. A
  * method whose body outgrows a screen is a candidate for the same move.
  */
-import { Context, Effect, Layer, Option, Result, Schedule, Stream } from "effect";
+import { Clock, Context, Effect, Layer, Option, Result, Schedule, Stream } from "effect";
 import {
   type HookRejected,
   Invalid,
@@ -487,6 +487,13 @@ export class Repository extends Context.Service<
       readonly fixed?: boolean;
       readonly ignoreCase?: boolean;
       readonly maxMatches?: number;
+      /** Maximum blobs considered before returning a continuation. */
+      readonly maxWork?: number;
+      /** Bounded-time budget in milliseconds. */
+      readonly maxTimeMs?: number;
+      readonly continuation?: string;
+      /** Opt-in approximate suggestions after an exhaustive exact miss. */
+      readonly fuzzy?: boolean;
       readonly signal?: AbortSignal;
     }) => Effect.Effect<Search.SearchResult, ObjectNotFound | StorageFailure | Invalid>;
 
@@ -903,7 +910,7 @@ export const layerWithSearchIndex = Layer.effect(
 
     const listFilesOf = Effect.fn("Repository.listFiles")(function* (
       tree: Oid,
-      options?: { readonly prefix?: string },
+      options?: { readonly prefix?: string; readonly signal?: AbortSignal },
     ) {
       const files: TreeFile[] = [];
       // Depth-first with an explicit stack rather than recursion: a deep tree
@@ -912,9 +919,14 @@ export const layerWithSearchIndex = Layer.effect(
         { oid: tree, prefix: options?.prefix ?? "" },
       ];
 
+      const aborted = () => options?.signal?.aborted === true;
       while (stack.length > 0) {
+        // Tree walks can be much larger than the blob reads that follow them;
+        // honour a local abort before every tree object and entry expansion.
+        if (aborted()) return yield* Effect.interrupt;
         const { oid, prefix } = stack.pop()!;
         for (const entry of yield* readTreeEntries(oid)) {
+          if (aborted()) return yield* Effect.interrupt;
           const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
           if (isTree(entry.mode)) stack.push({ oid: entry.oid, prefix: path });
           // Gitlinks included, deliberately. They are not content — the commit
@@ -1783,6 +1795,10 @@ export const layerWithSearchIndex = Layer.effect(
         readonly fixed?: boolean;
         readonly ignoreCase?: boolean;
         readonly maxMatches?: number;
+        readonly maxWork?: number;
+        readonly maxTimeMs?: number;
+        readonly continuation?: string;
+        readonly fuzzy?: boolean;
         readonly signal?: AbortSignal;
       }) {
         const revision = input.ref ?? "HEAD";
@@ -1790,36 +1806,78 @@ export const layerWithSearchIndex = Layer.effect(
         if (oid === null) {
           return yield* new Invalid({ field: "ref", reason: `unknown ref '${revision}'` });
         }
-        const tree = yield* searchTree(oid);
-        const test = yield* Effect.fromResult(
-          Search.compileMatcher({
+        const fixed = input.fixed === true;
+        const ignoreCase = input.ignoreCase === true;
+        const wantsFuzzy = input.fuzzy === true;
+        const cursor = yield* Effect.fromResult(
+          Search.continuation({
+            token: input.continuation,
             pattern: input.pattern,
-            fixed: input.fixed,
-            ignoreCase: input.ignoreCase,
+            revision: oid,
+            path: input.path,
+            fixed,
+            ignoreCase,
+            fuzzy: wantsFuzzy,
           }),
         );
-        const limit = Math.max(1, Math.min(input.maxMatches ?? 200, Search.MAX_MATCHES));
-        const candidates = searchIndex.candidates(
-          input.pattern,
-          input.fixed === true && input.ignoreCase === true,
+        const tree = yield* searchTree(oid);
+        const test = yield* Effect.fromResult(
+          Search.compileMatcher({ pattern: input.pattern, fixed, ignoreCase }),
         );
+        const limit = Math.max(1, Math.min(input.maxMatches ?? 200, Search.MAX_MATCHES));
+        const workLimit = Math.max(1, Math.floor(input.maxWork ?? Number.MAX_SAFE_INTEGER));
+        const started = yield* Clock.currentTimeMillis;
+        const deadline =
+          input.maxTimeMs === undefined ? null : started + Math.max(0, Math.floor(input.maxTimeMs));
+        const candidates = yield* indexed.candidates(input.pattern, fixed && ignoreCase);
         const matches: Search.SearchMatch[] = [];
         const skipped: string[] = [];
         const verified = new Map<Oid, ReadonlyArray<Search.LineMatch>>();
+        let work = 0;
         let truncated = false;
+        let continuation: string | undefined;
 
-        for (const file of yield* listFilesOf(tree)) {
-          // A browser's superseded query stops between tree/blob reads. Server
-          // request interruption reaches this Effect through its own scope.
-          yield* Effect.suspend(() =>
-            input.signal?.aborted === true ? Effect.interrupt : Effect.void,
-          );
+        const interrupted = () =>
+          Effect.suspend(() => (input.signal?.aborted === true ? Effect.interrupt : Effect.void));
+        const cursorFor = (afterPath: string, afterLine: number) =>
+          Search.nextContinuation({
+            pattern: input.pattern,
+            revision: oid,
+            path: input.path,
+            fixed,
+            ignoreCase,
+            fuzzy: wantsFuzzy,
+            afterPath,
+            afterLine,
+          });
+
+        for (const file of yield* listFilesOf(tree, { signal: input.signal })) {
+          // The HTTP adapter interrupts its request fiber on disconnect; the
+          // signal covers browser-local callers. Check before each storage hop.
+          yield* interrupted();
           if (isGitlink(file.mode) || !Search.underPath(file.path, input.path)) continue;
+          if (
+            cursor !== null &&
+            (file.path < cursor.afterPath ||
+              (file.path === cursor.afterPath && cursor.afterLine === Number.MAX_SAFE_INTEGER))
+          ) {
+            continue;
+          }
+          if (
+            work >= workLimit ||
+            (deadline !== null && (yield* Clock.currentTimeMillis) >= deadline)
+          ) {
+            truncated = true;
+            continuation = cursorFor(file.path, -1);
+            break;
+          }
+          work += 1;
 
           let blob = searchIndex.get(file.oid);
           let data: Uint8Array | undefined;
           if (blob === undefined) {
             data = yield* readBlobAt(file.oid);
+            yield* interrupted();
             blob = yield* indexed.observe(file.oid, data);
           }
           if (blob.state === "too-large") {
@@ -1830,25 +1888,71 @@ export const layerWithSearchIndex = Layer.effect(
           // A miss was read above and must be verified. Unicode blobs remain
           // verifier-only because JavaScript case folding is wider than ASCII;
           // only an ASCII-indexed blob may be rejected by the prefilter.
-          if (blob.state === "searchable" && candidates !== null && !candidates.has(blob.ordinal)) {
+          if (blob.state === "searchable" && candidates !== null && !candidates.has(blob.ordinal))
             continue;
-          }
 
           let lines = verified.get(file.oid);
           if (lines === undefined) {
             lines = Search.verify(data ?? (yield* readBlobAt(file.oid)), test, limit);
+            yield* interrupted();
             verified.set(file.oid, lines);
           }
           for (const line of lines) {
+            if (cursor !== null && file.path === cursor.afterPath && line.line <= cursor.afterLine)
+              continue;
             matches.push({ path: file.path, line: line.line, text: line.text });
             if (matches.length >= limit) {
               truncated = true;
+              continuation = cursorFor(file.path, line.line);
               break;
             }
           }
           if (truncated) break;
         }
+
+        let suggestions: ReadonlyArray<Search.FuzzyMatch> | undefined;
+        // Suggestions are a separate bounded pass only after an exhaustive
+        // literal miss. A partial answer must be resumed, not guessed at.
+        if (wantsFuzzy && matches.length === 0 && !truncated) {
+          const fuzzyMatches: Search.FuzzyMatch[] = [];
+          for (const file of yield* listFilesOf(tree, { signal: input.signal })) {
+            yield* interrupted();
+            if (isGitlink(file.mode) || !Search.underPath(file.path, input.path)) continue;
+            let blob = searchIndex.get(file.oid);
+            const data = yield* readBlobAt(file.oid);
+            if (blob === undefined) blob = yield* indexed.observe(file.oid, data);
+            if (blob.state === "too-large" || blob.state === "binary") continue;
+            const decoder = new TextDecoder();
+            let start = 0;
+            let line = 0;
+            while (start <= data.length) {
+              const newline = data.indexOf(0x0a, start);
+              const end = newline === -1 ? data.length : newline;
+              line += 1;
+              const text = decoder.decode(data.subarray(start, end));
+              const match = Search.fuzzy(input.pattern, text);
+              if (match !== null) {
+                fuzzyMatches.push({ path: file.path, line, text, ...match });
+              }
+              if (newline === -1) break;
+              start = newline + 1;
+            }
+          }
+          suggestions = fuzzyMatches
+            .sort(
+              (left, right) =>
+                right.score - left.score ||
+                left.path.localeCompare(right.path) ||
+                left.line - right.line,
+            )
+            .slice(0, 20);
+        }
         yield* indexed.flush;
+        if (suggestions !== undefined && continuation !== undefined) {
+          return { matches, suggestions, truncated, continuation, skipped };
+        }
+        if (suggestions !== undefined) return { matches, suggestions, truncated, skipped };
+        if (continuation !== undefined) return { matches, truncated, continuation, skipped };
         return { matches, truncated, skipped };
       }),
 

@@ -468,46 +468,33 @@ export const stores = (root: FileSystemDirectoryHandle | Promise<FileSystemDirec
   Layer.mergeAll(objectStore(root), refStore(root)).pipe(Layer.provideMerge(noPacks));
 
 /**
- * A best-effort, versioned snapshot beside OPFS Git state. Each update
- * replaces one atomic snapshot. A failed write only makes a later search cold,
- * because Repository still verifies every candidate.
+ * A best-effort, chunked snapshot beside OPFS Git state. A failed write only
+ * makes a later search cold, because Repository still verifies every
+ * candidate. Quota belongs primarily to repository objects: past the hard
+ * limit the index stays in memory only.
  */
 export const searchIndex = (
   rootHandle: FileSystemDirectoryHandle | Promise<FileSystemDirectoryHandle>,
 ) =>
-  Layer.effect(
-    Search.SearchIndex,
+  Layer.unwrap(
     Effect.gen(function* () {
       const root = yield* Effect.promise(() => Promise.resolve(rootHandle));
-      const saved = yield* Effect.tryPromise({
-        try: () => readBytes(root, "search/index-v1.json"),
-        catch: () => new StorageFailure({ operation: "search.read", path: "search/index-v1.json" }),
-      }).pipe(Effect.orElseSucceed(() => null));
-      const index = saved === null ? new Search.BlobIndex() : Search.BlobIndex.restore(saved);
-      const current = index ?? new Search.BlobIndex();
-      const checkpoint = () =>
-        Effect.tryPromise({
-          try: () => writeBytes(root, "search/index-v1.json", current.snapshot()),
-          catch: () => undefined,
-        }).pipe(Effect.ignore);
-      let dirty = false;
-      const observe = Effect.fn("Opfs.SearchIndex.observe")((oid: Oid, data: Uint8Array) =>
-        Effect.sync(() => {
-          const known = current.get(oid);
-          const blob = current.observe(oid, data);
-          if (known === undefined) dirty = true;
-          return blob;
-        }),
-      );
-      const forget = (oids: ReadonlyArray<Oid>) =>
-        Effect.sync(() => {
-          for (const oid of oids) dirty = current.forget(oid) || dirty;
-        });
-      const flush = Effect.suspend(() => {
-        if (!dirty) return Effect.void;
-        dirty = false;
-        return checkpoint();
+      const prefix = "search/index-v3";
+      return Search.persistent({
+        softLimitBytes: 25 * 1024 * 1024,
+        hardLimitBytes: 50 * 1024 * 1024,
+        read: (name) =>
+          Effect.tryPromise({
+            try: () => readBytes(root, `${prefix}/${name}`),
+            catch: () =>
+              new StorageFailure({ operation: "search.read", path: `${prefix}/${name}` }),
+          }).pipe(Effect.orElseSucceed(() => null)),
+        write: (name, bytes) =>
+          Effect.tryPromise({
+            try: () => writeBytes(root, `${prefix}/${name}`, bytes),
+            catch: () =>
+              new StorageFailure({ operation: "search.write", path: `${prefix}/${name}` }),
+          }).pipe(Effect.ignore),
       });
-      return Search.SearchIndex.of({ index: current, observe, forget, flush });
     }),
   );

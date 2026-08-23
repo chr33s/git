@@ -1,45 +1,28 @@
 /** Durable Object storage persistence for the derived search index. */
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 
 import { StorageFailure } from "./Error.ts";
 import * as Search from "./Search.ts";
-import type { Oid } from "./Store.ts";
 
-/** One atomic Durable Object value per repository; missing/corrupt means cold. */
-export const durable = (storage: DurableObjectStorage, repo: string) =>
-  Layer.effect(
-    Search.SearchIndex,
-    Effect.gen(function* () {
-      const key = `search-index-v1:${repo}`;
-      const saved = yield* Effect.tryPromise({
-        try: () => storage.get<Uint8Array>(key),
-        catch: () => new StorageFailure({ operation: "search.read", path: key }),
-      }).pipe(Effect.orElseSucceed(() => undefined));
-      const index = saved === undefined ? new Search.BlobIndex() : Search.BlobIndex.restore(saved);
-      const current = index ?? new Search.BlobIndex();
-      const checkpoint = () =>
-        Effect.tryPromise({
-          try: () => storage.put(key, current.snapshot()),
-          catch: () => new StorageFailure({ operation: "search.write", path: key }),
-        }).pipe(Effect.ignore);
-      let dirty = false;
-      const observe = Effect.fn("Cloudflare.SearchIndex.observe")((oid: Oid, data: Uint8Array) =>
-        Effect.sync(() => {
-          const known = current.get(oid);
-          const blob = current.observe(oid, data);
-          if (known === undefined) dirty = true;
-          return blob;
-        }),
-      );
-      const forget = (oids: ReadonlyArray<Oid>) =>
-        Effect.sync(() => {
-          for (const oid of oids) dirty = current.forget(oid) || dirty;
-        });
-      const flush = Effect.suspend(() => {
-        if (!dirty) return Effect.void;
-        dirty = false;
-        return checkpoint();
-      });
-      return Search.SearchIndex.of({ index: current, observe, forget, flush });
-    }),
-  );
+/**
+ * One value per chunk, keyed under the repository. DO storage has no multi-key
+ * atomic batch on this path, so ordering is the atomicity story: the manifest
+ * value is written last and is the only key a reader trusts.
+ */
+export const durable = (storage: DurableObjectStorage, repo: string) => {
+  const root = `search-index-v3:${repo}`;
+  return Search.persistent({
+    softLimitBytes: 10 * 1024 * 1024,
+    hardLimitBytes: 20 * 1024 * 1024,
+    read: (name) =>
+      Effect.tryPromise({
+        try: async () => (await storage.get<Uint8Array>(`${root}:${name}`)) ?? null,
+        catch: () => new StorageFailure({ operation: "search.read", path: `${root}:${name}` }),
+      }).pipe(Effect.orElseSucceed(() => null)),
+    write: (name, bytes) =>
+      Effect.tryPromise({
+        try: () => storage.put(`${root}:${name}`, bytes),
+        catch: () => new StorageFailure({ operation: "search.write", path: `${root}:${name}` }),
+      }).pipe(Effect.ignore),
+  });
+};

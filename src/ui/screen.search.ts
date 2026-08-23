@@ -14,7 +14,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, describe, type GrepMatch, type SearchApi } from "./api.ts";
+import { ApiError, describe, type FuzzyMatch, type GrepMatch, type SearchApi } from "./api.ts";
 import { GitPlusElement, navigate } from "./base.ts";
 import { statusToken, type Task } from "./model.ts";
 import { kindChip } from "./screen.tasks.ts";
@@ -26,6 +26,7 @@ type CodeResults =
   | {
       readonly tag: "loaded";
       readonly matches: readonly GrepMatch[];
+      readonly suggestions: readonly FuzzyMatch[];
       readonly truncated: boolean;
     }
   | { readonly tag: "unavailable"; readonly reason: string };
@@ -80,13 +81,24 @@ export class GpSearch extends GitPlusElement {
       const main = heads.find((ref) => ref.name === "refs/heads/main") ?? heads[0];
       if (main === undefined) {
         if (generation === this.#generation) {
-          this.code = { tag: "loaded", matches: [], truncated: false };
+          this.code = { tag: "loaded", matches: [], suggestions: [], truncated: false };
         }
         return;
       }
       const found = await api.grep(pattern, main.name, undefined, abort.signal);
+      // Approximate matching is an explicit second request, never a different
+      // interpretation of an exact query that happened to hit nothing.
+      const suggested =
+        found.matches.length === 0 && !found.truncated
+          ? await api.grep(pattern, main.name, undefined, abort.signal, true)
+          : found;
       if (generation === this.#generation) {
-        this.code = { tag: "loaded", matches: found.matches, truncated: found.truncated };
+        this.code = {
+          tag: "loaded",
+          matches: found.matches,
+          suggestions: suggested.suggestions ?? [],
+          truncated: found.truncated,
+        };
       }
     } catch (error) {
       if (abort.signal.aborted) return;
@@ -161,35 +173,71 @@ export class GpSearch extends GitPlusElement {
   }
 
   #matches(
-    code: { readonly matches: readonly GrepMatch[]; readonly truncated: boolean },
+    code: {
+      readonly matches: readonly GrepMatch[];
+      readonly suggestions: readonly FuzzyMatch[];
+      readonly truncated: boolean;
+    },
     query: string,
   ): TemplateResult {
-    if (code.matches.length === 0) {
+    if (code.matches.length === 0 && code.suggestions.length === 0) {
       return html`<div class="gp-empty">No file contents match “${query}”.</div>`;
     }
     return html`
-      <div class="gp-task-list">
-        ${code.matches.map(
-          (match) => html`
-            <button
-              class="gp-search-hit"
-              type="button"
-              @click=${() => navigate(this, { screen: "code", id: match.path })}
-            >
-              <span class="gp-search-hit-path"
-                >${match.path}<span class="gp-search-hit-line">:${match.line}</span></span
-              >
-              <span class="gp-search-hit-text">${match.text.trim()}</span>
-            </button>
-          `,
-        )}
-      </div>
+      ${
+        code.matches.length === 0
+          ? html`<div class="gp-empty">No exact file contents match “${query}”.</div>`
+          : html`<div class="gp-task-list">
+              ${code.matches.map(
+                (match) => html`
+                  <button
+                    class="gp-search-hit"
+                    type="button"
+                    @click=${() => navigate(this, { screen: "code", id: match.path })}
+                  >
+                    <span class="gp-search-hit-path"
+                      >${match.path}<span class="gp-search-hit-line">:${match.line}</span></span
+                    >
+                    <span class="gp-search-hit-text">${match.text.trim()}</span>
+                  </button>
+                `,
+              )}
+            </div>`
+      }
+      ${
+        code.suggestions.length === 0
+          ? nothing
+          : html`<h3 class="gp-section-label">Possible matches <small>(approximate)</small></h3>
+              <div class="gp-task-list">
+                ${code.suggestions.map(
+                  (match) => html`<button
+                    class="gp-search-hit gp-search-suggestion"
+                    type="button"
+                    @click=${() => navigate(this, { screen: "code", id: match.path })}
+                  >
+                    <span class="gp-search-hit-path"
+                      >${match.path}<span class="gp-search-hit-line">:${match.line}</span></span
+                    >
+                    <span class="gp-search-hit-text">${this.#highlight(match)}</span>
+                  </button>`,
+                )}
+              </div>`
+      }
       ${
         code.truncated
           ? html`<p class="gp-notice">More matches exist — the answer was capped.</p>`
           : nothing
       }
     `;
+  }
+
+  #highlight(match: FuzzyMatch): TemplateResult {
+    let at = 0;
+    return html`${match.ranges.map((range) => {
+      const before = match.text.slice(at, range.start);
+      at = range.end;
+      return html`${before}<mark>${match.text.slice(range.start, range.end)}</mark>`;
+    })}${match.text.slice(at)}`;
   }
 }
 

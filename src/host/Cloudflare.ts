@@ -27,6 +27,7 @@ import { type GitError, statusOf, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { durable as searchIndex } from "../git/Search.cloudflare.ts";
+import * as Search from "../git/Search.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
@@ -64,6 +65,10 @@ export default Repo.make(
     // init: bind the bucket and resolve this instance's storage, once.
     const bucket = yield* Alchemy.R2.ReadWriteBucket(Objects);
     const state = yield* Alchemy.DurableObjectState;
+    const searchPersistence = yield* Config.boolean("SEARCH_PERSISTENCE").pipe(
+      Config.withDefault(false),
+      Effect.orElseSucceed(() => false),
+    );
 
     // The nested `Effect<Effect<…>>` is alchemy's DO contract, not a mistake:
     // the outer generator binds resources once per instance, the inner runs
@@ -96,6 +101,9 @@ export default Repo.make(
 
       /** The remotes this repository fetches from, on that same SQLite. */
       const remotes = (repo: string) => Remotes.sql(sql, repo);
+
+      const indexFor = (repo: string): Layer.Layer<Search.SearchIndex> =>
+        searchPersistence ? searchIndex(state.raw.storage, repo) : Search.memory;
 
       const live = (repo: string): Layer.Layer<Repository> => {
         const existing = layers.get(repo);
@@ -139,7 +147,7 @@ export default Repo.make(
                         Layer.provideMerge(
                           stores({ bucket: r2, repo, storage: state.raw.storage }),
                         ),
-                        Layer.provide(searchIndex(state.raw.storage, repo)),
+                        Layer.provide(indexFor(repo)),
                       ),
                     ),
                   ),
@@ -157,7 +165,7 @@ export default Repo.make(
           // cross-request memos key on, and two repositories in one namespace
           // would share every entry.
           Layer.provideMerge(stores({ bucket: r2, repo, storage: state.raw.storage })),
-          Layer.provide(searchIndex(state.raw.storage, repo)),
+          Layer.provide(indexFor(repo)),
         );
         layers.set(repo, built);
         return built;

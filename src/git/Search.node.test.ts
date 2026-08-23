@@ -27,7 +27,8 @@ describe("Node SearchIndex", () => {
         const candidates = await Effect.runPromise(
           Effect.gen(function* () {
             const index = yield* SearchIndex;
-            return index.index.candidates("repository", true);
+            // Through the port: posting chunks load on demand from disk.
+            return yield* index.candidates("repository", true);
           }).pipe(Effect.provide(file(root))),
         );
         assert.equal(candidates?.has(0), true);

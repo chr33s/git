@@ -204,6 +204,14 @@ export const GrepRequest = Schema.Struct({
   fixed: Schema.optional(Schema.Boolean),
   /** Bounded by default: a grep over a big tree is a lot of lines. */
   max_matches: Schema.optional(Schema.Finite),
+  /** Blob/line work budget; a partial answer carries a continuation. */
+  max_work: Schema.optional(Schema.Finite),
+  /** Host-enforced time budget in milliseconds. */
+  max_time_ms: Schema.optional(Schema.Finite),
+  /** Retry an exhaustive exact miss with separate approximate suggestions. */
+  fuzzy: Schema.optional(Schema.Boolean),
+  /** Opaque cursor bound to pattern, resolved ref, scope, and matching mode. */
+  continuation: Schema.optional(Schema.String),
 });
 export type GrepRequest = (typeof GrepRequest)["Type"];
 
@@ -214,9 +222,22 @@ export const GrepMatch = Schema.Struct({
 });
 export type GrepMatch = (typeof GrepMatch)["Type"];
 
+export const FuzzyMatch = Schema.Struct({
+  path: Schema.String,
+  line: Schema.Finite,
+  text: Schema.String,
+  ranges: Schema.Array(Schema.Struct({ start: Schema.Finite, end: Schema.Finite })),
+  score: Schema.Finite,
+});
+export type FuzzyMatch = (typeof FuzzyMatch)["Type"];
+
 export const GrepResponse = Schema.Struct({
   matches: Schema.Array(GrepMatch),
+  /** Never merged into exact `matches`. */
+  suggestions: Schema.optional(Schema.Array(FuzzyMatch)),
   truncated: Schema.Boolean,
+  /** Present only when work or result limits left reachable files unvisited. */
+  continuation: Schema.optional(Schema.String),
   /** Files too large to scan, named so the answer is not silently partial. */
   skipped: Schema.Array(Schema.String),
 });

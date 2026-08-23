@@ -92,6 +92,105 @@ describe("Repository", () => {
     }),
   );
 
+  it.effect("returns scoped continuations and separate fuzzy suggestions", () =>
+    Effect.promise(async () => {
+      const found = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const tree = yield* repository.writeFiles({
+            changes: [
+              { path: "a.txt", content: new TextEncoder().encode("repository\\n") },
+              { path: "b.txt", content: new TextEncoder().encode("repository\\n") },
+            ],
+          });
+          yield* repository.commit({ branch: "main", tree, message: "search", author: alice });
+          const first = yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "repository",
+            fixed: true,
+            ignoreCase: true,
+            maxWork: 1,
+          });
+          if (first.continuation === undefined) assert.fail("expected a continuation");
+          const second = yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "repository",
+            fixed: true,
+            ignoreCase: true,
+            continuation: first.continuation,
+          });
+          const fuzzy = yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "rpsitry",
+            fixed: true,
+            ignoreCase: true,
+            fuzzy: true,
+          });
+          return { first, second, fuzzy };
+        }),
+      );
+      assert.equal(found.first.truncated, true);
+      assert.deepEqual(
+        found.second.matches.map((match) => match.path),
+        ["b.txt"],
+      );
+      assert.deepEqual(found.fuzzy.matches, []);
+      assert.equal(found.fuzzy.suggestions?.[0]?.path, "a.txt");
+    }),
+  );
+
+  it.effect("a zero time budget truncates at the first file with a continuation", () =>
+    Effect.promise(async () => {
+      const found = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const tree = yield* repository.writeFiles({
+            changes: [{ path: "a.txt", content: new TextEncoder().encode("needle\n") }],
+          });
+          yield* repository.commit({ branch: "main", tree, message: "search", author: alice });
+          return yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "needle",
+            fixed: true,
+            ignoreCase: true,
+            maxTimeMs: 0,
+          });
+        }),
+      );
+      assert.equal(found.truncated, true);
+      assert.notEqual(found.continuation, undefined);
+    }),
+  );
+
+  it.effect("interrupts an aborted search before tree/blob work", () =>
+    Effect.promise(async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const exit = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "search",
+            author: alice,
+          });
+          return yield* Effect.exit(
+            repository.search({
+              ref: "refs/heads/main",
+              pattern: "needle",
+              fixed: true,
+              ignoreCase: true,
+              signal: controller.signal,
+            }),
+          );
+        }),
+      );
+      assert.equal(exit._tag, "Failure");
+      assert.match(JSON.stringify(exit), /Interrupt/);
+    }),
+  );
+
   it.effect("answers a whole list of revisions from one ancestry walk", () =>
     Effect.promise(async () => {
       // What `isAncestor` asks once, offered to a caller with a list: same
