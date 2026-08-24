@@ -3,8 +3,8 @@
 .gp-btn-primary {
   font-size: 13px;
   font-weight: 600;
-  color: var(--gp-accent-fg);
-  background: var(--gp-accent);
+  color: var(--gp-action-fg);
+  background: var(--gp-action);
   border: 0;
   border-radius: var(--gp-radius);
   padding: 7px 14px;
@@ -13,7 +13,7 @@
 }
 
 .gp-btn-primary:hover {
-  background: var(--gp-accent-hover);
+  background: var(--gp-action-hover);
 }
 
 .gp-card {
