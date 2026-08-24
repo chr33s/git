@@ -51,8 +51,13 @@ export const compileMatcher = (input: {
 
   try {
     const unescaped = input.pattern.replace(/\\./g, "");
-    const quantifiers = unescaped.match(/[*+?]|\{\d/g)?.length ?? 0;
-    const grouped = /\((?!\?:)/.test(unescaped);
+    // A bracket expression is one atom, and `*`, `+`, `?`, `(` inside it are
+    // literal members rather than repetitions or groups. Counting them refused
+    // `[*?]x+` — a pattern with exactly one repetition — so each class is
+    // collapsed to a placeholder that any following quantifier still applies to.
+    const atoms = unescaped.replace(/\[\^?\]?[^\]]*\]/g, "[]");
+    const quantifiers = atoms.match(/[*+?]|\{\d/g)?.length ?? 0;
+    const grouped = /\((?!\?:)/.test(atoms);
     if (quantifiers > 1 || grouped || input.pattern.length > 200) {
       return Result.fail(
         new Invalid({
@@ -82,7 +87,11 @@ export const verify = (
   const matches: LineMatch[] = [];
   let start = 0;
   let line = 0;
-  while (start <= data.length && matches.length < maximum) {
+  // `start < data.length`, so a blob's final newline terminates its last line
+  // rather than opening another. Allowing the empty remainder through invented
+  // a line N+1 that no other grep reports, and a line 1 for an empty blob —
+  // visible to any pattern that accepts the empty string, such as `^`.
+  while (start < data.length && matches.length < maximum) {
     const newline = data.indexOf(0x0a, start);
     const end = newline === -1 ? data.length : newline;
     line += 1;

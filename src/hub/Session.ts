@@ -504,40 +504,16 @@ export const redact = Effect.fn("hub.Session.redact")(function* (input: {
  * account down with it.
  */
 export const entries = Effect.fn("hub.Session.entries")(function* (session: string) {
-  const repository = yield* Repository;
+  // No signer read at all: nothing a session projection decides turns on which
+  // key signed which event, which is the whole reason the walk hands back
+  // signatures rather than verifying them.
+  const walked = yield* Event.walk(refOf(session), decode);
+  const events = walked.records.map((record) => ({
+    commit: record.commit,
+    payload: record.payload,
+  }));
 
-  const head = yield* repository.resolve(refOf(session));
-  if (head === null) return { events: [], unreadable: [] } as const;
-
-  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* Event.ceilingOf());
-  const events: Array<{ readonly commit: Oid; readonly payload: SessionPayload }> = [];
-  const unreadable: Array<Oid> = [];
-
-  for (const commit of Dag.topological(parents)) {
-    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
-    const record = yield* Record.read(commit, Event.RECORD).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        Invalid: () => Effect.succeed(null),
-      }),
-    );
-    // A redaction deletes the payload and leaves the tree entry naming it, so
-    // the read fails where every other event's succeeds. That absence is what
-    // a tombstone looks like from here, and it is not a failure.
-    if (record === null) {
-      unreadable.push(commit);
-      continue;
-    }
-
-    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-    if (payload === null) {
-      unreadable.push(commit);
-      continue;
-    }
-    events.push({ commit, payload });
-  }
-
-  return { events, unreadable } as const;
+  return { events, unreadable: walked.unreadable } as const;
 });
 
 /**

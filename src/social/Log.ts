@@ -6,10 +6,11 @@ import * as Dag from "../git/Dag.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
-import { type Genesis, GENESIS_REF } from "../trust/Genesis.ts";
+import { type Genesis } from "../trust/Genesis.ts";
 import * as TrustLog from "../trust/Log.ts";
 import { principalId, type PrincipalId } from "../trust/Principal.ts";
 import type { Projection as TrustProjection } from "../trust/Projection.ts";
+import * as AppendOnly from "../trust/AppendOnly.ts";
 import * as Record from "../trust/Record.ts";
 import * as Verify from "../trust/Verify.ts";
 import * as Statement from "./Statement.ts";
@@ -46,20 +47,28 @@ export interface VerifiedLog {
   readonly rejected: ReadonlyArray<Rejected>;
 }
 
-const base = Effect.fn("social.Log.base")(function* () {
-  const repository = yield* Repository;
-  const head = yield* repository.readRef(LOG_REF);
-  if (head !== null) return { parent: head, expected: head };
+export const MAX_RECORDS = 16_384;
 
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  if (genesis === null) {
-    return yield* new Invalid({
-      field: "social",
-      reason: "this identity repository has no genesis",
-    });
-  }
-  return { parent: genesis, expected: null };
+export class Ceiling extends Context.Service<Ceiling, number>()("social/Log/Ceiling") {}
+
+export const ceiling = (records: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(records);
+
+export const ceilingOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
 });
+
+/** What this log is, for the machinery every append-only log shares. */
+const LOG: AppendOnly.LogDefinition<Statement.SocialStatement> = {
+  name: "social.Log",
+  ref: LOG_REF,
+  record: RECORD,
+  field: "social",
+  noGenesis: "this identity repository has no genesis",
+  decode: (bytes) => Statement.decode(bytes),
+  ceiling: ceilingOf(),
+};
+
+const base = () => AppendOnly.base(LOG);
 
 export const append = Effect.fn("social.Log.append")(
   function* (
@@ -106,79 +115,30 @@ export const join = Effect.fn("social.Log.join")(function* (heads: ReadonlyArray
   });
 });
 
-export const isSocialCommit = Effect.fn("social.Log.isSocialCommit")(function* (commit: Oid) {
-  const repository = yield* Repository;
-  const info = yield* repository
-    .readCommit(commit)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  if (info === null) return false;
+export const isSocialCommit = AppendOnly.isCommitOf(LOG);
 
-  const record = yield* repository
-    .findPath(info.tree, `${RECORD}.json`)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  if (record !== null) return true;
-  const tree = yield* repository
-    .readTree(info.tree)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  return tree?.length === 0;
-});
-
-export const MAX_RECORDS = 16_384;
-
-export class Ceiling extends Context.Service<Ceiling, number>()("social/Log/Ceiling") {}
-
-export const ceiling = (records: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(records);
-
-export const ceilingOf = Effect.fnUntraced(function* () {
-  return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
-});
-
-export const withinCeiling = Effect.fn("social.Log.withinCeiling")(function* (head: Oid) {
-  const repository = yield* Repository;
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  return yield* Dag.reachable(
-    head,
-    genesis,
-    (commit) => isSocialCommit(commit),
-    yield* ceilingOf(),
-  ).pipe(
-    Effect.as(true),
-    Effect.catchTag("Invalid", () => Effect.succeed(false)),
-  );
-});
+export const withinCeiling = AppendOnly.withinCeilingOf(LOG);
 
 /** Raw, structurally decodable records in deterministic topological order. */
-export const entries = Effect.fn("social.Log.entries")(function* () {
-  const repository = yield* Repository;
-  const head = yield* repository.resolve(LOG_REF);
-  if (head === null) return { records: [], parents: new Map<Oid, ReadonlyArray<Oid>>() };
+export const entries = AppendOnly.entriesOf(LOG);
 
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  const parents = yield* Dag.reachable(head, genesis, (commit) => isSocialCommit(commit));
-  const records: Entry[] = [];
-  for (const commit of Dag.topological(parents)) {
-    if (!(yield* Record.carries(commit, RECORD))) continue;
-    const record = yield* Record.read(commit, RECORD).pipe(
-      Effect.catchTags({
-        Invalid: () => Effect.succeed(null),
-        ObjectNotFound: () => Effect.succeed(null),
-      }),
-    );
-    if (record === null) continue;
-    const payload = yield* Statement.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-    if (payload === null) continue;
-    records.push({
-      commit,
-      parents: parents.get(commit) ?? [],
-      payload,
-      bytes: record.payload,
-      signatures: record.signatures,
-    });
-  }
-  return { records, parents };
-});
+/**
+ * One commit's ancestry, memoised per fold.
+ *
+ * The memo is the caller's rather than this function's, and it is keyed only
+ * by commit: a `Parents` map is fixed for the fold that built it, so within
+ * one fold a commit's ancestry cannot change, and between folds nothing is
+ * shared. Without one, every question about ancestry re-walked the whole DAG
+ * from scratch — and the two callers below ask on the order of one question
+ * per commit, which made a fold of a log near its 16,384-record ceiling walk
+ * that DAG tens of thousands of times. The host re-folds every sibling's log
+ * after every mutating request.
+ */
+type Ancestry = Map<Oid, ReadonlySet<Oid>>;
 
-const ancestorsOf = (commit: Oid, parents: Dag.Parents): ReadonlySet<Oid> => {
+const ancestorsOf = (commit: Oid, parents: Dag.Parents, memo: Ancestry): ReadonlySet<Oid> => {
+  const cached = memo.get(commit);
+  if (cached !== undefined) return cached;
   const seen = new Set<Oid>();
   const pending = [...(parents.get(commit) ?? [])];
   while (pending.length > 0) {
@@ -188,21 +148,27 @@ const ancestorsOf = (commit: Oid, parents: Dag.Parents): ReadonlySet<Oid> => {
     seen.add(current);
     pending.push(...(parents.get(current) ?? []));
   }
+  memo.set(commit, seen);
   return seen;
 };
 
 /** How strongly one candidate is embedded in the rest of the log. */
-const rankOf = (commit: Oid, parents: Dag.Parents): readonly [number, number, Oid] => {
+const rankOf = (
+  commit: Oid,
+  parents: Dag.Parents,
+  memo: Ancestry,
+): readonly [number, number, Oid] => {
   let descendants = 0;
   for (const candidate of parents.keys()) {
-    if (ancestorsOf(candidate, parents).has(commit)) descendants++;
+    if (ancestorsOf(candidate, parents, memo).has(commit)) descendants++;
   }
-  return [descendants, ancestorsOf(commit, parents).size, commit];
+  return [descendants, ancestorsOf(commit, parents, memo).size, commit];
 };
 
 const winners = (
   records: ReadonlyArray<VerifiedStatement>,
   parents: Dag.Parents,
+  memo: Ancestry,
 ): ReadonlySet<Oid> => {
   const byId = new Map<string, VerifiedStatement[]>();
   for (const record of records) {
@@ -213,10 +179,17 @@ const winners = (
   for (const candidates of byId.values()) {
     const first = candidates[0];
     if (first === undefined) continue;
+    // Nothing to rank against. Ranking is what makes this walk the DAG, and an
+    // id claimed once — which is nearly every id — has one candidate that wins
+    // by being the only one.
+    if (candidates.length === 1) {
+      selected.add(first.commit);
+      continue;
+    }
     let best = first;
-    let rank = rankOf(best.commit, parents);
+    let rank = rankOf(best.commit, parents, memo);
     for (const candidate of candidates.slice(1)) {
-      const next = rankOf(candidate.commit, parents);
+      const next = rankOf(candidate.commit, parents, memo);
       const better =
         next[0] !== rank[0]
           ? next[0] > rank[0]
@@ -243,6 +216,10 @@ export const verified = Effect.fn("social.Log.verified")(function* (
 ) {
   const repository = yield* Repository;
   const { parents, records } = yield* entries();
+  // One ancestry memo for the whole fold: `parents` does not change under it,
+  // and both the declared-head check below and `winners` at the end ask about
+  // the same commits.
+  const ancestry: Ancestry = new Map();
   const accepted: VerifiedStatement[] = [];
   const rejected: Rejected[] = [];
   const identity = principalId(genesis.repoId);
@@ -334,7 +311,7 @@ export const verified = Effect.fn("social.Log.verified")(function* (
       });
       continue;
     }
-    if (declared !== null && !ancestorsOf(entry.commit, parents).has(declared)) {
+    if (declared !== null && !ancestorsOf(entry.commit, parents, ancestry).has(declared)) {
       rejected.push({
         commit: entry.commit,
         reason: `declared social head ${declared} is not an ancestor of this statement`,
@@ -383,7 +360,7 @@ export const verified = Effect.fn("social.Log.verified")(function* (
     if (effectiveTrustHead !== null) trustFloorAt.set(entry.commit, effectiveTrustHead);
   }
 
-  const selected = winners(accepted, parents);
+  const selected = winners(accepted, parents, ancestry);
   for (const entry of accepted) {
     if (!selected.has(entry.commit)) {
       rejected.push({
@@ -402,20 +379,8 @@ export const verified = Effect.fn("social.Log.verified")(function* (
   } satisfies VerifiedLog;
 });
 
-export const contains = Effect.fn("social.Log.contains")(function* (commit: Oid) {
-  const repository = yield* Repository;
-  const head = yield* repository.resolve(LOG_REF);
-  if (head === null) return false;
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  return (yield* Dag.reachable(head, genesis, (oid) => isSocialCommit(oid))).has(commit);
-});
+export const contains = AppendOnly.containsOf(LOG);
 
-export const ancestry = Effect.fn("social.Log.ancestry")(function* (from: Oid) {
-  const repository = yield* Repository;
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  return new Set(
-    (yield* Dag.reachable(from, genesis, (oid) => isSocialCommit(oid), yield* ceilingOf())).keys(),
-  );
-});
+export const ancestry = AppendOnly.ancestryOf(LOG);
 
 export type LogError = Invalid | ObjectNotFound | StorageFailure;

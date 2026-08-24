@@ -49,38 +49,20 @@ import {
  */
 export const MAX_SIGNATURES = 64;
 
-export const CAPABILITIES = [
-  "repo.read",
-  "source.push",
-  "source.force-push",
-  "source.delete",
-  "hub.create-pr",
-  "hub.comment",
-  "hub.review",
-  "hub.approve",
-  "hub.merge",
-  "hub.redact",
-  "hub.session",
-  "hub.task",
-  "hub.queue",
-  "social.write",
-  "member.invite",
-  "member.revoke",
-  "policy.write",
-  "repo.admin",
-] as const;
-
-/** `hub.check:<name>` — one check name, or `*` for any. */
-const CHECK_PREFIX = "hub.check:";
-
-const known = new Set<string>(CAPABILITIES);
-
-export const isCapability = (value: string): boolean => {
-  if (known.has(value)) return true;
-  if (!value.startsWith(CHECK_PREFIX)) return false;
-  const name = value.slice(CHECK_PREFIX.length);
-  return name.length > 0 && !name.includes(" ");
-};
+// The capability vocabulary and its implication rule live in `Capability.ts`,
+// re-exported here because this is where callers have always asked for them.
+// They moved because `Principal` needs the same rule and this module imports
+// `Principal`, so the two could not share it and did not: stable-identity
+// authorization carried its own copy of the admin override and the
+// `hub.check:*` wildcard.
+export {
+  CAPABILITIES,
+  CHECK_PREFIX,
+  checkCapability,
+  isCapability,
+  permits,
+} from "./Capability.ts";
+import { isCapability } from "./Capability.ts";
 
 const isHttpUrl = (value: string): boolean => {
   try {
@@ -90,36 +72,6 @@ const isHttpUrl = (value: string): boolean => {
     return false;
   }
 };
-
-/**
- * Whether a set of held capabilities authorizes an operation.
- *
- * `repo.admin` implies everything. That is a real decision and not an
- * oversight: the spec's own authorization graph has a root quorum granting one
- * member `repo.admin` and that member then issuing grants, which only works if
- * admin carries `member.invite` — and once it carries one thing it did not
- * name, "which ones?" is a question with no principled answer. So: all of
- * them, said once, here.
- *
- * `hub.check:*` matches any check name; `hub.check:test` matches only `test`.
- */
-export const permits = (held: ReadonlyArray<string>, required: string): boolean => {
-  for (const capability of held) {
-    if (capability === "repo.admin") return true;
-    if (capability === required) return true;
-    if (
-      capability === `${CHECK_PREFIX}*` &&
-      required.startsWith(CHECK_PREFIX) &&
-      required.length > CHECK_PREFIX.length
-    ) {
-      return true;
-    }
-  }
-  return false;
-};
-
-/** The capability a check event of this name requires of its signer. */
-export const checkCapability = (name: string): string => `${CHECK_PREFIX}${name}`;
 
 // -- payloads ------------------------------------------------------------------
 

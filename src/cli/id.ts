@@ -6,11 +6,18 @@ import { formatPublicKey, isFingerprint } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
 import { encodePrincipal } from "../social/Encode.ts";
 import * as Certificate from "../trust/Certificate.ts";
-import { create, readGenesis, signGenesis, writeGenesis, type Genesis } from "../trust/Genesis.ts";
+import { create, signGenesis, writeGenesis, type Genesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
 import { principalId } from "../trust/Principal.ts";
 import { openWindow, project } from "../trust/Projection.ts";
-import { readPrivateKey, readPublicKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
+import {
+  mustBeEnabled,
+  readPrivateKey,
+  readPublicKey,
+  repoArgument,
+  rootFlag,
+  withRepo,
+} from "./shared.ts";
 
 const rootKeys = Flag.string("root-key").pipe(
   Flag.withDescription("Path to an offline root private key (repeat for a quorum)"),
@@ -18,11 +25,7 @@ const rootKeys = Flag.string("root-key").pipe(
 );
 
 const enabled = Effect.fn("cli.id.enabled")(function* (repo: string) {
-  const stored = yield* readGenesis();
-  if (stored === null) {
-    return yield* new Invalid({ field: "repo", reason: `${repo} is not an identity repository` });
-  }
-  return stored.genesis;
+  return (yield* mustBeEnabled(repo)).genesis;
 });
 
 const confirm = Effect.fn("cli.id.confirm")(function* (genesis: Genesis, commit: string) {

@@ -7,9 +7,15 @@ import type { RepoId } from "../trust/Genesis.ts";
 import { principalId } from "../trust/Principal.ts";
 import {
   attestExternalIdentity,
+  attestPrincipalKey,
   attestRepo,
+  checkpoint,
   decode,
   encode,
+  follow,
+  label,
+  mirrors,
+  revoke,
   validate,
   vouch,
 } from "./Statement.ts";
@@ -133,4 +139,44 @@ describe("social statements", () => {
       assert.match(failure.reason, /unknown social scope/);
     }),
   );
+  it("puts the envelope first and the variant's own fields after it, for every type", () => {
+    // `encode` derives this order structurally rather than restating each
+    // variant's field list, so what is signed is whatever the constructor
+    // built. These are the orders that produces — a change to one is a change
+    // to the bytes every existing signature was made over.
+    const context = { author: alice, id, socialHead: null, trustHead: null, at } as const;
+    const envelope = ["version", "type", "author", "id", "issuedAt", "socialHead", "trustHead"];
+    const keysOf = (bytes: Uint8Array) => Object.keys(JSON.parse(new TextDecoder().decode(bytes)));
+
+    const variants = [
+      [
+        attestRepo({ ...context, repo: project, urls: [], role: "origin" }),
+        ["repo", "urls", "role", "forkOf", "lineage", "inbox"],
+      ],
+      [
+        attestPrincipalKey({ ...context, subject: bob, publicKey: "ssh-ed25519 AAAA" }),
+        ["subject", "claim", "publicKey"],
+      ],
+      [
+        attestExternalIdentity({ ...context, subject: bob, identity: "i", proof: "p" }),
+        ["subject", "claim", "identity", "proof"],
+      ],
+      [mirrors({ ...context, repo: "self", urls: [] }), ["repo", "urls"]],
+      [
+        vouch({ ...context, subject: bob, scope: ["review"], depth: 1 }),
+        ["subject", "scope", "depth", "expiresAt"],
+      ],
+      [follow({ ...context, subject: bob, petname: "bob" }), ["subject", "petname"]],
+      [
+        label({ ...context, subject: "s", namespace: "n", label: "l" }),
+        ["subject", "namespace", "label"],
+      ],
+      [revoke({ ...context, target: "t" }), ["target", "reason", "compromisedAt"]],
+      [checkpoint({ ...context, frontier: [] }), ["frontier"]],
+    ] as const;
+
+    for (const [statement, fields] of variants) {
+      assert.deepEqual(keysOf(encode(statement)), [...envelope, ...fields], statement.type);
+    }
+  });
 });

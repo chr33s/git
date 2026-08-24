@@ -26,12 +26,11 @@
 import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
-import * as Dag from "../git/Dag.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
-import { GENESIS_REF } from "./Genesis.ts";
+import * as AppendOnly from "./AppendOnly.ts";
 import * as Record from "./Record.ts";
 
 /** The log's head. Append-only: it never moves to something not descended from it. */
@@ -93,6 +92,38 @@ export const newId = (at: Date = new Date()): string => {
 };
 
 /**
+ * How many commits one trust log fold will walk.
+ *
+ * Larger than a pull request's ceiling because a repository's membership
+ * history is meant to outlive its pull requests: at a checkpoint an hour this
+ * is a couple of years, and at the daily cadence most repositories will want,
+ * decades. It is a ceiling all the same, because the log is append-only and
+ * nothing can shorten it — a host expecting to outgrow this raises it rather
+ * than discovering it.
+ */
+export const MAX_RECORDS = 16_384;
+
+/** The ceiling in force, when a host wants a different one; see `MAX_RECORDS`. */
+export class Ceiling extends Context.Service<Ceiling, number>()("trust/Log/Ceiling") {}
+
+export const ceiling = (records: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(records);
+
+export const ceilingOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
+});
+
+/** What this log is, for the machinery every append-only log shares. */
+const LOG: AppendOnly.LogDefinition<Certificate.TrustPayload> = {
+  name: "trust.Log",
+  ref: LOG_REF,
+  record: RECORD,
+  field: "trust",
+  noGenesis: "this repository has no genesis; run `hub init` before granting membership",
+  decode: (bytes) => Certificate.decode(bytes),
+  ceiling: ceilingOf(),
+};
+
+/**
  * Where the next record hangs from, and what the ref must currently be.
  *
  * These are the same value except on the very first append, and the exception
@@ -102,23 +133,7 @@ export const newId = (at: Date = new Date()): string => {
  * the genesis". Conflating them makes the first append of every repository
  * fail with a conflict against a ref nobody has written.
  */
-const base = Effect.fn("trust.Log.base")(function* () {
-  const repository = yield* Repository;
-
-  // `readRef`: the same value is the parent *and* the compare-and-swap, and a
-  // resolved oid is not what the store compares against.
-  const head = yield* repository.readRef(LOG_REF);
-  if (head !== null) return { parent: head, expected: head };
-
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  if (genesis === null) {
-    return yield* new Invalid({
-      field: "trust",
-      reason: "this repository has no genesis; run `hub init` before granting membership",
-    });
-  }
-  return { parent: genesis, expected: null };
-});
+const base = () => AppendOnly.base(LOG);
 
 /**
  * Append a record and move the log head.
@@ -215,59 +230,7 @@ export const join = Effect.fn("trust.Log.join")(function* (heads: ReadonlyArray<
  * make every authorization check walk the whole repository — the same trap
  * `hub/Event.ts` guards against.
  */
-export const isTrustCommit = Effect.fn("trust.Log.isTrustCommit")(function* (commit: Oid) {
-  const repository = yield* Repository;
-  const info = yield* repository
-    .readCommit(commit)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  if (info === null) return false;
-  // The tree, not only the commit. `fetchRepository` applies refs without a
-  // connectivity check, so a replica can hold a commit whose tree object never
-  // arrived — and this walk is what every protected-branch push, collection
-  // and deepening fetch runs first. Read as a failure, one missing tree took
-  // all of them out; read as "not part of this history", it is one commit the
-  // walk steps over.
-  const found = yield* repository
-    .findPath(info.tree, `${RECORD}.json`)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  if (found !== null) return true;
-  // A join carries an empty tree; anything else is not part of this history.
-  // A missing tree is one commit the walk steps over; a store that *failed* to
-  // answer is not. `orElseSucceed` swallowed both, so a transient read error
-  // read as "not part of this history" — and this walk is the boundary of the
-  // history, so the whole ref went empty. Narrowed to the same absence the two
-  // reads above tolerate, a failure propagates and every caller turns it into
-  // its own conservative answer instead of a silently empty one.
-  //
-  // Swallowed, one blip on a join's tree emptied the trust log: no members and
-  // no revocations, cached under an unchanged head, so every revoked key was
-  // authorized again and a private repository reported itself as public.
-  const tree = yield* repository
-    .readTree(info.tree)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  return tree?.length === 0;
-});
-
-/**
- * How many commits one trust log fold will walk.
- *
- * Larger than a pull request's ceiling because a repository's membership
- * history is meant to outlive its pull requests: at a checkpoint an hour this
- * is a couple of years, and at the daily cadence most repositories will want,
- * decades. It is a ceiling all the same, because the log is append-only and
- * nothing can shorten it — a host expecting to outgrow this raises it rather
- * than discovering it.
- */
-export const MAX_RECORDS = 16_384;
-
-/** The ceiling in force, when a host wants a different one; see `MAX_RECORDS`. */
-export class Ceiling extends Context.Service<Ceiling, number>()("trust/Log/Ceiling") {}
-
-export const ceiling = (records: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(records);
-
-export const ceilingOf = Effect.fnUntraced(function* () {
-  return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
-});
+export const isTrustCommit = AppendOnly.isCommitOf(LOG);
 
 /**
  * Whether a value stays inside that ceiling.
@@ -281,73 +244,9 @@ export const ceilingOf = Effect.fnUntraced(function* () {
  * can be applied without turning an unreadable log into an unusable
  * repository: the push that would grow one.
  */
-export const withinCeiling = Effect.fn("trust.Log.withinCeiling")(function* (head: Oid) {
-  const repository = yield* Repository;
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  // Bounded as the walk runs. Bounding the result means reading the whole log
-  // before refusing it, which is the cost the ceiling exists to refuse.
-  return yield* Dag.reachable(
-    head,
-    genesis,
-    (commit) => isTrustCommit(commit),
-    yield* ceilingOf(),
-  ).pipe(
-    Effect.as(true),
-    Effect.catchTag("Invalid", () => Effect.succeed(false)),
-  );
-});
+export const withinCeiling = AppendOnly.withinCeilingOf(LOG);
 
-export const entries = Effect.fn("trust.Log.entries")(function* () {
-  const repository = yield* Repository;
-
-  const head = yield* repository.resolve(LOG_REF);
-  if (head === null) return { records: [], parents: new Map<Oid, ReadonlyArray<Oid>>() };
-
-  // The genesis is the chain's anchor, not a record: bounding the walk there
-  // is what stops it reading the whole source history if anything ever points
-  // the log at a branch.
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  const parents = yield* Dag.reachable(head, genesis, (commit) => isTrustCommit(commit));
-  const ordered = Dag.topological(parents);
-
-  const records: Entry[] = [];
-  for (const oid of ordered) {
-    const carries = yield* Record.carries(oid, RECORD);
-    // Join commits carry nothing; they are structure, not statements.
-    if (!carries) continue;
-
-    // A record this version cannot read is skipped, exactly as one that fails
-    // its authority check is. Propagating here would be permanent: the log is
-    // append-only, so a single malformed record pushed by any member would
-    // fail every projection, and with it every request, with no way to rewind
-    // the ref.
-    const record = yield* Record.read(oid, RECORD).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        Invalid: () => Effect.succeed(null),
-      }),
-    );
-    if (record === null) continue;
-
-    const payload = yield* Certificate.decode(record.payload).pipe(
-      Effect.orElseSucceed(() => null),
-    );
-    if (payload === null) continue;
-
-    records.push({
-      commit: oid,
-      parents: parents.get(oid) ?? [],
-      payload,
-      bytes: record.payload,
-      signatures: record.signatures,
-    });
-  }
-  // The whole walked DAG rides along, joins included. A caller deciding
-  // between two records that claim one id needs to know which of them the rest
-  // of the log descends from, and a parent map built from record-carrying
-  // commits alone would break at every join.
-  return { records, parents };
-});
+export const entries = AppendOnly.entriesOf(LOG);
 
 /**
  * Whether a commit is part of this replica's trust log.
@@ -358,16 +257,7 @@ export const entries = Effect.fn("trust.Log.entries")(function* () {
  * like an event that genuinely predates one. Naming any oid at all would
  * otherwise be a way out of every forward-only revocation.
  */
-export const contains = Effect.fn("trust.Log.contains")(function* (commit: Oid) {
-  const repository = yield* Repository;
-
-  const head = yield* repository.resolve(LOG_REF);
-  if (head === null) return false;
-
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  const reachable = yield* Dag.reachable(head, genesis, (oid) => isTrustCommit(oid));
-  return reachable.has(commit);
-});
+export const contains = AppendOnly.containsOf(LOG);
 
 /**
  * Every trust record an entry can reach, itself included.
@@ -381,24 +271,7 @@ export const contains = Effect.fn("trust.Log.contains")(function* (commit: Oid) 
  * same reason `entries` is: an unbounded walk from an attacker-supplied oid
  * reads the repository's entire source history on every authorization check.
  */
-export const ancestry = Effect.fn("trust.Log.ancestry")(function* (from: Oid) {
-  const repository = yield* Repository;
-
-  const genesis = yield* repository.resolve(GENESIS_REF);
-  // Bounded like every other walk of this namespace. `from` is an oid an
-  // *event* declared, so it is chosen by whoever wrote the event — and a
-  // branch of commits carrying a record, or empty trees, passes the
-  // namespace test. Unbounded, one such branch is walked again on every
-  // protected-branch push, every collection and every deepening fetch that
-  // reads that event.
-  const reachable = yield* Dag.reachable(
-    from,
-    genesis,
-    (oid) => isTrustCommit(oid),
-    yield* ceilingOf(),
-  );
-  return new Set(reachable.keys());
-});
+export const ancestry = AppendOnly.ancestryOf(LOG);
 
 export const RecordName = Schema.Literal(RECORD);
 

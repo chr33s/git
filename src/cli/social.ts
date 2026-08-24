@@ -13,7 +13,7 @@ import * as SocialProjection from "../social/Projection.ts";
 import * as Statement from "../social/Statement.ts";
 import * as Sync from "../social/Sync.node.ts";
 import { localSocialWeb } from "../social/Web.node.ts";
-import { isRepoId, readGenesis, type RepoId } from "../trust/Genesis.ts";
+import { isRepoId, type RepoId } from "../trust/Genesis.ts";
 import { KnownRepos } from "../trust/KnownRepos.ts";
 import { layer as knownRepos } from "../trust/KnownRepos.node.ts";
 import { isPrincipalId, principalId, principalOf, type PrincipalId } from "../trust/Principal.ts";
@@ -21,6 +21,7 @@ import { project as projectTrust } from "../trust/Projection.ts";
 import * as Verify from "../trust/Verify.ts";
 import { pushInbox } from "./inbox.node.ts";
 import {
+  mustBeEnabled,
   mustResolve,
   readPrivateKey,
   readPublicKey,
@@ -53,10 +54,7 @@ const repositoryId = (value: string): Effect.Effect<RepoId, Invalid> =>
 
 const identity = Effect.fn("cli.social.identity")(function* (repo: string) {
   const repository = yield* Repository;
-  const stored = yield* readGenesis();
-  if (stored === null) {
-    return yield* new Invalid({ field: "repo", reason: `${repo} is not an identity repository` });
-  }
+  const stored = yield* mustBeEnabled(repo);
   const trust = yield* projectTrust(stored.genesis);
   const author = principalId(stored.genesis.repoId);
   return {

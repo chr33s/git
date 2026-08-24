@@ -12,6 +12,7 @@ import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import type { VerifiedLog, VerifiedStatement } from "../social/Log.ts";
+import * as SocialProjection from "../social/Projection.ts";
 import { socialWebInMemory } from "../social/Projection.ts";
 import type { ExternalReview } from "../social/Review.ts";
 import { encode, vouch, type SocialStatement } from "../social/Statement.ts";
@@ -77,6 +78,7 @@ const endorsement = (
 
 const review: ExternalReview = {
   principal: reviewer,
+  claims: [reviewer],
   id: "review-1",
   author: reviewerKey,
   head: oid(100),
@@ -120,19 +122,21 @@ const author: Signature = {
 describe("external-review policy", () => {
   it.effect("counts only reviewers meeting the rooted independent-path bar", () =>
     Effect.sync(() => {
+      const webOf = (logs: ReadonlyArray<VerifiedLog>) =>
+        SocialProjection.project({ roots: rule.anchors, logs, maxDepth: rule.maxDepth });
       const both = eligibleExternalApprovals({
         rule,
-        logs: [endorsement(rootA, 1), endorsement(rootB, 2)],
+        graph: webOf([endorsement(rootA, 1), endorsement(rootB, 2)]),
         reviews: [review],
       });
       const one = eligibleExternalApprovals({
         rule,
-        logs: [endorsement(rootA, 1)],
+        graph: webOf([endorsement(rootA, 1)]),
         reviews: [review],
       });
       const sameKey = eligibleExternalApprovals({
         rule,
-        logs: [endorsement(rootA, 1), endorsement(rootB, 2)],
+        graph: webOf([endorsement(rootA, 1), endorsement(rootB, 2)]),
         reviews: [review],
         internal: [review],
       });

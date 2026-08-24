@@ -166,6 +166,51 @@ describe("Protocol negotiation", () => {
     }),
   );
 
+  it.effect("tells an inbox submitter the repository's identity and no other ref", () =>
+    Effect.promise(async () => {
+      // `git-inbox: 1` authenticates before any membership exists, and the
+      // receive-pack advertisement is deliberately exempt from the hiding that
+      // covers fetch — a writer needs old-oids. A submitter is not that writer:
+      // they create a ref that does not exist yet, so handing them every
+      // branch, hub ref and trust ref was a private repository's structure
+      // disclosed to anyone who set a header.
+      const { open, submitter } = await scenario(
+        Effect.gen(function* () {
+          yield* history;
+          const repository = yield* Repository;
+          yield* repository.setRef({
+            name: "refs/meta/trust/genesis",
+            to: yield* repository.commit({
+              branch: "genesis",
+              tree: EMPTY_TREE_OID,
+              message: "genesis",
+              author: alice,
+            }),
+          });
+          const read = (response: Response) =>
+            Effect.promise(() => response.arrayBuffer()).pipe(
+              Effect.map((buffer) => decoder.decode(new Uint8Array(buffer))),
+            );
+          return {
+            open: yield* read(yield* Protocol.advertise("git-receive-pack")),
+            submitter: yield* read(
+              yield* Protocol.advertise("git-receive-pack").pipe(
+                Effect.provide(
+                  Auth.requester({ ...Auth.anonymous, capabilities: [Auth.INBOX_SUBMIT] }),
+                ),
+              ),
+            ),
+          };
+        }),
+      );
+
+      assert.match(open, /refs\/heads\/main/);
+      assert.doesNotMatch(submitter, /refs\/heads\/main/);
+      assert.doesNotMatch(submitter, /refs\/heads\/side/);
+      assert.match(submitter, /refs\/meta\/trust\/genesis/);
+    }),
+  );
+
   it.effect("acknowledges every common have, says ready, and ends the round with NAK", () =>
     Effect.promise(async () => {
       const { a, b, lines } = await scenario(

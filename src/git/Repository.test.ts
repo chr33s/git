@@ -92,6 +92,36 @@ describe("Repository", () => {
     }),
   );
 
+  it.effect("finds literal text on the first search of a cold index", () =>
+    Effect.promise(async () => {
+      // The prefilter's candidate set is taken before the walk, so a blob first
+      // read *during* that walk holds an ordinal the set cannot contain. Judged
+      // against it anyway, every blob of an unwarmed index was rejected and the
+      // first search of every repository answered nothing — the default path,
+      // since the UI always asks fixed and case-insensitive.
+      const found = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const tree = yield* repository.writeFiles({
+            changes: [{ path: "a.txt", content: new TextEncoder().encode("hello world\n") }],
+          });
+          yield* repository.commit({ branch: "main", tree, message: "cold", author: alice });
+          return yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "hello",
+            fixed: true,
+            ignoreCase: true,
+          });
+        }),
+      );
+
+      assert.deepEqual(
+        found.matches.map((match) => [match.path, match.line, match.text]),
+        [["a.txt", 1, "hello world"]],
+      );
+    }),
+  );
+
   it.effect("answers a whole list of revisions from one ancestry walk", () =>
     Effect.promise(async () => {
       // What `isAncestor` asks once, offered to a caller with a list: same

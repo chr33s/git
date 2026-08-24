@@ -241,6 +241,116 @@ describe("principal membership", () => {
     }),
   );
 
+  it.effect("does not count one person's two membership routes as independent review", () =>
+    Effect.promise(async () => {
+      // `Verify.authorize` tries direct keys first and returns on the first
+      // success, so it reports a stable identity only when that is the route
+      // that granted membership. A person holding *both* — a direct key here
+      // and a principal whose devices are enrolled elsewhere — therefore
+      // opened as a bare fingerprint, recording no principal at all, and
+      // approved from a device the exclusion had nothing to match against.
+      const identity = await scenario(
+        Effect.gen(function* () {
+          const root = yield* generate("identity-root@example.com");
+          const laptop = yield* generate("laptop@example.com");
+          const phone = yield* generate("phone@example.com");
+          const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+          yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+          for (const device of [laptop, phone]) {
+            yield* Log.issue(
+              yield* Certificate.grant({
+                repo: genesis.repoId,
+                publicKey: formatPublicKey(device.publicKey),
+                capabilities: [],
+                id: Log.newId(),
+              }),
+              [root],
+            );
+          }
+          const projection = yield* project(genesis);
+          return {
+            laptop,
+            phone,
+            resolved: {
+              principal: principalId(genesis.repoId),
+              projection,
+              head: projection.head,
+            } satisfies ResolvedIdentity,
+          };
+        }),
+      );
+
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const root = yield* generate("project-root@example.com");
+          const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+          yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+          // Both routes for one human: the laptop is granted here by key, and
+          // the principal holding that same laptop is granted as well.
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: genesis.repoId,
+              publicKey: formatPublicKey(identity.laptop.publicKey),
+              capabilities: ["hub.create-pr", "hub.approve"],
+              id: Log.newId(),
+            }),
+            [root],
+          );
+          yield* Log.issue(
+            yield* Certificate.grantPrincipal({
+              repo: genesis.repoId,
+              principal: identity.resolved.principal,
+              capabilities: ["hub.create-pr", "hub.approve"],
+              id: Log.newId(),
+            }),
+            [root],
+          );
+
+          const direct = yield* PullRequest.open({
+            repo: genesis.repoId,
+            title: "opened by the key, approved by the principal",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: identity.laptop,
+          });
+          yield* PullRequest.review({
+            repo: genesis.repoId,
+            pr: direct.pr,
+            head: EMPTY_TREE_OID,
+            decision: "approve",
+            key: identity.phone,
+          });
+
+          // And the same collusion the other way round: opened by the device
+          // that resolves to the principal, approved by the direct key.
+          const viaPrincipal = yield* PullRequest.open({
+            repo: genesis.repoId,
+            title: "opened by the principal, approved by the key",
+            base: "refs/heads/main",
+            head: EMPTY_TREE_OID,
+            key: identity.phone,
+          });
+          yield* PullRequest.review({
+            repo: genesis.repoId,
+            pr: viaPrincipal.pr,
+            head: EMPTY_TREE_OID,
+            decision: "approve",
+            key: identity.laptop,
+          });
+
+          const trust = yield* project(genesis);
+          return {
+            direct: approvals(yield* projectPullRequest(genesis, trust, direct.pr)),
+            reverse: approvals(yield* projectPullRequest(genesis, trust, viaPrincipal.pr)),
+          };
+        }).pipe(Effect.provide(identitiesInMemory([identity.resolved]))),
+      );
+
+      assert.equal(outcome.direct.length, 0, "a principal device cannot approve its own key's PR");
+      assert.equal(outcome.reverse.length, 0, "nor the key approve its own principal's PR");
+    }),
+  );
+
   it.effect(
     "quarantines rather than rejects when an identity repository is not available yet",
     () =>

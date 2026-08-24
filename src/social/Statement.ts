@@ -258,69 +258,13 @@ export const checkpoint = (
 
 /** Canonical bytes: the common envelope first, then variant fields. */
 export const encode = (statement: SocialStatement): Uint8Array => {
-  const base = {
-    version: statement.version,
-    type: statement.type,
-    author: statement.author,
-    id: statement.id,
-    issuedAt: statement.issuedAt,
-    socialHead: statement.socialHead,
-    trustHead: statement.trustHead,
-  };
-
-  const ordered =
-    statement.type === "social.attest.repo"
-      ? {
-          ...base,
-          repo: statement.repo,
-          urls: statement.urls,
-          role: statement.role,
-          forkOf: statement.forkOf,
-          lineage: statement.lineage,
-          inbox: statement.inbox,
-        }
-      : statement.type === "social.attest.principal"
-        ? statement.claim === "key-of"
-          ? {
-              ...base,
-              subject: statement.subject,
-              claim: statement.claim,
-              publicKey: statement.publicKey,
-            }
-          : {
-              ...base,
-              subject: statement.subject,
-              claim: statement.claim,
-              identity: statement.identity,
-              proof: statement.proof,
-            }
-        : statement.type === "social.mirrors"
-          ? { ...base, repo: statement.repo, urls: statement.urls }
-          : statement.type === "social.vouch"
-            ? {
-                ...base,
-                subject: statement.subject,
-                scope: statement.scope,
-                depth: statement.depth,
-                expiresAt: statement.expiresAt,
-              }
-            : statement.type === "social.follow"
-              ? { ...base, subject: statement.subject, petname: statement.petname }
-              : statement.type === "social.label"
-                ? {
-                    ...base,
-                    subject: statement.subject,
-                    namespace: statement.namespace,
-                    label: statement.label,
-                  }
-                : statement.type === "social.revoke"
-                  ? {
-                      ...base,
-                      target: statement.target,
-                      reason: statement.reason,
-                      compromisedAt: statement.compromisedAt,
-                    }
-                  : { ...base, frontier: statement.frontier };
+  // The envelope is named, and everything left over follows in the order the
+  // constructor above inserted it. Written out per variant instead, the same
+  // eight field lists existed twice — once in the type and once here — and a
+  // field added to one and forgotten in the other would not be signed, so a
+  // statement would verify and store without it and only read back short.
+  const { version, type, author, id, issuedAt, socialHead, trustHead, ...rest } = statement;
+  const ordered = { version, type, author, id, issuedAt, socialHead, trustHead, ...rest };
 
   return encoder.encode(`${JSON.stringify(ordered, null, 2)}\n`);
 };

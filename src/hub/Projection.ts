@@ -28,6 +28,7 @@ import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
 import { permits } from "../trust/Certificate.ts";
 import type { Genesis } from "../trust/Genesis.ts";
+import * as Principal from "../trust/Principal.ts";
 import type { PrincipalId } from "../trust/Principal.ts";
 import type { Projection as TrustProjection } from "../trust/Projection.ts";
 import * as Log from "../trust/Log.ts";
@@ -39,6 +40,17 @@ export interface Review {
   readonly author: Fingerprint;
   /** Stable identity behind `author`, when membership resolved through one. */
   readonly principal: PrincipalId | null;
+  /**
+   * Every principal `author` speaks for, whichever route admitted them.
+   *
+   * `principal` answers "which identity authorized this review", and that is
+   * the wrong question for self-approval: a person holding both a direct key
+   * here and a principal enrolled elsewhere authorizes by whichever route
+   * `Verify.authorize` reaches first, which is not the same as which human
+   * signed. Counting only `principal` let that person open through one route
+   * and approve through the other, twice over — once in each direction.
+   */
+  readonly claims: ReadonlyArray<PrincipalId>;
   /** The exact revision reviewed. An approval is of a revision, never of a PR. */
   readonly head: Oid;
   /** The branch it was reviewed *for*; retargeting the pull request stales it. */
@@ -541,6 +553,33 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
   const openers = new Set<Fingerprint>();
   const openerPrincipals = new Set<PrincipalId>();
 
+  /**
+   * Every principal this opener speaks for, whichever route admitted them.
+   *
+   * `Verify.authorize` tries direct-key membership first and returns on the
+   * first success, so it answers with an `identity` only when the stable
+   * principal *is* what granted membership. Reading `openerPrincipals` from
+   * that alone meant a person who holds both routes — a direct key here and a
+   * principal whose devices are enrolled elsewhere — opened as a bare
+   * fingerprint, then approved from a second device whose principal nothing
+   * had recorded, and cleared their own review bar. Which of their keys signed
+   * which event is not the question `approvals` is asking.
+   */
+  const principalsOf = Effect.fnUntraced(function* (authorized: {
+    readonly principal: { readonly fingerprint: Fingerprint };
+    readonly identity?: { readonly principal: PrincipalId };
+  }) {
+    if (authorized.identity !== undefined) return [authorized.identity.principal];
+    // `includeFormer`, because an opener whose device was rotated after they
+    // opened is the same human as the one now approving.
+    const resolved = yield* Principal.resolveKeyCandidates({
+      projection: trust,
+      signer: authorized.principal.fingerprint,
+      includeFormer: true,
+    });
+    return resolved.matches.map((match) => match.grant.principal);
+  });
+
   /** Which members signed each event, for the contested-opening ranking. */
   const members = new Map<Oid, ReadonlySet<Fingerprint>>();
 
@@ -593,8 +632,8 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
       if (authorized.ok) {
         candidates.push(entry.commit);
         openers.add(authorized.principal.fingerprint);
-        if (authorized.identity !== undefined) {
-          openerPrincipals.add(authorized.identity.principal);
+        for (const principal of yield* principalsOf(authorized)) {
+          openerPrincipals.add(principal);
         }
       }
     }
@@ -966,7 +1005,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // approval on their own by declaring a stale head on a second
         // `pr.opened`.
         openers.add(signer);
-        if (stable !== null) openerPrincipals.add(stable);
+        for (const principal of yield* principalsOf(authorized)) openerPrincipals.add(principal);
         openings.push({ commit: entry.commit, base: Event.branchRef(payload.base) });
         if (supersedes({ commit: entry.commit, id: payload.id }, opened, ancestors)) {
           opened = { commit: entry.commit, id: payload.id };
@@ -1015,7 +1054,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         const head = Event.unqualify(payload.head);
         if (head !== null) {
           openers.add(signer);
-          if (stable !== null) openerPrincipals.add(stable);
+          for (const principal of yield* principalsOf(authorized)) openerPrincipals.add(principal);
         }
         // Whoever moved the head proposed the revision under review, which is
         // the thing `approvals` excludes. Keyed on the opening alone, a member
@@ -1096,6 +1135,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
           id: payload.id,
           author: signer,
           principal: stable,
+          claims: yield* principalsOf(authorized),
           head,
           // Filled in below, from the openings this review descends from
           // rather than from whichever one the walk happened to reach first.
@@ -1387,9 +1427,12 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
     // claimed opener, not merely `author`: a contested opening establishes no
     // author, and an approval from either claimant is still their own.
     if (pullRequest.openers.has(review.author)) continue;
-    if (review.principal !== null && pullRequest.openerPrincipals.has(review.principal)) {
-      continue;
-    }
+    // Every principal the reviewer speaks for, against every principal an
+    // opener speaks for. Keyed on the *authorizing* identity alone, one human
+    // holding a direct key here and a principal enrolled elsewhere cleared
+    // their own bar in either direction: open by the route that records no
+    // principal and approve by the one that does, or the reverse.
+    if (review.claims.some((principal) => pullRequest.openerPrincipals.has(principal))) continue;
     // A verdict, and only a verdict. A `comment` review takes no position —
     // it costs `hub.review` rather than `hub.approve`, which is the whole
     // difference — so letting one supersede was the lower capability

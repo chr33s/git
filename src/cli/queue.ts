@@ -18,33 +18,49 @@
 import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import { Invalid } from "../git/Error.ts";
+import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Event from "../hub/Event.ts";
 import * as HubProjection from "../hub/Projection.ts";
-import { approvals } from "../hub/Projection.ts";
 import * as Queue from "../hub/Queue.ts";
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
 import { permits } from "../trust/Certificate.ts";
 import * as Policy from "../server/Policy.ts";
-import { readGenesis } from "../trust/Genesis.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
 import * as Verify from "../trust/Verify.ts";
-import { readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
+import { mustBeEnabled, readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
 const identityOf = Effect.fn("queue.identityOf")(function* (repo: string) {
-  const stored = yield* readGenesis();
-  if (stored === null) {
-    return yield* new Invalid({
-      field: "repo",
-      reason: `${repo} has no genesis; run \`git+ hub init ${repo} --key <key>\` first`,
-    });
-  }
-  return stored.genesis;
+  return (yield* mustBeEnabled(repo)).genesis;
 });
+
+/**
+ * A read failure as a value, so one entry's cannot end the pass.
+ *
+ * Everything this wraps is a fact about *this replica* — a projection it
+ * cannot fold, an object it does not hold — and never about the entry itself.
+ * Left to escape, one unfetched head blocked every other pull request in the
+ * queue on every later run, with nothing in the output naming the cause. So
+ * the caller gets the error back and says what it means for that entry; a
+ * `_tag` in the result is what marks the read as failed.
+ *
+ * The three tags are named rather than caught wholesale: a failure this does
+ * not know about is one nobody has decided the handling of, and swallowing it
+ * here would turn it into a queue that silently declines to build.
+ */
+const settled = <A, R>(
+  effect: Effect.Effect<A, Invalid | ObjectNotFound | StorageFailure, R>,
+): Effect.Effect<A | Invalid | ObjectNotFound | StorageFailure, never, R> =>
+  effect.pipe(
+    Effect.catchTags({
+      Invalid: (error) => Effect.succeed(error),
+      ObjectNotFound: (error) => Effect.succeed(error),
+      StorageFailure: (error) => Effect.succeed(error),
+    }),
+  );
 
 const keyFlag = Flag.string("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
@@ -459,13 +475,7 @@ const list = Command.make("list", { root: rootFlag, repo: repoArgument }, ({ rep
           // let whoever grew one queue hide every other one. Reported rather
           // than skipped: a queue nothing lists and a queue that is not there
           // read identically otherwise.
-          const state = yield* Queue.project(id).pipe(
-            Effect.catchTags({
-              Invalid: (error) => Effect.succeed(error),
-              ObjectNotFound: (error) => Effect.succeed(error),
-              StorageFailure: (error) => Effect.succeed(error),
-            }),
-          );
+          const state = yield* settled(Queue.project(id));
           if ("_tag" in state) unreadable.push({ queue: id, reason: state._tag });
           else queues.push(state);
         }
@@ -916,13 +926,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // below follows, and for the same reason: a fold this replica cannot
     // complete says nothing about the entry, and letting it escape aborted the
     // whole pass.
-    const pullRequest = yield* HubProjection.project(genesis, trust, entry.pr).pipe(
-      Effect.catchTags({
-        Invalid: (error) => Effect.succeed(error),
-        ObjectNotFound: (error) => Effect.succeed(error),
-        StorageFailure: (error) => Effect.succeed(error),
-      }),
-    );
+    const pullRequest = yield* settled(HubProjection.project(genesis, trust, entry.pr));
     if ("_tag" in pullRequest) {
       unbuilt.push({ pr: entry.pr, reason: `could not be read here: ${pullRequest._tag}` });
       continue;
@@ -1056,10 +1060,24 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     }
 
     const reviewed = Policy.isProtected(rules, target) && Policy.needsReview(rules);
-    if (reviewed && approvals(pullRequest).length < rules.requiredApprovals) {
+    // The boundary's own count, not `approvals()` alone: where a repository
+    // configures external review, the judge this candidate will meet counts
+    // eligible external approvals too, and a runner that does not marks every
+    // such entry unbuilt for a bar the pull request has in fact cleared —
+    // a queue that never drains for pull requests that would land by hand.
+    const counted = reviewed
+      ? yield* Policy.approvalsFor({
+          genesis,
+          pullRequest,
+          id: entry.pr,
+          ref: target,
+          rules,
+        })
+      : { count: 0, stale: null };
+    if (reviewed && counted.count < rules.requiredApprovals) {
       unbuilt.push({
         pr: entry.pr,
-        reason: `has ${String(approvals(pullRequest).length)} approvals of its current revision, and ${String(rules.requiredApprovals)} are required`,
+        reason: `has ${String(counted.count)} approvals of its current revision, and ${String(rules.requiredApprovals)} are required`,
       });
       continue;
     }
@@ -1076,13 +1094,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     // build *that* entry. Letting the failure escape stopped the whole pass, so
     // one unfetched head blocked every other pull request in the queue, on
     // every later run, with nothing in the output naming the cause.
-    const merged = yield* repository.mergeTree({ ours: tip, theirs: entry.head }).pipe(
-      Effect.catchTags({
-        Invalid: (error) => Effect.succeed(error),
-        ObjectNotFound: (error) => Effect.succeed(error),
-        StorageFailure: (error) => Effect.succeed(error),
-      }),
-    );
+    const merged = yield* settled(repository.mergeTree({ ours: tip, theirs: entry.head }));
     if ("_tag" in merged) {
       // A fact about this replica rather than about the entry, so nothing is
       // written: it stays queued, and whoever holds the objects builds it.
@@ -1103,13 +1115,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       const withBranch =
         tip === from
           ? merged
-          : yield* repository.mergeTree({ ours: from, theirs: entry.head }).pipe(
-              Effect.catchTags({
-                Invalid: (error) => Effect.succeed(error),
-                ObjectNotFound: (error) => Effect.succeed(error),
-                StorageFailure: (error) => Effect.succeed(error),
-              }),
-            );
+          : yield* settled(repository.mergeTree({ ours: from, theirs: entry.head }));
       if ("_tag" in withBranch) {
         // The same rule every other read failure here follows: this says what
         // *this replica* could not read, which is no basis for a permanent

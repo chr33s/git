@@ -151,6 +151,9 @@ export const externalReviews = Effect.fn("social.Review.externalReviews")(functi
 
     latest.set(payload.principal, {
       principal: payload.principal,
+      // An external review speaks for exactly the principal it names — the
+      // whole route here is identity, never a direct key of this repository.
+      claims: [payload.principal],
       id: payload.id,
       author,
       head,

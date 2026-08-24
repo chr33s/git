@@ -1799,10 +1799,13 @@ export const layer = Layer.effect(
           }),
         );
         const limit = Math.max(1, Math.min(input.maxMatches ?? 200, Search.MAX_MATCHES));
-        const candidates = searchIndex.candidates(
-          input.pattern,
-          input.fixed === true && input.ignoreCase === true,
-        );
+        // Every literal search, not only the case-insensitive one. The
+        // postings are case-folded, which makes them a sound over-
+        // approximation for a case-sensitive needle too — a line containing it
+        // exactly contains its folded bigrams — and the verifier below still
+        // decides. Restricted to `ignoreCase`, a plain `grep -F` built the
+        // index on every query and then read every blob in the tree anyway.
+        const candidates = searchIndex.candidates(input.pattern, input.fixed === true);
         const matches: Search.SearchMatch[] = [];
         const skipped: string[] = [];
         const verified = new Map<Oid, ReadonlyArray<Search.LineMatch>>();
@@ -1827,10 +1830,18 @@ export const layer = Layer.effect(
             continue;
           }
           if (blob.state === "binary") continue;
-          // A miss was read above and must be verified. Unicode blobs remain
-          // verifier-only because JavaScript case folding is wider than ASCII;
-          // only an ASCII-indexed blob may be rejected by the prefilter.
-          if (blob.state === "searchable" && candidates !== null && !candidates.has(blob.ordinal)) {
+          // A miss was read above and must be verified: `candidates` was taken
+          // before this walk, so an ordinal minted during it cannot appear in
+          // it, and rejecting on that absence made every first search of an
+          // index return nothing. Unicode blobs remain verifier-only because
+          // JavaScript case folding is wider than ASCII; only an ASCII-indexed
+          // blob already in that snapshot may be rejected by the prefilter.
+          if (
+            blob.state === "searchable" &&
+            data === undefined &&
+            candidates !== null &&
+            !candidates.has(blob.ordinal)
+          ) {
             continue;
           }
 

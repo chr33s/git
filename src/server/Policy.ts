@@ -28,7 +28,7 @@
 import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import * as Dag from "../git/Dag.ts";
-import { Invalid, type StorageFailure } from "../git/Error.ts";
+import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import { type Oid, type RefUpdate, storageOf } from "../git/Store.ts";
@@ -54,7 +54,6 @@ import {
   type Review,
   type PullRequest as PullRequestState,
 } from "../hub/Projection.ts";
-import type { VerifiedLog } from "../social/Log.ts";
 import * as SocialProjection from "../social/Projection.ts";
 import { externalReviews, type ExternalReview } from "../social/Review.ts";
 import { permits } from "../trust/Certificate.ts";
@@ -356,18 +355,21 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
   };
 });
 
-/** External approvals that meet a repository-selected rooted confidence bar. */
+/**
+ * External approvals that meet a repository-selected rooted confidence bar.
+ *
+ * The graph is taken rather than built: the caller needs the same projection to
+ * ask whether the web is fresh, and building it here as well walked the whole
+ * social web twice per pull request on the synchronous push path — for one
+ * answer, from identical inputs the two call sites had to keep in step by hand.
+ */
 export const eligibleExternalApprovals = (input: {
   readonly rule: ExternalReviewRule;
-  readonly logs: ReadonlyArray<VerifiedLog>;
+  readonly graph: SocialProjection.Projection;
   readonly reviews: ReadonlyArray<ExternalReview>;
   readonly internal?: ReadonlyArray<Review>;
 }): ReadonlyArray<ExternalReview> => {
-  const graph = SocialProjection.project({
-    roots: input.rule.anchors,
-    logs: input.logs,
-    maxDepth: input.rule.maxDepth,
-  });
+  const graph = input.graph;
   const internal = new Set(
     (input.internal ?? []).map((review) => review.principal ?? review.author),
   );
@@ -384,6 +386,70 @@ export const eligibleExternalApprovals = (input: {
     )
     .slice(0, input.rule.maxCount);
 };
+
+/**
+ * How many approvals this pull request has, by every route the rules allow.
+ *
+ * One answer, for every caller who has to meet the same bar. The merge-queue
+ * runner counted `approvals()` alone and the boundary counted those *plus* the
+ * eligible external ones, so a repository whose bar is met partly by external
+ * review had its runner refuse to build a candidate the boundary would have
+ * landed: the entry sat unbuilt on every pass while the pull request itself was
+ * mergeable. A runner stricter than the judge it is building for is a queue
+ * that never drains, which is what the runner's own comment says must not
+ * happen.
+ *
+ * A caller with no social web in context — the CLI runner on a replica that
+ * holds none — counts the internal approvals and stops, which is the same
+ * answer the boundary gives there.
+ */
+export const approvalsFor = Effect.fn("Policy.approvalsFor")(function* (input: {
+  readonly genesis: Genesis;
+  readonly pullRequest: PullRequestState;
+  readonly id: string;
+  readonly ref: string;
+  readonly rules: Rules;
+}) {
+  const internal = approvals(input.pullRequest);
+  const notStale: string | null = null;
+  const configured = input.rules.externalReview ?? null;
+  const rule = configured?.branch === input.ref ? configured : null;
+  if (internal.length >= input.rules.requiredApprovals || rule === null || rule.maxCount <= 0) {
+    return { count: internal.length, stale: notStale };
+  }
+
+  const web = yield* Effect.serviceOption(SocialProjection.SocialWeb);
+  if (Option.isNone(web)) return { count: internal.length, stale: notStale };
+
+  const logs = yield* web.value.logs;
+  const external = yield* externalReviews(input.genesis, input.pullRequest, input.id, {
+    maxIdentityAgeMs: input.rules.maxTrustAgeSeconds * 1000,
+  });
+  const graph = SocialProjection.project({
+    roots: rule.anchors,
+    logs,
+    maxDepth: rule.maxDepth,
+  });
+  const eligible = eligibleExternalApprovals({
+    rule,
+    graph,
+    reviews: external.reviews,
+    internal,
+  });
+  const freshness =
+    input.rules.maxTrustAgeSeconds <= 0
+      ? ({ ok: true } as const)
+      : SocialProjection.fresh(graph, input.rules.maxTrustAgeSeconds * 1000);
+  // A stale web counts nothing, and is only worth *saying* when it had
+  // something to count: a repository with no external approvals at all is
+  // short of its bar for the ordinary reason, not because of the web.
+  return freshness.ok
+    ? { count: internal.length + eligible.length, stale: notStale }
+    : {
+        count: internal.length,
+        stale: eligible.length > 0 ? freshness.reason : notStale,
+      };
+});
 
 /**
  * The queue depth a repository actually gets, from what it asked for.
@@ -1105,12 +1171,8 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
   // holder could point a hub ref at any source commit at all, on a name that
   // can never be deleted, pinning whatever it reaches out of reach of `gc`
   // for good.
-  const belongs = update.name.startsWith("refs/hub/")
-    ? Event.isHubCommit
-    : update.name === Refspec.SOCIAL_LOG
-      ? SocialLog.isSocialCommit
-      : Log.isTrustCommit;
-  if (!(yield* belongs(update.value))) {
+  const belongs = namespaceOf(update.name) ?? TRUST_NAMESPACE;
+  if (!(yield* belongs.isCommit(update.value))) {
     return refused(update.name, `${update.value} is not part of ${update.name}'s history`);
   }
 
@@ -1251,6 +1313,82 @@ const quarantineRules = Effect.fn("Policy.quarantineRules")(function* (input: {
 });
 
 /**
+ * One append-only namespace, as the rules below need to see it.
+ *
+ * The three of them — hub, trust, social — differ in their record name, their
+ * fold ceiling, what counts as one of their commits, and whether their history
+ * descends from the genesis. Every rule that walks such a ref needs some of
+ * that, and each used to re-derive "which namespace is this" from the ref name
+ * itself and reach for that namespace's helpers by hand, in six places here
+ * and once more in `Replication`.
+ *
+ * Which made adding a namespace a change nobody could see the whole of, and
+ * every miss silent in the dangerous direction: one omitted here skips the
+ * revocation screening rather than failing, and one omitted in the ceiling
+ * walks the ref unbounded on the synchronous push path.
+ */
+interface LogNamespace {
+  /** Whether a commit belongs to this namespace's own history. */
+  readonly isCommit: (commit: Oid) => Effect.Effect<boolean, StorageFailure, Repository>;
+  readonly withinCeiling: (
+    head: Oid,
+  ) => Effect.Effect<boolean, ObjectNotFound | StorageFailure, Repository>;
+  readonly ceilingOf: () => Effect.Effect<number>;
+  readonly record: string;
+  /**
+   * Whether this namespace's history descends from the trust genesis.
+   *
+   * Hub refs do not: each is its own root. The trust and social logs both hang
+   * off the genesis, which is the one legitimate edge out of their namespace.
+   */
+  readonly anchored: boolean;
+  /** What this namespace holds, for the message a ceiling refusal carries. */
+  readonly holds: string;
+}
+
+const HUB_NAMESPACE: LogNamespace = {
+  isCommit: Event.isHubCommit,
+  withinCeiling: Event.withinCeiling,
+  ceilingOf: Event.ceilingOf,
+  record: Event.RECORD,
+  anchored: false,
+  holds: "events",
+};
+
+const TRUST_NAMESPACE: LogNamespace = {
+  isCommit: Log.isTrustCommit,
+  withinCeiling: Log.withinCeiling,
+  ceilingOf: Log.ceilingOf,
+  record: Log.RECORD,
+  anchored: true,
+  holds: "records",
+};
+
+const SOCIAL_NAMESPACE: LogNamespace = {
+  isCommit: SocialLog.isSocialCommit,
+  withinCeiling: SocialLog.withinCeiling,
+  ceilingOf: SocialLog.ceilingOf,
+  record: SocialLog.RECORD,
+  anchored: true,
+  holds: "statements",
+};
+
+/**
+ * Which append-only namespace a ref belongs to, or `null` for an ordinary ref.
+ *
+ * The one place the ref-name spellings are read. `Refspec.isAppendOnly` names
+ * exactly these three, so a ref it accepts always answers here.
+ */
+const namespaceOf = (ref: string): LogNamespace | null =>
+  ref.startsWith("refs/hub/")
+    ? HUB_NAMESPACE
+    : ref === Refspec.SOCIAL_LOG
+      ? SOCIAL_NAMESPACE
+      : ref === Refspec.TRUST_LOG
+        ? TRUST_NAMESPACE
+        : null;
+
+/**
  * Why an append-only ref may not hold this value, or `null`.
  *
  * Both namespaces are folded on paths that cannot wait — a protected-branch
@@ -1261,23 +1399,11 @@ const quarantineRules = Effect.fn("Policy.quarantineRules")(function* (input: {
  * there in the first place.
  */
 const beyondCeiling = Effect.fn("Policy.beyondCeiling")(function* (name: string, to: Oid) {
-  if (name.startsWith("refs/hub/")) {
-    return (yield* Event.withinCeiling(to))
-      ? null
-      : `${name} would hold more events than a fold will walk`;
-  }
-  if (name === Refspec.TRUST_LOG) {
-    return (yield* Log.withinCeiling(to))
-      ? null
-      : `${name} would hold more records than a fold will walk`;
-  }
-  if (name === Refspec.SOCIAL_LOG) {
-    return (yield* SocialLog.withinCeiling(to))
-      ? null
-      : `${name} would hold more statements than a fold will walk`;
-  }
-
-  return null;
+  const namespace = namespaceOf(name);
+  if (namespace === null) return null;
+  return (yield* namespace.withinCeiling(to))
+    ? null
+    : `${name} would hold more ${namespace.holds} than a fold will walk`;
 });
 
 /**
@@ -1307,20 +1433,15 @@ const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, cur
   if (current === null) return held;
 
   const repository = yield* Repository;
-  const hub = name.startsWith("refs/hub/");
-  const social = name === Refspec.SOCIAL_LOG;
-  const anchor = hub ? null : yield* repository.resolve(Refspec.TRUST_GENESIS);
+  const namespace = namespaceOf(name) ?? TRUST_NAMESPACE;
+  const anchor = namespace.anchored ? yield* repository.resolve(Refspec.TRUST_GENESIS) : null;
   // Bounded by the *ceiling*, not by the namespace. Bounded by the namespace,
   // the walk stopped at a commit whose tree object never arrived — a state
   // every other walk here deliberately steps over, because refs are applied
   // without a connectivity check — and everything behind it dropped out of
   // the set, so the next ordinary reconciling push met an unaccounted parent
   // and was refused for good on a ref that cannot be rewound.
-  const ceiling = hub
-    ? yield* Event.ceilingOf()
-    : social
-      ? yield* SocialLog.ceilingOf()
-      : yield* Log.ceilingOf();
+  const ceiling = yield* namespace.ceilingOf();
 
   // Walked here rather than through `Dag.reachable` for the same tolerance in
   // the other direction: a *commit* object that never arrived is still a
@@ -1387,8 +1508,11 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   );
   if (parents === null) return null;
 
+  // Only hub and social refs reach here — see the guard at the call site — so
+  // the namespace is one of those two, and its record name comes from the
+  // table rather than from a second reading of the ref name.
+  const recordName = (namespaceOf(ref) ?? HUB_NAMESPACE).record;
   for (const oid of parents.keys()) {
-    const recordName = social ? SocialLog.RECORD : Event.RECORD;
     if (!(yield* Record.carries(oid, recordName))) continue;
     const record = yield* Record.read(oid, recordName).pipe(
       Effect.catchTags({
@@ -1502,15 +1626,14 @@ const orphanBeyond = Effect.fn("Policy.orphanBeyond")(function* (
   // namespace, so a first push of `refs/hub/pr/<fresh-uuid>` could hang one
   // event commit off a source commit and pin everything behind it out of
   // reach of `gc` for good.
-  const hub = name.startsWith("refs/hub/");
-  const social = name === Refspec.SOCIAL_LOG;
-  const belongs = hub ? Event.isHubCommit : social ? SocialLog.isSocialCommit : Log.isTrustCommit;
+  const namespace = namespaceOf(name) ?? TRUST_NAMESPACE;
+  const belongs = namespace.isCommit;
   // The commit a trust log hangs off is not a record and never will be: it is
   // the genesis, the one legitimate edge out of that namespace. On every push
   // but the log's first it is already reachable from `current`; on the first
   // there is nothing else for the first record to name.
   const repository = yield* Repository;
-  const anchor = hub ? null : yield* repository.resolve(Refspec.TRUST_GENESIS);
+  const anchor = namespace.anchored ? yield* repository.resolve(Refspec.TRUST_GENESIS) : null;
   const reached = yield* held;
   const parents = yield* Dag.reachable(to, current, (commit) =>
     Effect.gen(function* () {
@@ -1673,42 +1796,16 @@ const authorizes = Effect.fn("Policy.authorizes")(function* (input: {
     // pull requests can propose the same revision, and refusing on the first
     // that falls short would let an unapproved duplicate block the approved
     // one purely by sorting first.
-    const internalApprovals = approvals(pullRequest);
-    let approvalCount = internalApprovals.length;
-    const configuredExternal = rules.externalReview ?? null;
-    const externalRule = configuredExternal?.branch === input.ref ? configuredExternal : null;
-    if (
-      approvalCount < rules.requiredApprovals &&
-      externalRule !== null &&
-      externalRule.maxCount > 0
-    ) {
-      const web = yield* Effect.serviceOption(SocialProjection.SocialWeb);
-      if (Option.isSome(web)) {
-        const logs = yield* web.value.logs;
-        const external = yield* externalReviews(input.genesis, pullRequest, id, {
-          maxIdentityAgeMs: rules.maxTrustAgeSeconds * 1000,
-        });
-        const eligible = eligibleExternalApprovals({
-          rule: externalRule,
-          logs,
-          reviews: external.reviews,
-          internal: internalApprovals,
-        });
-        const graph = SocialProjection.project({
-          roots: externalRule.anchors,
-          logs,
-          maxDepth: externalRule.maxDepth,
-        });
-        const freshness =
-          rules.maxTrustAgeSeconds <= 0
-            ? ({ ok: true } as const)
-            : SocialProjection.fresh(graph, rules.maxTrustAgeSeconds * 1000);
-        if (freshness.ok) {
-          approvalCount += eligible.length;
-        } else if (eligible.length > 0) {
-          shortfall ??= refused(input.ref, `external-review web is stale: ${freshness.reason}`);
-        }
-      }
+    const counted = yield* approvalsFor({
+      genesis: input.genesis,
+      pullRequest,
+      id,
+      ref: input.ref,
+      rules,
+    });
+    const approvalCount = counted.count;
+    if (counted.stale !== null) {
+      shortfall ??= refused(input.ref, `external-review web is stale: ${counted.stale}`);
     }
     if (approvalCount < rules.requiredApprovals) {
       shortfall ??= refused(
@@ -2029,7 +2126,10 @@ export const uncovered = Effect.fn("Policy.uncovered")(function* (
   return refused;
 });
 
-export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: string) {
+export const mayWrite = Effect.fn("Policy.mayWrite")(function* (
+  capability: string,
+  writes: ReadonlyArray<RefUpdate> = [],
+) {
   const stored = yield* readGenesis();
   if (stored === null) {
     const open = yield* Effect.serviceOption(Auth.AnonymousWrites);
@@ -2042,7 +2142,17 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (capability: stri
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);
-  if (who.capabilities.includes(Auth.INBOX_SUBMIT)) return null;
+  // Only for the refs the inbox is *for*. `quarantineRules` refuses everything
+  // else, but it runs in the object phase — so waving the whole push through
+  // here let an unauthenticated submitter have their entire pack unpacked and
+  // persisted before a single ref was judged, which is the object half of the
+  // write this pre-body check exists to refuse. A push naming any other ref is
+  // one this door can already answer, and it answers it before the body.
+  if (Auth.inboxOnly(who)) {
+    return writes.every((update) => update.name.startsWith(Inbox.PENDING_PREFIX))
+      ? null
+      : "an inbox submission may only create an inbox proposal ref";
+  }
   const principal = { member: who.principal, capabilities: who.capabilities };
   if (principal.member === null) return "authentication required to write refs";
   return may(principal, capability) ? null : `this needs ${capability}`;
@@ -2151,6 +2261,30 @@ const repairable = (ref: string, principal: Principal, open: boolean): boolean =
 
 const boundApplies = (ref: string): boolean => ref !== RULES_REF && ref !== Refspec.TRUST_LOG;
 
+/**
+ * Whether the requester's *foreign* identity view is too old to judge by.
+ *
+ * Both doors ask it — the API's `gateWrite` and receive-pack's `gate` — and
+ * both had their own copy, down to the message. Two copies of one bound is a
+ * member refused over a push and admitted over the JSON API the moment either
+ * is edited alone, which is the boundary consistency this module exists for.
+ *
+ * Fresh by definition when the bound is off, or when membership here came by a
+ * direct key: there is no foreign view behind it whose age could be in
+ * question. The repository's own projection is judged separately by each
+ * caller, because they refuse on it differently.
+ */
+const identityFreshness = (
+  who: Auth.Authenticated,
+  rules: Rules,
+): { readonly ok: true } | { readonly ok: false; readonly reason: string } => {
+  if (rules.maxTrustAgeSeconds <= 0 || who.identity === undefined) return { ok: true };
+  const fresh = Verify.fresh(who.identity.projection, rules.maxTrustAgeSeconds * 1000);
+  return fresh.ok
+    ? { ok: true }
+    : { ok: false, reason: `the member's identity view is stale: ${fresh.reason}` };
+};
+
 export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   ref: string,
   /**
@@ -2252,10 +2386,8 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
     const trust = yield* membership(stored.genesis, who.projection);
     const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
     if (!stale.ok) return stale.reason;
-    if (who.identity !== undefined) {
-      const foreign = Verify.fresh(who.identity.projection, rules.maxTrustAgeSeconds * 1000);
-      if (!foreign.ok) return `the member's identity view is stale: ${foreign.reason}`;
-    }
+    const foreign = identityFreshness(who, rules);
+    if (!foreign.ok) return foreign.reason;
   }
 
   // Refused outright, not evaluated. Every caller of this gates by ref *name*
@@ -2399,19 +2531,8 @@ export const gate = Effect.fn("Policy.gate")(function* (
     trust === null || rules.maxTrustAgeSeconds <= 0
       ? null
       : Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
-  const identityStale =
-    rules.maxTrustAgeSeconds <= 0 || who.identity === undefined
-      ? null
-      : Verify.fresh(who.identity.projection, rules.maxTrustAgeSeconds * 1000);
-  const stale =
-    ownStale !== null && !ownStale.ok
-      ? ownStale
-      : identityStale !== null && !identityStale.ok
-        ? {
-            ok: false as const,
-            reason: `the member's identity view is stale: ${identityStale.reason}`,
-          }
-        : ownStale;
+  const foreign = identityFreshness(who, rules);
+  const stale = ownStale !== null && !ownStale.ok ? ownStale : !foreign.ok ? foreign : ownStale;
   // Refused per ref rather than for the batch, so the two refs that lift the
   // bound are still reachable while it holds; see `boundApplies`.
   const withheld = new Set(

@@ -12,10 +12,21 @@ import { project as projectTrust } from "../trust/Projection.ts";
 import * as SocialLog from "./Log.ts";
 import { SocialWeb } from "./Projection.ts";
 
+/**
+ * One sibling repository, stores included.
+ *
+ * `provideMerge` for the stores, as every other assembly of this layer does:
+ * plain `provide` consumes their outputs instead of re-exporting them, so
+ * nothing composed under it can read through the ports, and a memo keyed on
+ * the `Storage` identity sees `null` rather than this repository's. Nothing
+ * below needs either today — the reads here all go through `Repository` — but
+ * the difference is invisible until something does, and then it is a cache
+ * that silently answers for the wrong repository.
+ */
 const repositoryAt = (root: string, name: string) =>
   GitRepository.layer.pipe(
     Layer.provide(GitRepository.hooksNoop),
-    Layer.provide(stores(path.join(root, name))),
+    Layer.provideMerge(stores(path.join(root, name))),
   );
 
 const repositoryNames = (root: string) =>

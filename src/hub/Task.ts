@@ -23,12 +23,10 @@ import {
   sign,
   verify,
 } from "../crypto/SshSignature.ts";
-import * as Dag from "../git/Dag.ts";
 import { Invalid } from "../git/Error.ts";
 import { TRUST_LOG } from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import { checkRefName, type Oid } from "../git/Store.ts";
-import * as Record from "../trust/Record.ts";
 import * as Secrets from "./Secrets.ts";
 import * as Event from "./Event.ts";
 import * as Tombstone from "./Tombstone.ts";
@@ -433,41 +431,23 @@ export const reopen = Effect.fn("hub.Task.reopen")(function* (input: {
 
 /** One task's events, oldest first; see `Session.entries` for the shape. */
 export const entries = Effect.fn("hub.Task.entries")(function* (task: string) {
-  const repository = yield* Repository;
-
-  const head = yield* repository.resolve(refOf(task));
-  if (head === null) return { events: [], unreadable: [] } as const;
-
-  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* Event.ceilingOf());
+  const walked = yield* Event.walk(refOf(task), decode);
   const events: Array<{
     readonly commit: Oid;
     readonly payload: TaskPayload;
     /** `null` where no signature verified; such a record decides nothing. */
     readonly signer: Fingerprint | null;
   }> = [];
-  const unreadable: Array<Oid> = [];
 
-  for (const commit of Dag.topological(parents)) {
-    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
-    const record = yield* Record.read(commit, Event.RECORD).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        Invalid: () => Effect.succeed(null),
-      }),
-    );
-    if (record === null) {
-      unreadable.push(commit);
-      continue;
-    }
-    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-    if (payload === null) {
-      unreadable.push(commit);
-      continue;
-    }
-    events.push({ commit, payload, signer: yield* signerOf(record.payload, record.signatures) });
+  for (const record of walked.records) {
+    events.push({
+      commit: record.commit,
+      payload: record.payload,
+      signer: yield* signerOf(record.bytes, record.signatures),
+    });
   }
 
-  return { events, unreadable } as const;
+  return { events, unreadable: walked.unreadable } as const;
 });
 
 /**

@@ -232,8 +232,14 @@ const branchRefOf = Effect.fn("Api.branchRefOf")(function* (value: string) {
  * the same spellings — `main`, `refs/heads/main`, `HEAD`, or the oid
  * itself — instead of each client qualifying at its own boundary. Bare
  * names mean branches; anything else is named in full.
+ *
+ * The empty string means `HEAD`, as `treeOfRef` has always read it: a client
+ * that sends `ref: ""` for "wherever the repository is" got `refs/heads/`
+ * here and a 400 for a request that used to answer, because this normalizer
+ * replaced that reading on the endpoints it was applied to.
  */
-const revisionOf = (value: string): string => (isOid(value) ? value : refNameOf(value));
+const revisionOf = (value: string): string =>
+  value === "" ? "HEAD" : isOid(value) ? value : refNameOf(value);
 
 const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = false) {
   // Fail closed: a policy that cannot be evaluated refuses the write rather

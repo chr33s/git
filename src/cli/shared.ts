@@ -25,6 +25,7 @@ import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import * as AfterPush from "../server/AfterPush.node.ts";
 import { isOid } from "../git/Store.ts";
+import { readGenesis } from "../trust/Genesis.ts";
 
 export const rootFlag = Flag.string("root").pipe(
   Flag.withDefault("."),
@@ -103,6 +104,26 @@ export interface RepoOptions {
    */
   readonly notify?: boolean;
 }
+
+/**
+ * The genesis of a repository that has one, or the refusal that says how.
+ *
+ * One guard, because every verb that touches identity, trust, the hub or the
+ * social log has to ask this first and they had each grown their own — four
+ * copies telling the same user two different things about the same repository,
+ * one naming the command that fixes it and one not. What a caller does with
+ * the answer still differs; asking is what does not.
+ */
+export const mustBeEnabled = Effect.fn("cli.mustBeEnabled")(function* (repo: string) {
+  const stored = yield* readGenesis();
+  if (stored === null) {
+    return yield* new Invalid({
+      field: "repo",
+      reason: `${repo} has no genesis; run \`git+ hub init ${repo} --key <key>\` first`,
+    });
+  }
+  return stored;
+});
 
 export const withRepo = <A, E>(
   root: string,

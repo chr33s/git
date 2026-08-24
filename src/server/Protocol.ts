@@ -20,12 +20,13 @@
 import { createGunzip } from "node:zlib";
 
 import { concatBytes as concat } from "../git/Format.ts";
-import { Effect, Schema, Stream } from "effect";
+import { Effect, Option, Schema, Stream } from "effect";
 
 import { type GitError, Invalid, PackCorrupt, type StorageFailure } from "../git/Error.ts";
 import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
+import * as Auth from "./Auth.ts";
 import * as Policy from "./Policy.ts";
 import * as Redaction from "../hub/Redaction.ts";
 import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
@@ -34,6 +35,16 @@ const decoder = new TextDecoder();
 
 const ZERO_OID = "0".repeat(40);
 const AGENT = "agent=chr33s-git/0";
+
+/**
+ * The most pack an unauthenticated inbox submission may persist.
+ *
+ * Generous for the thing an inbox is for — a patch series, with whatever
+ * history it needs to apply — and small next to what a member pushes, which
+ * this deliberately does not bound: a member's writes are already answerable
+ * to the trust log, and capping them would break the first large import.
+ */
+const MAX_INBOX_PACK = 32 * 1024 * 1024;
 
 const corrupt = (reason: string) => new PackCorrupt({ reason });
 
@@ -211,8 +222,19 @@ export const advertise = Effect.fn("Protocol.advertise")(function* (
   service: "git-upload-pack" | "git-receive-pack",
 ) {
   const repository = yield* Repository;
-  const refs = yield* repository.refs;
+  const all = yield* repository.refs;
   const head = yield* repository.head;
+
+  // An inbox submitter is told the repository's identity and nothing else.
+  // They authenticate before any membership exists, so the receive-pack
+  // advertisement — which is exempt from `hiddenFromAdvertisement` below,
+  // because a *writer* needs old-oids to make a stale push detectable — was
+  // handing every branch, hub ref and trust ref of a private repository to
+  // anyone who set the header. The one transition they may make creates a ref
+  // that does not exist yet, so there is no old-oid here for them to need.
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  const stranger = Auth.inboxOnly(Option.getOrElse(requester, () => Auth.anonymous));
+  const refs = stranger ? all.filter(([name]) => name === Refspec.TRUST_GENESIS) : all;
 
   // A detached HEAD holds the commit rather than the name of a ref — git
   // leaves one behind after `checkout <sha>`, a rebase or a bisect — and
@@ -689,6 +711,7 @@ const report = (results: ReadonlyArray<ReceiveResult>, unpacked: string): Uint8A
 /** `POST /git-receive-pack` — ref commands and a pack in, report-status out. */
 export const receivePack = Effect.fn("Protocol.receivePack")(function* (request: Request) {
   const repository = yield* Repository;
+  const who = Option.getOrElse(yield* Effect.serviceOption(Auth.Requester), () => Auth.anonymous);
   const reader = new PktReader(body(request));
 
   const updates: RefUpdate[] = [];
@@ -864,7 +887,7 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
   const refusal =
     writes.length === 0
       ? null
-      : yield* Policy.mayWrite("source.push").pipe(
+      : yield* Policy.mayWrite("source.push", writes).pipe(
           Effect.orElseSucceed(() => "the repository's policy could not be evaluated"),
         );
   // The body only ever gets read by the object phase below, and that runs
@@ -897,12 +920,30 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
   // a ref; a delete-only push sends none, and a push whose creates were all
   // refused above has already had its body drained.
   if (refusal === null && writes.length > 0) {
-    const unpacked = yield* repository
-      .unpack(Stream.fromAsyncIterable(reader.rest(), (cause) => corrupt(String(cause))))
-      .pipe(
-        Effect.map(() => null),
-        Effect.catch((error) => Effect.succeed(error)),
-      );
+    const body = Stream.fromAsyncIterable(reader.rest(), (cause) => corrupt(String(cause)));
+    // An inbox proposal is a patch someone is offering, and it arrives from a
+    // caller who has proved nothing. Every other writer is a member the trust
+    // log names, so their pack is bounded by what their membership is worth;
+    // this one is bounded here or not at all, and unbounded meant an anonymous
+    // stranger could persist objects until the store filled. Counted as it
+    // streams, because the length a client *declares* is not what it sends.
+    let received = 0;
+    const bounded = Auth.inboxOnly(who)
+      ? body.pipe(
+          Stream.mapEffect((chunk: Uint8Array) => {
+            received += chunk.length;
+            return received > MAX_INBOX_PACK
+              ? Effect.fail(
+                  corrupt(`an inbox proposal may not exceed ${MAX_INBOX_PACK} bytes of pack`),
+                )
+              : Effect.succeed(chunk);
+          }),
+        )
+      : body;
+    const unpacked = yield* repository.unpack(bounded).pipe(
+      Effect.map(() => null),
+      Effect.catch((error) => Effect.succeed(error)),
+    );
     if (unpacked !== null) {
       const reason = Schema.is(PackCorrupt)(unpacked) ? unpacked.reason : unpacked._tag;
       // The unpacker stopped part-way, so the rest of the pack is still

@@ -119,7 +119,65 @@ export const parseInvocation = (input: InvocationInput): ParsedInvocation => {
   };
 };
 
+/**
+ * Flags only the extension form of any command accepts.
+ *
+ * Naming one is how a caller says which implementation they meant, for a name
+ * both surfaces answer to.
+ */
+const SELECTORS = ["--into", "--root", "--strategy", "--work"];
+
+/**
+ * The same, per command — flags stock git would reject on that command alone.
+ *
+ * Per command because a name can select the extension for one and be git's own
+ * on another: `--branch` distinguishes the extension's `fetch`, and is stock
+ * git's flag on `clone`. Listed globally it would have routed
+ * `git+ clone --branch main <url>` away from the git it belongs to.
+ *
+ * `--root` cannot carry `fetch` on its own, which is what made these needed:
+ * it has a default, so the extension's own `fetch <repo> <url>` is a complete
+ * invocation with no selector in it, and every flag-bearing spelling of it —
+ * `git+ fetch --token … <repo> <url>` — was handed to stock git, which reads
+ * that grammar as a remote and a refspec.
+ */
+const COMMAND_SELECTORS: ReadonlyMap<string, ReadonlyArray<string>> = new Map([
+  ["fetch", ["--token", "--branch"]],
+  ["pull", ["--token"]],
+]);
+
+/**
+ * Flags whose value is a separate argument, so it is not read as a flag.
+ *
+ * Otherwise `git commit -m "--root cause"` names a selector in its own message
+ * and lands in the extension.
+ */
+const VALUE_FLAGS = [
+  "-b",
+  "--initial-branch",
+  "-m",
+  "--message",
+  "--author",
+  "-n",
+  "--max-count",
+  "--onto",
+  "--pretty",
+  "--format",
+  "--date",
+  "-e",
+  "-d",
+  "-D",
+  "-M",
+  "-s",
+  "--source",
+  "-c",
+  "-C",
+  "-u",
+  "--untracked-files",
+];
+
 const extensionSelector = (argv: ReadonlyArray<string>) => {
+  const selectors = [...SELECTORS, ...(COMMAND_SELECTORS.get(argv[0] ?? "") ?? [])];
   let takesValue = false;
   for (const argument of argv.slice(1)) {
     if (takesValue) {
@@ -127,44 +185,11 @@ const extensionSelector = (argv: ReadonlyArray<string>) => {
       continue;
     }
     if (argument === "--") return false;
-    if (
-      argument === "--into" ||
-      argument === "--root" ||
-      argument === "--strategy" ||
-      argument === "--work"
-    )
-      return true;
-    if (
-      argument.startsWith("--into=") ||
-      argument.startsWith("--root=") ||
-      argument.startsWith("--strategy=") ||
-      argument.startsWith("--work=")
-    )
-      return true;
-    takesValue = [
-      "-b",
-      "--initial-branch",
-      "-m",
-      "--message",
-      "--author",
-      "-n",
-      "--max-count",
-      "--onto",
-      "--pretty",
-      "--format",
-      "--date",
-      "-e",
-      "-d",
-      "-D",
-      "-m",
-      "-M",
-      "-s",
-      "--source",
-      "-c",
-      "-C",
-      "-u",
-      "--untracked-files",
-    ].includes(argument);
+    // Both spellings from one list. Kept as two hand-written chains, a flag
+    // added to the bare one and forgotten in the other left `--flag=value`
+    // routed to stock git while its spaced form reached the extension.
+    if (selectors.some((flag) => argument === flag || argument.startsWith(`${flag}=`))) return true;
+    takesValue = VALUE_FLAGS.includes(argument);
   }
   return false;
 };

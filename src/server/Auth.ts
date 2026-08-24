@@ -1025,6 +1025,24 @@ const EMPTY: Projection = {
 export class Requester extends Context.Service<Requester, Authenticated>()("server/Requester") {}
 
 /**
+ * Whether this requester reached receive-pack through the inbox door alone.
+ *
+ * The three inbox grants above mint exactly `[INBOX_SUBMIT]` and nothing else,
+ * which is what makes the set itself the test: a member who also happens to be
+ * able to submit holds their own capabilities beside it, and a repository with
+ * no genesis running open writes holds `WRITE` beside it. Both of those are
+ * callers the boundary already knows, and neither is what this narrows.
+ *
+ * It narrows the one caller nothing else has judged yet. `git-inbox: 1`
+ * authenticates *before* any membership is established — that is the point of
+ * an inbox — so everything downstream has to treat this requester as the
+ * unauthenticated stranger they are, rather than as a writer whose refs merely
+ * get refused later.
+ */
+export const inboxOnly = (who: Authenticated): boolean =>
+  who.capabilities.length === 1 && who.capabilities[0] === INBOX_SUBMIT;
+
+/**
  * The trust fold, remembered by the log head it was folded from.
  *
  * Every request runs it, and it is an Ed25519 verification per signature per

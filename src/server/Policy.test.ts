@@ -418,6 +418,48 @@ describe("Policy", () => {
       }),
     );
 
+    it.effect("refuses an inbox submission naming an ordinary ref before its body is read", () =>
+      Effect.promise(async () => {
+        // `mayWrite` is the pre-body check, and waving the inbox through it
+        // wholesale let an unauthenticated submitter have their entire pack
+        // unpacked and persisted before `quarantineRules` refused the ref in
+        // the object phase — the object half of the write it was refusing.
+        const id = "018bcfe5-6800-7000-8000-000000000002";
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            // For its genesis: `mayWrite` reads one, and a repository without
+            // one answers from the open-writes branch before the inbox is
+            // reached at all.
+            yield* world(["source.push"]);
+            const { second } = yield* history("refs/heads/proposal");
+            const asInbox = Auth.requester({
+              principal: null,
+              signer: null,
+              capabilities: [Auth.INBOX_SUBMIT],
+              projection: EMPTY_PROJECTION,
+              envelope: null,
+            });
+            return {
+              branch: yield* Policy.mayWrite("source.push", [
+                { name: "refs/heads/main", value: second },
+              ]).pipe(Effect.provide(asInbox)),
+              proposal: yield* Policy.mayWrite("source.push", [
+                { name: `${Inbox.PENDING_PREFIX}${id}`, value: second },
+              ]).pipe(Effect.provide(asInbox)),
+              mixed: yield* Policy.mayWrite("source.push", [
+                { name: `${Inbox.PENDING_PREFIX}${id}`, value: second },
+                { name: "refs/heads/main", value: second },
+              ]).pipe(Effect.provide(asInbox)),
+            };
+          }),
+        );
+
+        assert.match(outcome.branch ?? "", /inbox proposal ref/);
+        assert.equal(outcome.proposal, null);
+        assert.match(outcome.mixed ?? "", /inbox proposal ref/);
+      }),
+    );
+
     it.effect("refuses to move the genesis", () =>
       Effect.promise(async () => {
         const decision = await scenario(

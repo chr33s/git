@@ -10,6 +10,7 @@ import { Context, Effect, Layer, Option } from "effect";
 
 import type { Fingerprint } from "../crypto/SshSignature.ts";
 import type { Oid } from "../git/Store.ts";
+import { permits } from "./Capability.ts";
 import { isRepoId, type RepoId } from "./Genesis.ts";
 import type { Member, PrincipalMember, Projection } from "./Projection.ts";
 
@@ -79,20 +80,6 @@ const resolveVerified = Effect.fn("trust.Principal.resolveVerified")(function* (
   }
   return identity;
 });
-
-const permits = (held: ReadonlyArray<string>, required: string): boolean => {
-  for (const capability of held) {
-    if (capability === "repo.admin" || capability === required) return true;
-    if (
-      capability === "hub.check:*" &&
-      required.startsWith("hub.check:") &&
-      required.length > "hub.check:".length
-    ) {
-      return true;
-    }
-  }
-  return false;
-};
 
 export type PrincipalAuthorization =
   | {

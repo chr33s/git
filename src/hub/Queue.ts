@@ -40,12 +40,10 @@ import {
   sign,
   verify,
 } from "../crypto/SshSignature.ts";
-import * as Dag from "../git/Dag.ts";
 import { Invalid } from "../git/Error.ts";
 import { TRUST_LOG } from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import { checkRefName, type Oid } from "../git/Store.ts";
-import * as Record from "../trust/Record.ts";
 import * as Secrets from "./Secrets.ts";
 import * as Event from "./Event.ts";
 
@@ -449,48 +447,28 @@ const signerOf = Effect.fn("hub.Queue.signerOf")(function* (
   return null;
 });
 
+/** This namespace's shape of the shared hub-ref walk. */
+type Walk = Event.Walk<QueuePayload>;
+
 /** One queue's events, oldest first; see `Task.entries` for the shape. */
-export const entries = Effect.fn("hub.Queue.entries")(function* (queue: string) {
-  const repository = yield* Repository;
-
-  const head = yield* repository.resolve(refOf(queue));
-  if (head === null) return { events: [], unreadable: [], walked: 0 } as const;
-
-  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* Event.ceilingOf());
+export const entries = Effect.fn("hub.Queue.entries")(function* (queue: string, walked?: Walk) {
+  const found = walked ?? (yield* Event.walk(refOf(queue), decode));
   const events: Array<{
     readonly commit: Oid;
     readonly payload: QueuePayload;
     /** `null` where no signature verified; such a record decides nothing. */
     readonly signer: Fingerprint | null;
   }> = [];
-  const unreadable: Array<Oid> = [];
 
-  for (const commit of Dag.topological(parents)) {
-    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
-    const record = yield* Record.read(commit, Event.RECORD).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        Invalid: () => Effect.succeed(null),
-      }),
-    );
-    if (record === null) {
-      unreadable.push(commit);
-      continue;
-    }
-    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-    if (payload === null) {
-      unreadable.push(commit);
-      continue;
-    }
-    events.push({ commit, payload, signer: yield* signerOf(record.payload, record.signatures) });
+  for (const record of found.records) {
+    events.push({
+      commit: record.commit,
+      payload: record.payload,
+      signer: yield* signerOf(record.bytes, record.signatures),
+    });
   }
 
-  // `walked`, not `events.length`: the ceiling bounds every commit this walk
-  // reads — joins and records it cannot decode included — so a count of the
-  // decodable ones is the wrong number to warn on. Undercounted, the warning
-  // that a queue is filling up could never fire before the ref crossed the
-  // ceiling and became unreadable and unremovable at once.
-  return { events, unreadable, walked: parents.size } as const;
+  return { events, unreadable: found.unreadable, walked: found.walked } as const;
 });
 
 /** One pull request's place in the queue. */
@@ -546,8 +524,8 @@ export interface Projection {
  * member holding `hub.queue`, because each is undone by saying the opposite and
  * none of them can move a branch.
  */
-export const project = Effect.fn("hub.Queue.project")(function* (queue: string) {
-  const walked = yield* entries(queue);
+export const project = Effect.fn("hub.Queue.project")(function* (queue: string, from?: Walk) {
+  const walked = yield* entries(queue, from);
 
   let opened: { readonly target: string; readonly by: Fingerprint } | null = null;
   /** Insertion-ordered, which is what makes it the queue rather than a set. */
@@ -697,28 +675,16 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string) 
  * the cost — not the decoding. So this reads the same walk and verifies only
  * the two record kinds whose signer it actually consults.
  */
-const summary = Effect.fn("hub.Queue.summary")(function* (queue: string) {
-  const repository = yield* Repository;
-  const head = yield* repository.resolve(refOf(queue));
-  if (head === null) return { target: null, closed: null } as const;
-
-  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* Event.ceilingOf());
+const summary = Effect.fn("hub.Queue.summary")(function* (walked: Walk) {
   let target: string | null = null;
   let closed: string | null = null;
-  for (const commit of Dag.topological(parents)) {
-    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
-    const record = yield* Record.read(commit, Event.RECORD).pipe(
-      Effect.catchTags({
-        ObjectNotFound: () => Effect.succeed(null),
-        Invalid: () => Effect.succeed(null),
-      }),
-    );
-    if (record === null) continue;
-    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-    if (payload === null) continue;
+  for (const record of walked.records) {
+    const { payload } = record;
     if (payload.type !== "queue.opened" && payload.type !== "queue.closed") continue;
-    // The two the fold reads a signer for, and only these two.
-    if ((yield* signerOf(record.payload, record.signatures)) === null) continue;
+    // The two the fold reads a signer for, and only these two: that is what
+    // makes summarising cheaper than folding, and why a queue this loop does
+    // not want costs no verification at all.
+    if ((yield* signerOf(record.bytes, record.signatures)) === null) continue;
     if (payload.type === "queue.opened") target ??= payload.target;
     else if (target !== null) closed ??= payload.reason;
   }
@@ -740,7 +706,7 @@ const summary = Effect.fn("hub.Queue.summary")(function* (queue: string) {
  */
 export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: string) {
   const unreadable: Array<string> = [];
-  let found: Projection | null = null;
+  let matched: Projection | null = null;
   // Newest first, and stopping at the first live match. Folding a queue is a
   // signature verification per record, and this runs on the path a wake fires
   // per push — while the design *mandates* rotation, so the ended queues pile
@@ -752,27 +718,30 @@ export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: str
   // through the race `queue open` documents — resolve to the same one on every
   // replica: the newer, which is the one somebody meant.
   for (const id of [...(yield* queues())].reverse()) {
-    // Summarised first: what this loop asks of a queue it does not want is two
-    // fields, and folding one to find out verifies a signature per record it
-    // will then discard. Only the queue that matches is folded.
-    const brief = yield* summary(id).pipe(
+    // Read once, then summarised: what this loop asks of a queue it does not
+    // want is two fields, and folding one to find out verifies a signature per
+    // record it will then discard. Only the queue that matches is folded — and
+    // it is folded from the records already in hand, rather than by reading
+    // the ref a second time.
+    const records = yield* Event.walk(refOf(id), decode).pipe(
       Effect.catchTags({
         Invalid: () => Effect.succeed(null),
         ObjectNotFound: () => Effect.succeed(null),
         StorageFailure: () => Effect.succeed(null),
       }),
     );
-    if (brief === null) {
+    if (records === null) {
       unreadable.push(id);
       continue;
     }
+    const brief = yield* summary(records);
     // A closed queue is history, and stepping aside is the whole point of
     // ending one: the next `queue open` for this branch has to be able to
     // succeed, and every caller asking "which queue serves this branch?" has to
     // get the live one.
     if (brief.target !== target || brief.closed !== null) continue;
 
-    const state = yield* project(id).pipe(
+    const state = yield* project(id, records).pipe(
       Effect.catchTags({
         Invalid: () => Effect.succeed(null),
         ObjectNotFound: () => Effect.succeed(null),
@@ -783,10 +752,10 @@ export const forTarget = Effect.fn("hub.Queue.forTarget")(function* (target: str
       unreadable.push(id);
       continue;
     }
-    found = state;
+    matched = state;
     break;
   }
   // `unreadable` is therefore complete exactly when nothing matched, which is
   // the case its one caller — the guard in `queue open` — is asked about.
-  return { found, unreadable } as const;
+  return { found: matched, unreadable } as const;
 });

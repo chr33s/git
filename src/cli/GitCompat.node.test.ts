@@ -7,7 +7,11 @@ import { describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 
 import { coreCompatibility, manifestProblems } from "./GitCompat.ts";
-import { discoverRepository, parseInvocation } from "./GitCompat.node.ts";
+import {
+  discoverRepository,
+  isCoreCompatibilityInvocation,
+  parseInvocation,
+} from "./GitCompat.node.ts";
 
 const input = (argv: ReadonlyArray<string>, cwd = "/workspace") => ({
   argv,
@@ -48,6 +52,56 @@ describe("Git-compatible invocation", () => {
       config: ["core.abbrev=12", "color.ui=false"],
       bare: true,
       noPager: true,
+    });
+  });
+
+  describe("which implementation a shared command name reaches", () => {
+    const dispatch = (argv: ReadonlyArray<string>) => {
+      const parsed = parseInvocation(input(argv));
+      if (parsed._tag === "InvalidInvocation") assert.fail(parsed.message);
+      return isCoreCompatibilityInvocation(parsed.invocation) ? "git" : "extension";
+    };
+
+    it("routes a flag only the extension's fetch accepts to the extension", () => {
+      // `--root` has a default, so the extension's own `fetch` is a complete
+      // invocation with no selector in it, and every flag-bearing spelling was
+      // handed to stock git — which reads `<repo> <url>` as a remote and a
+      // refspec rather than as the two arguments the extension declares.
+      assert.equal(
+        dispatch(["fetch", "--token", "abc", "myrepo", "https://example.com/r"]),
+        "extension",
+      );
+      assert.equal(
+        dispatch(["fetch", "--branch=main", "myrepo", "https://example.com/r"]),
+        "extension",
+      );
+      assert.equal(
+        dispatch(["pull", "--token=abc", "myrepo", "https://example.com/r", "main"]),
+        "extension",
+      );
+    });
+
+    it("leaves a per-command selector out of every other command", () => {
+      // `--branch` is stock git's own flag on `clone`; selecting the extension
+      // on it globally would take a plain clone away from the git that owns it.
+      assert.equal(dispatch(["clone", "--branch", "main", "https://example.com/r"]), "git");
+      assert.equal(dispatch(["log", "--branch", "main"]), "git");
+    });
+
+    it("still answers the global selectors, spaced or attached", () => {
+      assert.equal(dispatch(["log", "--root", "/srv"]), "extension");
+      assert.equal(dispatch(["log", "--root=/srv"]), "extension");
+      assert.equal(dispatch(["merge", "--strategy=ours"]), "extension");
+    });
+
+    it("does not read a selector out of a flag's value", () => {
+      assert.equal(dispatch(["commit", "-m", "--root cause"]), "git");
+      assert.equal(dispatch(["status", "--", "--root"]), "git");
+    });
+
+    it("hands an unadorned core command to git", () => {
+      assert.equal(dispatch(["status", "--short"]), "git");
+      assert.equal(dispatch(["fetch", "origin", "main"]), "git");
     });
   });
 

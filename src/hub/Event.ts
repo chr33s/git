@@ -783,6 +783,86 @@ export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (hea
  * An event carries `event.json`; a join carries an empty tree. Anything else
  * is a commit from somewhere that is not the hub, and the walk stops there.
  */
+/** One record on a hub ref, decoded by whoever asked for the walk. */
+export interface WalkedRecord<A> {
+  readonly commit: Oid;
+  readonly payload: A;
+  readonly bytes: Uint8Array;
+  readonly signatures: ReadonlyArray<string>;
+}
+
+export interface Walk<A> {
+  readonly records: ReadonlyArray<WalkedRecord<A>>;
+  /** Commits carrying a record this replica could not read or decode. */
+  readonly unreadable: ReadonlyArray<Oid>;
+  /**
+   * Every commit the walk reached, joins and undecodable records included.
+   *
+   * Not `records.length`: the ceiling bounds what the walk *reads*, so a count
+   * of the decodable ones is the wrong number to warn a caller on. Undercounted,
+   * a "this ref is filling up" warning could never fire before the ref crossed
+   * the ceiling and became unreadable and unremovable at once.
+   */
+  readonly walked: number;
+}
+
+/**
+ * Every record on one hub ref, oldest first, decoded and nothing verified.
+ *
+ * The walk each hub namespace makes over its own ref is the same walk —
+ * bounded to this namespace's commits, stepping over joins, treating a record
+ * this version cannot decode as one lost record rather than a broken ref — and
+ * it was written out once per namespace. Four copies of "how a hub ref is
+ * read" is four places to fix a ceiling or an unreadable-record rule in, and
+ * the copies had already drifted: only one of them counted what it walked.
+ *
+ * Signatures are returned rather than checked, because how much verification a
+ * fold needs is the thing that actually differs: a queue summary reads a signer
+ * for two record types, a task fold for every one, and a session fold for none.
+ */
+export const walk = Effect.fn("hub.Event.walk")(function* <A>(
+  ref: string,
+  decodeOne: (bytes: Uint8Array) => Effect.Effect<A, Invalid>,
+) {
+  const repository = yield* Repository;
+  const head = yield* repository.resolve(ref);
+  if (head === null) return { records: [], unreadable: [], walked: 0 } satisfies Walk<A>;
+
+  const parents = yield* Dag.reachable(head, null, isHubCommit, yield* ceilingOf());
+  const records: Array<WalkedRecord<A>> = [];
+  const unreadable: Array<Oid> = [];
+
+  for (const commit of Dag.topological(parents)) {
+    if (!(yield* Record.carries(commit, RECORD))) continue;
+    // A redaction deletes the payload and leaves the tree entry naming it, so
+    // the read fails where every other event's succeeds. That absence is what
+    // a tombstone looks like from here, and it is not a failure.
+    const record = yield* Record.read(commit, RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    if (record === null) {
+      unreadable.push(commit);
+      continue;
+    }
+    const payload = yield* decodeOne(record.payload).pipe(Effect.orElseSucceed(() => null));
+    if (payload === null) {
+      unreadable.push(commit);
+      continue;
+    }
+    records.push({
+      commit,
+      payload,
+      bytes: record.payload,
+      signatures: record.signatures,
+    });
+  }
+
+  return { records, unreadable, walked: parents.size } satisfies Walk<A>;
+});
+
 export const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
   const repository = yield* Repository;
   const info = yield* repository

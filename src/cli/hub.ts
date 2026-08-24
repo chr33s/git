@@ -67,6 +67,7 @@ import { openWindow, project } from "../trust/Projection.ts";
 import { reconcile } from "../server/Replication.ts";
 import * as Whoami from "../server/Whoami.ts";
 import {
+  mustBeEnabled,
   readAnyPublicKey,
   readPrivateKey,
   readPublicKey,
@@ -517,17 +518,6 @@ const whoami = Command.make(
       yield* Console.log(JSON.stringify(answer, null, 2));
     }),
 );
-
-const mustBeEnabled = Effect.fn("hub.mustBeEnabled")(function* (repo: string) {
-  const stored = yield* readGenesis();
-  if (stored === null) {
-    return yield* new Invalid({
-      field: "repo",
-      reason: `${repo} has no genesis; run \`git+ hub init ${repo} --key <key>\` first`,
-    });
-  }
-  return stored;
-});
 
 // -- the client's view ------------------------------------------------------
 
