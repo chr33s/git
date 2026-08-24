@@ -5,7 +5,7 @@
  * satisfy the Artifacts binding:
  * `RepoClient.raw` must be deferred (an `Effect`) rather than an eager
  * `ArtifactsRepo` no off-platform provider can construct.
- * `patches/alchemy+2.0.0-beta.72.patch` applies exactly that change — the one
+ * `patches/alchemy+2.0.0-beta.74.patch` applies exactly that change — the one
  * proposed upstream — via `patch-package` on `postinstall`.
  *
  * The assertions here are compile-time: if the patch stopped applying, `raw`
@@ -34,7 +34,7 @@ describe("alchemy patch", () => {
       assert.equal(rawIsDeferred, true);
       assert.equal(failureIsDeclined, true);
       assert.ok(
-        fs.existsSync("patches/alchemy+2.0.0-beta.72.patch"),
+        fs.existsSync("patches/alchemy+2.0.0-beta.74.patch"),
         "the patch file ships with the repository",
       );
     }),

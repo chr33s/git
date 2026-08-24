@@ -5,7 +5,7 @@
  * the same `ReadWriteNamespaceClient` a Worker would — create, list with a
  * cursor, tokens, fork over alternates, import over real smart HTTP from the
  * node host. `RepoClient.raw` failing as a *typed* error is the payoff of
- * `patches/alchemy+2.0.0-beta.72.patch`.
+ * `patches/alchemy+2.0.0-beta.74.patch`.
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
