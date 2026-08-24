@@ -7,7 +7,7 @@
  * `data-*` attributes so the markup stays declarative.
  *
  * Components render into the *light DOM* (see `base.ts`), so these
- * ownership-based files remain global CSS and esbuild combines them into one
+ * ownership-based files remain global CSS and Vite+ combines them into one
  * asset. That is also the contract `@chr33s/base-wc` requires.
  */
 

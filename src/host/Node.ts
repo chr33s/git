@@ -49,6 +49,22 @@ import { assetResponse } from "../server/Static.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import { configuration, type ServeConfig } from "./ServeConfig.ts";
 
+/**
+ * A development asset server mounted before the Git routes.
+ *
+ * The callback follows Connect's `next` convention without making the host
+ * depend on Connect (or Vite): served assets end the response; a miss falls
+ * through unchanged to the streaming Git handlers.
+ */
+export interface DevelopmentMiddleware {
+  readonly handle: (
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    next: (cause?: unknown) => void,
+  ) => void;
+  readonly close: () => Promise<void>;
+}
+
 export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname"> {
   /** Defaults to an ephemeral port; the return value carries the real one. */
   readonly port?: number;
@@ -69,6 +85,14 @@ export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname"> {
    * what a host with no interest in the browser half wants.
    */
   readonly ui?: string;
+  /**
+   * Development assets mounted on this server's origin.
+   *
+   * Kept as a factory so Vite can attach its HMR websocket to the already
+   * created HTTP server. Production never constructs it and keeps serving
+   * `ui` from disk.
+   */
+  readonly development?: (server: http.Server) => Promise<DevelopmentMiddleware>;
   /**
    * Run each repository's `wake.json` rules when a push moves its hub refs.
    *
@@ -508,7 +532,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     }
   };
 
-  const server = http.createServer((incoming, outgoing) => {
+  let development: DevelopmentMiddleware | undefined;
+  const handleIncoming = (incoming: http.IncomingMessage, outgoing: http.ServerResponse): void => {
     void (async () => {
       // The `Host` header, not the bind address: a handler that has to hand
       // a client an absolute URL back — the LFS batch API does — can only
@@ -610,7 +635,23 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end(String(cause));
     });
+  };
+
+  const server = http.createServer((incoming, outgoing) => {
+    if (development !== undefined && (incoming.method === "GET" || incoming.method === "HEAD")) {
+      development.handle(incoming, outgoing, (cause) => {
+        if (cause === undefined) {
+          handleIncoming(incoming, outgoing);
+        } else {
+          if (!outgoing.headersSent) outgoing.writeHead(500);
+          outgoing.end(cause instanceof Error ? cause.message : "development middleware failure");
+        }
+      });
+      return;
+    }
+    handleIncoming(incoming, outgoing);
   });
+  development = options.development === undefined ? undefined : await options.development(server);
 
   await new Promise<void>((resolve, reject) => {
     // Rejected on `error` as well as resolved on `listening`. A port already
@@ -634,10 +675,12 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
   return {
     url: `http://${hostname}:${bound}`,
-    close: () =>
-      new Promise((resolve, reject) => {
+    close: async () => {
+      await development?.close();
+      await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
-      }),
+      });
+    },
   };
 };
 

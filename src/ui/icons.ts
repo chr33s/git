@@ -10,26 +10,26 @@
 import { html, svg, type TemplateResult } from "lit";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 
-import arrowRightSvg from "@phosphor-icons/core/regular/arrow-right.svg";
-import caretDownSvg from "@phosphor-icons/core/regular/caret-down.svg";
-import caretLeftSvg from "@phosphor-icons/core/regular/caret-left.svg";
-import clockSvg from "@phosphor-icons/core/regular/clock.svg";
-import codeSvg from "@phosphor-icons/core/regular/code.svg";
-import copySvg from "@phosphor-icons/core/regular/copy.svg";
-import dotsThreeSvg from "@phosphor-icons/core/regular/dots-three.svg";
-import fileTextSvg from "@phosphor-icons/core/regular/file-text.svg";
-import gearSvg from "@phosphor-icons/core/regular/gear.svg";
-import gitBranchSvg from "@phosphor-icons/core/regular/git-branch.svg";
-import gitDiffSvg from "@phosphor-icons/core/regular/git-diff.svg";
-import magnifyingGlassSvg from "@phosphor-icons/core/regular/magnifying-glass.svg";
-import moonSvg from "@phosphor-icons/core/regular/moon.svg";
-import pencilSimpleSvg from "@phosphor-icons/core/regular/pencil-simple.svg";
-import plusSvg from "@phosphor-icons/core/regular/plus.svg";
-import pulseSvg from "@phosphor-icons/core/regular/pulse.svg";
-import sunSvg from "@phosphor-icons/core/regular/sun.svg";
-import trashSvg from "@phosphor-icons/core/regular/trash.svg";
-import treeStructureSvg from "@phosphor-icons/core/regular/tree-structure.svg";
-import xSvg from "@phosphor-icons/core/regular/x.svg";
+import arrowRightSvg from "@phosphor-icons/core/regular/arrow-right.svg?raw";
+import caretDownSvg from "@phosphor-icons/core/regular/caret-down.svg?raw";
+import caretLeftSvg from "@phosphor-icons/core/regular/caret-left.svg?raw";
+import clockSvg from "@phosphor-icons/core/regular/clock.svg?raw";
+import codeSvg from "@phosphor-icons/core/regular/code.svg?raw";
+import copySvg from "@phosphor-icons/core/regular/copy.svg?raw";
+import dotsThreeSvg from "@phosphor-icons/core/regular/dots-three.svg?raw";
+import fileTextSvg from "@phosphor-icons/core/regular/file-text.svg?raw";
+import gearSvg from "@phosphor-icons/core/regular/gear.svg?raw";
+import gitBranchSvg from "@phosphor-icons/core/regular/git-branch.svg?raw";
+import gitDiffSvg from "@phosphor-icons/core/regular/git-diff.svg?raw";
+import magnifyingGlassSvg from "@phosphor-icons/core/regular/magnifying-glass.svg?raw";
+import moonSvg from "@phosphor-icons/core/regular/moon.svg?raw";
+import pencilSimpleSvg from "@phosphor-icons/core/regular/pencil-simple.svg?raw";
+import plusSvg from "@phosphor-icons/core/regular/plus.svg?raw";
+import pulseSvg from "@phosphor-icons/core/regular/pulse.svg?raw";
+import sunSvg from "@phosphor-icons/core/regular/sun.svg?raw";
+import trashSvg from "@phosphor-icons/core/regular/trash.svg?raw";
+import treeStructureSvg from "@phosphor-icons/core/regular/tree-structure.svg?raw";
+import xSvg from "@phosphor-icons/core/regular/x.svg?raw";
 
 const icon = (markup: string, size: number): TemplateResult =>
   html`${unsafeSVG(

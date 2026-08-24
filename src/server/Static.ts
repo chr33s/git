@@ -4,9 +4,9 @@
  * The browser half calls `/{repo}/...` with no scheme or host, so the page and
  * the API have to answer on one origin — that is not a convenience, it is the
  * only arrangement a browser permits. The deployed Worker gives them one, and
- * `src/ui/build.ts --serve` fakes one with a proxy for development. This is
- * the third place that needed it, so it is the one place it lives: `serve
- * --ui` hands the same bundle to the same origin without a proxy in front.
+ * `src/ui/dev.ts` mounts Vite's middleware directly on the node host for
+ * development. This is the third place that needed it, so it is the one place
+ * it lives: `serve --ui` hands the finished bundle to the same origin too.
  *
  * Reads are attempted, not routed. A path either names a file that was built
  * or it does not, and the caller falls through to the git handler when it does
@@ -40,8 +40,7 @@ export const mimeOf = (extension: string): string => {
  *
  * Copied out of node's Buffer rather than handed over: `readFile` returns a
  * view into a pooled allocation typed `ArrayBufferLike`, and `BodyInit` takes
- * a view over a plain `ArrayBuffer`. The same distinction `src/ui/build.ts`
- * documents where it collects a request body.
+ * a view over a plain `ArrayBuffer`.
  */
 export const fileAt = async (
   root: string,

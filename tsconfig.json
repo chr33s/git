@@ -21,7 +21,7 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "es2024",
-    "types": ["node", "@cloudflare/workers-types"]
+    "types": ["node"]
   },
   "include": ["src/**/*.ts", "worker-configuration.d.ts"],
   "exclude": ["node_modules", "dist", "src/ui"]

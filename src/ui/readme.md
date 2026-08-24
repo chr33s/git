@@ -35,7 +35,7 @@ refresh.
   explorer. It is path-first, so the `/files` response feeds it unchanged.
 - **[`@pierre/diffs`](https://github.com/pierrecomputer/pierre)** for the file
   view and Change Request diffs, with Shiki highlighting.
-- **esbuild** for the bundle — already a dependency of this repository.
+- **Vite+** for builds, source transforms and same-origin HMR.
 
 ## Data
 
@@ -189,27 +189,21 @@ notice naming the reason. That is a working UI showing sample data, not a
 broken one, and the startup banner prints the root so the mismatch is visible.
 
 ```bash
-npm run dev:ui              # watch and serve on :8000 — the one to reach for
-npm run build:ui            # bundle to dist/ui
+npm run dev:ui              # Vite HMR and API on :8000 — the one to reach for
+npm run build:ui            # production bundle to dist/ui
+npm run build:ui:debug      # readable, sourcemapped development bundle
+npm run watch:ui            # rebuild dist/ui for an external static server
 npm run verify:ui           # build, then drive it in a browser
-
-node src/ui/build.ts --watch    # watch only, for serving dist/ui yourself
-node src/ui/build.ts --debug    # unminified, for reading a stack trace
 ```
 
-`--serve` and `--watch` both stay in the foreground and rebuild on change; that
-is the process doing its job, not hanging. Only `--serve` puts a page at a URL.
+`dev:ui` stays in the foreground because Vite is watching. Its middleware and
+HMR websocket mount directly on the node host, so the page, source modules and
+`/:repo/...` answer on one port without a proxy. `watch:ui` instead writes a
+production-shaped bundle for a separate static server.
 
-`--serve` hands `dist/ui` to the server itself, so the page, the bundle and
-`/:repo/...` all answer on one port. That matters because a browser blocks the
-cross-origin alternative outright, and the UI would quietly show its fixtures
-instead. `--watch` rewrites `dist/ui` on every change and the server reads it
-per request, so a rebuild needs no restart.
-
-This used to be two servers with a hand-written proxy between them — esbuild's
-own on a random port, because esbuild cannot forward what it does not have
-(its docs say to put a proxy in front, and that is what it was). Nothing is
-between them now, and `dev:ui` runs the same code path that ships:
+`dev:ui` and deployment intentionally have different asset sources but the
+same route boundary: Vite serves source modules during development, while
+`serve --ui` and the Worker serve `dist/ui` after a finished build:
 
 ```bash
 npm run build:ui && npx git+ serve --root /path/to/repos --ui
@@ -233,39 +227,40 @@ shape, end to end.
 
 ## Files
 
-| File               | Role                                  |
-| ------------------ | ------------------------------------- |
-| `main.ts`          | Entry point                           |
-| `app.ts`           | Shell, routing                        |
-| `base.ts`          | Light-DOM Lit base, navigation event  |
-| `elements.ts`      | base-wc element registration          |
-| `api.ts`           | Typed client for the JSON API         |
-| `client.ts`        | Atom client derived from `Api.ts`     |
-| `atoms.ts`         | Atom ↔ Lit reactive-controller bridge |
-| `hub.ts`           | Hub queries folded into the store     |
-| `identity.ts`      | The browser's signing key; hub writes |
-| `local.ts`         | OPFS repository; clone, commit, push  |
-| `model.ts`         | Task / Change Request domain          |
-| `fixtures.ts`      | The design's Task data                |
-| `store.ts`         | The mutable, observable Task store    |
-| `theme.ts`         | Palette choice and persistence        |
-| `icons.ts`         | Phosphor Icons (regular), inline SVG  |
-| `highlight.ts`     | Lazy `@pierre/diffs` loader           |
-| `nav.sidebar.ts`   | The left rail                         |
-| `screen.*.ts`      | One module per screen                 |
-| `screen.search.ts` | ⌘K results: tasks and `/grep` hits    |
-| `tokens.css`       | Both palettes, as custom properties   |
-| `styles/*.css`     | Shell, primitives, and screen styles  |
-| `build.ts`         | esbuild bundle                        |
-| `verify.ts`        | Browser checks                        |
+| File                   | Role                                          |
+| ---------------------- | --------------------------------------------- |
+| `main.ts`              | Entry point                                   |
+| `app.ts`               | Shell, routing                                |
+| `base.ts`              | Light-DOM Lit base, navigation event          |
+| `elements.ts`          | base-wc element registration                  |
+| `api.ts`               | Typed client for the JSON API                 |
+| `client.ts`            | Atom client derived from `Api.ts`             |
+| `atoms.ts`             | Atom ↔ Lit reactive-controller bridge         |
+| `hub.ts`               | Hub queries folded into the store             |
+| `identity.ts`          | The browser's signing key; hub writes         |
+| `local.ts`             | OPFS repository; clone, commit, push          |
+| `model.ts`             | Task / Change Request domain                  |
+| `fixtures.ts`          | The design's Task data                        |
+| `store.ts`             | The mutable, observable Task store            |
+| `theme.ts`             | Palette choice and persistence                |
+| `icons.ts`             | Phosphor Icons (regular), inline SVG          |
+| `highlight.ts`         | Lazy `@pierre/diffs` loader                   |
+| `nav.sidebar.ts`       | The left rail                                 |
+| `screen.*.ts`          | One module per screen                         |
+| `screen.search.ts`     | ⌘K results: tasks and `/grep` hits            |
+| `tokens.css`           | Both palettes, as custom properties           |
+| `styles/*.css`         | Shell, primitives, and screen styles          |
+| `dev.ts`               | Vite middleware mounted on the node host      |
+| `../../vite.config.ts` | Vite+ build, lint and formatter configuration |
+| `verify.ts`            | Browser checks                                |
 
 ## Notes for whoever picks this up
 
 - **`@pierre/diffs@1.3.5` cannot be imported the normal way.** Its
   `sideEffects` names `dist/components/web-components.js` — the module that
-  registers `<diffs-container>` — but no `exports` subpath reaches it. `build.ts`
-  aliases the specifier to the file, and `globals.d.ts` declares it. Both can go
-  once the package exports it.
+  registers `<diffs-container>` — but no `exports` subpath reaches it.
+  `vite.config.ts` aliases the specifier to the file, and `globals.d.ts`
+  declares it. Both can go once the package exports it.
 
 - **`@chr33s/base-wc` bare imports do not survive bundling.** The package marks
   only `./dist/elements.js` and its stylesheets as having side effects, and this
@@ -289,10 +284,11 @@ shape, end to end.
   `npm run check` failure in `node_modules/`, not in `src/ui/` — fix it upstream by
   preference, or carry it in `patches/` as the `alchemy` dependency does.
 
-- **Reactive fields use `accessor`.** This repository sets no
-  `experimentalDecorators`, so both esbuild and `tsc` compile _standard_
-  decorators, and Lit's `@state` / `@property` need `accessor` under those.
-  Dropping it fails at runtime, not at build time.
+- **Reactive fields use `accessor`.** `src/ui/tsconfig.json` enables
+  TypeScript's legacy decorators and disables define-style class fields. Vite's
+  Oxc transform then lowers Lit's decorators before the browser sees them;
+  `useDefineForClassFields: false` keeps generated fields from shadowing Lit's
+  prototype setters.
 
 - **Shiki is loaded on demand.** It carries every bundled grammar, which is
   megabytes. `highlight.ts` defers `@pierre/diffs` to first use so Activity,

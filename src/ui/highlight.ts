@@ -9,7 +9,7 @@
  *
  * The `web-components` import is the side effect that registers
  * `<diffs-container>`; without it the renderers draw into an unstyled element.
- * See `build.ts` for why it is reached through an alias.
+ * See `vite.config.ts` for why it is reached through an alias.
  */
 import type { File as DiffsFile, FileDiff } from "@pierre/diffs";
 import type { Editor } from "@pierre/diffs/edit";

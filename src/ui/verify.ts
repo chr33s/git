@@ -12,7 +12,7 @@
  * `src/server/Api.ts` and the browser client. It therefore runs without a
  * Worker while still failing immediately if a fixture drifts from the wire.
  *
- *   node src/ui/build.ts && node src/ui/verify.ts
+ *   npm run build:ui && node src/ui/verify.ts
  *   node src/ui/verify.ts --shots <dir>    # also write screenshots
  *
  * Playwright is already a devDependency, and Chromium is expected on PATH or at
@@ -734,16 +734,12 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
   return server;
 };
 
-/** Exercise the actual `dev:ui` proxy, including its one-shot request stream. */
 /**
  * One origin, from whichever entry point put it there.
  *
- * Both ways of running the UI hand the built directory to the same server —
- * `dev:ui` while watching, `serve --ui` from a finished bundle — and the
- * property worth pinning is the one a browser enforces: the page, the bundle
- * and `/{repo}/...` all answer on a single port. It used to take a proxy in
- * front of esbuild's own server to arrange that, and the proxy was the part
- * that could be wrong; there is nothing between them now.
+ * `dev:ui` mounts Vite's source and HMR middleware on the Git host; `serve
+ * --ui` serves a finished bundle from that same host. Both must keep the page,
+ * its entry module and `/{repo}/...` on the single origin browsers require.
  */
 const oneOrigin = async (input: {
   readonly label: string;
@@ -751,6 +747,7 @@ const oneOrigin = async (input: {
    * they are told about it: `dev:ui` reads the environment, the CLI a flag. */
   readonly argv: (root: string, port: number) => readonly string[];
   readonly ready: string;
+  readonly entry: string;
   readonly port: number;
   readonly browser: Browser;
 }): Promise<void> => {
@@ -799,11 +796,12 @@ const oneOrigin = async (input: {
       index.status === 200 && (index.headers.get("content-type") ?? "").startsWith("text/html"),
       `${String(index.status)} ${index.headers.get("content-type") ?? ""}`,
     );
-    const bundle = await fetch(`${origin}/main.js`);
+    const entry = await fetch(`${origin}/${input.entry}`);
     check(
-      "and the bundle beside it",
-      bundle.status === 200 && (bundle.headers.get("content-type") ?? "") === "text/javascript",
-      `${String(bundle.status)} ${bundle.headers.get("content-type") ?? ""}`,
+      "and its entry module beside it",
+      entry.status === 200 &&
+        (entry.headers.get("content-type") ?? "").startsWith("text/javascript"),
+      `${String(entry.status)} ${entry.headers.get("content-type") ?? ""}`,
     );
     // The same origin, which is the whole point: a path the bundle does not
     // hold falls through to the repository the server is hosting.
@@ -2197,8 +2195,9 @@ try {
   // Both entry points, held to the same property; see `oneOrigin`.
   await oneOrigin({
     label: "dev:ui",
-    argv: () => [join(here, "build.ts"), "--serve"],
+    argv: () => [join(here, "dev.ts")],
     ready: "ui:   http",
+    entry: "main.ts",
     port: 8133,
     browser,
   });
@@ -2214,6 +2213,7 @@ try {
       "--ui",
     ],
     ready: "browser UI on",
+    entry: "main.js",
     port: 8134,
     browser,
   });

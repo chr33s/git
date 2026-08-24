@@ -19,28 +19,29 @@
   "type": "module",
   "scripts": {
     "build:sea": "npm run codegen && node src/cli/sea.build.ts",
-    "build:ui": "node src/ui/build.ts",
-    "check": "oxfmt --check && oxlint",
+    "build:ui": "vp build",
+    "build:ui:debug": "vp build --mode development",
+    "check": "vp fmt --check && vp lint",
     "codegen": "node tools/generate-version.ts && wrangler types -c wrangler.test.json",
-    "dev:ui": "node src/ui/build.ts --serve",
+    "dev:ui": "node src/ui/dev.ts",
+    "watch:ui": "vp build --watch",
     "docs:cli": "node tools/generate-cli-reference.ts",
     "docs:cli:check": "node tools/generate-cli-reference.ts --check",
-    "fix": "oxlint --fix && oxfmt --write",
+    "fix": "vp lint --fix && vp fmt",
     "prepare": "patch-package && effect-tsgo patch --oxlint",
     "setup": "npm run codegen",
-    "test": "vitest run",
-    "test:integration": "vitest run --project integration",
-    "test:interop": "vitest run --project interop",
-    "test:unit": "vitest run --project unit",
-    "test:watch": "vitest --project unit",
-    "verify:ui": "node src/ui/build.ts && node src/ui/verify.ts"
+    "test": "vp test run",
+    "test:integration": "vp test run --project integration",
+    "test:interop": "vp test run --project interop",
+    "test:unit": "vp test run --project unit",
+    "test:watch": "vp test --project unit",
+    "verify:ui": "npm run build:ui && node src/ui/verify.ts"
   },
   "dependencies": {
     "effect": "4.0.0-rc.111"
   },
   "devDependencies": {
     "@chr33s/base-wc": "github:chr33s/base-wc",
-    "@cloudflare/workers-types": "5.20260823.1",
     "@effect/platform-node": "4.0.0-rc.111",
     "@effect/tsgo": "0.36.5",
     "@effect/vitest": "4.0.0-rc.111",
@@ -50,15 +51,12 @@
     "@pierre/trees": "1.0.0-beta.6",
     "@types/node": "26.2.0",
     "alchemy": "2.0.0-beta.74",
-    "esbuild": "0.28.2",
     "lit": "3.3.3",
-    "oxfmt": "0.64.0",
-    "oxlint": "1.78.0",
-    "oxlint-tsgolint": "7.0.2001",
     "patch-package": "8.0.1",
     "playwright": "1.62.1",
     "typescript": "7.0.2",
-    "vitest": "4.1.11",
+    "vite-plus": "0.2.9",
+    "vitest": "4.1.10",
     "wrangler": "4.125.0"
   },
   "engines": {
@@ -66,7 +64,6 @@
     "node": ">=24.12.0"
   },
   "allowScripts": {
-    "esbuild": true,
     "fsevents": true,
     "workerd": true,
     "sharp": true

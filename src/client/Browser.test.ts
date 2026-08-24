@@ -2,7 +2,7 @@
  * The browser client in a real browser.
  *
  * `Opfs.test.ts` proves the adapter against a faked directory handle; this
- * proves the fake told the truth. esbuild bundles `adapters/Opfs.ts`,
+ * proves the fake told the truth. Vite+ bundles `adapters/Opfs.ts`,
  * `client/Client.ts` and the domain into an IIFE, Playwright loads it in
  * Chromium on the node host's own origin (localhost is a secure context, so
  * OPFS is live and fetches are same-origin), and the scenario runs against
@@ -22,8 +22,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "@effect/vitest";
 
-import { build } from "esbuild";
 import { Effect, Layer } from "effect";
+import { build } from "vite-plus";
 import { chromium } from "playwright";
 
 import { stores as nodeStores } from "../git/Node.ts";
@@ -197,20 +197,46 @@ describe.skipIf(!hasChromium)("Client in real Chromium", () => {
           ),
         );
 
-        const bundle = await build({
-          stdin: { contents: scenarioEntry, resolveDir: projectRoot, loader: "ts" },
-          bundle: true,
-          format: "iife",
-          platform: "browser",
-          target: "es2022",
-          write: false,
-        });
+        // Vite's library entry is a file, so make one for this scenario.
+        // It lives under the project root so the scenario's relative imports
+        // resolve through the same graph the browser build uses, then is removed
+        // before the test can leave a source artifact behind.
+        const entry = path.join(projectRoot, ".browser-scenario.tmp.ts");
+        await fs.writeFile(entry, scenarioEntry);
+        let bundle: string;
+        try {
+          const built = await build({
+            root: projectRoot,
+            configFile: false,
+            build: {
+              lib: {
+                entry,
+                name: "BrowserScenario",
+                formats: ["iife"],
+                fileName: "browser-scenario",
+              },
+              target: "es2022",
+              write: false,
+            },
+          });
+          if ("on" in built) throw new Error("Vite+ returned a watcher for the browser scenario");
+          const bundles = Array.isArray(built) ? built : [built];
+          const chunk = bundles
+            .flatMap((output) => output.output)
+            .find((output) => output.type === "chunk");
+          if (chunk === undefined || !("code" in chunk)) {
+            throw new Error("Vite+ emitted no browser scenario chunk");
+          }
+          bundle = chunk.code;
+        } finally {
+          await fs.rm(entry, { force: true });
+        }
 
         const page = await browser.newPage();
         // Any response will do: the point is the origin — localhost is a secure
         // context, so OPFS exists and every fetch is same-origin.
         await page.goto(server.url);
-        await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+        await page.addScriptTag({ content: bundle });
 
         // SAFETY: the script tag added above ran `scenarioEntry`, which installs
         // `scenario` on the page's global and resolves with exactly the members

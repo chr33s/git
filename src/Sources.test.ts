@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "@effect/vitest";
 
 import { Effect } from "effect";
@@ -24,7 +24,7 @@ describe("the source tree", () => {
         "*.json",
         "*.md",
       ]).toString();
-      const files = listed.split("\u0000").filter((path) => path.length > 0);
+      const files = listed.split("\u0000").filter((path) => path.length > 0 && existsSync(path));
 
       const offending = files.filter((path) => readFileSync(path).includes(0));
       assert.deepEqual(offending, [], "these files hold a raw control byte and are unsearchable");

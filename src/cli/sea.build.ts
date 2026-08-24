@@ -1,26 +1,26 @@
 /**
  * Single-executable build (`npm run build:sea`).
  *
- * Two steps: esbuild folds the CLI and its dependencies into one minified
- * CommonJS file, then `node --build-sea` (Node 26+) embeds it into a copy of
+ * Two steps: Vite+ Pack folds the CLI and its dependencies into one minified
+ * ESM file, then `node --build-sea` (Node 26+) embeds it into a copy of
  * the running node binary. The result is `dist/sea/git+` — one file
  * that needs no `node` or `node_modules` on the machine it runs on, for the
  * platform this script runs on.
  *
- * Why the knobs are set the way they are (measured on the benchmark harness;
- * together they took `--version` from 163 ms to 93 ms and peak RSS from
- * 131 MiB to 99 MiB):
+ * Why the knobs are set the way they are (40 interleaved `--version` runs on
+ * Node 26.7: ESM plus code cache median 46.2 ms and 81.2 MiB peak RSS;
+ * CommonJS plus code cache 46.3 ms and 80.8 MiB):
  * - `import.meta.main` is defined to `false`: the bundle is one module, so
  *   every entry guard in it (`main.ts`, `host/Node.ts`) would agree it is
  *   "main" and fire together; `sea.ts` calls `run()` explicitly instead.
- * - CommonJS output keeps `require` alive for the CommonJS dependencies
- *   (undici) that esbuild's ESM output turns into a runtime throw, and is
- *   what `useCodeCache` needs.
+ * - ESM is as fast as CommonJS with Node 26.7's SEA code cache, avoids Pack's
+ *   CommonJS warning, and is the format it recommends. Its banner restores
+ *   `require` for CommonJS dependencies (undici) that use it dynamically.
  * - `useCodeCache` embeds the V8 compile cache in the executable, skipping
- *   parse/compile of the bundle on every start. It disables dynamic
- *   `import()` — safe here because everything is bundled — and ties the
- *   executable to the building node's version and platform, which is already
- *   true of the binary itself.
+ *   parse/compile of the bundle on every start. It disables dynamic `import()`
+ *   — safe here because everything is bundled — and ties the executable to
+ *   the building node's version and platform, which is already true of the
+ *   binary itself.
  * - Minification is start-up time as much as size: less source to read and
  *   fewer bytes of code cache to load.
  *
@@ -57,7 +57,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { build } from "esbuild";
+import { build } from "vite-plus/pack";
 
 const major = Number(process.versions.node.split(".")[0]);
 if (major < 26) {
@@ -69,19 +69,26 @@ const out = path.join("dist", "sea");
 fs.mkdirSync(out, { recursive: true });
 
 await build({
-  entryPoints: ["src/cli/sea.ts"],
-  outfile: path.join(out, "main.cjs"),
-  bundle: true,
-  minify: true,
+  entry: ["src/cli/sea.ts"],
+  outDir: out,
+  clean: false,
+  format: "esm",
   platform: "node",
-  format: "cjs",
   target: "node26",
-  // A CJS bundle has no `import.meta`: `main` would misfire the guards in
-  // `main.ts` and `host/Node.ts`, and `dirname` is read at module scope in
-  // `session.ts` and `main.ts`, so an undefined one aborts startup. Inside
-  // the executable the module's directory is the executable's.
-  define: { "import.meta.main": "false", "import.meta.dirname": "__SEA_DIRNAME" },
-  banner: { js: 'var __SEA_DIRNAME=require("node:path").dirname(process.execPath);' },
+  fixedExtension: true,
+  hash: false,
+  minify: true,
+  // A SEA must contain every runtime dependency; it cannot load
+  // `node_modules` after Node has embedded the bundle.
+  deps: { alwaysBundle: /.*/, onlyBundle: false },
+  // `main` would misfire the guards in `main.ts` and `host/Node.ts`; `dirname`
+  // is read at module scope in `session.ts` and `main.ts`, so it must resolve
+  // to the executable's directory. The banner also keeps `require` available
+  // for CommonJS dependencies that call it dynamically.
+  define: { "import.meta.dirname": "__SEA_DIRNAME", "import.meta.main": "false" },
+  banner:
+    'import { createRequire } from "node:module"; import { dirname } from "node:path"; const require=createRequire(import.meta.url); const __SEA_DIRNAME=dirname(process.execPath);',
+  outputOptions: { entryFileNames: "main.mjs", codeSplitting: false },
 });
 
 const executable = path.join(out, process.platform === "win32" ? "git+.exe" : "git+");
@@ -90,8 +97,8 @@ fs.writeFileSync(
   configuration,
   JSON.stringify(
     {
-      main: path.join(out, "main.cjs"),
-      mainFormat: "commonjs",
+      main: path.join(out, "main.mjs"),
+      mainFormat: "module",
       output: executable,
       disableExperimentalSEAWarning: true,
       useCodeCache: true,

@@ -70,10 +70,9 @@ export default Repo.make(
     // @effect-diagnostics-next-line returnEffectInGen:off
     return Effect.gen(function* () {
       // `raw` is RuntimeContext-coloured: available here, not at init.
-      // SAFETY: alchemy types bindings from `@cloudflare/workers-types`, the
-      // backend from the generated worker types; the declarations disagree
-      // (their `Headers` differ) but describe the same runtime object, so
-      // one conversion crosses that seam here and nowhere else.
+      // SAFETY: Alchemy's R2 binding and the generated worker runtime types
+      // disagree (their `Headers` differ) but describe the same runtime
+      // object, so one conversion crosses that seam here and nowhere else.
       const r2: R2Bucket = (yield* bucket.raw) as never;
 
       /**
@@ -89,7 +88,7 @@ export default Repo.make(
        */
       // SAFETY: workerd's `SqlStorage` satisfies the `Sql` port structurally
       // — same value domain, cursor with `toArray` — the declarations differ
-      // only in workers-types' wider `any[]` bindings parameter.
+      // only in Alchemy's wider `any[]` bindings parameter.
       const sql = state.raw.storage.sql as Sql;
       const subscribers = (repo: string) => Subscribers.sql(sql, repo);
 

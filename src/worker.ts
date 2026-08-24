@@ -52,7 +52,7 @@ export default Git.make(
   {
     main: import.meta.url,
     compatibility,
-    // The compiled UI (`node ui/build.ts` → `dist/ui`) rides along as the
+    // The Vite+ UI build (`vp build` → `dist/ui`) rides along as the
     // Worker's static assets, so `/` serves the page and the page's requests
     // to `/:repo/...` stay same-origin — the arrangement the UI's readme
     // promises. Routing is assets-first: a request matching a file (the
@@ -138,10 +138,9 @@ export default Git.make(
         // Anonymous clone and fetch traffic is served from R2 when the
         // repository's published snapshot allows it; see `fromSnapshot`.
         if (Snapshot.readable(raw)) {
-          // SAFETY: alchemy types bindings from `@cloudflare/workers-types`,
-          // the backend from the generated worker types; the declarations
-          // disagree but describe the same runtime object — the same seam
-          // `host/Cloudflare.ts` crosses, in the same single place.
+          // SAFETY: Alchemy's R2 binding and the generated worker runtime
+          // types disagree but describe the same runtime object — the same
+          // seam `host/Cloudflare.ts` crosses, in the same single place.
           const r2: R2Bucket = (yield* bucket.raw) as never;
           const served = yield* fromSnapshot(r2, route.repo, raw);
           if (served !== null) return HttpServerResponse.raw(served);
