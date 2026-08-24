@@ -17,6 +17,8 @@ jobs:
           node-version: 26
           cache: npm
       - run: npm ci
+      # worker-configuration.d.ts is gitignored; lint typeCheck needs it.
+      - run: npm run codegen
       - run: npm run check
       - run: npm run docs:cli:check
       - run: npm run test:unit
@@ -30,6 +32,7 @@ jobs:
           node-version: 26
           cache: npm
       - run: npm ci
+      - run: npm run codegen
       - run: npm run test:integration
 
   compatibility:
