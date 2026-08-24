@@ -1,14 +1,10 @@
 /**
  * git+ design tokens.
  *
- * Extracted verbatim from the Claude Design prototypes:
- *   - `git-plus.dc.html`       (dark, the original)
- *   - `git-plus light.dc.html` (light, derived + softened)
- *
- * The prototypes carried every colour as an inline literal. Each literal that
- * differed between the two files became one token here, so a single `data-theme`
- * flip swaps the whole palette. Values are unchanged — this is a re-encoding,
- * not a re-design.
+ * The neutral palette follows the current UI reference: near-white light
+ * surfaces, graphite dark surfaces, restrained borders, and a deep teal accent.
+ * Primary actions are intentionally monochrome, so action colours are separate
+ * from the accent used for focus, links, and selected controls.
  *
  * `-rgb` variants exist for the colours the design uses at partial alpha
  * (status pills at 10%/25%, kind badges at 12%, diff line backgrounds at 7%).
@@ -19,37 +15,42 @@
   color-scheme: light;
 
   /* surfaces */
-  --gp-bg: #ffffff;
-  --gp-surface: #ffffff;
-  --gp-surface-raised: #fbfbfc;
-  --gp-surface-input: #f7f7f8;
-  --gp-surface-hover: #f2f2f4;
-  --gp-surface-active: #eaeaed;
-  --gp-surface-selected: #efeff1;
-  --gp-row-bg: #ffffff;
-  --gp-row-hover: #f4f4f6;
+  --gp-bg: #fcfcfc;
+  --gp-surface: #f9f9f9;
+  --gp-surface-raised: #f0f0f0;
+  --gp-surface-input: #fcfcfc;
+  --gp-surface-hover: #f0f0f0;
+  --gp-surface-active: #e4e4e4;
+  --gp-surface-selected: #f0f0f0;
+  --gp-row-bg: #f9f9f9;
+  --gp-row-hover: #f0f0f0;
 
   /* borders */
-  --gp-border: #ebebee;
-  --gp-border-strong: #e3e3e8;
-  --gp-border-card: #eaeaed;
-  --gp-border-hover: #d6d6dc;
-  --gp-divider: #f4f4f6;
+  --gp-border: #e4e4e4;
+  --gp-border-strong: #d9d9d9;
+  --gp-border-card: #dedede;
+  --gp-border-hover: #c8c8c8;
+  --gp-divider: #f0f0f0;
 
   /* text */
-  --gp-fg: #2e2e33;
-  --gp-fg-secondary: #52525a;
-  --gp-fg-muted: #74747e;
-  --gp-fg-faint: #9a9aa2;
-  --gp-fg-fainter: #c8c8ce;
-  --gp-fg-dim: #b8b8bf;
+  --gp-fg: #111111;
+  --gp-fg-secondary: #333333;
+  --gp-fg-muted: #666666;
+  --gp-fg-faint: #8a8a8a;
+  --gp-fg-fainter: #b3b3b3;
+  --gp-fg-dim: #a0a0a0;
 
   /* accent */
-  --gp-accent: #0e9f78;
-  --gp-accent-rgb: 14 159 120;
-  --gp-accent-hover: #0b8a68;
+  --gp-accent: #17453c;
+  --gp-accent-rgb: 23 69 60;
+  --gp-accent-hover: #0f3a32;
   --gp-accent-fg: #ffffff;
-  --gp-accent-strong: #0b8a68;
+  --gp-accent-strong: #103f37;
+
+  /* primary action */
+  --gp-action: #111111;
+  --gp-action-hover: #2a2a2a;
+  --gp-action-fg: #ffffff;
 
   /* status hues */
   --gp-blue: #3b6fd6;
@@ -58,9 +59,9 @@
   --gp-purple-rgb: 139 92 214;
   --gp-red: #d64545;
   --gp-red-rgb: 214 69 69;
-  --gp-todo: #74747e;
-  --gp-todo-rgb: 95 95 104;
-  --gp-todo-ring: #9a9aa2;
+  --gp-todo: #666666;
+  --gp-todo-rgb: 102 102 102;
+  --gp-todo-ring: #8a8a8a;
 
   /* label hues */
   --gp-amber: #b0862a;
@@ -69,7 +70,7 @@
   --gp-ts: #3b6fd6;
 
   /* diff */
-  --gp-diff-add-fg: #0b8a68;
+  --gp-diff-add-fg: #17453c;
   --gp-diff-del-fg: #b03535;
 
   /* danger zone */
@@ -77,48 +78,52 @@
   --gp-danger-hover-bg: #fbecec;
 
   /* avatars */
-  --gp-avatar-bg: #eaeaed;
-  --gp-avatar-fg: #52525a;
-  --gp-avatar-alt-bg: #e3e3e8;
-  --gp-avatar-ring: #ffffff;
+  --gp-avatar-bg: #e4e4e4;
+  --gp-avatar-fg: #555555;
+  --gp-avatar-alt-bg: #d9d9d9;
+  --gp-avatar-ring: #f9f9f9;
 
   /* chrome */
-  --gp-scroll-thumb: #e3e3e8;
-  --gp-scroll-track: #f7f7f8;
-  --gp-timeline-grid: #f2f2f4;
+  --gp-scroll-thumb: #d9d9d9;
+  --gp-scroll-track: #f0f0f0;
+  --gp-timeline-grid: #f0f0f0;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --gp-bg: #0c0c0d;
-  --gp-surface: #111113;
-  --gp-surface-raised: #141416;
-  --gp-surface-input: #161618;
-  --gp-surface-hover: #1c1c1f;
-  --gp-surface-active: #26262b;
-  --gp-surface-selected: #1f1f23;
-  --gp-row-bg: #101012;
-  --gp-row-hover: #18181b;
+  --gp-bg: #222222;
+  --gp-surface: #222222;
+  --gp-surface-raised: #191919;
+  --gp-surface-input: #2a2a2a;
+  --gp-surface-hover: #2f2f2f;
+  --gp-surface-active: #343434;
+  --gp-surface-selected: #2a2a2a;
+  --gp-row-bg: #222222;
+  --gp-row-hover: #2a2a2a;
 
-  --gp-border: #1e1e22;
-  --gp-border-strong: #2a2a2e;
-  --gp-border-card: #26262b;
-  --gp-border-hover: #3a3a40;
-  --gp-divider: #18181b;
+  --gp-border: #2f2f2f;
+  --gp-border-strong: #3a3a3a;
+  --gp-border-card: #333333;
+  --gp-border-hover: #4a4a4a;
+  --gp-divider: #2a2a2a;
 
-  --gp-fg: #ececef;
-  --gp-fg-secondary: #b9b9c0;
-  --gp-fg-muted: #8a8a93;
-  --gp-fg-faint: #6b6b74;
-  --gp-fg-fainter: #4a4a52;
-  --gp-fg-dim: #55555c;
+  --gp-fg: #f2f2f2;
+  --gp-fg-secondary: #d4d4d4;
+  --gp-fg-muted: #b0b0b0;
+  --gp-fg-faint: #8a8a8a;
+  --gp-fg-fainter: #5e5e5e;
+  --gp-fg-dim: #707070;
 
-  --gp-accent: #7ee2c0;
-  --gp-accent-rgb: 126 226 192;
-  --gp-accent-hover: #a4f0d6;
-  --gp-accent-fg: #0c0c0d;
-  --gp-accent-strong: #a4f0d6;
+  --gp-accent: #00695c;
+  --gp-accent-rgb: 0 105 92;
+  --gp-accent-hover: #007d6d;
+  --gp-accent-fg: #ffffff;
+  --gp-accent-strong: #008577;
+
+  --gp-action: #fcfcfc;
+  --gp-action-hover: #e8e8e8;
+  --gp-action-fg: #111111;
 
   --gp-blue: #8ab8f2;
   --gp-blue-rgb: 138 184 242;
@@ -126,29 +131,29 @@
   --gp-purple-rgb: 201 166 242;
   --gp-red: #f28b8b;
   --gp-red-rgb: 242 139 139;
-  --gp-todo: #8a8a93;
-  --gp-todo-rgb: 138 138 147;
-  --gp-todo-ring: #6b6b74;
+  --gp-todo: #8a8a8a;
+  --gp-todo-rgb: 138 138 138;
+  --gp-todo-ring: #707070;
 
   --gp-amber: #e2c37e;
   --gp-orange: #f2a76b;
   --gp-cyan: #67d3e0;
   --gp-ts: #6b9ff2;
 
-  --gp-diff-add-fg: #a4f0d6;
+  --gp-diff-add-fg: #6bb7a4;
   --gp-diff-del-fg: #f2a3a3;
 
   --gp-danger-border: #4a2325;
   --gp-danger-hover-bg: #2a1516;
 
-  --gp-avatar-bg: #26262b;
-  --gp-avatar-fg: #b9b9c0;
-  --gp-avatar-alt-bg: #2a2a2e;
-  --gp-avatar-ring: #0f1512;
+  --gp-avatar-bg: #2a2a2a;
+  --gp-avatar-fg: #bdbdbd;
+  --gp-avatar-alt-bg: #333333;
+  --gp-avatar-ring: #222222;
 
-  --gp-scroll-thumb: #2a2a2e;
-  --gp-scroll-track: #0c0c0d;
-  --gp-timeline-grid: #17171a;
+  --gp-scroll-thumb: #3a3a3a;
+  --gp-scroll-track: #222222;
+  --gp-timeline-grid: #2a2a2a;
 }
 
 /* Follow the OS when the user has expressed no preference. */
@@ -156,34 +161,38 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --gp-bg: #0c0c0d;
-    --gp-surface: #111113;
-    --gp-surface-raised: #141416;
-    --gp-surface-input: #161618;
-    --gp-surface-hover: #1c1c1f;
-    --gp-surface-active: #26262b;
-    --gp-surface-selected: #1f1f23;
-    --gp-row-bg: #101012;
-    --gp-row-hover: #18181b;
+    --gp-bg: #222222;
+    --gp-surface: #222222;
+    --gp-surface-raised: #191919;
+    --gp-surface-input: #2a2a2a;
+    --gp-surface-hover: #2f2f2f;
+    --gp-surface-active: #343434;
+    --gp-surface-selected: #2a2a2a;
+    --gp-row-bg: #222222;
+    --gp-row-hover: #2a2a2a;
 
-    --gp-border: #1e1e22;
-    --gp-border-strong: #2a2a2e;
-    --gp-border-card: #26262b;
-    --gp-border-hover: #3a3a40;
-    --gp-divider: #18181b;
+    --gp-border: #2f2f2f;
+    --gp-border-strong: #3a3a3a;
+    --gp-border-card: #333333;
+    --gp-border-hover: #4a4a4a;
+    --gp-divider: #2a2a2a;
 
-    --gp-fg: #ececef;
-    --gp-fg-secondary: #b9b9c0;
-    --gp-fg-muted: #8a8a93;
-    --gp-fg-faint: #6b6b74;
-    --gp-fg-fainter: #4a4a52;
-    --gp-fg-dim: #55555c;
+    --gp-fg: #f2f2f2;
+    --gp-fg-secondary: #d4d4d4;
+    --gp-fg-muted: #b0b0b0;
+    --gp-fg-faint: #8a8a8a;
+    --gp-fg-fainter: #5e5e5e;
+    --gp-fg-dim: #707070;
 
-    --gp-accent: #7ee2c0;
-    --gp-accent-rgb: 126 226 192;
-    --gp-accent-hover: #a4f0d6;
-    --gp-accent-fg: #0c0c0d;
-    --gp-accent-strong: #a4f0d6;
+    --gp-accent: #00695c;
+    --gp-accent-rgb: 0 105 92;
+    --gp-accent-hover: #007d6d;
+    --gp-accent-fg: #ffffff;
+    --gp-accent-strong: #008577;
+
+    --gp-action: #fcfcfc;
+    --gp-action-hover: #e8e8e8;
+    --gp-action-fg: #111111;
 
     --gp-blue: #8ab8f2;
     --gp-blue-rgb: 138 184 242;
@@ -191,29 +200,29 @@
     --gp-purple-rgb: 201 166 242;
     --gp-red: #f28b8b;
     --gp-red-rgb: 242 139 139;
-    --gp-todo: #8a8a93;
-    --gp-todo-rgb: 138 138 147;
-    --gp-todo-ring: #6b6b74;
+    --gp-todo: #8a8a8a;
+    --gp-todo-rgb: 138 138 138;
+    --gp-todo-ring: #707070;
 
     --gp-amber: #e2c37e;
     --gp-orange: #f2a76b;
     --gp-cyan: #67d3e0;
     --gp-ts: #6b9ff2;
 
-    --gp-diff-add-fg: #a4f0d6;
+    --gp-diff-add-fg: #6bb7a4;
     --gp-diff-del-fg: #f2a3a3;
 
     --gp-danger-border: #4a2325;
     --gp-danger-hover-bg: #2a1516;
 
-    --gp-avatar-bg: #26262b;
-    --gp-avatar-fg: #b9b9c0;
-    --gp-avatar-alt-bg: #2a2a2e;
-    --gp-avatar-ring: #0f1512;
+    --gp-avatar-bg: #2a2a2a;
+    --gp-avatar-fg: #bdbdbd;
+    --gp-avatar-alt-bg: #333333;
+    --gp-avatar-ring: #222222;
 
-    --gp-scroll-thumb: #2a2a2e;
-    --gp-scroll-track: #0c0c0d;
-    --gp-timeline-grid: #17171a;
+    --gp-scroll-thumb: #3a3a3a;
+    --gp-scroll-track: #222222;
+    --gp-timeline-grid: #2a2a2a;
   }
 }
 
