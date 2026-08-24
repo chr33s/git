@@ -69,12 +69,12 @@ toggles say they are local to the browser, and the danger zone's buttons are
 disabled with a title saying why. Offline, every write affordance disables
 rather than failing on click.
 
-Editing is the pencil on the file card and the explorer's "+": both open a
-textarea over the blob, and committing sends the file with `expected` pinned
-to the tip the editor opened at — a commit that lands mid-edit answers
-`RefConflict` and is shown as one, never silently overwritten. Offline, the
-editor disables: the sample repository is read-only because there is nothing
-to write to.
+Editing is the pencil on the file card and the explorer's "+": both attach
+`@pierre/diffs`'s editor to the rendered blob, and committing sends the file
+with `expected` pinned to the tip the editor opened at — a commit that lands
+mid-edit answers `RefConflict` and is shown as one, never silently overwritten.
+Offline, the editor disables: the sample repository is read-only because there
+is nothing to write to.
 
 **Tasks and Change Requests read the hub.** The git-native hub
 (`src/hub/PullRequest.ts`, `src/hub/Projection.ts`, `src/hub/Task.ts`) models

@@ -58,6 +58,35 @@ const check = (name: string, ok: boolean, detail = ""): void => {
   if (!ok) failures.push(name);
 };
 
+/** `@pierre/diffs` makes the rendered blob a `role=textbox` once attached. */
+const editorBox = (page: Page) => page.locator(".gp-source-host [role='textbox']");
+
+/**
+ * Replace the attached editor's document.
+ *
+ * Pierre owns the text in a `TextDocument` and only mutates it from
+ * `beforeinput`, so a Playwright `fill()` of the contenteditable would paint
+ * the DOM without moving what `#save` reads. Select-all then `insertText`
+ * is the same path a keystroke takes.
+ */
+const fillEditor = async (page: Page, text: string): Promise<void> => {
+  const box = editorBox(page);
+  await box.waitFor({ state: "visible" });
+  await box.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await box.evaluate((el, value) => {
+    el.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        data: value,
+        inputType: "insertText",
+      }),
+    );
+  }, text);
+};
+
 /** A repository the `live` suite serves: two refs, and a file that differs. */
 const oid = Schema.decodeUnknownSync(Contract.OidString);
 const OID_MAIN = oid("2".repeat(40));
@@ -1310,12 +1339,24 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
 
   // --- editing, through POST /commit --------------------------------------
   await page.click('.gp-file-card button[aria-label="Edit file"]');
-  await page.waitForTimeout(300);
+  await editorBox(page).waitFor({ state: "visible" });
   check(
     "the pencil opens the blob in an editor",
-    (await page.inputValue(".gp-editor")).includes("Live from the API."),
+    ((await editorBox(page).textContent()) ?? "").includes("Live from the API."),
   );
-  await page.fill(".gp-editor", "# core\n\nEdited from the UI.\n");
+  const editorThemeBefore = await rendererTheme();
+  await page.click(".gp-theme-toggle");
+  await page.waitForTimeout(500);
+  const editorThemeAfter = await rendererTheme();
+  check(
+    "an attached editor follows theme changes",
+    editorThemeBefore !== "" && editorThemeAfter !== "" && editorThemeBefore !== editorThemeAfter,
+  );
+  check(
+    "and keeps the draft across the palette flip",
+    ((await editorBox(page).textContent()) ?? "").includes("Live from the API."),
+  );
+  await fillEditor(page, "# core\n\nEdited from the UI.\n");
   await page.fill(".gp-editor-message", "update the README from the browser");
   await page.click(".gp-editor-bar .gp-btn-primary");
   await page.waitForTimeout(1500);
@@ -1336,9 +1377,9 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
 
   // --- a new file, from the explorer's "+" --------------------------------
   await page.click('.gp-explorer button[aria-label="New file"]');
-  await page.waitForTimeout(300);
+  await editorBox(page).waitFor({ state: "visible" });
   await page.fill(".gp-editor-path", "docs/notes.md");
-  await page.fill(".gp-editor", "# Notes\n");
+  await fillEditor(page, "# Notes\n");
   await page.click(".gp-editor-bar .gp-btn-primary");
   await page.waitForTimeout(1500);
   check(
@@ -1864,8 +1905,8 @@ const localMode = async (browser: Browser): Promise<void> => {
 
     // Edit and commit — locally: the tip moves in OPFS, not on the server.
     await page.click('.gp-file-card button[aria-label="Edit file"]');
-    await page.waitForTimeout(400);
-    await page.fill(".gp-editor", "# core\n\nEdited in the browser, committed to OPFS.\n");
+    await editorBox(page).waitFor({ state: "visible" });
+    await fillEditor(page, "# core\n\nEdited in the browser, committed to OPFS.\n");
     await page.fill(".gp-editor-message", "edit readme locally");
     await page.click(".gp-editor-bar .gp-btn-primary");
     await page.waitForTimeout(1200);
@@ -2014,8 +2055,8 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.click(".gp-new-branch button[type='submit']");
     await page.waitForTimeout(1500);
     await page.click('.gp-file-card button[aria-label="Edit file"]');
-    await page.waitForTimeout(400);
-    await page.fill(".gp-editor", "# core\n\nProposed from the browser.\n");
+    await editorBox(page).waitFor({ state: "visible" });
+    await fillEditor(page, "# core\n\nProposed from the browser.\n");
     await page.fill(".gp-editor-message", "propose from the browser");
     await page.click(".gp-editor-bar .gp-btn-primary");
     await page.waitForTimeout(1200);
