@@ -64,12 +64,12 @@ Knowledge Concepts
 
 Each layer answers a different question:
 
-| Layer | Question |
-| --- | --- |
-| signed session / decision | What happened, and who said or did it? |
-| Knowledge Concept | What reusable thing does the repository currently claim to know? |
-| Repository Memory | What small set of useful current knowledge should every session receive cheaply? |
-| Context Pack / Exposure | Was this knowledge or its supporting repository evidence exposed to this invocation? |
+| Layer                     | Question                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------ |
+| signed session / decision | What happened, and who said or did it?                                               |
+| Knowledge Concept         | What reusable thing does the repository currently claim to know?                     |
+| Repository Memory         | What small set of useful current knowledge should every session receive cheaply?     |
+| Context Pack / Exposure   | Was this knowledge or its supporting repository evidence exposed to this invocation? |
 
 A Concept is curated publication. Signed records remain the underlying provenance. Memory is a bounded projection. Context Exposure is the invocation-specific recall boundary.
 
@@ -100,6 +100,8 @@ Git+ currently profiles OKF v0.2:
 ```text
 https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
 ```
+
+That link tracks `main` and can drift. Programmatic consumers SHOULD pin the profiled upstream revision (tag or commit) rather than rely on the moving branch; this document profiles OKF v0.2 as published at the time of the revision above.
 
 The root `index.md` MAY carry OKF's `okf_version` metadata. Tools that rewrite a Concept SHOULD preserve unknown portable metadata.
 
@@ -276,7 +278,7 @@ gitplus:
     vendor-contract:
       retrieved_at: 2026-08-22T09:10:00Z
       content_digest: sha256:...
-      snapshot: sha256:...   # optional retained object/blob
+      snapshot: sha256:... # optional retained object/blob
 ```
 
 Rules:
@@ -344,7 +346,7 @@ Do not collapse these into one trust score.
 Git+ follows OKF's lifecycle fields:
 
 ```yaml
-status: draft        # draft | stable | deprecated
+status: draft # draft | stable | deprecated
 stale_after: 2026-12-31T00:00:00Z
 ```
 

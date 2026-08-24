@@ -191,7 +191,7 @@ Ranges are half-open byte offsets `[start, end)` into exact blob bytes. They MUS
 0 ≤ start < end ≤ blobSize
 ```
 
-Whole-blob evidence SHOULD omit `range`. A UTF-8 renderer MUST NOT slice through a codepoint boundary.
+Ranges are therefore non-empty by construction; zero-length evidence is invalid. Whole-blob evidence SHOULD omit `range`. A UTF-8 renderer MUST NOT slice through a codepoint boundary.
 
 Symlinks are blob evidence containing the link-target bytes. A verifier MUST NOT silently follow them.
 

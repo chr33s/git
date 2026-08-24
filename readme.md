@@ -85,17 +85,17 @@ A harness opens a session, the agent produces ordinary Git commits, and the harn
 
 ```bash
 session=$(git+ session open \
-  --key ~/.ssh/id_ed25519 \
-  --agent claude-code \
-  --model model-x \
+  --key="$HOME/.ssh/id_ed25519" \
+  --agent=claude-code \
+  --model=model-x \
   --prompt="Fix authentication policy")
 
 # edit / test / commit
 
 git+ session produce \
-  --key ~/.ssh/id_ed25519 \
-  --session "$session" \
-  --commit HEAD \
+  --key="$HOME/.ssh/id_ed25519" \
+  --session="$session" \
+  --commit=HEAD \
   --note="Worker auth tests require the production policy fixture"
 ```
 

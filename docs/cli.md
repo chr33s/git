@@ -92,6 +92,7 @@ Conventions:
 `npm run docs:cli` replaces the block below with the executable's `--help` output.
 
 <!-- BEGIN GENERATED CLI HELP -->
+
 ```text
 git+ --help
 
@@ -114,6 +115,7 @@ Knowledge / Audit
 Harness plumbing
   trace
 ```
+
 <!-- END GENERATED CLI HELP -->
 
 ---
@@ -149,18 +151,18 @@ Typical harness flow:
 
 ```bash
 session=$(git+ session open \
-  --key ~/.ssh/id_ed25519 \
-  --agent claude-code \
-  --model model-x \
-  --prompt "Fix auth policy")
+  --key="$HOME/.ssh/id_ed25519" \
+  --agent=claude-code \
+  --model=model-x \
+  --prompt="Fix auth policy")
 
 # work
 
 git+ session produce \
-  --key ~/.ssh/id_ed25519 \
-  --session "$session" \
-  --commit HEAD \
-  --note "Worker auth tests require the production policy fixture"
+  --key="$HOME/.ssh/id_ed25519" \
+  --session="$session" \
+  --commit=HEAD \
+  --note="Worker auth tests require the production policy fixture"
 ```
 
 Inspect a session by ID or by the branch it produced:
@@ -211,14 +213,14 @@ When the agent reaches a question that needs human judgement:
 
 ```bash
 git+ session ask \
-  --session "$session" \
-  --question "Which compatibility behavior should remain?" \
+  --session="$session" \
+  --question="Which compatibility behavior should remain?" \
   --option="strict,legacy"
 
 git+ session answer \
-  --session "$session" \
-  --decision <decision-id> \
-  --chose strict
+  --session="$session" \
+  --decision=<decision-id> \
+  --chose=strict
 ```
 
 The answer becomes signed causal provenance instead of an ephemeral chat message.
@@ -356,9 +358,9 @@ Raw trace writing exists for integrations without suitable native OTel:
 
 ```bash
 git+ trace record \
-  --session <session-id> \
-  --key <private-key> \
-  --event <event.json>
+  --session=<session-id> \
+  --key=<private-key> \
+  --event=<event.json>
 ```
 
 The recorder binds the repository and session, validates the normalized event, signs it, appends it under `refs/hub/trace/<session>`, and returns the Git record OID.

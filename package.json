@@ -20,7 +20,7 @@
   "scripts": {
     "build:sea": "node src/cli/sea.build.ts",
     "build:ui": "node src/ui/build.ts",
-    "check": "oxfmt --check && oxlint",
+    "check": "oxfmt --check && oxlint && node tools/cli-docs.ts --check",
     "dev:ui": "node src/ui/build.ts --serve",
     "docs:cli": "node tools/cli-docs.ts",
     "fix": "oxlint --fix && oxfmt --write",

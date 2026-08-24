@@ -10,10 +10,16 @@ const END = "<!-- END GENERATED CLI HELP -->";
 const document = fileURLToPath(new URL("../docs/cli.md", import.meta.url));
 const cli = fileURLToPath(new URL("../src/cli/bin.ts", import.meta.url));
 
+// Runs bin.ts directly; relies on Node >=24 native TypeScript type stripping.
 const rendered = spawnSync(process.execPath, [cli, "--help"], {
   encoding: "utf8",
   env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
 });
+
+if (rendered.error) {
+  console.error(`failed to spawn ${cli}: ${rendered.error.message}`);
+  process.exit(1);
+}
 
 if (rendered.status !== 0) {
   process.stderr.write(rendered.stderr);

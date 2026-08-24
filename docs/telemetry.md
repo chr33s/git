@@ -709,11 +709,13 @@ Raw trace writing is an integration surface, not a normal human workflow.
 A fallback harness without suitable OTel may use:
 
 ```text
-git+ trace record <repo> \
-  --session <session-id> \
-  --key <private-key> \
-  --event <event.json>
+git+ trace record \
+  --session=<session-id> \
+  --key=<private-key> \
+  --event=<event.json>
 ```
+
+The command follows the shared repository-discovery convention: the current checkout is the default, and explicit repository selection remains available for bare/server use.
 
 The recorder validates the normalized event, applies retention/secret policy, binds repository/session identity, signs it, appends under `refs/hub/trace/<session>`, and returns the qualified Git record OID.
 
