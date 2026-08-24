@@ -837,14 +837,18 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
           } as const);
   }
 
+  // The audience a host-bound credential is checked against comes from the
+  // host layer when it knows it, and only falls back to the request URL's host
+  // where that host is the true destination (see `RequestAudience`). Reading it
+  // straight off `input.request.url` would trust the client's `Host` header on
+  // a self-hosted server, which is the whole binding defeated.
+  const audience = Option.getOrElse(yield* Effect.serviceOption(RequestAudience), () =>
+    audienceOf(input.request.url),
+  );
+
   const identified =
     presented.kind === "delegated"
-      ? yield* openDelegation(
-          presented.credential,
-          projection.repoId,
-          now,
-          audienceOf(input.request.url),
-        )
+      ? yield* openDelegation(presented.credential, projection.repoId, now, audience)
       : yield* openEnvelope({
           payload: presented.payload,
           signature: presented.signature,
@@ -1118,6 +1122,31 @@ export class AnonymousWrites extends Context.Service<AnonymousWrites, boolean>()
 
 export const anonymousWrites = (allowed: boolean): Layer.Layer<AnonymousWrites> =>
   Layer.succeed(AnonymousWrites)(allowed);
+
+/**
+ * The host a host-bound delegation must match — the authority the request
+ * *actually* arrived at, as only the host layer can know it.
+ *
+ * The audience half of a delegation exists to stop a mirror replaying, back at
+ * the origin, the near-admin token it was handed. That check is only as strong
+ * as the host it compares against, and the request URL is the wrong place to
+ * read it on a self-hosted server: there the URL's host is the client's `Host`
+ * header, which the party the binding distrusts can set to whatever the token
+ * names. So the host provides the audience it validated instead — the header
+ * matched against its configured authorities, or `null` where none matched,
+ * which refuses every host-bound credential (the same fail-closed choice
+ * `openDelegation` already makes for an unknown host).
+ *
+ * A platform whose request URL *is* the true destination — Cloudflare serves
+ * the very request the edge received — provides no value here, and the guard
+ * falls back to the URL's host, which is trustworthy in that case.
+ */
+export class RequestAudience extends Context.Service<RequestAudience, string | null>()(
+  "server/RequestAudience",
+) {}
+
+export const requestAudience = (host: string | null): Layer.Layer<RequestAudience> =>
+  Layer.succeed(RequestAudience)(host);
 
 /** Anonymous, for the paths that never authenticated anybody. */
 export const anonymous: Authenticated = {

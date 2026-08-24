@@ -24,6 +24,7 @@ import {
   openDelegation,
   present,
   REPLICATION_CAPABILITIES,
+  requestAudience,
   requiredCapability,
   signEnvelope,
 } from "./Auth.ts";
@@ -963,5 +964,86 @@ describe("what a registered remote presents", () => {
         assert.equal(outcome.token, "s3cret");
         assert.equal(outcome.neither, undefined);
       }),
+  );
+});
+
+describe("verifies a host-bound delegation against the arrived-at host, not the client's", () => {
+  // The audience half of a delegation exists to stop a mirror replaying, back
+  // at the origin, the near-admin token it was handed. The host it is checked
+  // against is supplied by the host layer (`RequestAudience`) precisely so a
+  // client cannot name it: on a self-hosted server the request URL's host is
+  // the client's `Host` header, so were the check read from there, a mirror
+  // could set `Host` to the token's own audience and defeat the binding.
+
+  /** Mint the near-admin, host-bound credential a mirror is handed. */
+  const boundCredential = Effect.fn("test.boundCredential")(function* () {
+    const { genesis, member } = yield* hub(["source.push"]);
+    const credential = yield* mintDelegation({
+      key: member,
+      repo: genesis.repoId,
+      capabilities: ["source.push"],
+      audience: "mirror.example.com:8443",
+      ttlSeconds: 300,
+    });
+    // The request URL's host is the mirror's — the forged `Host` a replay
+    // sends so the URL agrees with the token's audience. The fix ignores it.
+    return {
+      credential,
+      request: new Request("http://mirror.example.com:8443/r/git-receive-pack", {
+        method: "POST",
+        headers: basic(credential),
+      }),
+    };
+  });
+
+  it.effect("refuses the replay when the arrived-at host is not the token's audience", () =>
+    Effect.promise(async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { request } = yield* boundCredential();
+          // The host the request truly arrived at is the origin — the replay
+          // target — not the mirror the `Host` header claims.
+          return yield* authenticate({ request, capability: ["source.push"] }).pipe(
+            Effect.provide(requestAudience("origin.example.com")),
+          );
+        }),
+      );
+
+      assert.equal(outcome.ok, false, "the mirror's replay must not authenticate at the origin");
+    }),
+  );
+
+  it.effect("refuses it likewise where the arrived-at host is unknown", () =>
+    Effect.promise(async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { request } = yield* boundCredential();
+          // No configured host matched the `Host` header, so the host layer
+          // reports no trustworthy audience — fail closed, as for a mismatch.
+          return yield* authenticate({ request, capability: ["source.push"] }).pipe(
+            Effect.provide(requestAudience(null)),
+          );
+        }),
+      );
+
+      assert.equal(outcome.ok, false, "an unknown arrived-at host refuses a bound credential");
+    }),
+  );
+
+  it.effect("admits it where the arrived-at host is the token's audience", () =>
+    Effect.promise(async () => {
+      const outcome = await scenario(
+        Effect.gen(function* () {
+          const { request } = yield* boundCredential();
+          // The legitimate case: the mirror itself receives the token at the
+          // host it was minted for, which the host layer confirms.
+          return yield* authenticate({ request, capability: ["source.push"] }).pipe(
+            Effect.provide(requestAudience("mirror.example.com:8443")),
+          );
+        }),
+      );
+
+      assert.equal(outcome.ok, true, "the audience host must still accept the credential");
+    }),
   );
 });

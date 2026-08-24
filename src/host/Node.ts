@@ -65,10 +65,18 @@ export interface DevelopmentMiddleware {
   readonly close: () => Promise<void>;
 }
 
-export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname"> {
+export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname" | "hosts"> {
   /** Defaults to an ephemeral port; the return value carries the real one. */
   readonly port?: number;
   readonly hostname?: string;
+  /**
+   * Public authorities this server answers to; see `ServeConfig.hosts`.
+   *
+   * Optional: the server's own bound `hostname:port` is always trusted, so a
+   * server reached at the address it binds needs none. Set it only where the
+   * public name differs from the bind address (behind a reverse proxy).
+   */
+  readonly hosts?: ReadonlyArray<string>;
   /**
    * Serve writes to repositories that have no genesis.
    *
@@ -134,6 +142,36 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const hostname = options.hostname ?? "127.0.0.1";
   /** Only reached by a client that sent no `Host`, which HTTP/1.1 requires. */
   let fallbackAuthority = `${hostname}:${options.port ?? 0}`;
+
+  /**
+   * The extra public authorities a host-bound credential may name, lowercased
+   * for the case-insensitive match a `Host` header needs. See
+   * `Auth.RequestAudience`: the `Host` header cannot be trusted to say what
+   * host a request arrived at, so a delegation's audience is checked against
+   * these (and the bound authority below) rather than the header alone. Empty
+   * is the common case — the server's own bound authority is trusted anyway.
+   */
+  const trustedHosts = new Set((options.hosts ?? []).map((host) => host.toLowerCase()));
+
+  /**
+   * The audience to check a host-bound credential against: the `Host` header
+   * only when it names an authority this server actually answers to, and
+   * `null` otherwise — which refuses the credential rather than trusting a
+   * header the client (a mirror, in the case that matters) chose.
+   *
+   * "Actually answers to" is the server's own bound authority — its real
+   * `hostname:port`, which it controls, not the client — plus any public
+   * authorities configured for a server reached under a different name (behind
+   * a proxy, say). A mirror's host is neither, so its replay still fails; a
+   * client cloning straight from this server names the bound authority, so the
+   * common single-origin case needs no configuration.
+   */
+  const arrivedAudience = (host: string | undefined): string | null => {
+    if (host === undefined) return null;
+    const normalized = host.toLowerCase();
+    if (normalized === fallbackAuthority.toLowerCase()) return normalized;
+    return trustedHosts.has(normalized) ? normalized : null;
+  };
 
   interface RepoState {
     readonly layer: Layer.Layer<Repository>;
@@ -609,7 +647,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // secret to configure any more, so there is nothing to leave off.
       const denied = await Effect.runPromise(
         Auth.guard(request).pipe(
-          Effect.provide(Layer.mergeAll(guardLayer(repo), nonces, openWrites, federation)),
+          Effect.provide(
+            Layer.mergeAll(
+              guardLayer(repo),
+              nonces,
+              openWrites,
+              federation,
+              // The audience a host-bound credential is verified against — the
+              // `Host` header only where it matches a configured authority,
+              // never the raw header, which the client controls.
+              Auth.requestAudience(arrivedAudience(incoming.headers.host)),
+            ),
+          ),
           // A repository whose identity cannot be read is not a repository
           // with no members: it is one nobody can be checked against, and the
           // honest answer is that the service is unavailable.
