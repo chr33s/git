@@ -30,7 +30,13 @@ import {
 
 import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
-import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
+import {
+  Invalid,
+  ObjectNotFound,
+  OperationNotFound,
+  PackCorrupt,
+  RefConflict,
+} from "../git/Error.ts";
 import {
   EMPTY_TREE_OID,
   isGitlink,
@@ -91,7 +97,10 @@ import {
   GrepRequest,
   GrepResponse,
   BisectAnswer,
+  BundlesResponse,
   HistoryPage,
+  OperationList,
+  OperationView,
   HubEventAppended,
   HubEventRequest,
   type HubMergeable,
@@ -138,6 +147,8 @@ interface RemoteRequest {
   sync?: { mode: "manual" | "fetch" | "push" | "mirror"; refs: ReadonlyArray<string> };
 }
 import { NewSubscriberWire, redact, Subscribers } from "./Subscribers.ts";
+import { Bundles } from "./Bundles.ts";
+import { Operations } from "./Operations.ts";
 import { fetchFrom, pull, remoteFor } from "./Sync.ts";
 
 /** JSON has no `Date`: `at` crosses as an ISO string, `offset` in minutes. */
@@ -1005,6 +1016,33 @@ const repo = HttpApiGroup.make("repo")
       error: [ObjectNotFound, Invalid],
     }),
   )
+  .add(
+    HttpApiEndpoint.get("bundles", "/bundles", {
+      params: RepoParam,
+      success: BundlesResponse,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("operations", "/operations", {
+      params: RepoParam,
+      query: { state: Schema.optional(Schema.String) },
+      success: OperationList,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("operation", "/operations/:id", {
+      params: { ...RepoParam, id: Schema.String },
+      success: OperationView,
+      error: [OperationNotFound],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("operationCancel", "/operations/:id/cancel", {
+      params: { ...RepoParam, id: Schema.String },
+      success: OperationView,
+      error: [OperationNotFound, Invalid],
+    }),
+  )
   .prefix("/:repo");
 
 /**
@@ -1257,6 +1295,46 @@ type PushRequest = {
   token?: string;
   force?: boolean;
   atomic?: boolean;
+};
+
+type OperationDraft = {
+  id: string;
+  repo: string;
+  kind: string;
+  state: OperationView["state"];
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  progress?: OperationView["progress"];
+  message?: string;
+  error?: OperationView["error"];
+};
+
+const operationView = (operation: {
+  readonly id: string;
+  readonly repo: string;
+  readonly kind: string;
+  readonly state: OperationView["state"];
+  readonly createdAt: string;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly progress?: OperationView["progress"];
+  readonly message?: string;
+  readonly error?: OperationView["error"];
+}): OperationView => {
+  const view: OperationDraft = {
+    id: operation.id,
+    repo: operation.repo,
+    kind: operation.kind,
+    state: operation.state,
+    created_at: operation.createdAt,
+  };
+  if (operation.startedAt !== undefined) view.started_at = operation.startedAt;
+  if (operation.finishedAt !== undefined) view.finished_at = operation.finishedAt;
+  if (operation.progress !== undefined) view.progress = operation.progress;
+  if (operation.message !== undefined) view.message = operation.message;
+  if (operation.error !== undefined) view.error = operation.error;
+  return view;
 };
 
 /** `StorageFailure` is a defect here: a 500 no caller can act on. */
@@ -2097,6 +2175,44 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       bisectNext({ bad: payload.bad, good: payload.good }).pipe(
         Effect.catchTag("StorageFailure", Effect.die),
       ),
+    )
+    .handle("bundles", () =>
+      Effect.gen(function* () {
+        const bundles = yield* Effect.serviceOption(Bundles);
+        if (Option.isNone(bundles)) return { enabled: false, families: [] };
+        return yield* bundles.value.summary.pipe(Effect.catchTag("StorageFailure", Effect.die));
+      }),
+    )
+    .handle("operations", ({ query }) =>
+      Effect.gen(function* () {
+        const operations = yield* Effect.serviceOption(Operations);
+        if (Option.isNone(operations)) return { operations: [] };
+        const state =
+          query.state === "queued" ||
+          query.state === "running" ||
+          query.state === "succeeded" ||
+          query.state === "failed" ||
+          query.state === "cancelled"
+            ? query.state
+            : undefined;
+        const listed = yield* operations.value.list(state === undefined ? {} : { state });
+        return { operations: listed.map(operationView) };
+      }),
+    )
+    .handle("operation", ({ params }) =>
+      Effect.gen(function* () {
+        const operations = yield* Effect.serviceOption(Operations);
+        if (Option.isNone(operations)) return yield* new OperationNotFound({ id: params.id });
+        return operationView(yield* operations.value.get(params.id));
+      }),
+    )
+    .handle("operationCancel", ({ params }) =>
+      Effect.gen(function* () {
+        yield* requireCapability("repo.admin");
+        const operations = yield* Effect.serviceOption(Operations);
+        if (Option.isNone(operations)) return yield* new OperationNotFound({ id: params.id });
+        return operationView(yield* operations.value.cancel(params.id));
+      }),
     ),
 );
 

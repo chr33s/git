@@ -27,12 +27,20 @@ import { type GitError, statusOf, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
+import type { ObjectStore } from "../git/Store.ts";
 import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Archive from "../server/Archive.ts";
+import * as Bundles from "../server/Bundles.ts";
+import { r2Layer as bundleR2, r2MetaLayer } from "../server/Bundles.cloudflare.ts";
 import * as CommitPack from "../server/CommitPack.ts";
+import { defaultsLayer as featuresLayer } from "../server/Features.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as LfsCore from "../server/Lfs.ts";
+import {
+  handleEvents as operationEvents,
+  memoryLayer as operationsMemory,
+} from "../server/Operations.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Snapshot from "../server/Snapshot.ts";
@@ -80,7 +88,7 @@ export default Repo.make(
        * from the stores, so storage has to resolve when the layer is built.
        * That correspondence is why a repository maps onto a DO at all.
        */
-      const layers = new Map<string, Layer.Layer<Repository>>();
+      const layers = new Map<string, Layer.Layer<ObjectStore | Repository>>();
 
       /**
        * The subscriber registry on this instance's own SQLite, beside the
@@ -95,7 +103,7 @@ export default Repo.make(
       /** The remotes this repository fetches from, on that same SQLite. */
       const remotes = (repo: string) => Remotes.sql(sql, repo);
 
-      const live = (repo: string): Layer.Layer<Repository> => {
+      const live = (repo: string): Layer.Layer<ObjectStore | Repository> => {
         const existing = layers.get(repo);
         if (existing !== undefined) return existing;
         // Delivery runs in `waitUntil`, so a slow receiver never adds its
@@ -159,6 +167,19 @@ export default Repo.make(
         return built;
       };
 
+      const services = (repo: string) => {
+        const built = live(repo);
+        const bundles = bundleR2({ bucket: r2, repo });
+        return Layer.mergeAll(
+          built,
+          bundles,
+          r2MetaLayer({ bucket: r2, repo }),
+          operationsMemory,
+          featuresLayer,
+          Bundles.layer.pipe(Layer.provide(bundles), Layer.provide(built)),
+        );
+      };
+
       /**
        * Response bodies still being read, per repository.
        *
@@ -216,7 +237,7 @@ export default Repo.make(
         if (existing !== undefined) return existing;
         const router = HttpRouter.toWebHandler(
           Api.layer(remotes(repo)).pipe(
-            Layer.provideMerge(live(repo)),
+            Layer.provideMerge(services(repo)),
             Layer.provideMerge(subscribers(repo)),
             Layer.provideMerge(openWrites),
           ),
@@ -423,6 +444,31 @@ export default Repo.make(
             );
           }
 
+          if (route === "bundles" && matched.rest !== "bundles") {
+            return Bundles.tryHandle(request).pipe(
+              Effect.map(
+                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+              ),
+              Effect.catch((error: GitError) =>
+                Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
+              ),
+              Effect.provide(services(repo)),
+              Effect.map((response) => track(repo, response)),
+            );
+          }
+
+          if (route === "operations" && matched.rest.endsWith("/events")) {
+            return operationEvents(request).pipe(
+              Effect.map(
+                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+              ),
+              Effect.catch((error: GitError) =>
+                Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
+              ),
+              Effect.provide(services(repo)),
+            );
+          }
+
           if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
             return Protocol.handle(request).pipe(
               Effect.map(
@@ -431,7 +477,7 @@ export default Repo.make(
               Effect.catch((error: GitError) =>
                 Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
               ),
-              Effect.provide(Layer.mergeAll(live(repo), requester, openWrites)),
+              Effect.provide(Layer.mergeAll(services(repo), requester, openWrites)),
               // The pack is the body that outlives its handler.
               Effect.map((response) => track(repo, response)),
             );

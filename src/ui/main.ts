@@ -25,6 +25,7 @@ import "./styles/a11y.css";
 import { REGISTERED } from "./elements.ts";
 import { restore } from "./theme.ts";
 import "./app.ts";
+import "./operation.ts";
 
 restore();
 

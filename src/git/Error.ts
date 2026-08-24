@@ -54,6 +54,19 @@ export class Invalid extends Schema.TaggedError<Invalid>()(
   { httpApiStatus: 400 },
 ) {}
 
+/** A generated bundle failed verification before it could be advertised. */
+export class BundleCorrupt extends Schema.TaggedError<BundleCorrupt>()(
+  "BundleCorrupt",
+  { reason: Schema.String },
+  { httpApiStatus: 422 },
+) {}
+
+export class OperationNotFound extends Schema.TaggedError<OperationNotFound>()(
+  "OperationNotFound",
+  { id: Schema.String },
+  { httpApiStatus: 404 },
+) {}
+
 /** A hook rejected a push; carried as a value, not thrown. */
 export class HookRejected extends Schema.TaggedError<HookRejected>()(
   "HookRejected",
@@ -71,7 +84,9 @@ export type GitError =
   | PackCorrupt
   | StorageFailure
   | Invalid
-  | HookRejected;
+  | HookRejected
+  | BundleCorrupt
+  | OperationNotFound;
 
 export const GitError = Schema.Union([
   ObjectNotFound,
@@ -80,6 +95,8 @@ export const GitError = Schema.Union([
   StorageFailure,
   Invalid,
   HookRejected,
+  BundleCorrupt,
+  OperationNotFound,
 ]);
 
 /** Status for a failure, for the paths that are not `HttpApi` (smart-HTTP). */
@@ -90,10 +107,12 @@ export const statusOf = (error: GitError): number => {
     case "HookRejected":
       return 403;
     case "ObjectNotFound":
+    case "OperationNotFound":
       return 404;
     case "RefConflict":
       return 409;
     case "PackCorrupt":
+    case "BundleCorrupt":
       return 422;
     case "StorageFailure":
       return 500;

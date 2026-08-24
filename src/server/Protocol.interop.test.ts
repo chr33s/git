@@ -520,4 +520,75 @@ describe.skipIf(!hasGit)("Protocol interop with git", () => {
       await git(work, "fsck", "--strict");
     }),
   );
+
+  const publishBundle = async (repo: string) => {
+    const { fileLayer } = await import("./Bundles.node.ts");
+    const BundlesMod = await import("./Bundles.ts");
+    const { defaultsLayer } = await import("./Features.ts");
+    const directory = path.join(root, repo);
+    const bundleStore = fileLayer(directory);
+    const live = GitRepository.layer.pipe(
+      Layer.provide(GitRepository.hooksNoop),
+      Layer.provideMerge(stores(directory)),
+    );
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const bundles = yield* BundlesMod.Bundles;
+        return yield* bundles.build({ kind: "full", filter: null });
+      }).pipe(
+        Effect.provide(
+          BundlesMod.layer.pipe(
+            Layer.provide(bundleStore),
+            Layer.provideMerge(live),
+            Layer.provideMerge(defaultsLayer),
+          ),
+        ),
+      ),
+    );
+  };
+
+  it.effect("stock clone succeeds when bundle infrastructure is unused", () =>
+    Effect.promise(async () => {
+      await seed("plain-clone");
+      const work = path.join(root, "work-plain-clone");
+      await git(root, "-c", "protocol.version=1", "clone", "--quiet", `${base}/plain-clone`, work);
+      await git(work, "fsck", "--strict");
+    }),
+  );
+
+  it.effect("stock clone succeeds after a bundle is published", () =>
+    Effect.promise(async () => {
+      await seed("with-bundle");
+      const artifact = await publishBundle("with-bundle");
+      assert.ok(artifact.bytes > 0);
+      const work = path.join(root, "work-with-bundle");
+      await git(root, "-c", "protocol.version=2", "clone", "--quiet", `${base}/with-bundle`, work);
+      assert.equal(
+        await fs.readFile(path.join(work, "hello.txt"), "utf8"),
+        "hello from the server\n",
+      );
+      await git(work, "fsck", "--strict");
+    }),
+  );
+
+  it.effect("unavailable bundle artifacts still let a clone finish", () =>
+    Effect.promise(async () => {
+      await seed("missing-bundle");
+      const artifact = await publishBundle("missing-bundle");
+      await fs.rm(path.join(root, "missing-bundle", "gitplus", "bundles", artifact.objectId), {
+        force: true,
+      });
+      const work = path.join(root, "work-missing-bundle");
+      await git(
+        root,
+        "-c",
+        "protocol.version=2",
+        "clone",
+        "--quiet",
+        `${base}/missing-bundle`,
+        work,
+      );
+      await git(work, "fsck", "--strict");
+    }),
+  );
 });

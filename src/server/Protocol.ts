@@ -27,6 +27,7 @@ import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
 import * as Auth from "./Auth.ts";
+import * as Bundles from "./Bundles.ts";
 import * as Policy from "./Policy.ts";
 import * as Redaction from "../hub/Redaction.ts";
 import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
@@ -204,18 +205,30 @@ const isVersionTwo = (request: Request): boolean =>
  * longer sends all of them before the client can say it only wants one. The
  * refs come back from `ls-refs`, filtered by prefix.
  */
-const advertiseV2 = (): Response =>
-  new Response(
-    concat([
-      pkt("version 2\n"),
-      pkt(`${AGENT}\n`),
-      pkt("ls-refs=unborn\n"),
-      pkt("fetch=shallow\n"),
-      pkt("object-format=sha1\n"),
-      FLUSH,
-    ]),
-    { headers: headers("application/x-git-upload-pack-advertisement") },
+const advertiseV2 = Effect.fn("Protocol.advertiseV2")(function* () {
+  const lines = [
+    pkt("version 2\n"),
+    pkt(`${AGENT}\n`),
+    pkt("ls-refs=unborn\n"),
+    pkt("fetch=shallow\n"),
+    pkt("object-format=sha1\n"),
+  ];
+  if (yield* Bundles.advertise()) lines.push(pkt("bundle-uri\n"));
+  lines.push(FLUSH);
+  return new Response(concat(lines), {
+    headers: headers("application/x-git-upload-pack-advertisement"),
+  });
+});
+
+/** Protocol v2 `bundle-uri`: the clone list as flattened config keys. */
+const bundleUri = Effect.fn("Protocol.bundleUri")(function* (request: Request) {
+  const lines = yield* Bundles.protocolList(request).pipe(
+    Effect.orElseSucceed((): ReadonlyArray<string> => []),
   );
+  return new Response(concat([...lines.map((line) => pkt(`${line}\n`)), FLUSH]), {
+    headers: headers("application/x-git-upload-pack-result"),
+  });
+});
 
 /** `GET /info/refs?service=…` — refs, capabilities on the first line. */
 export const advertise = Effect.fn("Protocol.advertise")(function* (
@@ -329,6 +342,7 @@ export const uploadPack = Effect.fn("Protocol.uploadPack")(function* (request: R
     const parsed = yield* readV2(new PktReader(body(request)));
     if (parsed.command === "ls-refs") return yield* lsRefs(parsed);
     if (parsed.command === "fetch") return yield* fetchV2(parsed);
+    if (parsed.command === "bundle-uri") return yield* bundleUri(request);
     return yield* new Invalid({
       field: "command",
       reason: `unknown v2 command '${parsed.command}'`,
@@ -1041,7 +1055,7 @@ export const handle = (request: Request): Effect.Effect<Response | null, GitErro
         // v2 advertises capabilities and no refs; the refs come from
         // `ls-refs`, which is the saving the version exists for.
         if (service === "git-upload-pack" && isVersionTwo(request)) {
-          return Effect.succeed(advertiseV2());
+          return advertiseV2();
         }
         return advertise(service);
       }

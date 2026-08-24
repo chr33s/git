@@ -17,6 +17,7 @@
  * unexpected defect prints a `Cause` with the fiber trace.
  */
 import { createWriteStream } from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -61,6 +62,7 @@ import {
   withRepo,
 } from "./shared.ts";
 import { sessionCommand } from "./session.ts";
+import { maintenanceCommand } from "./maintenance.ts";
 import { serveCommand } from "./serve.ts";
 import { fetchCommand, pullCommand } from "./transport.ts";
 import { queueCommand } from "./queue.ts";
@@ -166,6 +168,14 @@ const clone = Command.make(
         yield* target.refs.setHead(`refs/heads/${result.defaultBranch}`);
       }
       yield* Console.log(`Cloned ${result.refs.length} ref(s) from ${url} into ${directory}`);
+      const catchup = `${url.replace(/\/+$/, "").replace(/\.git$/, "")}/bundles/catchup`;
+      yield* Effect.tryPromise({
+        try: () =>
+          fs.appendFile(path.join(directory, "config"), `\n[fetch]\n\tbundleURI = ${catchup}\n`),
+        catch: () =>
+          new Invalid({ field: "clone", reason: "could not record catch-up bundle URI" }),
+      }).pipe(Effect.ignore);
+      yield* Console.log(`configured catch-up bundle URI ${catchup}`);
       // Refused rather than applied, and said out loud: a branch that stops
       // tracking silently is a divergence nobody sees until they compare tips.
       for (const ref of result.rejected) {
@@ -1047,6 +1057,9 @@ const git = Command.make("git+").pipe(
     history.pipe(Command.withDescription("Commits that changed one path")),
     init.pipe(Command.withDescription("Create an empty bare repository")),
     log.pipe(Command.withDescription("Commit history, newest first")),
+    maintenanceCommand.pipe(
+      Command.withDescription("Plan or run desired-state repository maintenance"),
+    ),
     merge.pipe(Command.withDescription("Three-way merge two revisions")),
     work.mv.pipe(Command.withDescription("Move a tracked path, staging both halves")),
     prCommand.pipe(Command.withDescription("Pull requests: open, review, discuss, check, merge")),

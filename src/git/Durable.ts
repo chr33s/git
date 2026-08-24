@@ -20,9 +20,17 @@ import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
+import * as Bundles from "../server/Bundles.ts";
+import { r2Layer as bundleR2, r2MetaLayer } from "../server/Bundles.cloudflare.ts";
 import * as CommitPack from "../server/CommitPack.ts";
+import { defaultsLayer as featuresLayer } from "../server/Features.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
 import * as Lfs from "../server/Lfs.ts";
+import {
+  handleEvents as operationEvents,
+  memoryLayer as operationsMemory,
+  Operations,
+} from "../server/Operations.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Remotes from "../server/Remotes.ts";
 import * as Sending from "../server/Sending.ts";
@@ -34,6 +42,7 @@ import { collector } from "./Conformance.ts";
 import { type GitError, statusOf } from "./Error.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
+import type { ObjectStore } from "./Store.ts";
 import { storeContract } from "./Store.contract.ts";
 
 /**
@@ -57,7 +66,7 @@ interface TestEnv {
 }
 
 export class GitRepo extends DurableObject<TestEnv> {
-  #layer: Layer.Layer<Repository> | null = null;
+  #layer: Layer.Layer<ObjectStore | Repository> | null = null;
 
   #subscribers: Layer.Layer<Subscribers.Subscribers> | null = null;
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
@@ -118,7 +127,7 @@ export class GitRepo extends DurableObject<TestEnv> {
   }
 
   /** Built once per instance: the DO is the unit of isolation, not the request. */
-  #live(repo: string): Layer.Layer<Repository> {
+  #live(repo: string): Layer.Layer<ObjectStore | Repository> {
     // Delivery runs in `waitUntil`, and so does forwarding: a remote that is
     // down must not touch a push that has already been accepted.
     const detached = <A, E>(effect: Effect.Effect<A, E>) =>
@@ -180,6 +189,20 @@ export class GitRepo extends DurableObject<TestEnv> {
     return this.#layer;
   }
 
+  /** Repository plus derived-artifact and operation services. */
+  #services(repo: string) {
+    const live = this.#live(repo);
+    const bundles = bundleR2({ bucket: this.env.GIT_OBJECTS, repo });
+    return Layer.mergeAll(
+      live,
+      bundles,
+      r2MetaLayer({ bucket: this.env.GIT_OBJECTS, repo }),
+      operationsMemory,
+      featuresLayer,
+      Bundles.layer.pipe(Layer.provide(bundles), Layer.provide(live)),
+    );
+  }
+
   /**
    * Response bodies still being read.
    *
@@ -218,14 +241,14 @@ export class GitRepo extends DurableObject<TestEnv> {
   #respond(
     repo: string,
     requester: Layer.Layer<Auth.Requester>,
-    effect: Effect.Effect<Response, GitError, Repository>,
+    effect: Effect.Effect<Response, GitError, Bundles.Bundles | Operations | Repository>,
   ): Promise<Response> {
     return Effect.runPromise(
       effect.pipe(
         Effect.catch((error: GitError) =>
           Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
         ),
-        Effect.provide(Layer.mergeAll(this.#live(repo), requester, this.#openWrites())),
+        Effect.provide(Layer.mergeAll(this.#services(repo), requester, this.#openWrites())),
         Effect.map((response) => this.#track(response)),
       ),
     );
@@ -301,6 +324,30 @@ export class GitRepo extends DurableObject<TestEnv> {
       );
     }
 
+    if (route === "bundles" && matched.rest !== "bundles") {
+      return this.#respond(
+        repo,
+        requester,
+        Bundles.tryHandle(request).pipe(
+          Effect.map(
+            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+          ),
+        ),
+      );
+    }
+
+    if (route === "operations" && matched.rest.endsWith("/events")) {
+      return this.#respond(
+        repo,
+        requester,
+        operationEvents(request).pipe(
+          Effect.map(
+            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
+          ),
+        ),
+      );
+    }
+
     // The smart-HTTP endpoints; everything else is the JSON API.
     if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
       return this.#respond(
@@ -324,7 +371,7 @@ export class GitRepo extends DurableObject<TestEnv> {
     const api = (this.#api ??= (() => {
       const router = HttpRouter.toWebHandler(
         Api.layer(this.#remoteRegistry(repo)).pipe(
-          Layer.provideMerge(this.#live(repo)),
+          Layer.provideMerge(this.#services(repo)),
           Layer.provideMerge(this.#registry(repo)),
           Layer.provideMerge(this.#openWrites()),
         ),
