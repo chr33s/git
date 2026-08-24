@@ -1,0 +1,1301 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>git+ — the whole forge in one git fetch</title>
+    <meta
+      name="description"
+      content="Git Smart-HTTP server, browser client, and Unix CLI built from one core. Pull requests, reviews, and identity live in native Git refs."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <nav class="nav" aria-label="Main">
+      <div class="nav-pill">
+        <a class="nav-brand" href="#top">
+          <svg
+            class="logo-icon"
+            width="26"
+            height="26"
+            viewBox="0 0 64 64"
+            fill="none"
+            aria-hidden="true"
+          >
+            <rect width="64" height="64" rx="16" fill="var(--logo-bg)" />
+            <circle cx="22.5" cy="22.5" r="6.5" fill="var(--logo-accent)" />
+            <circle cx="41.5" cy="22.5" r="6.5" fill="var(--logo-muted)" />
+            <circle cx="22.5" cy="41.5" r="6.5" fill="var(--logo-muted)" />
+            <circle cx="41.5" cy="41.5" r="6.5" fill="var(--logo-dark)" />
+          </svg>
+          <span>git<span class="accent">+</span></span>
+        </a>
+        <div class="nav-links">
+          <a href="#surfaces">Architecture</a>
+          <a href="#agents">Agents</a>
+          <a href="#cli">CLI</a>
+          <a href="#faq">FAQ</a>
+        </div>
+        <a class="btn btn-nav" href="https://github.com/chr33s/git" target="_blank" rel="noopener"
+          >Clone the repo</a
+        >
+      </div>
+    </nav>
+
+    <div class="hero-wrap">
+      <canvas class="hero-shader" aria-hidden="true"></canvas>
+      <header id="top" class="hero">
+        <p class="hero-badge mono"><span class="dot"></span> Pre 1.0 · MIT licensed · Effect v4</p>
+        <h1>The whole forge<br />in one git fetch</h1>
+        <p class="hero-sub">
+          git+ is a Git Smart-HTTP server, browser client, and Unix CLI built from one core. Pull
+          requests, reviews, checks, and identity live in native Git refs, so a single fetch brings
+          the complete state of your project.
+        </p>
+        <div class="hero-ctas">
+          <a
+            class="btn btn-primary"
+            href="https://github.com/chr33s/git"
+            target="_blank"
+            rel="noopener"
+            >Clone the repo</a
+          >
+          <a
+            class="btn btn-secondary"
+            href="https://github.com/chr33s/git/blob/main/docs/cli.md"
+            target="_blank"
+            rel="noopener"
+            >Read the docs</a
+          >
+        </div>
+        <div class="chip-row mono">
+          <span class="chip">Smart-HTTP v0/v2</span>
+          <span class="chip">Git LFS</span>
+          <span class="chip">JSON API</span>
+          <span class="chip">SSH-signed events</span>
+          <span class="chip">OPFS</span>
+        </div>
+        <div class="terminal">
+          <div class="terminal-bar">
+            <span class="light"></span><span class="light"></span><span class="light"></span>
+            <span class="label mono">terminal</span>
+          </div>
+          <div class="terminal-body mono">
+            <div><span class="prompt">$</span> git+ serve --root ./repos --port 8080</div>
+            <div class="ok">✓ smart-http v2 listening on :8080</div>
+            <div class="gap">
+              <span class="prompt">$</span> git clone http://127.0.0.1:8080/my-repo.git
+            </div>
+            <div class="out">Cloning into 'my-repo'... done.</div>
+            <div class="gap">
+              <span class="prompt">$</span> git+ pr open --title "Ship the queue"
+            </div>
+            <div class="out">event signed · appended to refs/hub/pr/42</div>
+          </div>
+        </div>
+      </header>
+    </div>
+
+    <section id="surfaces" class="section" data-reveal>
+      <div class="split">
+        <div>
+          <h2>One core, four surfaces</h2>
+          <p class="lede">
+            The same repository engine runs in a Cloudflare Durable Object, on plain Node.js, in a
+            browser tab over OPFS, and directly as a Unix CLI. Object formats, merge behavior, and
+            protocol rules never fork across platforms.
+          </p>
+          <div class="tag-row mono">
+            <span class="chip chip-accent">Durable Objects</span>
+            <span class="chip chip-accent">Node.js</span>
+            <span class="chip chip-accent">Browser OPFS</span>
+            <span class="chip chip-accent">Unix CLI</span>
+          </div>
+        </div>
+        <div class="card diagram">
+          <div class="diagram-core mono">Repository · shared Git domain core</div>
+          <svg width="280" height="32" viewBox="0 0 280 32" fill="none" aria-hidden="true">
+            <path
+              d="M140 0 V12 M140 12 H30 M140 12 H250 M30 12 V32 M103 12 V32 M177 12 V32 M250 12 V32"
+              stroke="var(--border-strong)"
+              stroke-width="1.5"
+            />
+          </svg>
+          <div class="diagram-row mono">
+            <div>Smart HTTP</div>
+            <div>JSON API</div>
+            <div>CLI</div>
+            <div>Browser</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" data-reveal>
+      <div class="split">
+        <div class="card tree mono">
+          <div class="root">refs/</div>
+          <div class="l1">├── meta/</div>
+          <div class="l2">├── trust/ <span class="note">— identity, grants, revocations</span></div>
+          <div class="l2">└── policy <span class="note">— branch and hub policy</span></div>
+          <div class="l1">└── hub/</div>
+          <div class="l2 hub">
+            ├── pr/ <span class="note-accent">— pull request event DAGs</span>
+          </div>
+          <div class="l2 hub">├── task/ <span class="note-accent">— agent assignments</span></div>
+          <div class="l2 hub">├── session/ <span class="note-accent">— agent provenance</span></div>
+          <div class="l2 hub">└── queue/ <span class="note-accent">— merge coordination</span></div>
+        </div>
+        <div>
+          <h2>Everything fetches</h2>
+          <p class="lede">
+            Source, developer identities, key logs, pull requests, reviews, and checks live inside
+            native Git objects and refs. One fetch gives you complete, causally ordered project
+            state with no hosting provider web API in the loop.
+          </p>
+          <div class="tag-row mono">
+            <span class="chip chip-accent">Native refs</span>
+            <span class="chip chip-accent">Append-only DAGs</span>
+            <span class="chip chip-accent">No rate limits</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tagline">
+      <p>
+        Your agents can host, review, and merge code locally. No third party APIs. No rate limits.
+        Just Git.
+      </p>
+    </section>
+
+    <section id="agents" class="section" data-reveal>
+      <div class="split">
+        <div>
+          <h2>Built for concurrent agent fleets</h2>
+          <p class="lede">
+            Tasks, sessions, and wake triggers are signed events in the repository itself. Agents
+            claim work with a lease, record what they were told and what came of it, and self
+            release if they drop offline. PRs converge by DAG union; merges land through atomic
+            compare and swap at the ref boundary.
+          </p>
+          <div class="feature-list">
+            <div>
+              <strong>Capability scoped authority</strong> — tokens bound to explicit grants like
+              source.push or hub.check:test, minted from member SSH keys.
+            </div>
+            <div>
+              <strong>Cryptographic authorship</strong> — every review and trust change is SSH
+              signed and tied to an exact head SHA. Self approvals are rejected at the protocol
+              level.
+            </div>
+            <div>
+              <strong>Containable errors</strong> — revoke compromised keys retroactively or
+              tombstone leaked secrets without breaking hash chains.
+            </div>
+          </div>
+        </div>
+        <div class="card code-panel">
+          <div class="code-panel-bar mono">agent workflow</div>
+          <div class="code-panel-body mono">
+            <div><span class="prompt">$</span> git+ task claim --id="task-102" --ttl="15m"</div>
+            <div class="ok">✓ lease acquired · signed as agent/rev-3</div>
+            <div class="gap comment"># work happens here</div>
+            <div class="gap">
+              <span class="prompt">$</span> git+ pr review --approve --sha 4edd493
+            </div>
+            <div class="ok">✓ attestation appended to refs/hub/pr/42</div>
+            <div class="gap">
+              <span class="prompt">$</span> git+ task resolve --id="task-102" --status="completed"
+            </div>
+            <div class="ok">✓ lease released · event in refs/hub/task/</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cli" class="section" data-reveal>
+      <div class="section-head">
+        <h2>A full Git in your terminal</h2>
+        <p class="lede">
+          Fifty plus commands from clone to queue. Everything stock git does, plus the hub, trust,
+          and agent layer.
+        </p>
+      </div>
+      <div class="grid grid-cli">
+        <div class="grid-card">
+          <h3>Core Git</h3>
+          <div class="cmd-list mono">
+            <div>clone · push · pull</div>
+            <div>commit · merge · rebase</div>
+            <div>branch · tag · switch</div>
+            <div>log · diff · bisect</div>
+          </div>
+        </div>
+        <div class="grid-card">
+          <h3>Hub &amp; trust</h3>
+          <div class="cmd-list mono">
+            <div>hub · id · social</div>
+            <div>credential</div>
+            <div>refs/meta/trust</div>
+            <div>policy enforcement</div>
+          </div>
+        </div>
+        <div class="grid-card">
+          <h3>Collaboration</h3>
+          <div class="cmd-list mono">
+            <div>pr · queue</div>
+            <div>reviews &amp; checks</div>
+            <div>CAS ref merges</div>
+            <div>DAG union events</div>
+          </div>
+        </div>
+        <div class="grid-card">
+          <h3>Agents</h3>
+          <div class="cmd-list mono">
+            <div>task · session · wake</div>
+            <div>lease based claims</div>
+            <div>signed provenance</div>
+            <div>webhook · server</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" data-reveal>
+      <div class="section-head">
+        <h2>Running in three commands</h2>
+      </div>
+      <div class="grid grid-steps">
+        <div class="grid-card">
+          <div class="step-num mono">01</div>
+          <div class="step-title">Clone and install</div>
+          <div class="step-code mono">
+            git clone https://github.com/chr33s/git.git &amp;&amp; cd git &amp;&amp; mise install
+            &amp;&amp; npm ci
+          </div>
+        </div>
+        <div class="grid-card">
+          <div class="step-num mono">02</div>
+          <div class="step-title">Serve your repos</div>
+          <div class="step-code mono">git+ serve --root ./repos --port 8080</div>
+        </div>
+        <div class="grid-card">
+          <div class="step-num mono">03</div>
+          <div class="step-title">Use stock git</div>
+          <div class="step-code mono">git clone http://127.0.0.1:8080/my-repo.git</div>
+        </div>
+      </div>
+      <p class="footnote">
+        Requires Node 24.12+ and git 2.55. Any standard Git client can clone and push from there.
+      </p>
+    </section>
+
+    <section id="faq" class="section faq" data-reveal>
+      <h2>Frequently asked questions</h2>
+      <div class="faq-list">
+        <details class="faq-item" open>
+          <summary>Is git+ production ready?</summary>
+          <p>
+            Not yet. The API is pre 1.0, unstable, and not recommended for production use. It is
+            ready for experimentation, agent workflows, and local development.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Can standard Git clients use it?</summary>
+          <p>
+            Yes. Both server implementations speak Smart HTTP v0/v2 and Git LFS, so stock git can
+            clone, fetch, and push against a git+ server with no plugins.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>How do I install it?</summary>
+          <p>
+            The package is not on npm yet. Clone the repository, run mise install and npm ci, then
+            build the SEA binary with npm run build:sea for the end user executable.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Where does it run?</summary>
+          <p>
+            One core runs in a Cloudflare Durable Object, on plain Node.js (24.12+), in a browser
+            tab using OPFS storage, and directly as a Unix CLI.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>How are permissions handled?</summary>
+          <p>
+            Authority is bound to explicit capabilities like source.push or hub.check:test. Short
+            lived tokens are minted via member SSH keys, with no centralized token registry.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>What happens if a key is compromised?</summary>
+          <p>
+            Keys can be revoked retroactively to invalidate past events, and replicating tombstone
+            events can scrub leaked secrets without breaking hash chains.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Is there a web interface?</summary>
+          <p>
+            Yes. A lightweight file browser, commit viewer, task manager, and PR inspector built
+            with Lit web components ships in src/ui and serves via git+ serve --ui.
+          </p>
+        </details>
+      </div>
+    </section>
+
+    <section class="section cta" data-reveal>
+      <div class="mark">
+        <svg
+          class="logo-icon"
+          width="56"
+          height="56"
+          viewBox="0 0 64 64"
+          fill="none"
+          aria-hidden="true"
+        >
+          <rect width="64" height="64" rx="16" fill="var(--logo-cta-bg)" />
+          <circle cx="22.5" cy="22.5" r="6.5" fill="var(--logo-accent)" />
+          <circle cx="41.5" cy="22.5" r="6.5" fill="var(--logo-muted)" />
+          <circle cx="22.5" cy="41.5" r="6.5" fill="var(--logo-muted)" />
+          <circle cx="41.5" cy="41.5" r="6.5" fill="var(--logo-dark)" />
+        </svg>
+      </div>
+      <h2>Bring the forge home</h2>
+      <p class="lede">
+        MIT licensed and yours to run anywhere a repository fits. Clone it, serve it, and let your
+        agents get to work.
+      </p>
+      <div class="cta-btns">
+        <a
+          class="btn btn-primary"
+          href="https://github.com/chr33s/git"
+          target="_blank"
+          rel="noopener"
+          >Clone the repo</a
+        >
+        <a
+          class="btn btn-secondary"
+          href="https://github.com/chr33s/git/blob/main/docs/internals.md"
+          target="_blank"
+          rel="noopener"
+          >Read the internals</a
+        >
+      </div>
+    </section>
+
+    <footer>
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <svg
+            class="logo-icon"
+            width="22"
+            height="22"
+            viewBox="0 0 64 64"
+            fill="none"
+            aria-hidden="true"
+          >
+            <rect width="64" height="64" rx="16" fill="var(--logo-bg)" />
+            <circle cx="22.5" cy="22.5" r="6.5" fill="var(--logo-accent)" />
+            <circle cx="41.5" cy="22.5" r="6.5" fill="var(--logo-muted)" />
+            <circle cx="22.5" cy="41.5" r="6.5" fill="var(--logo-muted)" />
+            <circle cx="41.5" cy="41.5" r="6.5" fill="var(--logo-dark)" />
+          </svg>
+          <span class="name">git<span class="accent">+</span></span>
+          <span class="legal">© 2026 chr33s · MIT license</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/chr33s/git" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/chr33s/git/tree/main/docs" target="_blank" rel="noopener"
+            >Documentation</a
+          >
+          <a
+            href="https://github.com/chr33s/git/blob/main/security.md"
+            target="_blank"
+            rel="noopener"
+            >Security</a
+          >
+          <a
+            href="https://github.com/chr33s/git/blob/main/license.md"
+            target="_blank"
+            rel="noopener"
+            >License</a
+          >
+        </div>
+      </div>
+    </footer>
+    <style>
+      /* git+ landing — tokens */
+      :root {
+        color-scheme: dark;
+        --bg: #000000;
+        --surface: #181818;
+        --border: #272727;
+        --border-strong: #313131;
+        --text: #f5f5f7;
+        --muted: #9a9aa3;
+        --faint: #6b6b74;
+        --accent: #12c295;
+        --button-text: #000000;
+        --mask-color: #000000;
+        --selection-bg: rgb(18 194 149 / 30%);
+        --nav-bg: rgb(24 24 24 / 72%);
+        --nav-border: var(--border);
+        --nav-button-bg: var(--text);
+        --nav-text: var(--muted);
+        --nav-brand-text: var(--text);
+        --heading-start: #ffffff;
+        --heading-end: #9b9b9b;
+        --accent-subtle: rgb(18 194 149 / 8%);
+        --step-code-bg: var(--bg);
+        --tagline-word: rgb(245 245 247 / 25%);
+        --logo-bg: #26262b;
+        --logo-cta-bg: var(--surface);
+        --logo-accent: var(--accent);
+        --logo-muted: #8e8e98;
+        --logo-dark: #f2f2f4;
+        --ease: cubic-bezier(0.32, 0.72, 0, 1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Geist", system-ui, sans-serif;
+      }
+      a {
+        color: var(--text);
+        text-decoration: none;
+      }
+      a:hover {
+        color: var(--accent);
+      }
+      ::selection {
+        background: var(--selection-bg);
+      }
+
+      .mono {
+        font-family: "Geist Mono", ui-monospace, monospace;
+      }
+
+      /* ---------- nav ---------- */
+      .nav {
+        position: sticky;
+        top: 24px;
+        z-index: 50;
+        display: flex;
+        justify-content: center;
+        padding: 0 24px;
+      }
+      .nav-pill {
+        display: flex;
+        align-items: center;
+        gap: clamp(16px, 3vw, 32px);
+        padding: 8px 12px 8px 16px;
+        border-radius: 999px;
+        background: var(--nav-bg);
+        backdrop-filter: blur(24px);
+        border: 1px solid var(--nav-border);
+      }
+      .nav-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--nav-brand-text);
+      }
+      .nav-brand span {
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .nav-links a {
+        color: var(--nav-text);
+      }
+      .nav-links a:hover {
+        color: var(--text);
+      }
+      @media (max-width: 720px) {
+        .nav-links {
+          display: none;
+        }
+      }
+
+      .accent {
+        color: var(--accent);
+      }
+      .nav-brand .accent,
+      .footer-brand .accent {
+        color: var(--logo-accent);
+      }
+      .footer-brand .name {
+        color: var(--nav-brand-text);
+      }
+
+      /* ---------- buttons ---------- */
+      .btn {
+        display: inline-block;
+        font-size: 16px;
+        font-weight: 600;
+        padding: 8px 12px;
+        border-radius: 10px;
+        transition: all 0.7s var(--ease);
+      }
+      .btn:active {
+        transform: scale(0.98);
+      }
+      .btn-primary {
+        background: var(--accent);
+        color: var(--button-text);
+      }
+      .btn-primary:hover {
+        background: var(--text);
+        color: var(--button-text);
+      }
+      .btn-secondary {
+        color: var(--text);
+        border: 1px solid var(--border-strong);
+      }
+      .btn-secondary:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .btn-nav {
+        font-size: 14px;
+        background: var(--nav-button-bg);
+        color: var(--button-text);
+        border-radius: 999px;
+      }
+      .btn-nav:hover {
+        background: var(--accent);
+        color: var(--button-text);
+      }
+
+      /* ---------- hero ---------- */
+      .hero-wrap {
+        position: relative;
+      }
+      .hero-shader {
+        position: absolute;
+        top: -120px;
+        left: 0;
+        width: 100%;
+        height: calc(100% + 120px);
+        pointer-events: none;
+        opacity: 0.45;
+        -webkit-mask-image: radial-gradient(
+          ellipse 75% 70% at 50% 38%,
+          var(--mask-color) 30%,
+          transparent 75%
+        );
+        mask-image: radial-gradient(
+          ellipse 75% 70% at 50% 38%,
+          var(--mask-color) 30%,
+          transparent 75%
+        );
+      }
+      .hero {
+        position: relative;
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 96px 24px 80px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        animation: hero-in 0.9s var(--ease) both;
+      }
+      @keyframes hero-in {
+        from {
+          opacity: 0;
+          transform: translateY(24px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .hero-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 4px 12px;
+        margin-bottom: 24px;
+      }
+      .hero-badge .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      .hero h1 {
+        max-width: 680px;
+        margin: 0 0 16px;
+        font-size: clamp(38px, 8vw, 60px);
+        line-height: 1.05;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        text-wrap: balance;
+        background: linear-gradient(90deg, var(--heading-start), var(--heading-end));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .hero-sub {
+        max-width: 680px;
+        margin: 0 0 32px;
+        font-size: 18px;
+        line-height: 28px;
+        color: var(--muted);
+        text-wrap: pretty;
+      }
+      .hero-ctas {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 40px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .chip-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: center;
+        margin-bottom: 48px;
+      }
+      .chip {
+        font-size: 12px;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 4px 8px;
+      }
+      .chip-accent {
+        color: var(--accent);
+      }
+
+      /* ---------- terminal / cards ---------- */
+      .terminal {
+        width: 100%;
+        max-width: 760px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        overflow: hidden;
+        text-align: left;
+      }
+      .terminal-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .terminal-bar .light {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--border-strong);
+      }
+      .terminal-bar .label {
+        margin-left: 8px;
+        font-size: 12px;
+        color: var(--faint);
+      }
+      .terminal-body {
+        padding: 24px;
+        font-size: 14px;
+        line-height: 24px;
+        overflow-x: auto;
+      }
+      .terminal-body .gap {
+        margin-top: 12px;
+      }
+      .prompt {
+        color: var(--faint);
+      }
+      .ok {
+        color: var(--accent);
+      }
+      .out {
+        color: var(--muted);
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+      }
+
+      /* ---------- sections ---------- */
+      .section {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 80px 24px;
+        border-top: 1px solid var(--surface);
+      }
+      .split {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 48px;
+        align-items: center;
+      }
+      .section h2 {
+        margin: 0 0 16px;
+        font-size: clamp(28px, 5.5vw, 36px);
+        line-height: 1.15;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        text-wrap: balance;
+      }
+      .section .lede {
+        margin: 0 0 24px;
+        font-size: 16px;
+        line-height: 24px;
+        color: var(--muted);
+        text-wrap: pretty;
+      }
+      .section-head {
+        text-align: center;
+        margin-bottom: 48px;
+      }
+      .section-head h2,
+      .section-head .lede {
+        margin-left: auto;
+        margin-right: auto;
+        max-width: 680px;
+      }
+      .section-head .lede {
+        margin-bottom: 0;
+      }
+      .tag-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      /* architecture diagram */
+      .diagram {
+        padding: 32px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .diagram-core {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+        border: 1px solid var(--accent);
+        border-radius: 10px;
+        padding: 12px 24px;
+        background: var(--accent-subtle);
+        text-align: center;
+      }
+      .diagram-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+        width: 100%;
+      }
+      .diagram-row div {
+        font-size: 12px;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 4px;
+        text-align: center;
+      }
+
+      /* refs tree */
+      .tree {
+        padding: 24px;
+        font-size: 13px;
+        line-height: 22px;
+        overflow-x: auto;
+        color: var(--muted);
+      }
+      .tree .root {
+        color: var(--faint);
+        margin-bottom: 8px;
+      }
+      .tree .l1 {
+        padding-left: 16px;
+      }
+      .tree .l2 {
+        padding-left: 32px;
+      }
+      .tree .hub {
+        color: var(--text);
+      }
+      .tree .note {
+        color: var(--faint);
+      }
+      .tree .note-accent {
+        color: var(--accent);
+      }
+
+      /* tagline */
+      .tagline {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 128px 24px;
+        text-align: center;
+      }
+      .tagline p {
+        margin: 0 auto;
+        max-width: 680px;
+        font-size: clamp(30px, 6vw, 48px);
+        line-height: 1.2;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        text-wrap: balance;
+      }
+
+      /* feature list */
+      .feature-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        font-size: 16px;
+        line-height: 24px;
+        color: var(--muted);
+      }
+      .feature-list strong {
+        color: var(--text);
+      }
+
+      /* code panel */
+      .code-panel {
+        overflow: hidden;
+      }
+      .code-panel-bar {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--faint);
+      }
+      .code-panel-body {
+        padding: 24px;
+        font-size: 13px;
+        line-height: 24px;
+        overflow-x: auto;
+      }
+      .code-panel-body .gap {
+        margin-top: 12px;
+      }
+      .comment {
+        color: var(--faint);
+      }
+
+      /* grids of cards */
+      .grid {
+        display: grid;
+        gap: 12px;
+      }
+      .grid-cli {
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+      .grid-steps {
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+      .grid-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        transition: all 0.7s var(--ease);
+      }
+      .grid-cli .grid-card:hover {
+        border-color: var(--border-strong);
+        transform: translateY(-2px);
+      }
+      .grid-card h3 {
+        margin: 0 0 12px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .cmd-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .step-num {
+        font-size: 12px;
+        color: var(--accent);
+        margin-bottom: 12px;
+      }
+      .step-title {
+        font-size: 16px;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      .step-code {
+        font-size: 13px;
+        color: var(--muted);
+        background: var(--step-code-bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        line-height: 20px;
+        overflow-wrap: break-word;
+      }
+      .footnote {
+        text-align: center;
+        margin: 24px 0 0;
+        font-size: 14px;
+        line-height: 20px;
+        color: var(--faint);
+      }
+
+      /* ---------- faq (native details — works without JS) ---------- */
+      .faq {
+        max-width: 720px;
+      }
+      .faq h2 {
+        text-align: center;
+        margin-bottom: 32px;
+      }
+      .faq-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .faq-item {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        transition: border-color 0.7s var(--ease);
+      }
+      .faq-item:hover {
+        border-color: var(--border-strong);
+      }
+      .faq-item summary {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        padding: 16px 24px;
+        cursor: pointer;
+        list-style: none;
+        font-size: 16px;
+        font-weight: 600;
+        line-height: 24px;
+      }
+      .faq-item summary::-webkit-details-marker {
+        display: none;
+      }
+      .faq-item summary::after {
+        content: "+";
+        font-size: 20px;
+        color: var(--accent);
+        font-weight: 400;
+      }
+      .faq-item[open] summary::after {
+        content: "−";
+      }
+      .faq-item p {
+        margin: 0;
+        padding: 0 24px 16px;
+        font-size: 14px;
+        line-height: 20px;
+        color: var(--muted);
+        text-wrap: pretty;
+      }
+
+      /* ---------- final cta ---------- */
+      .cta {
+        text-align: center;
+        padding-top: 96px;
+        padding-bottom: 96px;
+      }
+      .cta .mark {
+        margin-bottom: 24px;
+      }
+      .cta h2 {
+        max-width: 680px;
+        margin: 0 auto 16px;
+        font-size: clamp(32px, 7vw, 48px);
+        line-height: 1.1;
+        letter-spacing: -0.03em;
+        background: linear-gradient(90deg, var(--heading-start), var(--heading-end));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .cta .lede {
+        max-width: 680px;
+        margin: 0 auto 32px;
+      }
+      .cta-btns {
+        display: inline-flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+
+      /* ---------- footer ---------- */
+      footer {
+        border-top: 1px solid var(--surface);
+        padding: 40px 24px;
+      }
+      .footer-inner {
+        max-width: 1080px;
+        margin: 0 auto;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 24px;
+        flex-wrap: wrap;
+      }
+      .footer-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .footer-brand .name {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .footer-brand .legal {
+        font-size: 13px;
+        color: var(--faint);
+      }
+      .footer-links {
+        display: flex;
+        gap: 24px;
+        font-size: 13px;
+      }
+      .footer-links a {
+        color: var(--muted);
+      }
+      .footer-links a:hover {
+        color: var(--text);
+      }
+
+      /* ---------- progressive enhancement hooks (JS adds .js to <html>) ---------- */
+      .js [data-reveal] {
+        opacity: 0;
+        transform: translateY(32px);
+        filter: blur(6px);
+        transition:
+          opacity 0.9s var(--ease),
+          transform 0.9s var(--ease),
+          filter 0.9s var(--ease);
+      }
+      .js [data-reveal].is-visible {
+        opacity: 1;
+        transform: translateY(0);
+        filter: blur(0);
+      }
+      .js .tagline .word {
+        color: var(--tagline-word);
+        transition: color 0.7s var(--ease);
+      }
+      .js .tagline.is-visible .word {
+        color: var(--text);
+      }
+
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --bg: #f8f8f6;
+          --surface: #ffffff;
+          --border: #dfdfda;
+          --border-strong: #c7c7c0;
+          --text: #1c1c20;
+          --muted: #62626c;
+          --faint: #7a7a83;
+          --nav-bg: rgb(255 255 255 / 86%);
+          --nav-border: #d2d2cc;
+          --nav-button-bg: #f2f2f4;
+          --nav-text: #36363d;
+          --nav-brand-text: #2e2e33;
+          --heading-start: #1c1c20;
+          --heading-end: #777780;
+          --step-code-bg: #f2f2ef;
+          --tagline-word: rgb(28 28 32 / 25%);
+          --logo-bg: #f2f2f4;
+          --logo-cta-bg: #f2f2f4;
+          --logo-accent: #489d7c;
+          --logo-muted: #9a9aa2;
+          --logo-dark: #2e2e33;
+        }
+
+        .hero-shader {
+          opacity: 0.22;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .hero {
+          animation: none;
+        }
+        .js [data-reveal] {
+          opacity: 1;
+          transform: none;
+          filter: none;
+          transition: none;
+        }
+        .js .tagline .word {
+          color: var(--text);
+          transition: none;
+        }
+      }
+    </style>
+    <script type="module">
+      /* git+ landing — progressive enhancement only.
+       The page is fully functional without this file:
+       layout, navigation, and the FAQ (<details>) all work in plain HTML/CSS. */
+      (function () {
+        "use strict";
+        document.documentElement.classList.add("js");
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+        // --- scroll reveals ---
+        var revealed = document.querySelectorAll("[data-reveal]");
+        if ("IntersectionObserver" in window && revealed.length) {
+          var io = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (e) {
+                if (e.isIntersecting) {
+                  e.target.classList.add("is-visible");
+                  io.unobserve(e.target);
+                }
+              });
+            },
+            { threshold: 0.12 },
+          );
+          revealed.forEach(function (el) {
+            io.observe(el);
+          });
+        } else {
+          revealed.forEach(function (el) {
+            el.classList.add("is-visible");
+          });
+        }
+
+        // --- word-by-word tagline reveal ---
+        var tagline = document.querySelector(".tagline");
+        var taglineText = tagline && tagline.querySelector("p");
+        if (taglineText && "IntersectionObserver" in window) {
+          var words = taglineText.textContent.trim().split(/\s+/);
+          taglineText.textContent = "";
+          words.forEach(function (w, i) {
+            var s = document.createElement("span");
+            s.className = "word";
+            s.textContent = w + " ";
+            s.style.transitionDelay = i * 55 + "ms";
+            taglineText.appendChild(s);
+          });
+          var tio = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (e) {
+                if (e.isIntersecting) {
+                  tagline.classList.add("is-visible");
+                  tio.disconnect();
+                }
+              });
+            },
+            { threshold: 0.5 },
+          );
+          tio.observe(taglineText);
+        }
+
+        // --- hero aurora shader (decorative; canvas is empty without JS) ---
+        var canvas = document.querySelector(".hero-shader");
+        if (!canvas) return;
+        var gl = canvas.getContext("webgl", { alpha: true, antialias: false });
+        if (!gl) return;
+        var vs = "attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }";
+        var fs = [
+          "precision mediump float;",
+          "uniform vec2 r; uniform float t;",
+          "float n(vec2 p){ return sin(p.x)*sin(p.y); }",
+          "float fbm(vec2 p){",
+          "  float a = 0.5, s = 0.0;",
+          "  for (int i = 0; i < 5; i++){ s += a * n(p); p = mat2(1.6, 1.2, -1.2, 1.6) * p; a *= 0.5; }",
+          "  return s;",
+          "}",
+          "void main(){",
+          "  vec2 uv = gl_FragCoord.xy / r;",
+          "  vec2 p = uv * vec2(r.x / r.y, 1.0) * 2.2;",
+          "  float T = t * 0.05;",
+          "  float f = fbm(p + vec2(T, -T * 0.6) + fbm(p * 1.5 - T));",
+          "  float g = smoothstep(-0.35, 0.85, f);",
+          "  float g2 = smoothstep(-0.2, 1.0, fbm(p * 0.7 - T * 0.5 + 3.7));",
+          "  vec3 green = vec3(0.07, 0.76, 0.58);",
+          "  vec3 gray = vec3(0.45, 0.47, 0.52);",
+          "  vec3 col = green * g * 0.55 + gray * g2 * 0.25;",
+          "  float a = clamp(g * 0.7 + g2 * 0.25, 0.0, 0.75);",
+          "  gl_FragColor = vec4(col, a);",
+          "}",
+        ].join("\n");
+        function mk(type, src) {
+          var s = gl.createShader(type);
+          gl.shaderSource(s, src);
+          gl.compileShader(s);
+          return s;
+        }
+        var prog = gl.createProgram();
+        gl.attachShader(prog, mk(gl.VERTEX_SHADER, vs));
+        gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, fs));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
+        gl.useProgram(prog);
+        var buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+        var loc = gl.getAttribLocation(prog, "p");
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+        var uR = gl.getUniformLocation(prog, "r");
+        var uT = gl.getUniformLocation(prog, "t");
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        function resize() {
+          var dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+          var w = Math.round(canvas.clientWidth * dpr * 0.5);
+          var h = Math.round(canvas.clientHeight * dpr * 0.5);
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+            gl.viewport(0, 0, w, h);
+          }
+        }
+        function frame(ms) {
+          resize();
+          gl.uniform2f(uR, canvas.width, canvas.height);
+          gl.uniform1f(uT, ms / 1000);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+          requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
