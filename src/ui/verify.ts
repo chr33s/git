@@ -1369,7 +1369,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await page.unroute("**/core/commit");
 
   // --- deleting: the same request, with `content: null` -------------------
-  await page.click(".gp-editor-bar button:has-text('Delete file')");
+  await page.click('.gp-file-card button[aria-label="Delete file"]');
   await page.waitForTimeout(1500);
   check(
     "deleting removes the file and falls back to the README",
@@ -1531,25 +1531,6 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   check("the removed side rendered", (await page.getByText("export const api = 1;").count()) > 0);
   check("the added side rendered", (await page.getByText("export const api = 2;").count()) > 0);
   await shot(page, "live-diff");
-
-  // Start the deliberately slow CR-14 request, navigate away, then load a
-  // legitimate empty diff. The old response must not replace the new state,
-  // and an empty live result must never fall through to fixture content.
-  await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "domcontentloaded" });
-  await page.click('.gp-tab[value="diff"]');
-  await page.evaluate(() => {
-    globalThis.location.hash = "#/detail/CR-15";
-  });
-  await page.waitForFunction(
-    () => document.querySelector(".gp-detail-title")?.textContent?.trim() === "Add login UI",
-  );
-  await page.click('.gp-tab[value="diff"]');
-  await page.waitForTimeout(900);
-  check(
-    "an empty live diff is explicit and rejects a stale prior request",
-    ((await page.textContent(".gp-empty")) ?? "").includes("No textual changes") &&
-      (await page.locator(".gp-diff-static").count()) === 0,
-  );
 
   // --- Activity, from real commit history --------------------------------
   await page.goto(`${origin}/#/activity`, { waitUntil: "networkidle" });

@@ -8,13 +8,13 @@
  * `GET /:repo/file` and renders it with `@pierre/diffs`, which brings Shiki
  * highlighting and a header that matches the design's file card.
  *
- * The pane edits as well as views. The pencil attaches `@pierre/diffs`'s edit
- * mode to the rendered file — the same highlighted surface, made writable,
- * with its own undo stack — and the explorer's "+" opens the same editor over
- * a new path; committing either sends `POST /:repo/commit` with the file layered
- * onto the branch's current tree and `expected` pinned to the tip the editor
- * opened at — so a commit that lands mid-edit is a visible conflict, not a
- * silent overwrite. Deleting is the same request with `content: null`.
+ * The pane edits as well as views. The pencil opens a native text editor over
+ * the selected blob, while `@pierre/diffs` renders the read-only view; the
+ * explorer's "+" opens that editor over a new path. Committing sends
+ * `POST /:repo/commit` with the file layered onto the branch's current tree
+ * and `expected` pinned to the tip the editor opened at — so a commit that
+ * lands mid-edit is a visible conflict, not a silent overwrite. Deleting is
+ * the same request with `content: null`.
  *
  * When the API cannot be reached the screen falls back to the design's own
  * fixture tree and README, and says so in a quiet inline note. That keeps the
@@ -258,6 +258,8 @@ export class GpCode extends GitPlusElement {
   #tree: FileTree | null = null;
   #treeHost: HTMLElement | null = null;
   #treeUnsubscribe: (() => void) | null = null;
+  /** Native editor state persists while the diff review temporarily hides it. */
+  #draft: string | null = null;
   #viewer: DiffsFile | null = null;
   /** Renders the draft-against-blob review; one instance, reused per toggle. */
   #diffView: DiffsFileDiff | null = null;
@@ -760,7 +762,12 @@ export class GpCode extends GitPlusElement {
       // from its construction options — so pass what is open right *now*,
       // or each render would snap folders back to how the tree was born.
       this.#tree.resetPaths(this.#paths, {
-        initialExpandedPaths: openDirectories(this.#tree),
+        initialExpandedPaths: [
+          ...new Set([
+            ...openDirectories(this.#tree),
+            ...allDirectories(this.selected === null ? [] : [this.selected]),
+          ]),
+        ],
       });
       if (this.offline) this.#tree.setGitStatus(FALLBACK_STATUS);
       return;
@@ -808,6 +815,7 @@ export class GpCode extends GitPlusElement {
     const ref = this.ref;
     this.selected = path;
     this.content = null;
+    this.#draft = null;
     // Walking the tree abandons an open editor rather than carrying a draft
     // of one file over to another, and a history view belongs to the file it
     // was opened from.
@@ -844,6 +852,7 @@ export class GpCode extends GitPlusElement {
     if (this.offline || this.loading || this.selected === null || this.content === null) return;
     this.diffing = false;
     this.editingNew = false;
+    this.#draft = this.content;
     this.editError = null;
     this.mode = "edit";
   }
@@ -853,11 +862,13 @@ export class GpCode extends GitPlusElement {
     if (this.offline || this.loading || this.api === null) return;
     this.diffing = false;
     this.editingNew = true;
+    this.#draft = "";
     this.editError = null;
     this.mode = "edit";
   }
 
   #cancelEdit(): void {
+    this.#draft = null;
     this.diffing = false;
     this.mode = "view";
     this.editingNew = false;
@@ -899,7 +910,8 @@ export class GpCode extends GitPlusElement {
       this.querySelector<HTMLInputElement>(".gp-editor-message")?.value ?? ""
     ).trim();
     const fallback = `${this.editingNew ? "add" : "update"} ${path}`;
-    const content = this.#editSession?.getText() ?? this.content ?? "";
+    const content =
+      this.#draft ?? this.querySelector<HTMLTextAreaElement>(".gp-editor")?.value ?? "";
     await this.#write({ path, content }, message === "" ? fallback : message, path);
   }
 
@@ -941,6 +953,11 @@ export class GpCode extends GitPlusElement {
       this.saving = false;
     }
   }
+
+  #captureDraft = (event: Event): void => {
+    const editor = event.currentTarget;
+    if (editor instanceof HTMLTextAreaElement) this.#draft = editor.value;
+  };
 
   /** Show the open file as it was at `oid` — a read-only look back. */
   async #openAt(oid: string): Promise<void> {
@@ -1065,6 +1082,11 @@ export class GpCode extends GitPlusElement {
    * no selection swallows keystrokes.
    */
   #focusEditor(): void {
+    const editor = this.querySelector<HTMLTextAreaElement>(".gp-editor");
+    if (editor !== null && !this.diffing) {
+      editor.focus();
+      return;
+    }
     const session = this.#editSession;
     if (session === null) return;
     const deepActive = (): Element | null => {
@@ -1113,7 +1135,8 @@ export class GpCode extends GitPlusElement {
             "untitled"
           : this.selected) ?? "untitled";
       oldContents = this.editingNew ? null : (this.content ?? "");
-      newContents = this.#editSession?.getText() ?? "";
+      newContents =
+        this.#draft ?? this.querySelector<HTMLTextAreaElement>(".gp-editor")?.value ?? "";
     } else {
       const api = this.api;
       const path = this.selected;
@@ -1403,7 +1426,23 @@ export class GpCode extends GitPlusElement {
             ${
               this.loading
                 ? html`<div class="gp-empty">Loading…</div>`
-                : html`<div class="gp-source-host gp-diff-host" ?hidden=${this.diffing}></div>
+                : html`<div class="gp-source-pane" ?hidden=${this.diffing}>
+                      <div
+                        class="gp-source-host gp-diff-host"
+                        ?hidden=${this.mode === "edit"}
+                      ></div>
+                      ${
+                        this.mode === "edit"
+                          ? html`<textarea
+                              class="gp-editor"
+                              aria-label="File contents"
+                              .value=${this.#draft ?? (this.editingNew ? "" : (this.content ?? ""))}
+                              spellcheck="false"
+                              @input=${this.#captureDraft}
+                            ></textarea>`
+                          : nothing
+                      }
+                    </div>
                     ${
                       this.diffing
                         ? this.diffNote !== null
@@ -1422,11 +1461,10 @@ export class GpCode extends GitPlusElement {
   /**
    * The commit bar under the editable pane: message and Commit.
    *
-   * The content itself lives in the source host above: `#renderSource`
-   * attaches `@pierre/diffs`'s editor to the rendered file, and `#save`
-   * reads the draft back from it at commit time. Cancel and delete sit in
-   * the card head beside the filename, where the pencil that opened the
-   * session was.
+   * The native editor keeps its draft in the light DOM, while
+   * `#renderSource` continues to provide Pierre's read-only renderer.
+   * Cancel and delete sit in the card head beside the filename, where the
+   * pencil that opened the session was.
    */
   #editorBar(): TemplateResult {
     return html`

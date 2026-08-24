@@ -139,9 +139,27 @@
   margin-left: 0;
 }
 
-/* A brand-new file renders as an empty diffs pane; give the caret room. */
-.gp-file-card:has(.gp-editor-bar) .gp-source-host {
+/* The source pane has one surface at a time: Pierre's viewer or the native
+   draft editor. A new file still has room to type before it has a blob. */
+.gp-file-card:has(.gp-editor-bar) .gp-source-pane {
   min-height: 340px;
+}
+
+.gp-editor {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 340px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  padding: 16px;
+  background: var(--gp-surface);
+  color: var(--gp-text);
+  font-family: var(--gp-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
 }
 
 .gp-editor-bar {

@@ -269,9 +269,10 @@ export class GpDetail extends GitPlusElement {
 
   #select(tab: Tab): void {
     this.tab = tab;
-    if (tab === "diff" && (this.diffState.tag === "idle" || this.diffState.tag === "fallback")) {
-      void this.#loadDiff();
-    }
+    // A route can replace the task while its previous diff is still resolving.
+    // Reload a settled Diff selection: its visible state may belong to that
+    // previous route, while `#loadDiff`'s generation rejects its late answer.
+    if (tab === "diff" && this.diffState.tag !== "loading") void this.#loadDiff();
   }
 
   /** Ask the server what changed, then read both sides of each file. */
