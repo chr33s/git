@@ -1127,3 +1127,45 @@ describe("advertisement hiding", () => {
     }),
   );
 });
+
+describe("protocol v2 bundle-uri", () => {
+  const advertise = () =>
+    new Request("http://host/repo/info/refs?service=git-upload-pack", {
+      headers: { "git-protocol": "version=2" },
+    });
+
+  const command = () =>
+    new Request("http://host/repo/git-upload-pack", {
+      method: "POST",
+      headers: { "git-protocol": "version=2" },
+      body: body([pkt("command=bundle-uri"), FLUSH]),
+    });
+
+  it.effect("does not advertise bundle-uri when no bundles are published", () =>
+    Effect.promise(async () => {
+      const text = await scenario(
+        Effect.gen(function* () {
+          const response = yield* Protocol.handle(advertise());
+          if (response === null) return "";
+          return decoder.decode(
+            new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+          );
+        }),
+      );
+      assert.match(text, /version 2/);
+      assert.doesNotMatch(text, /bundle-uri/);
+    }),
+  );
+
+  it.effect("answers bundle-uri with an empty list when none are published", () =>
+    Effect.promise(async () => {
+      const lines = await scenario(
+        Effect.gen(function* () {
+          const response = yield* Protocol.uploadPack(command());
+          return linesOf(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()))).lines;
+        }),
+      );
+      assert.ok(lines.every((line) => !line.includes(".uri=")));
+    }),
+  );
+});

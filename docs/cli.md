@@ -39,6 +39,7 @@ SUBCOMMANDS
   history             Commits that changed one path
   init                Create an empty bare repository
   log                 Commit history, newest first
+  maintenance         Plan or run desired-state repository maintenance
   merge               Three-way merge two revisions
   mv                  Move a tracked path, staging both halves
   pr                  Pull requests: open, review, discuss, check, merge

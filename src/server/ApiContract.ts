@@ -706,3 +706,66 @@ export const BisectAnswer = Schema.Struct({
   steps: Schema.Finite,
 });
 export type BisectAnswer = (typeof BisectAnswer)["Type"];
+
+export const BundleFamilySummary = Schema.Struct({
+  filter: Schema.NullOr(Schema.Literals(["blob:none"])),
+  full: Schema.NullOr(Schema.String),
+  incrementals: Schema.Finite,
+  latestCreationToken: Schema.NullOr(Schema.String),
+});
+export type BundleFamilySummary = (typeof BundleFamilySummary)["Type"];
+
+export const BundlesResponse = Schema.Struct({
+  enabled: Schema.Boolean,
+  families: Schema.Array(BundleFamilySummary),
+});
+export type BundlesResponse = (typeof BundlesResponse)["Type"];
+
+export const OperationProgress = Schema.Struct({
+  current: Schema.optional(Schema.Finite),
+  total: Schema.optional(Schema.Finite),
+  unit: Schema.optional(Schema.String),
+});
+
+export const OperationError = Schema.Struct({
+  tag: Schema.String,
+  message: Schema.String,
+});
+
+export const OperationState = Schema.Literals([
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+
+export const OperationView = Schema.Struct({
+  id: Schema.String,
+  repo: Schema.String,
+  kind: Schema.String,
+  state: OperationState,
+  created_at: Schema.String,
+  started_at: Schema.optional(Schema.String),
+  finished_at: Schema.optional(Schema.String),
+  progress: Schema.optional(OperationProgress),
+  message: Schema.optional(Schema.String),
+  error: Schema.optional(OperationError),
+});
+export type OperationView = (typeof OperationView)["Type"];
+
+export const OperationList = Schema.Struct({
+  operations: Schema.Array(OperationView),
+});
+export type OperationList = (typeof OperationList)["Type"];
+
+export const MaintenanceUnitView = Schema.Struct({
+  kind: Schema.String,
+  filter: Schema.optional(Schema.NullOr(Schema.Literals(["blob:none"]))),
+  ids: Schema.optional(Schema.Array(Schema.String)),
+});
+
+export const MaintenancePlan = Schema.Struct({
+  units: Schema.Array(MaintenanceUnitView),
+});
+export type MaintenancePlan = (typeof MaintenancePlan)["Type"];

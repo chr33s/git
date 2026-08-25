@@ -627,6 +627,21 @@ describe("cli", () => {
       }
     }),
   );
+
+  it.effect("plans and runs desired-state maintenance", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-plan-"));
+      try {
+        await seed(path.join(root, "repo"), "kept");
+        const planned = await cli(["maintenance", "plan", "--root", root, "repo"]);
+        assert.match(planned, /build-full|fsck|no maintenance needed/);
+        const ran = await cli(["maintenance", "run", "--root", root, "repo"]);
+        assert.match(ran, /complete|no maintenance needed/);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
 });
 
 /**

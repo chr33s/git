@@ -24,6 +24,7 @@ import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
+import type { ObjectStore } from "../git/Store.ts";
 import * as SocialLog from "../social/Log.ts";
 import { SocialWeb } from "../social/Projection.ts";
 import { readGenesis } from "../trust/Genesis.ts";
@@ -39,9 +40,18 @@ import * as Api from "../server/Api.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
+import * as Bundles from "../server/Bundles.ts";
+import { fileLayer as bundleFiles, fileMetaLayer } from "../server/Bundles.node.ts";
 import * as CommitPack from "../server/CommitPack.ts";
+import { configuration as featuresConfiguration, ServerFeatures } from "../server/Features.ts";
 import { file as lfsFile } from "../server/Lfs.node.ts";
 import * as Lfs from "../server/Lfs.ts";
+import { tick as maintenanceTick } from "../server/MaintenanceRun.ts";
+import {
+  handleEvents as operationEvents,
+  memoryLayer as operationsMemory,
+  Operations,
+} from "../server/Operations.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
 import { collects, routeOf, settledWithin } from "../server/Route.ts";
@@ -131,12 +141,14 @@ const nodeHeaders = (headers: Headers): NodeHeaders => {
 };
 
 export const serve = async (options: ServeOptions): Promise<Server> => {
+  const features = await Effect.runPromise(featuresConfiguration().pipe(Effect.orDie));
+  const featuresLayer = Layer.succeed(ServerFeatures, ServerFeatures.of(features));
   const hostname = options.hostname ?? "127.0.0.1";
   /** Only reached by a client that sent no `Host`, which HTTP/1.1 requires. */
   let fallbackAuthority = `${hostname}:${options.port ?? 0}`;
 
   interface RepoState {
-    readonly layer: Layer.Layer<Repository>;
+    readonly layer: Layer.Layer<Bundles.Bundles | ObjectStore | Operations | Repository>;
     readonly lfs: Layer.Layer<Lfs.LfsStore>;
     readonly api: (
       request: Request,
@@ -391,13 +403,23 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         ? AfterPush.chain({ root: options.root, repo, wake: true })
         : AfterPush.chain({ root: options.root, repo });
 
-    const layer = GitRepository.layer.pipe(
+    const repoStores = stores(directory);
+    const bundleStore = bundleFiles(directory);
+    const live = GitRepository.layer.pipe(
       // Real hooks, not `hooksNoop`: this is what makes a push deliver.
       // `forkDetach` is the node stand-in for `waitUntil` — delivery outlives
       // the response without the push waiting on a slow receiver.
       Layer.provide(afterPush),
       // As `guardLayer` above: `provide` would swallow `Storage`.
-      Layer.provideMerge(stores(directory)),
+      Layer.provideMerge(repoStores),
+    );
+    const layer = Layer.mergeAll(
+      live,
+      bundleStore,
+      fileMetaLayer(directory),
+      operationsMemory,
+      featuresLayer,
+      Bundles.layer.pipe(Layer.provide(bundleStore), Layer.provide(live)),
     );
 
     // Built once per repository, not once per request. The requester stays
@@ -492,6 +514,16 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         Archive.handle(request).pipe(Effect.provide(state.layer)),
       );
       if (exported !== null) return exported;
+
+      const bundled = await Effect.runPromise(
+        Bundles.tryHandle(request).pipe(Effect.provide(state.layer)),
+      );
+      if (bundled !== null) return bundled;
+
+      const events = await Effect.runPromise(
+        operationEvents(request).pipe(Effect.provide(state.layer)),
+      );
+      if (events !== null) return events;
 
       const matched = await Effect.runPromise(
         Protocol.handle(request).pipe(
@@ -673,9 +705,28 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const bound = (server.address() as AddressInfo).port;
   fallbackAuthority = `${hostname}:${bound}`;
 
+  let maintenanceTimer: ReturnType<typeof setInterval> | undefined;
+  const tickMaintenance = async () => {
+    const entries = await fs.readdir(options.root, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const state = stateFor(entry.name);
+      await Effect.runPromise(maintenanceTick().pipe(Effect.provide(state.layer))).catch(
+        () => undefined,
+      );
+    }
+  };
+  maintenanceTimer = setInterval(
+    () => {
+      void tickMaintenance();
+    },
+    60 * 60 * 1000,
+  );
+
   return {
     url: `http://${hostname}:${bound}`,
     close: async () => {
+      if (maintenanceTimer !== undefined) clearInterval(maintenanceTimer);
       await development?.close();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
