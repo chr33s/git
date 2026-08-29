@@ -126,6 +126,31 @@ describe("starting up", () => {
       }
     }),
   );
+
+  it.effect("disposes per-repository routers when the server closes", () =>
+    Effect.promise(async () => {
+      // `close` used to shut the HTTP server and leave every router's `Scope`
+      // open — dropping the entry without running its finalizer. A second
+      // server over the same root is a restart; it has to be able to open the
+      // same files.
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "host-lifetime-"));
+      const opened = await serve({ root: dir, allowAnonymousWrites: true });
+      try {
+        const created = await post(`${opened.url}/lived/blob`, { content: "x\n" });
+        assert.equal(created.status, 200);
+      } finally {
+        await opened.close();
+      }
+      const again = await serve({ root: dir, allowAnonymousWrites: true });
+      try {
+        const refs = await fetch(`${again.url}/lived/refs`);
+        assert.equal(refs.status, 200);
+      } finally {
+        await again.close();
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    }),
+  );
 });
 
 describe("a memoised router", () => {

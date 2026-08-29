@@ -6,8 +6,8 @@
  *
  * What the Durable Object gets free is built here: a per-repository mutex
  * stands in for the input gate (not `PartitionedSemaphore` — its permits are
- * a capacity shared across keys, not per-key exclusion), and one cached layer
- * per repository name stands in for instance isolation.
+ * a capacity shared across keys, not per-key exclusion), and an `RcMap` of
+ * per-repository layers stands in for instance isolation.
  */
 import * as http from "node:http";
 import * as fs from "node:fs/promises";
@@ -17,7 +17,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
-import { Context, Effect, Layer, Predicate } from "effect";
+import { Context, Effect, Exit, Layer, Predicate, RcMap, Scope } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
@@ -130,6 +130,24 @@ interface NodeHeaders {
   [name: string]: string;
 }
 
+/** How many distinct unknown `Host` authorities are worth a log line. */
+const REPORT_LIMIT = 16;
+
+/** Addresses that name no particular host: bound to every interface there is. */
+const WILDCARD: ReadonlySet<string> = new Set(["0.0.0.0", "::", "[::]", "::0", "[::0]"]);
+
+/**
+ * `host:port` as a `Host` header writes it.
+ *
+ * Bracketed for an IPv6 literal, because that is the form a client sends and
+ * the only one `new URL` can parse back: unbracketed, `::1` and port 8080
+ * concatenate to `::1:8080`, which matches no header any client will ever send
+ * — so a server bound to an IPv6 address could not recognise even its own
+ * address as its own.
+ */
+const authorityOf = (host: string, port: number): string =>
+  `${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`;
+
 const nodeHeaders = (headers: Headers): NodeHeaders => {
   const values: NodeHeaders = {};
   headers.forEach((value, name) => {
@@ -141,17 +159,50 @@ const nodeHeaders = (headers: Headers): NodeHeaders => {
 export const serve = async (options: ServeOptions): Promise<Server> => {
   const hostname = options.hostname ?? "127.0.0.1";
   /** Only reached by a client that sent no `Host`, which HTTP/1.1 requires. */
-  let fallbackAuthority = `${hostname}:${options.port ?? 0}`;
+  let fallbackAuthority = authorityOf(hostname, options.port ?? 0);
 
   /**
-   * The extra public authorities a host-bound credential may name, lowercased
-   * for the case-insensitive match a `Host` header needs. See
+   * Every public authority a host-bound credential may name, lowercased for
+   * the case-insensitive match a `Host` header needs. See
    * `Auth.RequestAudience`: the `Host` header cannot be trusted to say what
    * host a request arrived at, so a delegation's audience is checked against
-   * these (and the bound authority below) rather than the header alone. Empty
-   * is the common case — the server's own bound authority is trusted anyway.
+   * this allowlist rather than the header alone.
+   *
+   * The server's own bound authority joins it once `listen` has settled the
+   * real port, so the two conceptually-one trust sources stay one set rather
+   * than a pair of branches a later reader has to reconcile. Configuring none
+   * is the common case: a client cloning straight from this server names the
+   * bound authority.
    */
   const trustedHosts = new Set((options.hosts ?? []).map((host) => host.toLowerCase()));
+
+  /**
+   * Authorities already complained about, so that a client choosing a fresh
+   * `Host` per request cannot flood the log — and cannot grow this set without
+   * bound either, which is why it stops remembering after `REPORT_LIMIT`.
+   */
+  const reported = new Set<string>();
+
+  /**
+   * Says once, per authority, why a credential is about to be refused.
+   *
+   * The refusal itself is a generic 401 from the guard — a credential that did
+   * not verify — which on its own is indistinguishable from a wrong key and
+   * leaves an operator behind a proxy with nothing to go on. This is the line
+   * that names the header, so the fix (`--hosts`/`GIT_HOSTS`) is one message
+   * away rather than a bisect.
+   */
+  const reportUnknown = (authority: string): void => {
+    if (reported.has(authority) || reported.size > REPORT_LIMIT) return;
+    reported.add(authority);
+    console.error(
+      reported.size > REPORT_LIMIT
+        ? `unknown Host authorities are no longer being reported; ${REPORT_LIMIT} were`
+        : `refusing host-bound credentials for Host '${authority}': this server answers to ` +
+            `${[...trustedHosts].join(", ")}. Pass --hosts (or GIT_HOSTS) naming the public ` +
+            `authority if this server is reached under a name it does not bind`,
+    );
+  };
 
   /**
    * The audience to check a host-bound credential against: the `Host` header
@@ -162,15 +213,19 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
    * "Actually answers to" is the server's own bound authority — its real
    * `hostname:port`, which it controls, not the client — plus any public
    * authorities configured for a server reached under a different name (behind
-   * a proxy, say). A mirror's host is neither, so its replay still fails; a
-   * client cloning straight from this server names the bound authority, so the
-   * common single-origin case needs no configuration.
+   * a proxy, say). A mirror's host is neither, so its replay still fails.
+   *
+   * A request carrying no `Host` at all is not a client naming a host to be
+   * distrusted: HTTP/1.1 requires the header, so this is HTTP/1.0, and the
+   * only authority such a request can have arrived at is the one this server
+   * bound — the same reading `authority` below already takes of the same
+   * condition, and the one the pre-audience guard took by way of the URL.
    */
   const arrivedAudience = (host: string | undefined): string | null => {
-    if (host === undefined) return null;
-    const normalized = host.toLowerCase();
-    if (normalized === fallbackAuthority.toLowerCase()) return normalized;
-    return trustedHosts.has(normalized) ? normalized : null;
+    const normalized = (host ?? fallbackAuthority).toLowerCase();
+    if (trustedHosts.has(normalized)) return normalized;
+    reportUnknown(normalized);
+    return null;
   };
 
   interface RepoState {
@@ -194,10 +249,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
      * reading its socket wedge the repository for everyone else.
      */
     readonly delivering: Set<Promise<unknown>>;
-    /** Requests inside the gate right now; an evictable entry has none. */
-    active: number;
   }
-  const repos = new Map<string, RepoState>();
 
   /**
    * Challenge nonces, one store for the process.
@@ -211,37 +263,6 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
   /** One value for the process; see `Policy.AnonymousWrites`. */
   const openWrites = Policy.anonymousWrites(options.allowAnonymousWrites === true);
-
-  /**
-   * How many repositories keep a built layer.
-   *
-   * One entry per name ever asked for is a leak with a name: a scan for
-   * `/aaaa/info/refs`, `/aaab/…` would grow the map without bound, and none of
-   * those repositories need exist. Eviction only ever takes an entry with
-   * nothing in flight, so it cannot break the serialization the gate provides.
-   */
-  const REPO_CACHE = 256;
-
-  const evict = () => {
-    if (repos.size <= REPO_CACHE) return;
-    for (const [name, state] of repos) {
-      if (state.active > 0 || state.delivering.size > 0) continue;
-      repos.delete(name);
-      // The router holds a `Scope`: the layers it built — stores, hooks, the
-      // webhook registry — have finalizers, and dropping the entry without
-      // running them leaks a file handle per evicted repository.
-      //
-      // Caught, not merely detached. A finalizer that rejects becomes an
-      // unhandled rejection, and node's default is to turn that into a throw
-      // that takes the whole server down — so a file handle this host could
-      // not close would stop it serving every repository it holds. Eviction is
-      // housekeeping; it says so and carries on.
-      state.disposeApi().catch((cause: unknown) => {
-        console.error(`could not release ${name}: ${String(cause)}`);
-      });
-      if (repos.size <= REPO_CACHE) return;
-    }
-  };
 
   /**
    * Just enough of a repository to check who is asking.
@@ -394,16 +415,17 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     }),
   );
 
-  const stateFor = (repo: string): RepoState => {
-    const cached = repos.get(repo);
-    if (cached !== undefined) {
-      // Re-inserted so iteration order is least-recently-used first.
-      repos.delete(repo);
-      repos.set(repo, cached);
-      return cached;
-    }
-    evict();
-
+  /**
+   * One repository's layers and its input-gate stand-in.
+   *
+   * Built the first time a request holds this name, shared with every other
+   * in-flight request (including bodies still being written), and released
+   * when the last one finishes. A scan over names that need not exist cannot
+   * grow a resident set: an idle entry is already gone. Closing the server
+   * closes the map's scope, which is what actually runs the router finalizers
+   * — dropping the entry without that leaks a file handle per repository.
+   */
+  const openRepo = (repo: string): RepoState => {
     // The registry lives beside the repository it reports on, so a webhook
     // survives a restart the same way a ref does.
     const subscribers = subscribersFile(path.join(options.root, repo, "webhooks.json"));
@@ -438,12 +460,12 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       Layer.provideMerge(stores(directory)),
     );
 
-    // Built once per repository, not once per request. The requester stays
-    // *out* of the graph and arrives as a per-request context instead, which
-    // is what `toWebHandler`'s second argument is for: a router built per
-    // call rebuilds the whole API handler tree and opens a `Scope` nobody
-    // ever closes, and one built with the requester baked in would answer
-    // every later request as whoever made the first.
+    // Built once while this repository has a request in flight, not once per
+    // call. The requester stays *out* of the graph and arrives as a per-request
+    // context instead, which is what `toWebHandler`'s second argument is for:
+    // a router built per call rebuilds the whole API handler tree and opens a
+    // `Scope` nobody ever closes, and one built with the requester baked in
+    // would answer every later request as whoever made the first.
     const router = HttpRouter.toWebHandler(
       Api.layer(remotes).pipe(
         Layer.provideMerge(layer),
@@ -453,7 +475,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       { disableLogger: true },
     );
 
-    const state: RepoState = {
+    return {
       layer,
       lfs: lfsFile(path.join(options.root, repo, "lfs")),
       api: (request: Request, requester: Context.Context<Auth.Requester>) =>
@@ -464,11 +486,34 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       disposeApi: router.dispose,
       gate: Promise.resolve(),
       delivering: new Set(),
-      active: 0,
     };
-    repos.set(repo, state);
-    return state;
   };
+
+  const { scope, repos } = await Effect.runPromise(
+    Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const repos = yield* RcMap.make({
+        lookup: (repo: string) =>
+          Effect.acquireRelease(
+            Effect.sync(() => openRepo(repo)),
+            (state) =>
+              // Caught, not merely detached. A finalizer that rejects becomes
+              // an unhandled rejection, and node's default is to turn that
+              // into a throw that takes the whole server down — so a file
+              // handle this host could not close would stop it serving every
+              // repository it holds. Release is housekeeping; it says so and
+              // carries on.
+              Effect.promise(() =>
+                state.disposeApi().catch((cause: unknown) => {
+                  console.error(`could not release ${repo}: ${String(cause)}`);
+                }),
+              ),
+          ),
+        idleTimeToLive: 0,
+      }).pipe(Effect.provideService(Scope.Scope, scope));
+      return { scope, repos };
+    }),
+  );
 
   /**
    * One repository's requests, strictly in order.
@@ -488,85 +533,90 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     deliver: (response: Response) => Promise<void>,
     authenticated: Auth.Authenticated,
   ): Promise<void> => {
-    const state = stateFor(repo);
-    state.active += 1;
-
-    // Two shapes of the same fact. The protocol and bulk paths build their own
-    // effect per request and take a layer; the API router is built once and
-    // takes a context per call, which is what keeps it memoisable.
-    const requester = Auth.requester(authenticated);
-    const asked = Auth.requesterContext(authenticated);
-
-    // Outside the gate, deliberately: a collection waits on bodies that finish
-    // at their clients' pace, and waiting for them with the gate held would
-    // stall every other request to this repository for the whole bound.
-    if (collects(request)) await settledWithin(state.delivering);
-
-    const answer = async (): Promise<Response> => {
-      // And once more with the gate held, briefly: the wait above lets go of
-      // the backlog without holding anyone up, but a body that started while
-      // it was waiting would otherwise still be reading objects. Short,
-      // because by here the queue is short.
-      if (collects(request)) await settledWithin(state.delivering, 2_000);
-
-      // LFS first: it shares the `info/` prefix with the advertisement, and
-      // its bodies are the large ones, so it must not be behind a handler
-      // that would read them.
-      const lfs = await Effect.runPromise(
-        Lfs.handle(request).pipe(Effect.provide(Layer.mergeAll(state.lfs, requester))),
-      );
-      if (lfs !== null) return lfs;
-
-      // Also ahead of the API: a bulk commit body is arbitrarily large and is
-      // consumed as a stream, so nothing that would buffer it may see it first.
-      const bulk = await Effect.runPromise(
-        CommitPack.handle(request).pipe(
-          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
-        ),
-      );
-      if (bulk !== null) return bulk;
-
-      const exported = await Effect.runPromise(
-        Archive.handle(request).pipe(Effect.provide(state.layer)),
-      );
-      if (exported !== null) return exported;
-
-      const matched = await Effect.runPromise(
-        Protocol.handle(request).pipe(
-          Effect.catch((error) =>
-            Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
-          ),
-          Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
-        ),
-      );
-      return matched ?? (await state.api(request, asked));
-    };
-
-    const answered = state.gate.then(answer, answer);
-    state.gate = answered.then(
-      () => undefined,
-      () => undefined,
-    );
-
-    let response: Response;
+    // The lease that keeps this repository's layers alive: acquired here and
+    // released in `finally`, so it spans the handler *and* writing the body.
+    // An upload-pack still reads objects as the client consumes it; dropping
+    // the router in between would close that store out from under the stream.
+    const held = await Effect.runPromise(Scope.make());
     try {
-      response = await answered;
+      const state = await Effect.runPromise(
+        RcMap.get(repos, repo).pipe(Effect.provideService(Scope.Scope, held)),
+      );
+
+      // Two shapes of the same fact. The protocol and bulk paths build their own
+      // effect per request and take a layer; the API router is built once and
+      // takes a context per call, which is what keeps it memoisable.
+      const requester = Auth.requester(authenticated);
+      const asked = Auth.requesterContext(authenticated);
+
+      // Outside the gate, deliberately: a collection waits on bodies that finish
+      // at their clients' pace, and waiting for them with the gate held would
+      // stall every other request to this repository for the whole bound.
+      if (collects(request)) await settledWithin(state.delivering);
+
+      const answer = async (): Promise<Response> => {
+        // And once more with the gate held, briefly: the wait above lets go of
+        // the backlog without holding anyone up, but a body that started while
+        // it was waiting would otherwise still be reading objects. Short,
+        // because by here the queue is short.
+        if (collects(request)) await settledWithin(state.delivering, 2_000);
+
+        // LFS first: it shares the `info/` prefix with the advertisement, and
+        // its bodies are the large ones, so it must not be behind a handler
+        // that would read them.
+        const lfs = await Effect.runPromise(
+          Lfs.handle(request).pipe(Effect.provide(Layer.mergeAll(state.lfs, requester))),
+        );
+        if (lfs !== null) return lfs;
+
+        // Also ahead of the API: a bulk commit body is arbitrarily large and is
+        // consumed as a stream, so nothing that would buffer it may see it first.
+        const bulk = await Effect.runPromise(
+          CommitPack.handle(request).pipe(
+            Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
+          ),
+        );
+        if (bulk !== null) return bulk;
+
+        const exported = await Effect.runPromise(
+          Archive.handle(request).pipe(Effect.provide(state.layer)),
+        );
+        if (exported !== null) return exported;
+
+        const matched = await Effect.runPromise(
+          Protocol.handle(request).pipe(
+            Effect.catch((error) =>
+              Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
+            ),
+            Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
+          ),
+        );
+        return matched ?? (await state.api(request, asked));
+      };
+
+      const answered = state.gate.then(answer, answer);
+      state.gate = answered.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      const response = await answered;
       // Git writes and JSON mutations are POST/PUT/PATCH/DELETE requests.
       // Invalidating after any non-safe request is deliberately conservative:
       // read-only POST endpoints merely refresh the index next time, while a
       // ref update is visible to every following request immediately.
       if (request.method !== "GET" && request.method !== "HEAD") invalidateFederation();
-    } finally {
-      state.active -= 1;
-    }
 
-    const delivery = deliver(response);
-    // Registered before it is awaited, so a `gc` that arrives mid-body sees it.
-    state.delivering.add(delivery);
-    try {
-      await delivery;
+      const delivery = deliver(response);
+      // Registered before it is awaited, so a `gc` that arrives mid-body sees it.
+      state.delivering.add(delivery);
+      try {
+        await delivery;
+      } finally {
+        state.delivering.delete(delivery);
+      }
     } finally {
-      state.delivering.delete(delivery);
+      await Effect.runPromise(Scope.close(held, Exit.void));
     }
   };
 
@@ -700,35 +750,62 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     }
     handleIncoming(incoming, outgoing);
   });
-  development = options.development === undefined ? undefined : await options.development(server);
+  try {
+    development = options.development === undefined ? undefined : await options.development(server);
 
-  await new Promise<void>((resolve, reject) => {
-    // Rejected on `error` as well as resolved on `listening`. A port already
-    // in use — the ordinary mistake, and what a second `serve` on a fixed port
-    // does — emitted an `error` nobody had subscribed to: node turned that
-    // into an uncaught exception that killed the process, and the promise this
-    // awaited never settled either way. Now the caller is told which port and
-    // why, and `serve` fails like anything else that cannot start.
-    server.once("error", reject);
-    server.listen(options.port ?? 0, hostname, () => {
-      server.removeListener("error", reject);
-      resolve();
+    await new Promise<void>((resolve, reject) => {
+      // Rejected on `error` as well as resolved on `listening`. A port already
+      // in use — the ordinary mistake, and what a second `serve` on a fixed port
+      // does — emitted an `error` nobody had subscribed to: node turned that
+      // into an uncaught exception that killed the process, and the promise this
+      // awaited never settled either way. Now the caller is told which port and
+      // why, and `serve` fails like anything else that cannot start.
+      server.once("error", reject);
+      server.listen(options.port ?? 0, hostname, () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
     });
-  });
+  } catch (cause: unknown) {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    throw cause;
+  }
 
   // Known only now, because port 0 means "whichever one is free".
   // SAFETY: the server listens on a TCP port, never a pipe, so `address()`
   // returns an `AddressInfo` once `listen` has resolved.
   const bound = (server.address() as AddressInfo).port;
-  fallbackAuthority = `${hostname}:${bound}`;
+  fallbackAuthority = authorityOf(hostname, bound);
+  // Trusted from here rather than checked separately in `arrivedAudience`:
+  // one allowlist, and nothing can have arrived yet to consult it early.
+  trustedHosts.add(fallbackAuthority.toLowerCase());
+
+  // A wildcard bind answers to every name the network reaches it by and knows
+  // none of them, so the bound authority above is a placeholder no client will
+  // ever send — the container-behind-a-proxy topology, where every host-bound
+  // credential would otherwise be refused with the reason only visible here.
+  if (WILDCARD.has(hostname.toLowerCase()) && trustedHosts.size === 1) {
+    console.error(
+      `bound to ${hostname}, which names no host a client can send: host-bound credentials ` +
+        "will be refused until --hosts (or GIT_HOSTS) names the authority this server is " +
+        "reached at, e.g. GIT_HOSTS=git.example.com",
+    );
+  }
 
   return {
-    url: `http://${hostname}:${bound}`,
+    url: `http://${authorityOf(hostname, bound)}`,
     close: async () => {
-      await development?.close();
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
+      try {
+        await development?.close();
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      } finally {
+        // The routers' scopes live here, not on the HTTP server. Closing
+        // without this drops every still-held entry without running its
+        // finalizer: one file handle per repository this process opened.
+        await Effect.runPromise(Scope.close(scope, Exit.void));
+      }
     },
   };
 };

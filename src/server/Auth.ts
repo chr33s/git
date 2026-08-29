@@ -461,7 +461,12 @@ export const mintDelegation = Effect.fn("Auth.mintDelegation")(function* (input:
     version: 1,
     repo: input.repo,
     capabilities: input.capabilities,
-    audience: input.audience,
+    // Lowercased here rather than by every caller: `openDelegation` compares
+    // this against an audience the host layer has already lowercased, so an
+    // audience minted with any capital in it would name a destination that
+    // could never accept it — and at mint time there is still somewhere to
+    // put the fix, whereas at the destination there is only a 401.
+    audience: input.audience?.toLowerCase(),
     expiresAt: new Date(now.getTime() + input.ttlSeconds * 1000).toISOString(),
     nonce: crypto.randomUUID(),
   } satisfies Delegation;
@@ -838,13 +843,13 @@ export const authenticate = Effect.fn("Auth.authenticate")(function* (input: {
   }
 
   // The audience a host-bound credential is checked against comes from the
-  // host layer when it knows it, and only falls back to the request URL's host
-  // where that host is the true destination (see `RequestAudience`). Reading it
-  // straight off `input.request.url` would trust the client's `Host` header on
-  // a self-hosted server, which is the whole binding defeated.
-  const audience = Option.getOrElse(yield* Effect.serviceOption(RequestAudience), () =>
-    audienceOf(input.request.url),
-  );
+  // host layer, which is the only thing that knows what host a request truly
+  // arrived at (see `RequestAudience`). Required rather than optional with a
+  // fall back to `input.request.url`: that fallback is right on exactly one
+  // kind of platform and silently reopens the replay hole on the others, so a
+  // host that omits the layer must fail to compile rather than fail closed
+  // where nobody looks.
+  const audience = yield* RequestAudience;
 
   const identified =
     presented.kind === "delegated"
