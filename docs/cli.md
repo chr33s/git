@@ -6,7 +6,7 @@ with `npm run docs:cli` after changing commands.
 
 ## Top-level commands
 
-`GIT_ROOT`, `PORT`, and `HOSTNAME` configure `git+ serve` when its
+`GIT_ROOT`, `PORT`, `HOSTNAME`, and `GIT_HOSTS` configure `git+ serve` when its
 corresponding explicit flag is absent. Other local commands use `--root`.
 
 ```text

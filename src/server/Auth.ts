@@ -1143,8 +1143,10 @@ export const anonymousWrites = (allowed: boolean): Layer.Layer<AnonymousWrites> 
  * `openDelegation` already makes for an unknown host).
  *
  * A platform whose request URL *is* the true destination — Cloudflare serves
- * the very request the edge received — provides no value here, and the guard
- * falls back to the URL's host, which is trustworthy in that case.
+ * the very request the edge received — says so with `arrivedAtRequestUrl`.
+ * There is no default: the fallback is right on exactly one kind of platform
+ * and silently reopens the replay hole on every other, so each host names the
+ * reading it is entitled to and a host that names none fails to compile.
  */
 export class RequestAudience extends Context.Service<RequestAudience, string | null>()(
   "server/RequestAudience",
@@ -1152,6 +1154,24 @@ export class RequestAudience extends Context.Service<RequestAudience, string | n
 
 export const requestAudience = (host: string | null): Layer.Layer<RequestAudience> =>
   Layer.succeed(RequestAudience)(host);
+
+/**
+ * The audience for a platform that serves the request its edge received.
+ *
+ * Sound only where the request URL's host cannot be set by the client — where
+ * routing to this code *is* the proof that the host is the one configured for
+ * it, as Cloudflare's is. Written as a named constructor rather than left to
+ * each host to spell as `requestAudience(audienceOf(request.url))`, so the
+ * claim has one place to be read, one place to be searched for, and a name
+ * that says what is being assumed.
+ *
+ * A deploy topology that invalidates it — a second custom domain, a shared or
+ * wildcard route reaching one instance under more than one host — makes this
+ * the wrong reading, and the host should validate a header allowlist the way
+ * `host/Node.ts` does instead.
+ */
+export const arrivedAtRequestUrl = (request: Request): Layer.Layer<RequestAudience> =>
+  requestAudience(audienceOf(request.url));
 
 /** Anonymous, for the paths that never authenticated anybody. */
 export const anonymous: Authenticated = {

@@ -243,7 +243,17 @@ export class GitRepo extends DurableObject<TestEnv> {
     // which is what every repository that predates this was.
     const guarded = await Effect.runPromise(
       Auth.guard(request).pipe(
-        Effect.provide(Layer.mergeAll(this.#live(repo), this.#nonces(), this.#openWrites())),
+        Effect.provide(
+          Layer.mergeAll(
+            this.#live(repo),
+            this.#nonces(),
+            this.#openWrites(),
+            // Reached through the Worker's own routing, so the URL's host is
+            // the destination rather than a header a client set. See
+            // `Auth.arrivedAtRequestUrl`.
+            Auth.arrivedAtRequestUrl(request),
+          ),
+        ),
         // As the other two hosts do: a repository whose identity cannot be
         // read is unavailable, not open, and not an exception out of `fetch`.
         Effect.orElseSucceed(() => ({

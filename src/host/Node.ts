@@ -47,7 +47,7 @@ import { file as remotesFile } from "../server/Remotes.node.ts";
 import { collects, routeOf, settledWithin } from "../server/Route.ts";
 import { assetResponse } from "../server/Static.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
-import { configuration, type ServeConfig } from "./ServeConfig.ts";
+import { resolve as resolveConfiguration, type ServeConfig } from "./ServeConfig.ts";
 
 /**
  * A development asset server mounted before the Git routes.
@@ -810,10 +810,14 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   };
 };
 
-export { configuration } from "./ServeConfig.ts";
+export { configuration, resolve as resolveConfiguration } from "./ServeConfig.ts";
 
 if (import.meta.main) {
-  const options = await Effect.runPromise(configuration().pipe(Effect.orDie));
+  // `resolve` rather than `configuration`: it is where `GIT_HOSTS` is parsed
+  // and refused, so this entry point and `git+ serve` reject the same value
+  // with the same message rather than one of them starting on a list no
+  // request can match.
+  const options = await Effect.runPromise(resolveConfiguration({}).pipe(Effect.orDie));
   const { url } = await serve(options);
   console.log(`git smart-HTTP server on ${url}, repositories under ${options.root}/`);
 }

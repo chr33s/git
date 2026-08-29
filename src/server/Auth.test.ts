@@ -24,27 +24,39 @@ import {
   openDelegation,
   present,
   REPLICATION_CAPABILITIES,
+  RequestAudience,
   requestAudience,
   requiredCapability,
   signEnvelope,
 } from "./Auth.ts";
 
-const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | Nonces>) =>
+/**
+ * The services the guard reads, with the audience these requests arrived at.
+ *
+ * `requestAudience` is merged rather than left to each test: every request
+ * below is built against `http://host/`, so `host` is what a host layer
+ * validating the header would have produced. A test asking what happens under
+ * a *different* audience provides its own, which wins — the inner `provide`
+ * satisfies the requirement before this one is reached.
+ */
+const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | Nonces | RequestAudience>) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(
-        Layer.merge(
+        Layer.mergeAll(
           GitRepository.layer.pipe(
             Layer.provide(GitRepository.hooksNoop),
             Layer.provideMerge(stores),
           ),
           noncesInMemory(),
+          requestAudience(AUDIENCE),
         ),
       ),
     ),
   );
 
-const request = (url: string, init?: RequestInit) => new Request(`http://host/${url}`, init);
+const AUDIENCE = "host";
+const request = (url: string, init?: RequestInit) => new Request(`http://${AUDIENCE}/${url}`, init);
 
 /** A repository with a genesis and one member holding `capabilities`. */
 const hub = Effect.fn("test.hub")(function* (capabilities: ReadonlyArray<string>) {

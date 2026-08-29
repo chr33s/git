@@ -1,19 +1,19 @@
 /** `git+ serve` — the node host, with the same configuration as its standalone entry. */
 import * as path from "node:path";
 
-import { Console, Effect } from "effect";
+import { Console, Effect, Result } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
-import { resolve } from "../host/ServeConfig.ts";
+import { parseHosts, resolve } from "../host/ServeConfig.ts";
 import * as Static from "../server/Static.ts";
 
 /** The bundle is beside this source when run from a checkout or package. */
 const defaultUiDir = path.join(import.meta.dirname, "..", "..", "dist", "ui");
 
 /**
- * Explicit flags win, followed by `GIT_ROOT`, `PORT` and `HOSTNAME`, then the
- * node host defaults. Keeping the resolution in the host makes `git+ serve`
+ * Explicit flags win, followed by `GIT_ROOT`, `PORT`, `HOSTNAME` and
+ * `GIT_HOSTS`, then the node host defaults. Keeping the resolution in the host makes `git+ serve`
  * and `node src/host/Node.ts` one configuration surface.
  */
 export const serveCommand = Command.make(
@@ -27,6 +27,12 @@ export const serveCommand = Command.make(
     hostname: Flag.string("hostname").pipe(
       Flag.optional,
       Flag.withDescription("Host interface to bind (or HOSTNAME)"),
+    ),
+    hosts: Flag.string("hosts").pipe(
+      Flag.optional,
+      Flag.withDescription(
+        "Public authorities this server answers to, comma-separated (or GIT_HOSTS)",
+      ),
     ),
     open: Flag.boolean("open").pipe(
       Flag.withDefault(false),
@@ -45,12 +51,21 @@ export const serveCommand = Command.make(
       Flag.withDescription("Where the built UI is, if not the one built beside this install"),
     ),
   },
-  ({ hostname, open, port, root, ui, uiDir, wake }) =>
+  ({ hostname, hosts, open, port, root, ui, uiDir, wake }) =>
     Effect.gen(function* () {
+      // Validated here as well as in the environment, because an entry no
+      // request can match is worth refusing at startup whichever way it
+      // arrived. `resolve` checks `GIT_HOSTS`; this checks the flag that
+      // overrides it. See `parseHosts`.
+      const named = hosts._tag === "Some" ? parseHosts(hosts.value) : null;
+      if (named !== null && Result.isFailure(named)) {
+        return yield* new Invalid({ field: "hosts", reason: named.failure });
+      }
       const options = yield* resolve({
         root: root._tag === "Some" ? root.value : undefined,
         port: port._tag === "Some" ? port.value : undefined,
         hostname: hostname._tag === "Some" ? hostname.value : undefined,
+        hosts: named === null ? undefined : named.success,
       });
       const assets = ui ? (uiDir === "" ? defaultUiDir : uiDir) : undefined;
       if (assets !== undefined && !(yield* Effect.promise(() => Static.built(assets)))) {

@@ -354,7 +354,17 @@ export default Repo.make(
           // Worker in front of this is a router and holds no secret — there is
           // nothing for it to authenticate with.
           const guarded = yield* Auth.guard(request).pipe(
-            Effect.provide(Layer.mergeAll(live(repo), nonces, openWrites)),
+            Effect.provide(
+              Layer.mergeAll(
+                live(repo),
+                nonces,
+                openWrites,
+                // The edge routed this request here under the host configured
+                // for this Worker, so the URL's host is the destination and
+                // not the client's to choose. See `Auth.arrivedAtRequestUrl`.
+                Auth.arrivedAtRequestUrl(request),
+              ),
+            ),
             Effect.orElseSucceed(() => ({
               denied: new Response("authentication unavailable", { status: 503 }),
               authenticated: Auth.anonymous,

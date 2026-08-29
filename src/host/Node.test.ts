@@ -10,6 +10,7 @@
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
@@ -21,6 +22,7 @@ import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores as memoryStores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
+import { mintDelegation } from "../server/Auth.ts";
 import { enableHubUnder, grantMemberUnder } from "../testing/Hub.ts";
 import { serve, type Server } from "./Node.ts";
 
@@ -385,6 +387,128 @@ describe("a remote configured to be sent to", () => {
       }
 
       assert.equal(arrived, made, "the branch the push moved is on the downstream remote");
+    }),
+  );
+});
+
+/**
+ * What audience a host-bound credential is actually checked against, asked of
+ * the real `serve()` rather than of `authenticate` with a layer handed to it.
+ *
+ * The binding exists to stop a mirror replaying, at the origin, a credential
+ * it was handed — and it is only as strong as where the host reads the arrived
+ * host from. Reading it from the request URL means reading the client's own
+ * `Host` header, so every assertion below is about a header this test sets
+ * and a server that must not believe it. Exercised end to end because the
+ * failure this guards against is a *wiring* failure: a layer dropped from
+ * `serve()`'s graph, which no test of `authenticate` in isolation would see.
+ */
+describe("the audience a host-bound credential is checked against", () => {
+  const PUBLIC = "git.example.com";
+  let hostedRoot: string;
+  let hosted: Server;
+  let bound: string;
+  let fixture: Awaited<ReturnType<typeof enableHubUnder>>;
+
+  /** A credential minted for one destination, as `Auth.present` mints one. */
+  const boundTo = (audience: string) =>
+    Effect.runPromise(
+      mintDelegation({
+        key: fixture.member,
+        repo: fixture.repoId,
+        capabilities: ["repo.read"],
+        ttlSeconds: 300,
+        audience,
+      }),
+    );
+
+  /**
+   * One request with the `Host` header this test chose.
+   *
+   * Raw rather than `fetch`, which treats `Host` as a forbidden header and
+   * drops it — leaving the one input every assertion here turns on unset. The
+   * omitted-header case is HTTP/1.0, which is the only way to send none.
+   */
+  const asHost = (host: string | null, credential: string | null): Promise<number> =>
+    new Promise((resolve, reject) => {
+      const port = Number(new URL(hosted.url).port);
+      const socket = net.connect(port, "127.0.0.1", () => {
+        const lines = [
+          `GET /r/refs HTTP/1.0`,
+          ...(host === null ? [] : [`Host: ${host}`]),
+          ...(credential === null ? [] : [`Authorization: Bearer ${credential}`]),
+          "",
+          "",
+        ];
+        socket.write(lines.join("\r\n"));
+      });
+      let received = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        received += chunk;
+      });
+      socket.on("error", reject);
+      socket.on("end", () => resolve(Number(received.split(" ")[1] ?? 0)));
+    });
+
+  beforeAll(async () => {
+    hostedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "host-audience-"));
+    // The public name differs from the bind address, which is the topology
+    // `--hosts` exists for and the one where getting this wrong is silent.
+    hosted = await serve({ root: hostedRoot, hosts: [PUBLIC] });
+    bound = new URL(hosted.url).host;
+    fixture = await enableHubUnder(hostedRoot, "r", ["repo.read"]);
+  });
+
+  afterAll(async () => {
+    await hosted.close();
+    await fs.rm(hostedRoot, { recursive: true, force: true });
+  });
+
+  it.effect("accepts a credential named for an authority this server answers to", () =>
+    Effect.promise(async () => {
+      const credential = await boundTo(PUBLIC);
+      assert.equal(await asHost(PUBLIC, credential), 200);
+      // The member is what makes this repository non-anonymous; without the
+      // credential the same request is refused, so 200 means the credential.
+      assert.equal(await asHost(PUBLIC, null), 401);
+    }),
+  );
+
+  it.effect("accepts one named for the address it bound, with no entry for it", () =>
+    Effect.promise(async () => {
+      assert.equal(await asHost(bound, await boundTo(bound)), 200);
+    }),
+  );
+
+  it.effect("does not let a client's Host header establish the audience", () =>
+    Effect.promise(async () => {
+      // The replay this binding exists to stop: a mirror holding a credential
+      // minted for itself, presenting it at the origin and naming its own host
+      // in the header. The header is not one this server answers to, so the
+      // audience is unknown and the credential is refused.
+      assert.equal(await asHost("mirror.example.com", await boundTo("mirror.example.com")), 401);
+
+      // And the converse: a credential for an authority this server does
+      // answer to is still refused when the request did not arrive there.
+      assert.equal(await asHost("mirror.example.com", await boundTo(PUBLIC)), 401);
+    }),
+  );
+
+  it.effect("reads a request with no Host as having arrived at the bound address", () =>
+    Effect.promise(async () => {
+      // HTTP/1.1 requires the header, so this is HTTP/1.0 — and the only
+      // authority such a request can have reached is the one this server
+      // bound. Refusing it would refuse the server its own credentials.
+      assert.equal(await asHost(null, await boundTo(bound)), 200);
+    }),
+  );
+
+  it.effect("still accepts a credential that names no host at all", () =>
+    Effect.promise(async () => {
+      // An unbound credential is not made stronger or weaker by any of this:
+      // it names no destination, so no destination check applies.
+      assert.equal(await asHost("mirror.example.com", fixture.credential), 200);
     }),
   );
 });
