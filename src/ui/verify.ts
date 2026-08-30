@@ -381,6 +381,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
               usageWindowSeconds: 0,
               queueCandidates: false,
               queueDepth: 8,
+              inbox: true,
             },
             ref: null,
           });

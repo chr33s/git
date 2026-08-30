@@ -533,6 +533,18 @@ pull request of their own. The authority model is not weakened — nothing
 quarantined counts for anything — but the drive-by patch, the workflow
 git was built for and hosted forges gated behind accounts, is back.
 
+The inbox is a door a repository opens, so it is a repository that closes
+it: `"inbox": false` in `refs/meta/policy` refuses every quarantine push,
+and the refusal lands before the body is read rather than after the pack
+has been persisted. It is `true` by default and for an absent field —
+this is the one write an _unauthenticated_ caller may make, so it must be
+an operator's answer rather than a default nobody chose, and closing a
+door nobody asked to close is the same mistake as opening one. The two
+refusals that need nothing from the pack — a proposal id that is not a
+UUIDv7, and one that already exists or has already been adopted — are
+also given before the body, so a stranger's rejected submission does not
+leave objects behind for a `gc` only an admin can run.
+
 ---
 
 ## 7. Application: discovery and replication

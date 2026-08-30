@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, it } from "@effect/vitest";
 import { deflateSync } from "node:zlib";
 
-import { Effect, Result, Stream } from "effect";
+import { Effect, Layer, Result, Stream } from "effect";
 
 import { encodeCommit, encodeTree } from "./Format.ts";
 import { stores } from "./Memory.ts";
@@ -12,6 +12,8 @@ import {
   createDelta,
   encodeOfsDistance,
   ingest,
+  MAX_OBJECT_BYTES,
+  maxObject,
   pack,
   sizeVarint,
   unpack,
@@ -301,6 +303,79 @@ describe("Pack", () => {
           new Uint8Array(deflateSync(data)),
         ]);
         await expectCorrupt(buildPack([entry]));
+      }),
+    );
+
+    /**
+     * The declared size is what the inflate below it is bounded by, and it is
+     * written by whoever sent the pack. Bounded only by `Inflate.MAX_INFLATED`
+     * — 512 MiB, four times what a Durable Object gets — one object could ask
+     * for more memory than the isolate has, from about half a megabyte of
+     * pack, because deflate reaches ~1000:1. The size check that follows the
+     * inflate can only report a bomb that has already been built.
+     */
+    it.effect("refuses a declared size past the ceiling before inflating it", () =>
+      Effect.promise(async () => {
+        // Eight megabytes of zeros, which deflate carries in a few kilobytes —
+        // the shape of the thing, at a size a test can afford to build.
+        const payload = new Uint8Array(8 * 1024 * 1024);
+        const entry = concat([
+          Uint8Array.from(objectHeader(3, payload.length)),
+          new Uint8Array(deflateSync(payload)),
+        ]);
+        const bytes = buildPack([entry]);
+        assert.ok(bytes.length < 64 * 1024, `the bomb itself is ${bytes.length} bytes`);
+
+        let peak = 0;
+        const sample = setInterval(() => {
+          peak = Math.max(peak, process.memoryUsage().arrayBuffers);
+        }, 1);
+        const before = process.memoryUsage().arrayBuffers;
+        const error = await Effect.runPromise(
+          unpack(Stream.fromIterable(chunked(bytes, 4096))).pipe(
+            Effect.flip,
+            // A host that says it has less says so here; see `MaxObject`.
+            Effect.provide(Layer.mergeAll(stores, maxObject(1024))),
+            Effect.ensuring(Effect.sync(() => clearInterval(sample))),
+          ),
+        );
+
+        assert.equal(error._tag, "PackCorrupt");
+        assert.match(error.reason, /declares 8388608 bytes, more than the 1024/);
+        // Refused *before* the allocation, which is the whole point: inflating
+        // first and comparing after would put all eight megabytes here.
+        assert.ok(
+          peak - before < 4 * 1024 * 1024,
+          `inflated ${peak - before} bytes before refusing`,
+        );
+      }),
+    );
+
+    it.effect("refuses a size varint too long to be a size", () =>
+      Effect.promise(async () => {
+        // A hundred and fifty continuation bytes. Read to the end, `size`
+        // accumulates `2 ** shift` past the safe-integer range and arrives at
+        // `Infinity` — which satisfies every ceiling, equals no inflated
+        // length, and reports itself as "header says Infinity bytes".
+        const entry = concat([
+          // Blob, low size nibble set, continuation bit on — then nothing but
+          // continuations.
+          Uint8Array.from([0xbf, ...Array.from({ length: 150 }, () => 0x80), 0x00]),
+          new Uint8Array(deflateSync(encoder.encode("x"))),
+        ]);
+        const error = await expectCorrupt(buildPack([entry]));
+        assert.match(error.reason, /size varint is too long/);
+      }),
+    );
+
+    it.effect("takes the default ceiling where no host has said otherwise", () =>
+      Effect.promise(async () => {
+        const entry = concat([
+          Uint8Array.from(objectHeader(3, MAX_OBJECT_BYTES + 1)),
+          new Uint8Array(deflateSync(encoder.encode("x"))),
+        ]);
+        const error = await expectCorrupt(buildPack([entry]));
+        assert.match(error.reason, new RegExp(`more than the ${String(MAX_OBJECT_BYTES)}`));
       }),
     );
   });

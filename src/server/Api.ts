@@ -1897,6 +1897,10 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // Clamped by the same rule that reads the file back, so what this
           // answers with is what the repository will enforce.
           queueDepth: Policy.clampDepth(payload.queueDepth ?? held.queueDepth),
+          // As `queueCandidates`: absent is unchanged, never the default. A
+          // client that predates the field must not close a repository's inbox
+          // — or reopen one somebody closed — by not mentioning it.
+          inbox: payload.inbox ?? held.inbox,
           // Absent from the HTTP document for the same reason `queueCandidates`
           // once was: a client that does not know the field must not turn it off.
           externalReview: held.externalReview ?? null,

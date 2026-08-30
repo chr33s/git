@@ -314,9 +314,16 @@ describe("Remotes", () => {
         "url",
       );
 
-      // Loopback http is how a server reaches the one next to it.
+      // Loopback http is how a server reaches the one next to it — all three
+      // spellings of it, since a machine does not stop being itself because
+      // the operator wrote the address rather than the name.
       const local = yield* registry.add({ name: "next-door", url: "http://127.0.0.1:8080/r" });
       assert.equal(local.credential, null);
+      yield* registry.add({ name: "by-name", url: "http://localhost:8080/r" });
+      yield* registry.add({ name: "by-v6", url: "http://[::1]:8080/r" });
+      // And a scheme is not excused by a loopback host: the exemption is for
+      // `http`, not for "anything, as long as it is next door".
+      assert.equal(yield* refused({ name: "odd", url: "file://localhost/etc/passwd" }), "url");
     }).pipe(Effect.provide(Remotes.memory)),
   );
 

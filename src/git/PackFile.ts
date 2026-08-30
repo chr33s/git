@@ -99,6 +99,10 @@ const windowed = (source: PackSource, start: number, primed: Uint8Array): ByteSo
   };
 };
 
+/** As `Pack.ts`'s bound of the same name; a pack at rest gets the same reading. */
+const MAX_SIZE_SHIFT = 56;
+const MAX_OFFSET_BYTES = 8;
+
 interface Header {
   readonly code: number;
   readonly size: number;
@@ -123,6 +127,11 @@ const parseHeader = (bytes: Uint8Array, at: number): Header => {
   let size = current & 0x0f;
   let shift = 4;
   while (current & 0x80) {
+    // Bounded, as the transport reader's is: past this the `2 ** shift` term
+    // leaves the safe-integer range and `size` becomes `Infinity`, which is
+    // then handed to the decoder as its output limit and compared against the
+    // inflated length — a number that satisfies neither test.
+    if (shift > MAX_SIZE_SHIFT) throw corrupt("object size varint is too long", at);
     current = byte();
     size += (current & 0x7f) * 2 ** shift;
     shift += 7;
@@ -131,9 +140,12 @@ const parseHeader = (bytes: Uint8Array, at: number): Header => {
   if (code === OFS_DELTA) {
     current = byte();
     let distance = current & 0x7f;
+    let read = 1;
     while (current & 0x80) {
+      if (read > MAX_OFFSET_BYTES) throw corrupt("ofs-delta offset varint is too long", at);
       current = byte();
       distance = (distance + 1) * 128 + (current & 0x7f);
+      read++;
     }
     return { code, size, length: position, baseOffset: at - distance };
   }

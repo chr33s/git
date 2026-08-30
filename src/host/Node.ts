@@ -22,6 +22,7 @@ import { HttpRouter } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
+import * as Pack from "../git/Pack.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as SocialLog from "../social/Log.ts";
@@ -263,6 +264,17 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
   /** One value for the process; see `Policy.AnonymousWrites`. */
   const openWrites = Policy.anonymousWrites(options.allowAnonymousWrites === true);
+
+  /**
+   * What one object may inflate to here; see `Pack.MaxObject`.
+   *
+   * The portable default is sized for the smallest host there is — a Durable
+   * Object's 128 MiB, halved again for the decoder's doubling — and a
+   * self-hosted server is not that. Declared rather than inherited, so the
+   * first import of a repository with a large blob in its history is not
+   * refused by a budget belonging to a machine this is not running on.
+   */
+  const objectSize = Pack.maxObject(128 * 1024 * 1024);
 
   /**
    * Just enough of a repository to check who is asking.
@@ -573,7 +585,9 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         // consumed as a stream, so nothing that would buffer it may see it first.
         const bulk = await Effect.runPromise(
           CommitPack.handle(request).pipe(
-            Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
+            Effect.provide(
+              Layer.mergeAll(state.layer, requester, openWrites, federation, objectSize),
+            ),
           ),
         );
         if (bulk !== null) return bulk;
@@ -588,7 +602,9 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
             Effect.catch((error) =>
               Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
             ),
-            Effect.provide(Layer.mergeAll(state.layer, requester, openWrites, federation)),
+            Effect.provide(
+              Layer.mergeAll(state.layer, requester, openWrites, federation, objectSize),
+            ),
           ),
         );
         return matched ?? (await state.api(request, asked));

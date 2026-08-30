@@ -161,6 +161,24 @@ export interface Rules {
    * to turn one push into an unbounded walk.
    */
   readonly queueDepth: number;
+  /**
+   * Whether a stranger may leave a proposal in this repository's inbox.
+   *
+   * The inbox is the one door an *unauthenticated* caller may write through:
+   * `git-inbox: 1` on receive-pack mints `quarantine.submit` before any
+   * membership exists, which is the point — it is how the drive-by patch
+   * arrives without an account. web-of-trust.md §6 describes it as the front
+   * door a repository's self-attestation *names*, and it was reachable on
+   * every repository with a genesis whether or not anyone had named it: there
+   * was no rules field, no serve flag, and no way for a private repository to
+   * shut the only anonymous write it has.
+   *
+   * `true` by default, because that is what every repository predating this
+   * had and closing a door nobody asked to close is the same mistake as
+   * opening one. What it buys is the operator's answer to a question they
+   * could not previously be asked.
+   */
+  readonly inbox: boolean;
   /** Opt-in only; omitted and `null` both mean external reviews never count. */
   readonly externalReview?: ExternalReviewRule | null;
 }
@@ -199,6 +217,7 @@ export const OPEN: Rules = {
   usageWindowSeconds: 0,
   queueCandidates: false,
   queueDepth: QUEUE_DEPTH,
+  inbox: true,
   externalReview: null,
 };
 
@@ -222,6 +241,8 @@ const RulesDocument = Schema.Struct({
   /** Optional, so a rules file written before this existed still decodes. */
   queueCandidates: Schema.optional(Schema.Boolean),
   queueDepth: Schema.optional(Schema.Int),
+  /** Optional, so a rules file written before this existed still decodes. */
+  inbox: Schema.optional(Schema.Boolean),
   externalReview: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -256,6 +277,7 @@ export const encodeRules = (rules: Rules): Uint8Array =>
         usageWindowSeconds: rules.usageWindowSeconds,
         queueCandidates: rules.queueCandidates,
         queueDepth: rules.queueDepth,
+        inbox: rules.inbox,
         externalReview:
           rules.externalReview === undefined || rules.externalReview === null
             ? null
@@ -351,6 +373,10 @@ export const rulesOf = Effect.fn("Policy.rulesOf")(function* () {
     usageWindowSeconds: loaded.usageWindowSeconds ?? 0,
     queueCandidates: loaded.queueCandidates ?? false,
     queueDepth: clampDepth(loaded.queueDepth),
+    // A document that never mentioned the inbox is one written before the
+    // field existed, and that repository's inbox was open. Absent is what it
+    // had, not what a later default would prefer.
+    inbox: loaded.inbox ?? true,
     externalReview,
   };
 });
@@ -920,6 +946,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
       stored,
       principal: input.principal,
       enabled: input.genesis !== null && input.trust !== null,
+      rules: input.rules,
     });
   }
 
@@ -1270,10 +1297,15 @@ const quarantineRules = Effect.fn("Policy.quarantineRules")(function* (input: {
   readonly stored: Oid | null;
   readonly principal: Principal;
   readonly enabled: boolean;
+  readonly rules: Rules;
 }) {
   const { update } = input;
   if (!input.enabled) {
     return refused(update.name, "an inbox belongs to an identified repository");
+  }
+  // The repository's own answer about its only anonymous door; see `Rules.inbox`.
+  if (!input.rules.inbox) {
+    return refused(update.name, "this repository does not accept inbox proposals");
   }
   if (!update.name.startsWith(Inbox.PENDING_PREFIX)) {
     return refused(update.name, `${update.name} is not an inbox proposal ref`);
@@ -2149,9 +2181,37 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (
   // write this pre-body check exists to refuse. A push naming any other ref is
   // one this door can already answer, and it answers it before the body.
   if (Auth.inboxOnly(who)) {
-    return writes.every((update) => update.name.startsWith(Inbox.PENDING_PREFIX))
-      ? null
-      : "an inbox submission may only create an inbox proposal ref";
+    if (!writes.every((update) => update.name.startsWith(Inbox.PENDING_PREFIX))) {
+      return "an inbox submission may only create an inbox proposal ref";
+    }
+
+    // Whether this repository has an inbox at all, asked here as well as in
+    // `quarantineRules`. Asked only there, a repository that had closed the
+    // door still had every stranger's pack unpacked and written to the object
+    // store before the ref was judged — which is the object half of the write
+    // it was closing.
+    const published = yield* rulesOf().pipe(Effect.orElseSucceed(() => null));
+    if (published === null) return "the repository's policy could not be evaluated";
+    if (!published.inbox) return "this repository does not accept inbox proposals";
+
+    // And the two refusals that need nothing from the pack. A submission is
+    // judged in the object phase, so a malformed id or a ref that already
+    // exists cost a stranger's whole pack — persisted, unreferenced, and left
+    // for a `gc` only `repo.admin` can run — before anything looked at the
+    // name. These are the commonest refusals there are, and both are knowable
+    // from the command alone.
+    const repository = yield* Repository;
+    for (const update of writes) {
+      const id = update.name.slice(Inbox.PENDING_PREFIX.length);
+      if (!Inbox.isProposalId(id)) return "an inbox proposal ref must end in a UUIDv7";
+      if ((yield* repository.resolve(update.name)) !== null) {
+        return `inbox proposal '${id}' already exists`;
+      }
+      if ((yield* repository.resolve(`${Inbox.ADOPTED_PREFIX}${id}`)) !== null) {
+        return `inbox proposal '${id}' has already been adopted`;
+      }
+    }
+    return null;
   }
   const principal = { member: who.principal, capabilities: who.capabilities };
   if (principal.member === null) return "authentication required to write refs";
@@ -2243,6 +2303,16 @@ const standing = Effect.fn("Policy.standing")(function* (
 
   const now = new Date();
   const capabilities: Array<string> = [];
+  // Taken from the answer that authorized, not looked up afterwards. A member
+  // whose authority comes from a `principal:<PrincipalID>` grant has no entry
+  // in `members` — `trust/Principal.ts` synthesizes a Member-shaped view out
+  // of `principals`, and that is what the guard put on `Authenticated` — so
+  // reading `members` here returned nothing for exactly those members. The
+  // capabilities survived and the member did not, and `evaluate`'s first line
+  // reads the member: a stable-identity contributor whose push happened to
+  // span an append to the trust log was refused with "authentication required
+  // to write refs", having authenticated a moment earlier.
+  let member: Member | null = null;
   for (const capability of who.capabilities) {
     const authorized = yield* Verify.authorizeKey({
       projection: trust,
@@ -2250,9 +2320,10 @@ const standing = Effect.fn("Policy.standing")(function* (
       capability,
       at: now,
     });
-    if (authorized.ok) capabilities.push(capability);
+    if (!authorized.ok) continue;
+    capabilities.push(capability);
+    member ??= authorized.principal;
   }
-  const member = trust.members.get(who.signer) ?? null;
   return { member: capabilities.length === 0 ? null : member, capabilities };
 });
 

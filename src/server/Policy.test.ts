@@ -24,8 +24,9 @@ import * as Statement from "../social/Statement.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import { create, type Genesis, GENESIS_REF, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
-import { principalId } from "../trust/Principal.ts";
+import { identitiesInMemory, principalId, type ResolvedIdentity } from "../trust/Principal.ts";
 import { type Member, project as projectTrust } from "../trust/Projection.ts";
+import * as Verify from "../trust/Verify.ts";
 import * as Auth from "./Auth.ts";
 import * as Policy from "./Policy.ts";
 import { evaluate, OPEN, type Principal, type Rules } from "./Policy.ts";
@@ -457,6 +458,192 @@ describe("Policy", () => {
         assert.match(outcome.branch ?? "", /inbox proposal ref/);
         assert.equal(outcome.proposal, null);
         assert.match(outcome.mixed ?? "", /inbox proposal ref/);
+      }),
+    );
+
+    it.effect("refuses the inbox refusals it can already answer before the body", () =>
+      Effect.promise(async () => {
+        // These three are the commonest refusals an inbox has, and all three
+        // are knowable from the command alone. Left to `quarantineRules` — the
+        // object phase — each one cost a stranger's whole pack, written to the
+        // object store, unreferenced, and left for a `gc` only `repo.admin`
+        // can run.
+        const taken = "018bcfe5-6800-7000-8000-000000000003";
+        const adopted = "018bcfe5-6800-7000-8000-000000000004";
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            yield* world(["source.push"]);
+            const repository = yield* Repository;
+            const { second } = yield* history("refs/heads/proposal");
+            yield* repository.setRef({ name: `${Inbox.PENDING_PREFIX}${taken}`, to: second });
+            yield* repository.setRef({ name: `${Inbox.ADOPTED_PREFIX}${adopted}`, to: second });
+            const asInbox = Auth.requester({
+              principal: null,
+              signer: null,
+              capabilities: [Auth.INBOX_SUBMIT],
+              projection: EMPTY_PROJECTION,
+              envelope: null,
+            });
+            const ask = (name: string) =>
+              Policy.mayWrite("source.push", [{ name, value: second }]).pipe(
+                Effect.provide(asInbox),
+              );
+            return {
+              malformed: yield* ask(`${Inbox.PENDING_PREFIX}not-a-uuid`),
+              taken: yield* ask(`${Inbox.PENDING_PREFIX}${taken}`),
+              adopted: yield* ask(`${Inbox.PENDING_PREFIX}${adopted}`),
+            };
+          }),
+        );
+
+        assert.match(outcome.malformed ?? "", /UUIDv7/);
+        assert.match(outcome.taken ?? "", /already exists/);
+        assert.match(outcome.adopted ?? "", /already been adopted/);
+      }),
+    );
+
+    it.effect("lets a repository close its inbox, and leaves it open by default", () =>
+      Effect.promise(async () => {
+        // The inbox is the one door an *unauthenticated* caller writes
+        // through, and it was open on every repository with a genesis whether
+        // or not anyone had named one — no rules field, no flag, no way for a
+        // private repository to shut it. Open stays the default: closing a
+        // door nobody asked to close is the same mistake as opening one.
+        const id = "018bcfe5-6800-7000-8000-000000000005";
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            const where = yield* world(["source.push"]);
+            const { second } = yield* history("refs/heads/proposal");
+            const trust = yield* trustOf(where);
+            const submit = (rules: Rules) =>
+              evaluate({
+                update: { name: `${Inbox.PENDING_PREFIX}${id}`, value: second },
+                principal: { member: null, capabilities: [Auth.INBOX_SUBMIT] },
+                genesis: where.genesis,
+                trust,
+                rules,
+              });
+            return {
+              byDefault: yield* submit(OPEN),
+              closed: yield* submit({ ...OPEN, inbox: false }),
+              // A rules file written before the field existed said nothing
+              // about the inbox, and that repository's inbox was open.
+              legacy: Policy.OPEN.inbox,
+            };
+          }),
+        );
+
+        assert.equal(outcome.legacy, true);
+        assert.equal(outcome.byDefault.ok, true);
+        assert.equal(outcome.closed.ok, false);
+        assert.match(
+          outcome.closed.ok ? "" : outcome.closed.reason,
+          /does not accept inbox proposals/,
+        );
+      }),
+    );
+
+    it.effect("keeps a stable-identity member when the trust log moves mid-push", () =>
+      Effect.promise(async () => {
+        // Between the guard's fold and this boundary sits the whole pack
+        // upload, so `gate` re-folds when the log has moved and `standing`
+        // re-asks what the requester still holds. It looked the member up in
+        // `members` — but a `principal:<PrincipalID>` member is not there:
+        // `trust/Principal.ts` synthesizes a Member-shaped view out of
+        // `principals`, and that is what the guard put on `Authenticated`. So
+        // the capabilities survived the narrowing and the member did not, and
+        // `evaluate`'s first line reads the member: an ordinary push refused
+        // as "authentication required to write refs", by a repository that had
+        // authenticated it seconds earlier.
+        const identity = await scenario(
+          Effect.gen(function* () {
+            const owner = yield* generate("identity-root@example.com");
+            const device = yield* generate("device@example.com");
+            const genesis = yield* create([formatPublicKey(owner.publicKey)], 1);
+            yield* writeGenesis(genesis, [yield* signGenesis(genesis, owner)]);
+            yield* Log.issue(
+              yield* Certificate.grant({
+                repo: genesis.repoId,
+                publicKey: formatPublicKey(device.publicKey),
+                capabilities: [],
+                id: Log.newId(),
+              }),
+              [owner],
+            );
+            return {
+              id: principalId(genesis.repoId),
+              signer: yield* fingerprint(device.publicKey),
+              projection: yield* projectTrust(genesis),
+            };
+          }),
+        );
+        const resolved: ResolvedIdentity = {
+          principal: identity.id,
+          projection: identity.projection,
+          head: identity.projection.head,
+        };
+
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            const root = yield* generate("root@example.com");
+            const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+            yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+            yield* Log.issue(
+              yield* Certificate.grantPrincipal({
+                repo: genesis.repoId,
+                principal: identity.id,
+                capabilities: ["source.push"],
+                id: Log.newId(),
+              }),
+              [root],
+            );
+            const current = yield* projectTrust(genesis);
+            const authorized = yield* Verify.authorizeKey({
+              projection: current,
+              signer: identity.signer,
+              capability: "source.push",
+            });
+            if (!authorized.ok) return { authorized, gated: null };
+
+            // The log moves while the pack uploads — another grant is enough —
+            // so the projection the guard decided against is no longer the one
+            // this boundary folds.
+            yield* Log.issue(
+              yield* Certificate.grant({
+                repo: genesis.repoId,
+                publicKey: formatPublicKey((yield* generate("late@example.com")).publicKey),
+                capabilities: [],
+                id: Log.newId(),
+              }),
+              [root],
+            );
+
+            const { second } = yield* history("refs/heads/topic");
+            const gated = yield* Policy.gate(
+              [{ name: "refs/heads/topic", value: second }],
+              false,
+            ).pipe(
+              Effect.provide(
+                Auth.requester({
+                  principal: authorized.principal,
+                  signer: identity.signer,
+                  capabilities: ["source.push"],
+                  projection: current,
+                  envelope: null,
+                }),
+              ),
+            );
+            return { authorized, gated };
+          }).pipe(Effect.provide(identitiesInMemory([resolved]))),
+        );
+
+        assert.equal(outcome.authorized.ok, true);
+        assert.deepEqual(
+          outcome.gated?.refused.map((entry) => entry.reason),
+          [],
+          "a stable-identity member's push was refused after the log moved",
+        );
+        assert.equal(outcome.gated?.updates.length, 1);
       }),
     );
 

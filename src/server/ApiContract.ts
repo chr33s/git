@@ -633,6 +633,7 @@ export const PolicyRules = Schema.Struct({
   usageWindowSeconds: Schema.Int,
   queueCandidates: Schema.Boolean,
   queueDepth: Schema.Int,
+  inbox: Schema.Boolean,
 });
 export type PolicyRules = (typeof PolicyRules)["Type"];
 
@@ -656,6 +657,7 @@ export const PolicyRulesWrite = Schema.Struct({
   ...PolicyRules.fields,
   queueCandidates: Schema.optional(Schema.Boolean),
   queueDepth: Schema.optional(Schema.Int),
+  inbox: Schema.optional(Schema.Boolean),
 });
 export type PolicyRulesWrite = (typeof PolicyRulesWrite)["Type"];
 

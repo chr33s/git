@@ -22,7 +22,7 @@
  * where the work is background and the bytes are storage. Per-object deflate
  * is `CompressionStream("deflate")`, available everywhere this runs.
  */
-import { Effect, Result, Schema, Stream } from "effect";
+import { Context, Effect, Layer, Option, Result, Schema, Stream } from "effect";
 
 import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
 import { bytesToHex, concatBytes as concat, hashObject } from "./Format.ts";
@@ -46,6 +46,78 @@ const CODE_TYPES = new Map<number, ObjectType>([
 ]);
 const OFS_DELTA = 6;
 const REF_DELTA = 7;
+
+/**
+ * How far an object-size varint may shift before this stops reading it.
+ *
+ * `size` accumulates `(byte & 0x7f) * 2 ** shift`, so past about 2^53 the sum
+ * stops being exact and shortly after that is `Infinity` — a value that
+ * satisfies no ceiling and equals no inflated length. Eight continuation
+ * bytes reach 2^60; nothing honest needs more than five.
+ */
+const MAX_SIZE_SHIFT = 56;
+
+/** The same bound for an ofs-delta's backwards offset, counted in bytes. */
+const MAX_OFFSET_BYTES = 8;
+
+/**
+ * The most one object may inflate to before a pack is refused.
+ *
+ * The declared size is a claim by whoever wrote the pack, and `unpack` used
+ * it as the inflate ceiling directly — clamped only by `Inflate.MAX_INFLATED`,
+ * which is 512 MiB. So the effective bound on one object was always the
+ * backstop, and the backstop is four times the 128 MiB a Durable Object gets.
+ * `Output` grows by doubling, so the peak is half as much again: about 768 MiB
+ * for one object, from roughly half a megabyte of pack, because deflate
+ * reaches ~1000:1. That is an isolate reset rather than an error a client can
+ * read — failure mode 1 in `docs/internals.md`, reached through the object
+ * phase instead of the transport phase the gzip bomb test already covers.
+ *
+ * So the declared size is refused *before* a byte is inflated, against a
+ * number this host chose. Thirty-two megabytes leaves the doubling's peak at
+ * about 48 MiB, well inside the smallest budget any of the four hosts has, and
+ * well above what a source object is: a blob larger than this is what LFS is
+ * for, and `server/Lfs.ts` is where it belongs.
+ */
+export const MAX_OBJECT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * What *this* host will inflate one object to, where it differs.
+ *
+ * A service rather than a constant for the reason `Policy.MemoSize` and
+ * `Auth.AnonymousWrites` are: the number is a property of the machine, and the
+ * four hosts here differ by an order of magnitude — a Durable Object has
+ * 128 MiB, a browser tab less, a CLI import as much as the process has. A host
+ * that says nothing gets `MAX_OBJECT_BYTES`, which is safe everywhere; a host
+ * that knows better says so once, in its own layer, rather than the transport
+ * inferring it from the pack it is validating.
+ */
+export class MaxObject extends Context.Service<MaxObject, number>()("git/MaxObject") {}
+
+export const maxObject = (bytes: number): Layer.Layer<MaxObject> => Layer.succeed(MaxObject)(bytes);
+
+const ceilingOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(MaxObject), () => MAX_OBJECT_BYTES);
+});
+
+/**
+ * Why this object may not be inflated, or `null`.
+ *
+ * Asked of the *header*, before the stream is touched: the size check that
+ * follows an inflate can only report a bomb that has already been built.
+ */
+const oversized = (
+  index: number,
+  size: number,
+  ceiling: number,
+  offset: number,
+): PackCorrupt | null =>
+  Number.isSafeInteger(size) && size <= ceiling
+    ? null
+    : new PackCorrupt({
+        reason: `object ${index}: declares ${size} bytes, more than the ${ceiling} this host will inflate`,
+        offset,
+      });
 
 const readU32 = (bytes: Uint8Array, at: number): number =>
   ((bytes[at]! << 24) | (bytes[at + 1]! << 16) | (bytes[at + 2]! << 8) | bytes[at + 3]!) >>> 0;
@@ -136,6 +208,13 @@ class Source {
     let size = byte & 0x0f;
     let shift = 4;
     while (byte & 0x80) {
+      // Bounded, because the loop's only other exit is the sender's. Past
+      // `MAX_SIZE_SHIFT` the `2 ** shift` term leaves the safe-integer range
+      // and `size` reaches `Infinity` — which then compares equal to nothing,
+      // makes every ceiling below a no-op, and reports itself as
+      // "header says Infinity bytes". A hundred and fifty continuation bytes
+      // is not a size, it is a way of declining to state one.
+      if (shift > MAX_SIZE_SHIFT) throw this.corrupt("object size varint is too long");
       byte = await this.byte();
       size += (byte & 0x7f) * 2 ** shift;
       shift += 7;
@@ -144,9 +223,14 @@ class Source {
     if (code === OFS_DELTA) {
       byte = await this.byte();
       let distance = byte & 0x7f;
+      let read = 1;
       while (byte & 0x80) {
+        // As above: an offset this long names nothing inside any pack, and
+        // an unbounded one is a run of bytes rather than a number.
+        if (read > MAX_OFFSET_BYTES) throw this.corrupt("ofs-delta offset varint is too long");
         byte = await this.byte();
         distance = (distance + 1) * 128 + (byte & 0x7f);
+        read++;
       }
       return { kind: "ofs", distance, size };
     }
@@ -527,6 +611,7 @@ export const unpack = Effect.fn("Pack.unpack")(function* <E>(input: Stream.Strea
     });
 
   const count = yield* step(() => source.header());
+  const ceiling = yield* ceilingOf();
   /** Object boundaries seen so far, for resolving ofs-delta bases. */
   const oidAt = new Map<number, Oid>();
   const oids: Oid[] = [];
@@ -534,9 +619,12 @@ export const unpack = Effect.fn("Pack.unpack")(function* <E>(input: Stream.Strea
   for (let index = 0; index < count; index++) {
     const start = source.offset;
     const header = yield* step(() => source.objectHeader());
-    // Bounded by what the header declared: the size check below happens
-    // after the stream is inflated, so without this a few megabytes of pack
-    // can expand to gigabytes before anything compares them.
+    // The declared size decides how much memory the inflate below may take,
+    // and it is written by whoever sent the pack — so it is judged against
+    // this host's own ceiling first. Checked after the inflate, as it was, the
+    // comparison happens once the bomb is already resident; see `MaxObject`.
+    const refusal = oversized(index, header.size, ceiling, start);
+    if (refusal !== null) return yield* refusal;
     const data = yield* step(() => source.inflate(header.size + 1));
     if (data.length !== header.size) {
       return yield* new PackCorrupt({
@@ -701,11 +789,17 @@ const retain = (
     const step = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: asCorrupt });
 
     const declared = yield* step(() => source.header());
+    const ceiling = yield* ceilingOf();
     const starts: number[] = [];
     for (let index = 0; index < declared; index++) {
       const start = source.offset;
       starts.push(start);
       const header = yield* step(() => source.objectHeader());
+      // As in `unpack`, and for the same reason: `ingest` buffers up to
+      // `retainUpTo` bytes of pack, and 64 MiB of pack is room for a great
+      // many megabytes of declared object.
+      const refusal = oversized(index, header.size, ceiling, start);
+      if (refusal !== null) return yield* refusal;
       const data = yield* step(() => source.inflate(header.size + 1));
       if (data.length !== header.size) {
         return yield* new PackCorrupt({

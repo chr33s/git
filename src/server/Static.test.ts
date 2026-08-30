@@ -4,7 +4,7 @@
  * the root answers, and what a method that is not a read answers.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
@@ -49,6 +49,41 @@ describe("Static", () => {
       // A sibling directory whose name merely starts with the root's is outside
       // it, which is what the separator in the prefix check is for.
       assert.equal(await fileAt(`${root}x`, "/index.html"), null);
+    }),
+  );
+
+  it.effect("refuses a symlink that leaves the root, and the root's own link", () =>
+    Effect.promise(async () => {
+      // A lexical `resolve` does not follow links, so this path passes the
+      // prefix test and names a file outside the root. Only `realpath` sees it.
+      await symlink(join(outside, "secret.txt"), join(root, "escape.txt"));
+      assert.equal(await fileAt(root, "/escape.txt"), null);
+
+      // And a root reached *through* a link still serves its own files: the
+      // anchor is resolved too, or every deployment behind a symlinked
+      // `current` directory would answer nothing at all.
+      const linked = join(outside, "ui-link");
+      await symlink(root, linked);
+      assert.notEqual(await fileAt(linked, "/index.html"), null);
+    }),
+  );
+
+  it.effect("reads a name the URL escaped, and refuses one that is not a name", () =>
+    Effect.promise(async () => {
+      await writeFile(join(root, "a b.js"), "globalThis.spaced = true;");
+      // `URL.pathname` keeps the escape, so the raw spelling is the only one a
+      // client can send — and it has to name the file it means.
+      assert.notEqual(await fileAt(root, "/a%20b.js"), null);
+      assert.equal(
+        (await assetResponse(root, new Request("http://ui.test/a%20b.js")))?.headers.get(
+          "content-type",
+        ),
+        "text/javascript",
+      );
+      // Decoding happens before the containment check, so an escaped climb is
+      // refused rather than resolved afterwards — and a lone `%` is not a path.
+      assert.equal(await fileAt(root, "/%2e%2e/secret.txt"), null);
+      assert.equal(await fileAt(root, "/%"), null);
     }),
   );
 

@@ -13,6 +13,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import type { ReceiveResult } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { deliver, eventOf, sign, subscribersOf } from "./Webhooks.ts";
+import { validate } from "./Subscribers.ts";
 
 interface Received {
   readonly body: string;
@@ -198,6 +199,41 @@ describe("Webhooks", () => {
         ),
       );
       assert.equal(hook.calls.length, 0);
+    }),
+  );
+
+  it.effect("holds a receiver's URL to the same rules a remote's is held to", () =>
+    Effect.gen(function* () {
+      const refused = (url: string) =>
+        validate({ url, secret: "long-enough-secret" }).pipe(
+          Effect.flip,
+          Effect.map((failure) => failure.reason),
+        );
+
+      // The two registries had drifted in both directions. This one exempted
+      // the whole *scheme* when the hostname was `localhost`, so a URL that is
+      // not an HTTP address at all validated...
+      assert.match(yield* refused("file://localhost/etc/passwd"), /must be https/);
+      // ...while refusing the other two spellings of the same machine that
+      // `Remotes.validate` has always accepted.
+      yield* validate({ url: "http://127.0.0.1:8080/hook", secret: "long-enough-secret" });
+      yield* validate({ url: "http://[::1]:8080/hook", secret: "long-enough-secret" });
+      yield* validate({ url: "http://localhost:8080/hook", secret: "long-enough-secret" });
+
+      // And only that one refused userinfo, though both hand the URL straight
+      // back out of a list endpoint.
+      assert.match(yield* refused("https://user:pw@example.com/hook"), /credentials/);
+      assert.match(yield* refused("not a url"), /not a URL/);
+      assert.match(yield* refused("http://example.com/hook"), /must be https/);
+
+      // The secret is still this registry's own rule.
+      assert.match(
+        yield* validate({ url: "https://example.com/hook", secret: "short" }).pipe(
+          Effect.flip,
+          Effect.map((failure) => failure.field),
+        ),
+        /secret/,
+      );
     }),
   );
 });

@@ -14,6 +14,7 @@ import { Context, Effect, Layer, Schema } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
+import { outboundUrl } from "../text.ts";
 
 export interface Subscriber {
   readonly id: string;
@@ -47,16 +48,10 @@ export class Subscribers extends Context.Service<
  */
 export const validate = (input: NewSubscriber): Effect.Effect<NewSubscriber, Invalid> =>
   Effect.suspend(() => {
-    let parsed: URL;
-    try {
-      parsed = new URL(input.url);
-    } catch {
-      return Effect.fail(new Invalid({ field: "url", reason: `not a URL: '${input.url}'` }));
-    }
-    if (parsed.protocol !== "https:" && parsed.hostname !== "localhost") {
-      return Effect.fail(
-        new Invalid({ field: "url", reason: "webhook URLs must be https (localhost excepted)" }),
-      );
+    // The same reading `Remotes.validate` takes; see `outboundUrl`.
+    const address = outboundUrl(input.url);
+    if (address !== null) {
+      return Effect.fail(new Invalid({ field: "url", reason: `webhook URL ${address}` }));
     }
     if (input.secret.length < 16) {
       return Effect.fail(

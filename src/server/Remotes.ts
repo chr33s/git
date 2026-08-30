@@ -21,6 +21,7 @@ import { Context, Effect, Layer, Option, Result, Schema } from "effect";
 import { parsePrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
+import { outboundUrl } from "../text.ts";
 import { DELEGATION_PREFIX } from "./Auth.ts";
 
 /**
@@ -98,8 +99,6 @@ export class Remotes extends Context.Service<
   }
 >()("server/Remotes") {}
 
-const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 /**
  * A remote name becomes half of a ref — `refs/remotes/<name>/main` — and its
  * URL becomes a request this server makes. Both are refused at registration
@@ -157,29 +156,12 @@ export const validate = (input: NewRemote): Effect.Effect<NewRemote, Invalid> =>
       }
     }
 
-    let parsed: URL;
-    try {
-      parsed = new URL(input.url);
-    } catch {
-      return Effect.fail(new Invalid({ field: "url", reason: `not a URL: '${input.url}'` }));
-    }
-    // Loopback http is how a test — and a developer — reaches the server next
-    // to them; everything else on the network is https or nothing.
-    if (
-      parsed.protocol !== "https:" &&
-      !(parsed.protocol === "http:" && LOOPBACK.has(parsed.hostname))
-    ) {
-      return Effect.fail(
-        new Invalid({ field: "url", reason: "remote URLs must be https (loopback http excepted)" }),
-      );
-    }
-    // A URL is a read path: userinfo in it would come straight back out of
-    // `list`, which is the one thing storing a credential separately is for.
-    // `fetch` rejects it anyway.
-    if (parsed.username !== "" || parsed.password !== "") {
-      return Effect.fail(
-        new Invalid({ field: "url", reason: "credentials belong in 'credential', not in the URL" }),
-      );
+    // Scheme and userinfo alike; see `outboundUrl`. A URL is a read path, so
+    // userinfo in it would come straight back out of `list`, which is the one
+    // thing storing a credential separately is for — `fetch` rejects it anyway.
+    const address = outboundUrl(input.url, "credential");
+    if (address !== null) {
+      return Effect.fail(new Invalid({ field: "url", reason: `remote URL ${address}` }));
     }
     if (input.credential === "") {
       return Effect.fail(

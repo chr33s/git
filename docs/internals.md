@@ -198,6 +198,17 @@ Handlers that consume large bodies must be dispatched _before_ anything that
 would buffer them. In both hosts, LFS and `commit-pack` are tried ahead of the
 JSON API for exactly this reason.
 
+One object still has to be resident while it is decoded, and how large that is
+comes from the pack's own header — a number written by whoever sent it. So it
+is judged before it is honoured: `Pack.MAX_OBJECT_BYTES` is what a host accepts
+by default, and `Pack.MaxObject` is the layer a host with a different budget
+declares instead. The four hosts differ by an order of magnitude — a Durable
+Object has 128 MiB, a browser tab less — and a bound taken from the input being
+validated is not a bound. Read as the declared size alone, one object could ask
+for 512 MiB (`Inflate.MAX_INFLATED`, the decoder's own backstop) from about half
+a megabyte of pack, since deflate reaches ~1000:1; the size check that follows
+an inflate can only report a bomb that has already been built.
+
 ### Concurrency and lifetime
 
 `RcMap` for reference-counted per-repository instances (a plain `Map` leaked —
@@ -248,10 +259,22 @@ actually bitten:
   _not_ other 4xx) is the policy hand-rolled predicates reach for.
 - `Effect.fn("Domain.operation")` on public and non-trivial operations, so a
   push or fetch shows its cost where it is spent.
-- Do not use `as any`, non-null assertions, or casts to silence typing
-  problems. Sixteen such assertions were removed here; deleting them made the
-  compiler name the two that were load-bearing, and those carry a
-  line-scoped diagnostic suppression _and a reason_.
+- Do not use `as any`, a cast, or a non-null assertion to **silence a typing
+  problem**. A cast is a claim the compiler cannot check, so where it stands in
+  for a check it carries a `SAFETY:` comment naming the invariant that makes it
+  true — `Certificate.validate` has already proved this subject is a
+  fingerprint, `take` has already returned exactly twenty bytes — and two of
+  them need a line-scoped diagnostic suppression besides. An `as any` or a
+  widen-then-assert has no such reason available and is refused outright by the
+  `anti-slop` rules in `tools/oxlint/`.
+
+  A `!` on a value the surrounding code has just established — `stack.pop()!`
+  inside `while (stack.length > 0)`, `parts[0]!` after a length check — is not
+  in that class and is used freely: the invariant is on the line above, and
+  spelling it out with a branch that cannot be taken buys nothing. What the
+  rule is about is `!` standing in for a check nobody made. Roughly eighty of
+  the former exist; an earlier version of this paragraph counted the latter and
+  read as though it were counting all of them.
 
 Two deviations are deliberate: raw `fetch` in `client/Fetch.ts` because it is
 the browser transport, with Effect discipline kept inside the adapter; and no
