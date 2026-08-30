@@ -17,7 +17,17 @@ import { Invalid } from "../git/Error.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import * as Memory from "../hub/Memory.ts";
 import * as Session from "../hub/Session.ts";
-import { readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
+import * as Invocation from "../telemetry/Invocation.ts";
+import * as Audit from "./audit.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
+import {
+  readPrivateKey,
+  repoArgument,
+  repoFlag,
+  rootFlag,
+  withDiscovered,
+  withRepo,
+} from "./shared.ts";
 
 /** Comma-separated list flags, which is how a hook passes several of a thing. */
 const listOf = (value: string): ReadonlyArray<string> =>
@@ -44,6 +54,24 @@ const identityOf = Effect.fn("session.identityOf")(function* (repo: string) {
     });
   }
   return stored.genesis.repoId;
+});
+
+/**
+ * The repository's identity and its membership, for an audit that judges both.
+ *
+ * Built once per command rather than per record: the projection audits every
+ * exposure a session holds, and rebuilding the trust walk for each of them
+ * would make a long run's audit quadratic in the trust log.
+ */
+const membership = Effect.fn("session.membership")(function* () {
+  const stored = yield* readGenesis();
+  if (stored === null) {
+    return yield* new Invalid({
+      field: "repo",
+      reason: "this repository has no genesis, so its trace cannot be judged",
+    });
+  }
+  return { repo: stored.genesis.repoId, trust: yield* projectTrust(stored.genesis) };
 });
 
 const keyFlag = Flag.string("key").pipe(
@@ -149,20 +177,43 @@ const produce = Command.make(
     }),
 );
 
+/**
+ * `git+ session show [<session>] [--audit]` — the audit read path.
+ *
+ * The one verb in this group whose repository is a flag rather than a
+ * positional, and the reason is the shape docs/telemetry.md §15 and §17 ask
+ * for: `git+ session show <session> --audit` from inside a checkout. Two
+ * optional positionals cannot express that — one value would fill the first —
+ * so the session keeps the positional and `--repo` selects a bare repository
+ * for server and administration use.
+ *
+ * `--audit` joins the policy-visible session projection with its
+ * policy-invisible Invocation history. They stay two refs and one answer: a
+ * reader should not have to know that a run's account and its runtime trace
+ * live in different namespaces for different reasons.
+ */
 const show = Command.make(
   "show",
   {
     root: rootFlag,
+    repo: repoFlag,
     branch: Flag.string("branch").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Show the session that last produced this ref instead of an id"),
     ),
-    repo: repoArgument,
+    audit: Flag.boolean("audit").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Join the run's Invocations, context exposures and capture health"),
+    ),
+    json: Flag.boolean("json").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("The joined projection as JSON rather than the Invocation layout"),
+    ),
     session: Argument.string("session").pipe(Argument.optional),
   },
-  ({ branch, repo, root, session }) =>
+  ({ audit, branch, json, repo, root, session }) =>
     Effect.gen(function* () {
-      const projection = yield* withRepo(
+      const projection = yield* withDiscovered(
         root,
         repo,
         Effect.gen(function* () {
@@ -184,10 +235,37 @@ const show = Command.make(
                   : `no session has produced ${branch}`,
             });
           }
-          return yield* Session.project(id);
+
+          const projected = yield* Session.project(id);
+          if (!audit) return { session: projected, audit: null } as const;
+
+          // The trace ref is read only when it is asked for. It is the large,
+          // policy-invisible half, and a `session show` that folded it every
+          // time would make the cheap question pay for the expensive one.
+          const { repo: identity, trust } = yield* membership();
+          return {
+            session: projected,
+            audit: yield* Invocation.project({ session: id, repo: identity, trust }),
+          } as const;
         }),
       );
-      yield* Console.log(JSON.stringify(projection, null, 2));
+
+      // The session projection stays JSON whether or not `--audit` was asked
+      // for: its reader is a harness hook, and a hook that had to parse prose
+      // is a hook that breaks on the next wording change. The audit view is
+      // the human-facing one, so it renders unless a machine asks otherwise.
+      if (projection.audit === null || json) {
+        return yield* Console.log(
+          JSON.stringify(
+            projection.audit === null
+              ? projection.session
+              : { ...projection.session, audit: projection.audit },
+            null,
+            2,
+          ),
+        );
+      }
+      for (const line of Audit.renderAll(projection.audit)) yield* Console.log(line);
     }),
 );
 

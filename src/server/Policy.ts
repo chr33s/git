@@ -1395,6 +1395,24 @@ const HUB_NAMESPACE: LogNamespace = {
   holds: "events",
 };
 
+/**
+ * Trace refs, bounded on their own terms.
+ *
+ * docs/telemetry.md §13: trace storage must not inherit the policy-critical
+ * session fold's budget. Nothing folds this namespace — the boundary walks it
+ * once to check containment and grafting, which is linear — so holding it to
+ * the pull-request ceiling would refuse honest audit history for a cost that
+ * namespace does not impose.
+ */
+const TRACE_NAMESPACE: LogNamespace = {
+  isCommit: Event.isHubCommit,
+  withinCeiling: Trace.withinCeiling,
+  ceilingOf: Trace.ceilingOf,
+  record: Event.RECORD,
+  anchored: false,
+  holds: "records",
+};
+
 const TRUST_NAMESPACE: LogNamespace = {
   isCommit: Log.isTrustCommit,
   withinCeiling: Log.withinCeiling,
@@ -1417,16 +1435,20 @@ const SOCIAL_NAMESPACE: LogNamespace = {
  * Which append-only namespace a ref belongs to, or `null` for an ordinary ref.
  *
  * The one place the ref-name spellings are read. `Refspec.isAppendOnly` names
- * exactly these three, so a ref it accepts always answers here.
+ * exactly these, so a ref it accepts always answers here. Trace refs are asked
+ * about first: they are hub refs by name and are bounded separately, so the
+ * broader `refs/hub/` test would swallow them.
  */
 const namespaceOf = (ref: string): LogNamespace | null =>
-  ref.startsWith("refs/hub/")
-    ? HUB_NAMESPACE
-    : ref === Refspec.SOCIAL_LOG
-      ? SOCIAL_NAMESPACE
-      : ref === Refspec.TRUST_LOG
-        ? TRUST_NAMESPACE
-        : null;
+  Trace.traceOf(ref) !== null
+    ? TRACE_NAMESPACE
+    : ref.startsWith("refs/hub/")
+      ? HUB_NAMESPACE
+      : ref === Refspec.SOCIAL_LOG
+        ? SOCIAL_NAMESPACE
+        : ref === Refspec.TRUST_LOG
+          ? TRUST_NAMESPACE
+          : null;
 
 /**
  * Why an append-only ref may not hold this value, or `null`.

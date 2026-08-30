@@ -144,6 +144,7 @@ SUBCOMMANDS
   social              Social graph: follows, vouches and discovery
   tag                 List, create or delete tags
   task                What needs doing, and who is on it
+  trace               Append signed runtime telemetry to a session's audit trace
   queue               Land approved pull requests as one tested batch
   wake                Run local rules for hub events since the last run
   webhook             Administer a server's webhooks over its JSON API
@@ -420,7 +421,21 @@ git+ trace record \
   --event=<event.json>
 ```
 
-The recorder binds the repository and session, validates the normalized event, signs it, appends it under `refs/hub/trace/<session>`, and returns the Git record OID.
+The recorder binds the repository and session, validates the normalized event, signs it, appends it under `refs/hub/trace/<session>`, and returns the Git record OID. The envelope — repository, session, record id, time, trust head — is the recorder's to fill in, so a file that supplies its own is overwritten rather than believed.
+
+A GenAI span can go through the same writer instead of a pre-normalized event:
+
+```bash
+git+ trace record \
+  --session=<session-id> --key=<private-key> \
+  --event=<span.json> --otel \
+  --stage=sdk-export --semconv-revision=<upstream revision> \
+  --exposure=<context-exposure-oid>
+```
+
+`--stage` records where the signal was captured before anything could sample it. `--semconv-revision` is what makes the record claim strict semconv adherence; without it the mapping is best-effort and says so by omitting the `semconv` block. `--exposure` names the Context Exposure this invocation was made against, which is the only join the projection uses.
+
+Both forms discover the current checkout by default; `--root` and `--repo` select a bare repository for server use.
 
 There is no normal `trace show` workflow. The session/Invocation projection is the human-facing read path.
 

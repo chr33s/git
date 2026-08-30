@@ -21,17 +21,28 @@
  * become an input to authorization decisions it has no business informing.
  *
  * Mechanically it is an ordinary hub ref: one per session, append-only,
- * hash-linked commits carrying a signed payload, walked by `Event.walk`. What
- * differs is who reads it. Nothing in `Policy.ts` folds this namespace, and
- * `Projection.ts` does not project it.
+ * hash-linked commits carrying a signed payload. What differs is who reads it.
+ * Nothing in `Policy.ts` folds this namespace, and `Projection.ts` does not
+ * project it.
+ *
+ * The walk here hands back *bytes*, not decoded payloads, and that is the one
+ * structural difference from `Event.walk`. One trace ref carries several
+ * unrelated record kinds — a context exposure, a runtime invocation, a tool
+ * operation, a workspace transition — and a walk that decoded with one
+ * namespace's schema would report every other kind as unreadable, which is how
+ * "this replica is missing a record" and "this record is somebody else's"
+ * become the same finding. Each reader decodes what it recognises and steps
+ * over the rest.
  */
-import { Effect } from "effect";
+import { Context, Effect, Layer, Option } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
+import * as Dag from "../git/Dag.ts";
 import { Invalid } from "../git/Error.ts";
 import type { TreeEntry } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
-import { checkRefName } from "../git/Store.ts";
+import { checkRefName, type Oid } from "../git/Store.ts";
+import * as Record from "../trust/Record.ts";
 import * as Event from "./Event.ts";
 
 /** Where one session's trace records live. */
@@ -80,6 +91,47 @@ export const traces = Effect.fn("hub.Trace.traces")(function* () {
 export const MAX_PAYLOAD = 512 * 1024;
 
 /**
+ * How many records one session's trace ref may hold.
+ *
+ * Its own bound, deliberately, and four times the pull-request ceiling:
+ * docs/telemetry.md §13 says trace storage must not inherit the
+ * policy-critical session fold's budget, and the two are bounded for different
+ * reasons. A pull request's ceiling exists because folding one is quadratic and
+ * runs synchronously on the receive-pack path. Nothing folds a trace ref: the
+ * boundary walks it once, linearly, to check containment, and the projection
+ * that reads it runs where a person is waiting rather than where a push is.
+ *
+ * Set where an honest session stops rather than where a large one does. Two
+ * records per invocation — an exposure and its runtime record — puts this at
+ * some thousands of invocations for one session, which is far past any run a
+ * person is still calling a session.
+ */
+export const MAX_RECORDS = 16_384;
+
+/**
+ * The ceiling in force, when a host wants a different one.
+ *
+ * A tuning number rather than an authority, like `Event.Ceiling`: the default
+ * is what every caller gets, and a host that lowers it only narrows what it
+ * will walk.
+ */
+export class Ceiling extends Context.Service<Ceiling, number>()("hub/Trace/Ceiling") {}
+
+export const ceiling = (records: number): Layer.Layer<Ceiling> => Layer.succeed(Ceiling)(records);
+
+export const ceilingOf = Effect.fnUntraced(function* () {
+  return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
+});
+
+/** Whether a trace ref's history is short enough for this host to walk. */
+export const withinCeiling = Effect.fn("hub.Trace.withinCeiling")(function* (head: Oid) {
+  return yield* Dag.reachable(head, null, Event.isHubCommit, yield* ceilingOf()).pipe(
+    Effect.as(true),
+    Effect.catchTag("Invalid", () => Effect.succeed(false)),
+  );
+});
+
+/**
  * Sign one trace record and append it to its session's trace ref.
  *
  * `attach` is how a record carries the objects it must keep reachable —
@@ -115,3 +167,119 @@ export const append = Effect.fn("hub.Trace.append")(function* (input: {
     attach: input.attach,
   });
 });
+
+// -- reading --------------------------------------------------------------------
+
+/** One record on a trace ref, still in the bytes its signature covers. */
+export interface Entry {
+  readonly commit: Oid;
+  /** The records this one follows; a join has several. */
+  readonly parents: ReadonlyArray<Oid>;
+  /**
+   * `<type> <id>` off the commit message.
+   *
+   * Read from the message rather than the payload because it is the only part
+   * of a redacted record that survives, and "a tool operation was removed here"
+   * is a more useful thing for a projection to be able to say than a gap.
+   */
+  readonly type: string | null;
+  readonly id: string | null;
+  readonly payload: Uint8Array;
+  readonly signatures: ReadonlyArray<string>;
+}
+
+export interface Walk {
+  /** Oldest first, parents before children. */
+  readonly records: ReadonlyArray<Entry>;
+  /** The DAG the walk was taken over, so a reader can keep concurrent lanes. */
+  readonly parents: Dag.Parents;
+  /** Commits carrying a record whose payload this replica could not read. */
+  readonly unreadable: ReadonlyArray<Oid>;
+  /** Every commit reached, joins and unreadable records included. */
+  readonly walked: number;
+}
+
+const summaryOf = (message: string) => {
+  const [type = "", id = ""] = message.split("\n")[0]?.split(" ") ?? [];
+  return { type: type === "" ? null : type, id: id === "" ? null : id };
+};
+
+/**
+ * Every record on one session's trace ref, oldest first, nothing verified.
+ *
+ * Parentage comes back with the records because docs/telemetry.md §15 forbids
+ * manufacturing a single causal order out of timestamps when concurrent
+ * parents exist. A topological order alone would hide that two records were
+ * written by fibers that never saw each other; handing the edges back lets the
+ * Flight Recorder show two lanes where there were two lanes.
+ *
+ * Signatures are returned rather than checked, for the reason `Event.walk`
+ * returns them: how much verification a reader needs is what differs — an
+ * audit checks every one, a projection listing what happened checks none.
+ */
+export const walk = Effect.fn("hub.Trace.walk")(function* (session: string) {
+  const repository = yield* Repository;
+  const head = yield* repository.resolve(refOf(session));
+  if (head === null) {
+    return { records: [], parents: new Map(), unreadable: [], walked: 0 } satisfies Walk;
+  }
+
+  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* ceilingOf()).pipe(
+    Effect.mapError((error) =>
+      error._tag === "Invalid"
+        ? new Invalid({
+            field: "session",
+            reason: `trace '${session}' holds more than ${MAX_RECORDS} records and cannot be read`,
+          })
+        : error,
+    ),
+  );
+
+  const records: Array<Entry> = [];
+  const unreadable: Array<Oid> = [];
+
+  for (const commit of Dag.topological(parents)) {
+    // Joins carry nothing: they are how two lanes became one again.
+    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
+
+    const info = yield* repository.readCommit(commit);
+    const read = yield* Record.read(commit, Event.RECORD).pipe(
+      Effect.catchTags({
+        ObjectNotFound: () => Effect.succeed(null),
+        Invalid: () => Effect.succeed(null),
+      }),
+    );
+    // A redaction deletes the payload blob and leaves the tree entry naming
+    // it, so the read fails where every other record's succeeds.
+    if (read === null) {
+      unreadable.push(commit);
+      continue;
+    }
+
+    records.push({
+      commit,
+      parents: parents.get(commit) ?? [],
+      ...summaryOf(info.message),
+      payload: read.payload,
+      signatures: read.signatures,
+    });
+  }
+
+  return { records, parents, unreadable, walked: parents.size } satisfies Walk;
+});
+
+/**
+ * Whether any two records on this ref were written without seeing each other.
+ *
+ * True when the DAG branches: two children of one commit are two lanes, and a
+ * reader that printed them as a line would be asserting an order the history
+ * does not contain (§15).
+ */
+export const concurrent = (parents: Dag.Parents): boolean => {
+  const children = new Map<Oid, number>();
+  for (const [, of] of parents) {
+    for (const parent of of) children.set(parent, (children.get(parent) ?? 0) + 1);
+  }
+  for (const [, count] of children) if (count > 1) return true;
+  return false;
+};

@@ -75,8 +75,28 @@ const TREE_MODE = "040000";
  */
 export const Capture = Schema.Struct({
   transport: Schema.String,
+  /**
+   * Where the capture was taken, before anything could sample it.
+   *
+   * docs/telemetry.md §12: a normal observability pipeline may sample, filter
+   * and transform, so *where* a signal was picked off decides whether a
+   * completeness claim is available at all. Recorded here rather than inferred
+   * from the transport, because "otel" says nothing about which processor ran
+   * first.
+   */
+  stage: Schema.optional(Schema.String),
   traceId: Schema.optional(Schema.String),
   spanId: Schema.optional(Schema.String),
+  /**
+   * The semantic-convention profile this signal was interpreted under.
+   *
+   * Present only when the producer declared a revision. §4.1 allows a
+   * documented best-effort mapping when none is known but forbids claiming
+   * strict semconv adherence for that signal — so an absent `semconv` is the
+   * difference between "interpreted under this revision" and "interpreted as
+   * well as we could".
+   */
+  semconv: Schema.optional(Schema.Struct({ profile: Schema.String, revision: Schema.String })),
 });
 export type Capture = typeof Capture.Type;
 
@@ -88,8 +108,11 @@ export type Capture = typeof Capture.Type;
  * that can be replayed into another, and cli.md §8 makes binding both the
  * recorder's job.
  */
+/** What the commit message declares a record of this kind to be. */
+export const TYPE = "context-exposure";
+
 export const Payload = Schema.Struct({
-  type: Schema.tag("context-exposure"),
+  type: Schema.tag(TYPE),
   version: Schema.Literal(1),
   repo: Schema.String,
   session: Schema.String,
@@ -133,8 +156,12 @@ export const encode = (payload: Payload): Uint8Array =>
         "renderDigest",
         "capture",
         "transport",
+        "stage",
         "traceId",
         "spanId",
+        "semconv",
+        "profile",
+        "revision",
       ],
       2,
     )}\n`,
@@ -252,23 +279,54 @@ export const expose = Effect.fn("context.Exposure.expose")(function* (input: {
     ],
   });
 
-  return { commit, id: payload.id, pack: qualify(pack), digest: rendered.digest } as const;
+  return {
+    commit,
+    /** The record's canonical identity, which a later record joins on (§3). */
+    oid: qualify(commit),
+    id: payload.id,
+    pack: qualify(pack),
+    digest: rendered.digest,
+  } as const;
 });
 
 // -- reading --------------------------------------------------------------------
 
-/** Every exposure on one session's trace ref, oldest first. */
+/**
+ * Every exposure on one session's trace ref, oldest first.
+ *
+ * Filtered by the record's own declared type rather than by whether it decodes:
+ * the ref carries runtime telemetry, tool operations and workspace transitions
+ * beside these, and reading "this is not a context exposure" as "this record is
+ * unreadable" would report a healthy session as a damaged one.
+ */
 export const entries = Effect.fn("context.Exposure.entries")(function* (session: string) {
-  const walked = yield* Event.walk(Trace.refOf(session), decode);
-  return {
-    exposures: walked.records.map((record) => ({
+  const walked = yield* Trace.walk(session);
+  const exposures: Array<{
+    readonly commit: Oid;
+    readonly payload: Payload;
+    readonly bytes: Uint8Array;
+    readonly signatures: ReadonlyArray<string>;
+  }> = [];
+  const unreadable: Array<Oid> = [...walked.unreadable];
+
+  for (const record of walked.records) {
+    if (record.type !== TYPE) continue;
+    const payload = yield* decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+    // Claimed to be one and is not: that *is* a damaged record, and it is the
+    // one case this filter must not swallow.
+    if (payload === null) {
+      unreadable.push(record.commit);
+      continue;
+    }
+    exposures.push({
       commit: record.commit,
-      payload: record.payload,
-      bytes: record.bytes,
+      payload,
+      bytes: record.payload,
       signatures: record.signatures,
-    })),
-    unreadable: walked.unreadable,
-  } as const;
+    });
+  }
+
+  return { exposures, unreadable, parents: walked.parents } as const;
 });
 
 // -- auditing -------------------------------------------------------------------

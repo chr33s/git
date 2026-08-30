@@ -1885,6 +1885,92 @@ describe("Policy", () => {
       }),
     );
 
+    it.effect("bounds a trace ref on its own budget, not the fold's", () =>
+      Effect.promise(async () => {
+        // docs/telemetry.md §13 and §19.13: trace storage must not inherit the
+        // policy-critical session fold's budget. A pull request's ceiling
+        // exists because folding one is quadratic on the receive-pack path;
+        // nothing folds a trace ref, so holding it to the same number would
+        // refuse honest audit history for a cost it does not impose.
+        //
+        // Proved by squeezing the *event* ceiling to two and leaving the trace
+        // ceiling alone: three records pass on one namespace at a length the
+        // other would refuse, which can only happen if the budgets are
+        // genuinely separate.
+        const outcome = await scenario(
+          Effect.gen(function* () {
+            const where = yield* world(["repo.admin"]);
+            const repository = yield* Repository;
+            const commit = yield* repository.commitTree({
+              tree: yield* repository.writeTree([]),
+              parents: [],
+              message: "root\n",
+              author,
+            });
+
+            for (let index = 0; index < 3; index++) {
+              yield* Exposure.expose({
+                repo: where.genesis.repoId,
+                session: SESSION,
+                key: where.dev,
+                pack: { version: 1, view: yield* Pack.committed(commit), items: [] },
+                segments: [
+                  {
+                    placement: "user",
+                    mediaType: "text/plain",
+                    body: new TextEncoder().encode(`ask ${index}`),
+                  },
+                ],
+                retain: false,
+              });
+            }
+            const trace = yield* repository.resolve(Trace.refOf(SESSION));
+
+            // The same length on the namespace the squeezed ceiling covers.
+            const opened = yield* Session.open({
+              repo: where.genesis.repoId,
+              agent: { kind: "claude-code", model: "m", harness: "h" },
+              prompt: "do the thing",
+              key: where.dev,
+            });
+            yield* Session.produced({
+              repo: where.genesis.repoId,
+              session: opened.session,
+              key: where.dev,
+            });
+            yield* Session.produced({
+              repo: where.genesis.repoId,
+              session: opened.session,
+              key: where.dev,
+            });
+            const events = yield* repository.resolve(Session.refOf(opened.session));
+
+            return yield* Effect.all({
+              trace: judge(where, { name: Trace.refOf(SESSION), value: trace }),
+              session: judge(where, {
+                name: Session.refOf(opened.session),
+                value: events,
+              }),
+            }).pipe(Effect.provide(Event.ceiling(2)));
+          }),
+        );
+
+        assert.equal(
+          outcome.trace.ok,
+          true,
+          "three records pass on a namespace whose own ceiling is far higher",
+        );
+        // The control: the same history length on the namespace the squeezed
+        // ceiling does cover. Without this the test would pass just as well if
+        // both namespaces shared one generous budget.
+        assert.equal(outcome.session.ok, false, "and are refused where that ceiling applies");
+        assert.match(
+          outcome.session.ok === false ? outcome.session.reason : "",
+          /more events than a fold will walk/,
+        );
+      }),
+    );
+
     it.effect("refuses a hub update that grafts a second beginning onto the history", () =>
       Effect.promise(async () => {
         // Every hub event is written onto the ref's current head, so the history

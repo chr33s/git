@@ -67,6 +67,7 @@ import { fetchCommand, pullCommand } from "./transport.ts";
 import { queueCommand } from "./queue.ts";
 import { socialCommand } from "./social.ts";
 import { taskCommand } from "./task.ts";
+import { traceCommand } from "./trace.ts";
 import { prCommand } from "./pr.ts";
 import { wakeCommand } from "./wake.ts";
 import * as work from "./work.ts";
@@ -1077,6 +1078,9 @@ const git = Command.make("git+").pipe(
     socialCommand.pipe(Command.withDescription("Social graph: follows, vouches and discovery")),
     tag.pipe(Command.withDescription("List, create or delete tags")),
     taskCommand.pipe(Command.withDescription("What needs doing, and who is on it")),
+    traceCommand.pipe(
+      Command.withDescription("Append signed runtime telemetry to a session's audit trace"),
+    ),
     queueCommand.pipe(Command.withDescription("Land approved pull requests as one tested batch")),
     wakeCommand,
     webhookCommand.pipe(

@@ -142,7 +142,9 @@ describe("cli session", () => {
 
       // What a second agent reads. The sandbox that held the transcript is gone;
       // this is what the repository kept.
-      const shown = JSON.parse(await cli(["session", "show", "--root", root, "project", session]));
+      const shown = JSON.parse(
+        await cli(["session", "show", "--root", root, "--repo", "project", session]),
+      );
       assert.equal(shown.session, session);
       assert.equal(shown.agent.kind, "claude-code");
       assert.equal(shown.agent.model, "claude-fable-5");
@@ -176,7 +178,16 @@ describe("cli session", () => {
       ]);
 
       const shown = JSON.parse(
-        await cli(["session", "show", "--root", root, "--branch", "refs/heads/topic", "project"]),
+        await cli([
+          "session",
+          "show",
+          "--root",
+          root,
+          "--repo",
+          "project",
+          "--branch",
+          "refs/heads/topic",
+        ]),
       );
       assert.equal(shown.session, first);
       assert.deepEqual(
@@ -189,9 +200,10 @@ describe("cli session", () => {
         "show",
         "--root",
         root,
+        "--repo",
+        "project",
         "--branch",
         "refs/heads/nowhere",
-        "project",
       ]);
       assert.match(missing, /no session has produced/);
     }),
@@ -244,7 +256,7 @@ describe("cli session", () => {
       ).trim();
 
       const blocked = JSON.parse(
-        await cli(["session", "show", "--root", root, "project", session]),
+        await cli(["session", "show", "--root", root, "--repo", "project", session]),
       );
       assert.equal(blocked.decisions.length, 1);
       assert.equal(blocked.decisions[0].id, decision);
@@ -268,7 +280,7 @@ describe("cli session", () => {
       ]);
 
       const answered = JSON.parse(
-        await cli(["session", "show", "--root", root, "project", session]),
+        await cli(["session", "show", "--root", root, "--repo", "project", session]),
       );
       assert.equal(answered.decisions[0].chose, "alias");
     }),
@@ -303,7 +315,9 @@ describe("cli session", () => {
       });
 
       const id = (await fs.readFile(path.join(work, ".chr33s", "session.id"), "utf8")).trim();
-      const shown = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+      const shown = JSON.parse(
+        await cli(["session", "show", "--root", root, "--repo", "project", id]),
+      );
       assert.deepEqual(
         shown.prompts.map((entry: { prompt: string }) => entry.prompt),
         ["fix the flaky test"],
@@ -327,7 +341,9 @@ describe("cli session", () => {
         encoding: "utf8",
         env: { ...process.env, CHR33S_GIT_BRANCH: "refs/heads/topic" },
       });
-      const after = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+      const after = JSON.parse(
+        await cli(["session", "show", "--root", root, "--repo", "project", id]),
+      );
       assert.deepEqual(after.refs, ["refs/heads/topic"]);
       assert.equal(fsSync.existsSync(path.join(work, ".chr33s", "session.id")), false);
     }),

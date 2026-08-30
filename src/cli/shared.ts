@@ -281,3 +281,48 @@ export const withWork = <A, E>(
       ),
     );
   });
+
+/**
+ * The repository a repo-scoped audit command should act on.
+ *
+ * The current checkout by default, an explicit bare repository under `--root`
+ * when one is named (docs/telemetry.md §17, docs/context-pack.md §13). Two
+ * paths rather than one because the two callers are genuinely different: a
+ * person standing in a project has a `.git` to find, and a server
+ * administering a directory of bare repositories has a name and no checkout.
+ *
+ * Hooks are noop on the discovery path. Nothing an audit verb does lands a ref
+ * through `receive`, which is the only thing the chain runs for, so building
+ * the delivery machinery here would be paying for a notification nobody sends.
+ */
+export const withDiscovered = <A, E>(
+  root: string,
+  repo: string,
+  effect: Effect.Effect<A, E, Repository | GitRepository.Hooks>,
+): Effect.Effect<A, E | Invalid, GitInvocation> => {
+  if (repo !== "") return withRepo(root, repo, effect, { notify: false });
+
+  return Effect.gen(function* () {
+    const found = yield* discoverRepository(yield* GitInvocation);
+    if (found === null) {
+      return yield* new Invalid({
+        field: "repository",
+        reason: "not a Git repository; name one with --repo, or run this inside a checkout",
+      });
+    }
+    return yield* effect.pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provideMerge(GitRepository.hooksNoop),
+          Layer.provide(stores(found.gitDir)),
+        ),
+      ),
+    );
+  });
+};
+
+/** Selects a bare repository under `--root`; empty means the current checkout. */
+export const repoFlag = Flag.string("repo").pipe(
+  Flag.withDefault(""),
+  Flag.withDescription("A bare repository under --root, instead of the current checkout"),
+);

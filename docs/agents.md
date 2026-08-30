@@ -1533,15 +1533,17 @@ asked to finish related work, reads before it writes:
 ```sh
 TOKEN=$(npx git+ credential project --key ~/.ssh/agent-codex \
   --capability repo.read,source.push --ttl 3600)
-git+ session show project --branch claude/agent-keys
+git+ session show --repo project --branch claude/agent-keys
 ```
 
 The branch is the natural key — "put me back in context for this branch"
 is the question an agent has on checkout, and the latest session whose
 `session.produced` names the branch is derivable from the refs. An id
-works too, when the caller has one: `session show project S`. Both print
-the projection — prompt, agent, what was produced, what it cost — and
-append nothing.
+works too, when the caller has one: `session show --repo project S`. Both
+print the projection — prompt, agent, what was produced, what it cost —
+and append nothing. Inside a checkout `--repo` is unnecessary: the
+repository a person is standing in is the default, which is why the
+session is the positional here and the repository is a flag.
 
 Appending to a session another agent opened is `session produce
 --session S`, which is a record of what _this_ agent did under the same
