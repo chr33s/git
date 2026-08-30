@@ -145,6 +145,16 @@ const forCommand = Command.make(
       // Read before the repository layer is built: a private key is the one
       // input no command takes as an argument, and the file is on this
       // machine, not in the repository.
+      //
+      // Refused by name rather than by path: `--key` defaults to empty, so a
+      // caller who asked to record an exposure and forgot it got `cannot read`
+      // with nothing after it — a file-not-found error naming no file.
+      if (session !== "" && key === "") {
+        return yield* new Invalid({
+          field: "key",
+          reason: "recording an exposure needs --key; a record nobody signed is not a record",
+        });
+      }
       const signer = session === "" ? null : yield* readPrivateKey(key);
 
       const result = yield* withWork(
@@ -297,11 +307,33 @@ const why = Command.make(
 
 // -- audit --------------------------------------------------------------------
 
-/** Which session's trace ref holds this record, if any of them do. */
+/**
+ * Which session's trace ref holds this record, if any of them do.
+ *
+ * The record's own payload names a session, and that is used as a *hint* —
+ * checked against the ref it names, never believed. Scanning every trace ref
+ * in the repository read all of them end to end to find one commit, which for
+ * a repository with a few hundred recorded sessions is a full walk and decode
+ * of each. The fallback scan stays for a record whose payload is unreadable or
+ * whose claim does not hold, which is exactly when the answer matters most.
+ */
 const sessionOf = Effect.fn("context.sessionOf")(function* (commit: Oid) {
-  for (const session of yield* Trace.traces()) {
+  const holds = Effect.fn("context.holds")(function* (session: string) {
     const walked = yield* Exposure.entries(session);
-    if (walked.exposures.some((exposure) => exposure.commit === commit)) return session;
+    return walked.exposures.some((exposure) => exposure.commit === commit);
+  });
+
+  const claimed = yield* Exposure.audit({ commit, repo: "", session: "" }).pipe(
+    Effect.map((audited) => audited.payload?.session ?? null),
+    Effect.catchTags({
+      ObjectNotFound: () => Effect.succeed(null),
+      Invalid: () => Effect.succeed(null),
+    }),
+  );
+  if (claimed !== null && Trace.isTraceId(claimed) && (yield* holds(claimed))) return claimed;
+
+  for (const session of yield* Trace.traces()) {
+    if (yield* holds(session)) return session;
   }
   return null;
 });

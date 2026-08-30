@@ -308,6 +308,70 @@ describe("Invocation projection", () => {
     ),
   );
 
+  it.effect("gives two invocations from one tree their own transitions", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { base, key } = yield* opened();
+          const view = yield* Pack.committed(base);
+
+          const written: Array<string> = [];
+          for (const label of ["first", "second"]) {
+            const exposed = yield* Exposure.expose({
+              repo: REPO,
+              session: SESSION,
+              key,
+              pack: { version: 1, view, items: [] },
+              segments: [
+                {
+                  placement: "user",
+                  mediaType: "text/plain",
+                  body: new TextEncoder().encode(label),
+                },
+              ],
+              retain: false,
+            });
+            yield* Records.record(
+              {
+                ...(yield* Records.context(REPO, SESSION)),
+                type: Records.INVOCATION,
+                exposure: exposed.oid,
+                capture: null,
+              },
+              key,
+            );
+            const after = yield* repository.writeBlob(new TextEncoder().encode(label));
+            written.push(qualify(after));
+            yield* Records.record(
+              {
+                ...(yield* Records.context(REPO, SESSION)),
+                type: Records.WORKSPACE,
+                // Both start from the same clean tree, which is the ordinary
+                // case and the one a map keyed on `beforeTree` collapsed.
+                beforeTree: view.tree,
+                afterTree: qualify(after),
+                operation: null,
+              },
+              key,
+            );
+          }
+
+          const projected = yield* Invocation.project({ session: SESSION, repo: REPO });
+          const rows = projected.invocations.filter((row) => row.runtime !== null);
+          assert.equal(rows.length, 2);
+          // Each invocation gets the transition that followed *it*, not the
+          // last one written — otherwise the first row makes a fabricated
+          // claim about what it changed.
+          assert.deepEqual(
+            rows.map((row) => row.workspace?.after),
+            written,
+          );
+        }),
+      ),
+    ),
+  );
+
   it.effect("keeps two lanes as two lanes when the trace history branches", () =>
     Effect.promise(() =>
       scenario(

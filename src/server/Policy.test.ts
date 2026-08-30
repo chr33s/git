@@ -1882,6 +1882,12 @@ describe("Policy", () => {
           false,
           "writing somebody's exposures is not something hub.session buys",
         );
+
+        // And not something `hub.redact` buys either: this namespace defines
+        // no tombstone record, so admitting a redactor would sell the right to
+        // append in exchange for a removal they cannot express.
+        const redactor = await judged(["hub.redact", "source.push"]);
+        assert.equal(redactor.moved.ok, false);
       }),
     );
 

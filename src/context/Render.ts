@@ -45,6 +45,8 @@ const PREAMBLE = "git+ContextRender\0v1\0";
  * answered, and conflating the two is how retrieved content talks its way into
  * being obeyed.
  */
+const encoder = new TextEncoder();
+
 export const PLACEMENTS = ["system", "developer", "user", "tool", "other"] as const;
 export type Placement = (typeof PLACEMENTS)[number];
 
@@ -63,7 +65,12 @@ export const isPlacement = (value: string): boolean => {
   return (
     slash > 0 &&
     slash < value.length - 1 &&
-    value.length <= MAX_PLACEMENT &&
+    // Bounded in *bytes*, which is what the framing writes and what `parse`
+    // reads back. Measured in UTF-16 units, a placement of sixty CJK
+    // characters passed here, framed to a hundred and eighty bytes, and was
+    // then refused by this module's own parser — so an intact retained render
+    // audited as `unreadable` forever, on a record nothing can remove.
+    encoder.encode(value).length <= MAX_PLACEMENT &&
     !value.includes("\0") &&
     value.indexOf("/", slash + 1) === -1
   );
@@ -88,8 +95,6 @@ export interface Segment {
   /** The exact bytes crossing the boundary; hashed as supplied. */
   readonly body: Uint8Array;
 }
-
-const encoder = new TextEncoder();
 
 const u32 = (value: number): Uint8Array => {
   const bytes = new Uint8Array(4);

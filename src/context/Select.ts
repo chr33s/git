@@ -36,6 +36,15 @@ export const MAX_BYTES = 64 * 1024;
 /** How large a blob this selector will read at all. */
 const MAX_FILE_BYTES = 1024 * 1024;
 
+/**
+ * How many omissions a pack will name individually before counting them.
+ *
+ * Omissions are non-exhaustive by definition (§6.1), so a cap costs nothing a
+ * reader is entitled to — and without one the diagnostics can be larger than
+ * the evidence they are diagnostics for.
+ */
+const MAX_NAMED_OMISSIONS = 64;
+
 /** Lines of context kept either side of a match, in the recorded range. */
 const CONTEXT_LINES = 4;
 
@@ -186,7 +195,7 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   const repository = yield* Repository;
   const maxItems = options.maxItems ?? MAX_ITEMS;
   const maxBytes = options.maxBytes ?? MAX_BYTES;
-  const named = (options.diagnostics ?? "path") === "path";
+  const namesPaths = (options.diagnostics ?? "path") === "path";
 
   const tree = Pack.unqualify(options.view.tree);
   if (tree === null) {
@@ -200,11 +209,27 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   const blobs = new Map(files.filter((file) => !isGitlink(file.mode)).map((f) => [f.path, f]));
 
   const items: Array<Pack.Item> = [];
-  const omissions: Array<Pack.Omission> = [];
-  let aggregate = 0;
+  const named: Array<Pack.Omission> = [];
+  /**
+   * How many paths each reason accounted for, for the entries not named.
+   *
+   * Counted per reason rather than totalled, because the reason is the whole
+   * content of an aggregate diagnostic: rolling `budget` and `unavailable`
+   * into one `filtered` count states, in a signed record, that a content
+   * filter removed things a budget removed.
+   */
+  const counted = new Map<string, number>();
   const omit = (path: string, reason: string) => {
-    if (named) omissions.push({ path, reason });
-    else aggregate += 1;
+    // Bounded like the items are. Once the budget is spent every remaining
+    // candidate is an omission, and `candidates()` returns one entry per file
+    // matching any task term — a common word on a large repository is
+    // thousands of paths, which is a pack that outgrows `MAX_PAYLOAD` after
+    // the selection work is already done.
+    if (namesPaths && named.length < MAX_NAMED_OMISSIONS) {
+      named.push({ path, reason });
+      return;
+    }
+    counted.set(reason, (counted.get(reason) ?? 0) + 1);
   };
 
   // The standing instructions first, and always. They are the one selection a
@@ -265,9 +290,14 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   // Submodules the selected evidence actually points at. A gitlink proves only
   // that this repository named that commit — nothing from inside the submodule
   // was retrieved — so it earns its place by being referenced, not by existing.
+  //
+  // Skipped entirely when the view holds no submodules, which is every
+  // repository without one: the scan below re-reads every selected blob and
+  // decodes it, a second full copy of the evidence budget bought for nothing.
+  const gitlinks = files.filter((file) => isGitlink(file.mode));
   const decoder = new TextDecoder();
   const mentions: Array<string> = [];
-  for (const item of items) {
+  for (const item of gitlinks.length === 0 ? [] : items) {
     if (item.kind !== "blob") continue;
     const bytes = yield* Pack.evidence(options.view, item).pipe(
       Effect.catchTags({
@@ -279,8 +309,7 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   }
   const mentioned = mentions.join("\n");
 
-  for (const file of files) {
-    if (!isGitlink(file.mode)) continue;
+  for (const file of gitlinks) {
     if (items.length >= maxItems) break;
     const referenced = options.task.includes(file.path) || mentioned.includes(file.path);
     if (!referenced) continue;
@@ -293,7 +322,10 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
     });
   }
 
-  if (aggregate > 0) omissions.push({ reason: "filtered", count: aggregate });
+  const omissions: Array<Pack.Omission> = [...named];
+  for (const [reason, count] of [...counted].sort(([left], [right]) => left.localeCompare(right))) {
+    omissions.push({ reason, count });
+  }
 
   const pack: Pack.Pack = {
     version: Pack.VERSION,

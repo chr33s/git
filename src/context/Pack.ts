@@ -31,6 +31,7 @@ import { isGitlink, isTree } from "../git/Format.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import type { IndexEntry } from "../git/Index.ts";
 import { IndexStore, modeString, unchanged, WorkTree } from "../git/Work.ts";
 
 export { qualify, unqualify };
@@ -315,8 +316,22 @@ export const capture = Effect.fn("context.Pack.capture")(function* (base: Oid) {
   const work = yield* WorkTree;
   const index = yield* IndexStore;
 
-  const entries: Array<{ readonly path: string; readonly oid: Oid; readonly mode: string }> = [];
+  // One entry per path, and stage 0 wins. A conflicted index holds stages 1..3
+  // for a path and no stage 0 at all; taking them as they come re-hashed the
+  // same file three times and let `writePaths` keep whichever landed last — so
+  // a view could name "theirs" at a path whose working file holds conflict
+  // markers, and an agent that read the markers would be audited against bytes
+  // it never saw. That is exactly the §4.2 mislabelling `capture` exists to
+  // prevent, arriving through the index instead of through the commit.
+  const staged = new Map<string, { readonly entry: IndexEntry; readonly merged: boolean }>();
   for (const entry of yield* index.load) {
+    const held = staged.get(entry.path);
+    if (entry.stage === 0) staged.set(entry.path, { entry, merged: true });
+    else if (held === undefined) staged.set(entry.path, { entry, merged: false });
+  }
+
+  const entries: Array<{ readonly path: string; readonly oid: Oid; readonly mode: string }> = [];
+  for (const { entry, merged } of staged.values()) {
     // A submodule has no file of its own in this checkout — the other
     // repository's work tree is its own business — so `stat` says nothing
     // about it and the index is the only thing that can.
@@ -331,7 +346,10 @@ export const capture = Effect.fn("context.Pack.capture")(function* (base: Oid) {
     // the direction nobody expects.
     if (stat === null) continue;
 
-    if (unchanged(entry, stat)) {
+    // An unmerged path's stat cache describes one side of the conflict, not
+    // the file on disk — so the fast path is exactly wrong there, and the
+    // bytes have to be read.
+    if (merged && unchanged(entry, stat)) {
       entries.push({ path: entry.path, oid: entry.oid, mode: modeString(entry.mode) });
       continue;
     }

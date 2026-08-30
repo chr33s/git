@@ -1036,6 +1036,14 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // every field a queue record carries is an identifier, an object id or a
     // ref name, so the namespace has no tombstone to admit a redactor for. See
     // `hub/Queue.ts`.
+    //
+    // A trace ref is charged `hub.trace` alone for a narrower reason: this
+    // version defines no tombstone record for the namespace, so admitting a
+    // redactor bought a capability holder the right to append records they
+    // could not otherwise write, in exchange for a removal they cannot
+    // express. `Redaction.recordRefs` does not walk trace refs either, so a
+    // tombstone written here would never be honoured — see
+    // docs/internals.md on what retention this namespace does have.
     const needed = (name: string): { exact: ReadonlyArray<string> } | { prefix: string } =>
       name === Refspec.SOCIAL_LOG
         ? { exact: ["social.write"] }
@@ -1044,7 +1052,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
           : Session.sessionOf(name) !== null
             ? { exact: ["hub.session", "hub.redact"] }
             : Trace.traceOf(name) !== null
-              ? { exact: ["hub.trace", "hub.redact"] }
+              ? { exact: ["hub.trace"] }
               : Queue.queueOf(name) !== null
                 ? { exact: ["hub.queue"] }
                 : name.startsWith("refs/hub/")

@@ -123,6 +123,40 @@ describe("Repository View", () => {
     ),
   );
 
+  it.effect("takes the file on disk when the index holds a conflict", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const { commit, repository } = yield* checkout();
+          const work = yield* WorkTree;
+          const index = yield* IndexStore;
+
+          // What `git merge` leaves behind: no stage 0, three sides in the
+          // index, and conflict markers in the working file.
+          const conflicted = "<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>>\n";
+          yield* work.write("src/auth.ts", encode(conflicted), 0o100644);
+          const held = yield* index.load;
+          const entry = held.find((candidate) => candidate.path === "src/auth.ts")!;
+          const theirs = yield* repository.writeBlob(encode("theirs\n"));
+          yield* index.save([
+            ...held.filter((candidate) => candidate.path !== "src/auth.ts"),
+            { ...entry, stage: 1 },
+            { ...entry, stage: 2 },
+            { ...entry, oid: theirs, stage: 3 },
+          ]);
+
+          const view = yield* Pack.capture(commit);
+          const tree = Pack.unqualify(view.tree)!;
+          const found = yield* repository.findPath(tree, "src/auth.ts");
+          const bytes = yield* repository.readBlob(found!.oid);
+          // The bytes retrieval can actually read, not whichever stage the
+          // index happened to list last.
+          assert.equal(new TextDecoder().decode(bytes), conflicted);
+        }),
+      ),
+    ),
+  );
+
   it.effect("drops a tracked path that is not on disk", () =>
     Effect.promise(() =>
       scenario(

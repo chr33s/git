@@ -152,6 +152,27 @@ describe("ContextRender framing", () => {
     }
   });
 
+  it("bounds a placement by the bytes it will frame, not by its characters", () => {
+    // A placement this module frames and then refuses to parse would make an
+    // intact retained render audit as `unreadable` for good, on a record
+    // nothing can remove. Sixty CJK characters are 180 UTF-8 bytes.
+    const wide = `acme/${"\u4e2d".repeat(60)}`;
+    assert.equal(wide.length <= Render.MAX_PLACEMENT, true, "short in UTF-16 units");
+    assert.equal(Render.isPlacement(wide), false, "and over the bound in bytes");
+
+    const framed = Render.frame([{ placement: wide, mediaType: "text/plain", body: encode("x") }]);
+    assert.equal(Result.isFailure(framed), true);
+  });
+
+  it("round-trips a placement that is wide but within the byte bound", () => {
+    const wide = `acme/${"\u4e2d".repeat(20)}`;
+    const parsed = Render.parse(
+      framed([{ placement: wide, mediaType: "text/plain", body: encode("x") }]),
+    );
+    assert.equal(Result.isSuccess(parsed), true);
+    if (Result.isSuccess(parsed)) assert.equal(parsed.success[0]?.placement, wide);
+  });
+
   it("takes namespaced extension placements and refuses nonsense", () => {
     assert.equal(Render.isPlacement("system"), true);
     assert.equal(Render.isPlacement("acme/scratchpad"), true);

@@ -203,6 +203,11 @@ export const expose = Effect.fn("context.Exposure.expose")(function* (input: {
 }) {
   const repository = yield* Repository;
 
+  // Held to exactly what `Pack.decode` will accept, and before a single object
+  // is written. A record whose pack this repository's own reader refuses is
+  // one whose every later audit reports "no readable pack naming a view" —
+  // permanently, on a ref nothing can remove. The byte cap alone let that
+  // through: four thousand terse items sit well inside a megabyte.
   const bytes = Pack.encode(input.pack);
   if (bytes.length > Pack.MAX_PAYLOAD) {
     return yield* new Invalid({
@@ -210,7 +215,17 @@ export const expose = Effect.fn("context.Exposure.expose")(function* (input: {
       reason: `a context pack may not exceed ${Pack.MAX_PAYLOAD} bytes; this one is ${bytes.length}`,
     });
   }
-  const pack = yield* repository.writeBlob(bytes);
+  if (input.pack.items.length > Pack.MAX_ITEMS) {
+    return yield* new Invalid({
+      field: "items",
+      reason: `a context pack may not carry more than ${Pack.MAX_ITEMS} items; this one has ${input.pack.items.length}`,
+    });
+  }
+
+  // Framed before anything is stored, for the same reason: the segment bound
+  // is enforced here, and discovering it after the pack blob had been written
+  // left an object behind for every refused call.
+  const rendered = yield* Render.commit(input.segments);
 
   const view = unqualify(input.pack.view.tree);
   if (view === null) {
@@ -235,7 +250,7 @@ export const expose = Effect.fn("context.Exposure.expose")(function* (input: {
     ),
   );
 
-  const rendered = yield* Render.commit(input.segments);
+  const pack = yield* repository.writeBlob(bytes);
 
   const attached: Array<TreeEntry> = [
     { mode: BLOB_MODE, name: "pack.json", oid: pack },
@@ -299,8 +314,12 @@ export const expose = Effect.fn("context.Exposure.expose")(function* (input: {
  * beside these, and reading "this is not a context exposure" as "this record is
  * unreadable" would report a healthy session as a damaged one.
  */
-export const entries = Effect.fn("context.Exposure.entries")(function* (session: string) {
-  const walked = yield* Trace.walk(session);
+export const entries = Effect.fn("context.Exposure.entries")(function* (
+  session: string,
+  taken?: Trace.Walk,
+) {
+  // A caller holding the walk already hands it in; see `Records.entries`.
+  const walked = taken ?? (yield* Trace.walk(session));
   const exposures: Array<{
     readonly commit: Oid;
     readonly payload: Payload;
@@ -375,6 +394,15 @@ export interface Audit {
   /** Whether `context/view` exists and is `pack.view.tree`. */
   readonly retained: Check;
   readonly evidence: Pack.Report | null;
+  /**
+   * The pack these checks were made against, decoded once.
+   *
+   * Handed back because every caller that wants more than a verdict — the
+   * Invocation projection counting evidence, `context why` explaining it —
+   * would otherwise read the same blob and run the same schema a second time,
+   * per exposure, per projection.
+   */
+  readonly decoded: Pack.Pack | null;
   readonly render: RenderStatus;
   /** Runtime correlation, when the producer recorded any. */
   readonly capture: Capture | null;
@@ -422,6 +450,7 @@ export const audit = Effect.fn("context.Exposure.audit")(function* (input: {
       pack: bad("no payload naming a pack"),
       retained: bad("no payload naming a view"),
       evidence: null,
+      decoded: null,
       render: { state: "unreadable", reason: "no payload naming a render" },
       capture: null,
       ok: false,
@@ -460,6 +489,7 @@ export const audit = Effect.fn("context.Exposure.audit")(function* (input: {
       pack: bad("no payload naming a pack"),
       retained: bad("no payload naming a view"),
       evidence: null,
+      decoded: null,
       render: { state: "unreadable", reason: "no payload naming a render" },
       capture: null,
       ok: false,
@@ -527,6 +557,7 @@ export const audit = Effect.fn("context.Exposure.audit")(function* (input: {
     pack,
     retained,
     evidence,
+    decoded,
     render,
     capture: payload.capture,
     ok:

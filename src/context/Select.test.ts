@@ -58,7 +58,16 @@ const project = Effect.fn("test.project")(function* () {
     0o100644,
   );
   yield* work.write("docs/readme.md", encode("Nothing to do with any of it.\n"), 0o100644);
-  yield* work.write("assets/logo.bin", Uint8Array.from([0x89, 0x00, 0x01, 0x02, 0x00]), 0o100644);
+  // Matches the task's words and is larger than the selector will read: a
+  // candidate it finds and then refuses, which is a `filtered` omission rather
+  // than a budget one.
+  // One match, so it does not crowd out the smaller candidates, and far past
+  // the byte cap the selector reads at.
+  yield* work.write(
+    "assets/policy.log",
+    encode(`authorize policy\n${"padding line\n".repeat(100_000)}`),
+    0o100644,
+  );
   yield* Checkout.add(["."]);
   const made = yield* Checkout.commit({ message: "first\n", author });
   return yield* Pack.capture(made.oid);
@@ -147,6 +156,33 @@ describe("the default selector", () => {
           // A count and a reason, and no repository structure at all.
           assert.equal(omissions[0]?.path, undefined);
           assert.equal((omissions[0]?.count ?? 0) > 0, true);
+          // And the reason that actually applied. Rolling every cut into one
+          // `filtered` count would state, in a signed record, that a content
+          // filter removed what a budget removed.
+          assert.equal(omissions[0]?.reason, "budget");
+        }),
+      ),
+    ),
+  );
+
+  it.effect("counts an unreadable path under its own reason, not the budget's", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const view = yield* project();
+          const pack = yield* Select.select({
+            task: "authorize policy",
+            view,
+            diagnostics: "aggregate",
+            // Room for everything, so nothing is cut by the budget: the only
+            // omission left is the binary file the selector will not read.
+            maxItems: 64,
+          });
+          const omissions = pack.omissions ?? [];
+          assert.deepEqual(
+            omissions.map((omission) => omission.reason),
+            ["filtered"],
+          );
         }),
       ),
     ),

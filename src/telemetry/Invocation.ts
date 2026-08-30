@@ -35,7 +35,6 @@ import * as Exposure from "../context/Exposure.ts";
 import * as Pack from "../context/Pack.ts";
 import type { ObjectNotFound, StorageFailure, Invalid } from "../git/Error.ts";
 import { qualify } from "../git/Oid.ts";
-import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Trace from "../hub/Trace.ts";
 import * as Records from "./Records.ts";
@@ -177,30 +176,10 @@ const contextOf = Effect.fn("telemetry.Invocation.contextOf")(function* (input: 
   readonly trust: Parameters<typeof Exposure.audit>[0]["trust"];
 }) {
   const audited = yield* Exposure.audit(input);
-  const repository = yield* Repository;
-
-  const packed = yield* Exposure.packOf(input.commit).pipe(
-    Effect.catchTags({
-      Invalid: () => Effect.succeed(null),
-      ObjectNotFound: () => Effect.succeed(null),
-    }),
-  );
-  const pack =
-    packed === null
-      ? null
-      : yield* Pack.decode(packed.bytes).pipe(Effect.orElseSucceed(() => null));
-
-  // Read for its side effect of proving the repository still holds it: an
-  // exposure whose retained view was collected is one whose counts describe a
-  // tree nobody can look at any more.
-  if (pack !== null) {
-    const tree = Pack.unqualify(pack.view.tree);
-    if (tree !== null) {
-      yield* repository
-        .readTree(tree)
-        .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-    }
-  }
+  // The pack the audit has already read and decoded. Reading it back through
+  // `packOf` cost a second `readCommit`, `findPath`, `readBlob` and schema
+  // decode per exposure, per projection — purely to count blobs and gitlinks.
+  const pack = audited.decoded;
 
   return {
     exposure: audited.exposure,
@@ -227,9 +206,12 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
   readonly repo: string;
   readonly trust?: Parameters<typeof Exposure.audit>[0]["trust"];
 }) {
+  // One walk, read twice. Both `entries` calls do nothing but filter the
+  // walked records by type, so taking the ref three times was three
+  // `Dag.reachable` passes and three payload reads per record.
   const walked = yield* Trace.walk(input.session);
-  const telemetry = yield* Records.entries(input.session);
-  const exposures = yield* Exposure.entries(input.session);
+  const telemetry = yield* Records.entries(input.session, walked);
+  const exposures = yield* Exposure.entries(input.session, walked);
 
   const health: Array<Records.TraceHealth> = [];
   const lifecycle: Array<{ record: string; payload: Records.ContextCompaction }> = [];
@@ -252,12 +234,29 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
   const coverage = coverageOf(health);
 
   // A workspace transition belongs to the invocation whose exposure names the
-  // tree it started from: §11's capture pattern remembers tree A before the
-  // work and materializes tree B before the next invocation, so A is what
-  // links them. Nothing here reads a clock.
-  const transitionByBefore = new Map(
-    workspaces.map((entry) => [entry.payload.beforeTree, entry.payload]),
-  );
+  // tree it started from *and* which precedes it in the history: §11's capture
+  // pattern remembers tree A before the work and materializes tree B before
+  // the next invocation, so A and the walk order together are what link them.
+  // Nothing here reads a clock.
+  //
+  // Both halves are needed. Keyed on `beforeTree` alone, two invocations that
+  // began from the same clean tree — the ordinary case — collapsed to one
+  // transition, and both rows were then rendered with it: a fabricated claim
+  // about what the first invocation changed. Each transition is claimed once.
+  const position = new Map(walked.records.map((entry, index) => [entry.commit, index]));
+  const unclaimed = workspaces.map((entry) => ({ ...entry, claimed: false }));
+  const transitionAfter = (from: Oid, before: string) => {
+    const at = position.get(from) ?? 0;
+    const found = unclaimed.find(
+      (entry) =>
+        !entry.claimed &&
+        entry.payload.beforeTree === before &&
+        (position.get(entry.commit) ?? 0) >= at,
+    );
+    if (found === undefined) return null;
+    found.claimed = true;
+    return found.payload;
+  };
 
   const paired = new Set<string>();
   const invocations: Array<Invocation> = [];
@@ -283,7 +282,7 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
           });
 
     const before = context?.view?.tree;
-    const transition = before === undefined ? undefined : transitionByBefore.get(before);
+    const transition = before === undefined ? null : transitionAfter(runtime.commit, before);
 
     invocations.push({
       id: qualify(runtime.commit),
@@ -303,9 +302,7 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
         attempts: payload.attempts ?? null,
       },
       workspace:
-        transition === undefined
-          ? null
-          : { before: transition.beforeTree, after: transition.afterTree },
+        transition === null ? null : { before: transition.beforeTree, after: transition.afterTree },
       capture: payload.capture,
       coverage,
       inputPressure: pressureOf(payload),
@@ -352,7 +349,14 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
     health,
     coverage,
     concurrent: Trace.concurrent(walked.parents),
-    unreadable: [...new Set([...walked.unreadable, ...telemetry.unreadable])],
+    // Every reader's unreadable set, exposures included. `Exposure.entries`
+    // calls a record that claims to be a context exposure and then fails to
+    // decode "the one case this filter must not swallow" — and dropping it
+    // here swallowed it one level up, so a damaged run projected as a clean
+    // one with a row simply missing.
+    unreadable: [
+      ...new Set([...walked.unreadable, ...telemetry.unreadable, ...exposures.unreadable]),
+    ],
   } satisfies Projection;
 });
 

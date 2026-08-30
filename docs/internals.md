@@ -422,10 +422,21 @@ exists, which is what lets retrieval stay probabilistic while evidence identity
 does not.
 
 The trace namespace they write to, `refs/hub/trace/<session>`, is ordinary hub
-machinery — append-only, hash-linked, walked by `Event.walk` — and is read by
-nothing in `Policy.ts` or `Projection.ts`. That is deliberate: an agent's
-volume of exposures must not become an input to authorization, or a cost every
-protected-branch push pays.
+machinery — append-only, hash-linked — and is read by nothing in `Policy.ts` or
+`Projection.ts`. That is deliberate: an agent's volume of exposures must not
+become an input to authorization, or a cost every protected-branch push pays.
+
+**Trace redaction is not built.** The namespace defines no tombstone record and
+`hub/Redaction.ts` does not walk trace refs, so `hub.redact` buys nothing here
+and the boundary charges `hub.trace` alone — the same reasoning `hub/Queue.ts`
+gets, arrived at from the other direction. What retention this namespace does
+have is per-record and up front: `--retain-render=false` keeps a render's
+commitment and drops its bytes, and raw prompts, model outputs and tool bodies
+are non-canonical by construction rather than removable after the fact. A
+namespace that needs a tombstone needs a payload kind, a walk in `Redaction`
+and a decoder that can tell one ref's records from another's; admitting a
+redactor without those would sell the right to append in exchange for a
+removal nobody can express.
 
 ### Runtime telemetry
 

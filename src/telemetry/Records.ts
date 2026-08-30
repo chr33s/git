@@ -536,8 +536,15 @@ export interface Entry {
  * kind it then fails to decode, which is the only absence here that means
  * something is wrong.
  */
-export const entries = Effect.fn("telemetry.Records.entries")(function* (session: string) {
-  const walked = yield* Trace.walk(session);
+export const entries = Effect.fn("telemetry.Records.entries")(function* (
+  session: string,
+  taken?: Trace.Walk,
+) {
+  // A caller that already holds the walk hands it in. `Invocation.project`
+  // reads both this namespace and the exposures off one ref, and taking the
+  // walk once per reader meant three `Dag.reachable` passes and three payload
+  // reads per record for one `session show --audit`.
+  const walked = taken ?? (yield* Trace.walk(session));
   const records: Array<Entry> = [];
   const unreadable: Array<Oid> = [...walked.unreadable];
 
