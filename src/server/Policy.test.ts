@@ -6,6 +6,8 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
+import * as Exposure from "../context/Exposure.ts";
+import * as Pack from "../context/Pack.ts";
 import { fingerprint, formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
@@ -16,6 +18,7 @@ import { ObjectStore, type Oid, type RefUpdate, storageOf } from "../git/Store.t
 import * as Event from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as Session from "../hub/Session.ts";
+import * as Trace from "../hub/Trace.ts";
 import * as Queue from "../hub/Queue.ts";
 import * as Task from "../hub/Task.ts";
 import * as Inbox from "../social/Inbox.ts";
@@ -61,6 +64,9 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | ObjectStore>) =
       ),
     ),
   );
+
+/** One session id, for the trace namespace's own tests. */
+const SESSION = "0192f000-0000-7000-8000-000000000000";
 
 const author: Signature = {
   name: "Alice",
@@ -1815,6 +1821,67 @@ describe("Policy", () => {
         );
         assert.equal(outcome.proper.ok, true, "a session ref moves");
         assert.equal(outcome.nested.ok, false, "a name outside either shape does not");
+      }),
+    );
+
+    it.effect("admits a trace ref, and charges hub.trace for it", () =>
+      Effect.promise(async () => {
+        // Context exposures live under `refs/hub/trace/<session>`, which is
+        // audit data the boundary never folds (docs/context-pack.md §3). It
+        // still has to be a *name* the namespace admits: unknown shapes under
+        // `refs/hub/` are refused because nothing there can ever be deleted, so
+        // an unrecognised one is a permanent pin on the object graph.
+        //
+        // One world per run: `world` writes the genesis, and two of them in one
+        // repository is a ref conflict rather than a second member.
+        const judged = (capabilities: ReadonlyArray<string>) =>
+          scenario(
+            Effect.gen(function* () {
+              const where = yield* world(capabilities);
+              const repository = yield* Repository;
+              const commit = yield* repository.commitTree({
+                tree: yield* repository.writeTree([]),
+                parents: [],
+                message: "root\n",
+                author,
+              });
+              const exposed = yield* Exposure.expose({
+                repo: where.genesis.repoId,
+                session: SESSION,
+                key: where.dev,
+                pack: { version: 1, view: yield* Pack.committed(commit), items: [] },
+                segments: [
+                  {
+                    placement: "user",
+                    mediaType: "text/plain",
+                    body: new TextEncoder().encode("what was asked"),
+                  },
+                ],
+              });
+              const ref = Trace.refOf(SESSION);
+              return {
+                moved: yield* judge(where, { name: ref, value: exposed.commit }),
+                deleted: yield* judge(where, { name: ref, value: null }),
+                nested: yield* judge(where, { name: `${ref}/extra`, value: exposed.commit }),
+              };
+            }),
+          );
+
+        const permitted = await judged(["hub.trace", "source.push", "source.delete"]);
+        assert.equal(permitted.moved.ok, true, "hub.trace is what the namespace charges");
+        assert.equal(
+          permitted.deleted.ok,
+          false,
+          "a trace ref is append-only like every other hub ref",
+        );
+        assert.equal(permitted.nested.ok, false, "and a name outside the shape does not belong");
+
+        const elsewhere = await judged(["hub.session", "source.push"]);
+        assert.equal(
+          elsewhere.moved.ok,
+          false,
+          "writing somebody's exposures is not something hub.session buys",
+        );
       }),
     );
 

@@ -47,6 +47,7 @@ import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { GitInvocation } from "./GitCompat.ts";
 import { parseInvocation, runCoreCompatibility } from "./GitCompat.node.ts";
+import { contextCommand } from "./context.ts";
 import { hubCommand } from "./hub.ts";
 import { idCommand } from "./id.ts";
 import * as replay from "./replay.ts";
@@ -1034,6 +1035,7 @@ const git = Command.make("git+").pipe(
     replay.cherryPickCommand.pipe(Command.withDescription("Replay one commit onto another")),
     clone.pipe(Command.withDescription("Clone a repository over smart HTTP")),
     work.commitCommand.pipe(Command.withDescription("Commit what is staged")),
+    contextCommand.pipe(Command.withDescription("Git-native context packs, renders and exposures")),
     diff.pipe(Command.withDescription("Unified diff between two revisions")),
     files.pipe(Command.withDescription("List the files a revision's tree holds")),
     fetchCommand.pipe(

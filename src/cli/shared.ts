@@ -23,9 +23,13 @@ import type { Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
+import { IndexStore, WorkTree } from "../git/Work.ts";
+import { workspace } from "../git/Work.node.ts";
 import * as AfterPush from "../server/AfterPush.node.ts";
 import { isOid } from "../git/Store.ts";
 import { readGenesis } from "../trust/Genesis.ts";
+import { GitInvocation } from "./GitCompat.ts";
+import { discoverRepository } from "./GitCompat.node.ts";
 
 export const rootFlag = Flag.string("root").pipe(
   Flag.withDefault("."),
@@ -230,3 +234,50 @@ export const readPublicKey = Effect.fn("cli.readPublicKey")(function* (location:
     ? yield* new Invalid({ field: "key", reason: `${location}: ${parsed.failure.reason}` })
     : formatPublicKey(parsed.success);
 });
+
+/**
+ * A checkout, rather than one of the bare repositories under `--root`.
+ *
+ * The working-tree commands are the only ones that need files on disk, so
+ * they take `--work` — a directory whose repository is `.git` inside it,
+ * which is the layout `git` itself uses and the reason the two can be
+ * pointed at the same directory.
+ */
+export const workFlag = Flag.string("work").pipe(
+  Flag.optional,
+  Flag.withDescription("Explicit checkout selector for extension commands"),
+);
+
+export const withWork = <A, E>(
+  work: { readonly _tag: "None" } | { readonly _tag: "Some"; readonly value: string },
+  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore>,
+) =>
+  Effect.gen(function* () {
+    const invocation = yield* GitInvocation;
+    if (invocation.bare) {
+      return yield* new Invalid({
+        field: "bare",
+        reason: "this command requires a work tree",
+      });
+    }
+    const selected =
+      invocation.workTree !== undefined || work._tag === "None"
+        ? invocation
+        : { ...invocation, workTree: path.resolve(invocation.cwd, work.value) };
+    const found = yield* discoverRepository(selected);
+    if (found === null || found.workTree === null) {
+      return yield* new Invalid({
+        field: "repository",
+        reason: "not a Git work tree",
+      });
+    }
+    return yield* effect.pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provide(stores(found.gitDir)),
+          Layer.provideMerge(workspace(found.workTree)),
+        ),
+      ),
+    );
+  });

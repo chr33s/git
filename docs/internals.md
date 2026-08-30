@@ -76,6 +76,11 @@ run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: fa
 | `src/crypto/SshSignature.ts` | SSH sign / verify                                                    |
 | `src/trust/`                 | genesis, trust log, certificates, PrincipalID, known_repos           |
 | `src/hub/`                   | event DAGs: PRs, sessions, tasks, queue, redaction, memory           |
+| `src/hub/Trace.ts`           | `refs/hub/trace/*`: audit records no policy fold ever reads          |
+| `src/context/Pack.ts`        | Repository Views, and the evidence a Context Pack resolves from them |
+| `src/context/Render.ts`      | `git+context-render/v1` framing and its SHA-256 commitment           |
+| `src/context/Exposure.ts`    | the signed record binding pack, render and retained view             |
+| `src/context/Select.ts`      | the default, replaceable selector behind `git+ context for`          |
 | `src/social/`                | identity-repo social log, introduction, inbox, external review       |
 | `src/artifacts/Namespace.ts` | local Cloudflare Artifacts provider over alchemy's binding tag       |
 | `src/artifacts/Sqlite.ts`    | the provider's registry + tokens on Durable Object SQLite            |
@@ -385,6 +390,39 @@ boundary drawn on purpose: a bare server has no files, so serving `add` would
 mean inventing a work tree behind the API. The server-side spelling is
 `POST /:repo/commit-pack`, which streams an NDJSON body of file frames into a
 commit without holding more than one file in memory.
+
+### Repository context
+
+`git+ context for | why | audit`, over the four modules under `src/context/`.
+The protocol is in [context-pack.md](context-pack.md); what is worth saying
+here is where the seams fall.
+
+`Pack.ts` owns the Repository View and evidence resolution. A view is captured
+from the index and the files on disk, so a clean checkout reproduces `HEAD`'s
+own tree oid and a dirty one produces an overlay tree that is _written_, not
+merely hashed — an unresolvable view is not a view. Verification is a report
+with independent dimensions rather than a boolean: a missing view, a drifted
+item and an instruction claim that does not hold are three different findings,
+and an auditor handed one flag cannot tell which they have.
+
+`Render.ts` is the one thing here that must be byte-identical across
+implementations, so its framing is spelled out to the byte and its test asserts
+a hex literal rather than that the code agrees with itself.
+
+`Exposure.ts` writes the signed record. The part that is easy to get wrong is
+reachability: an oid inside JSON keeps nothing alive, so the record's tree
+carries a real `context/view` edge and the test proves it by running `gc` and
+reading the object back.
+
+`Select.ts` is the replaceable half. Nothing in the other three knows it
+exists, which is what lets retrieval stay probabilistic while evidence identity
+does not.
+
+The trace namespace they write to, `refs/hub/trace/<session>`, is ordinary hub
+machinery — append-only, hash-linked, walked by `Event.walk` — and is read by
+nothing in `Policy.ts` or `Projection.ts`. That is deliberate: an agent's
+volume of exposures must not become an input to authorization, or a cost every
+protected-branch push pays.
 
 ### Auth
 

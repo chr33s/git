@@ -23,6 +23,7 @@ import { push, type PushRef } from "../client/Push.ts";
 import { Hooks, type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Auth from "./Auth.ts";
 import * as Session from "../hub/Session.ts";
+import * as Trace from "../hub/Trace.ts";
 import * as Task from "../hub/Task.ts";
 import { type Remote, Remotes, sends } from "./Remotes.ts";
 
@@ -43,14 +44,19 @@ export const covered = (
   const patterns = remote.sync?.refs ?? [];
   return results.filter((result) => {
     if (!result.ok) return false;
-    // Sessions and tasks are never carried by a default. They hold the prompts
-    // an agent was given and the descriptions of work it was asked to do,
-    // which is the most leak-prone thing this repository stores,
-    // and "everything" configured once — a mirror, a backup, a fork — would
-    // put them somewhere nobody chose to put them. Named explicitly they go,
-    // which is what a provenance remote is (docs/agents.md §10).
+    // Sessions, traces and tasks are never carried by a default. They hold the
+    // prompts an agent was given, the repository bytes a harness showed a model
+    // and the descriptions of work it was asked to do, which is the most
+    // leak-prone thing this repository stores, and "everything" configured once
+    // — a mirror, a backup, a fork — would put them somewhere nobody chose to
+    // put them. Named explicitly they go, which is what a provenance remote is
+    // (docs/agents.md §10, docs/context-pack.md §14).
     if (patterns.length === 0) {
-      return Session.sessionOf(result.ref) === null && Task.taskOf(result.ref) === null;
+      return (
+        Session.sessionOf(result.ref) === null &&
+        Trace.traceOf(result.ref) === null &&
+        Task.taskOf(result.ref) === null
+      );
     }
     return patterns.some((pattern) => matches(pattern, result.ref));
   });

@@ -26,7 +26,7 @@
 import { Effect, Schema } from "effect";
 
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
-import type { Signature } from "../git/Format.ts";
+import type { Signature, TreeEntry } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 
@@ -79,6 +79,15 @@ export const encodeSignatures = (armored: ReadonlyArray<string>): Uint8Array =>
  * The commit is *not* attached to a ref here: which ref, and under what
  * compare-and-swap, is the caller's decision — an append to a trust log and an
  * append to a pull request's event DAG differ in exactly that.
+ *
+ * `attach` puts further entries beside the payload in the record's own tree.
+ * A Context Exposure needs one (docs/context-pack.md §10): naming a view's
+ * tree oid inside JSON does not make that tree reachable, so the record has to
+ * carry a real tree edge to it or the object it names is collected out from
+ * under the audit that was supposed to be able to read it. Beside the payload
+ * rather than inside it, for the reason the signatures are: the payload's
+ * bytes are what every signature covers, and they must not change to hold
+ * something a signature is not making a claim about.
  */
 export const write = Effect.fn("trust.Record.write")(function* (input: {
   readonly name: string;
@@ -87,6 +96,7 @@ export const write = Effect.fn("trust.Record.write")(function* (input: {
   readonly parents: ReadonlyArray<Oid>;
   readonly message: string;
   readonly at?: Date;
+  readonly attach?: ReadonlyArray<TreeEntry>;
 }) {
   const repository = yield* Repository;
 
@@ -95,6 +105,7 @@ export const write = Effect.fn("trust.Record.write")(function* (input: {
   const tree = yield* repository.writeTree([
     { mode: BLOB_MODE, name: `${input.name}.json`, oid: payload },
     { mode: BLOB_MODE, name: `${input.name}.sig`, oid: signatures },
+    ...(input.attach ?? []),
   ]);
 
   return yield* repository.commitTree({

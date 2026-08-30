@@ -31,7 +31,9 @@ import { Context, Effect, Layer, Option, Schema } from "effect";
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import type { TreeEntry } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
+import { qualify, unqualify } from "../git/Oid.ts";
 import { checkRefName, isOid, type Oid } from "../git/Store.ts";
 import { checkCapability } from "../trust/Certificate.ts";
 import type { RepoId } from "../trust/Genesis.ts";
@@ -138,12 +140,6 @@ export const prOf = (ref: string): string | null => {
 export const newId = Log.newId;
 
 /**
- * An object id as a payload spells one: `sha1:<hex>`.
- *
- * Qualified even though this version only writes SHA-1, because the point of
- * qualifying is that the payloads never have to change when it does not.
- */
-/**
  * A pull request's base branch as a full ref name.
  *
  * `base` is a string a client writes, and both spellings are natural — `main`
@@ -158,15 +154,14 @@ export const newId = Log.newId;
 export const branchRef = (value: string): string =>
   value.startsWith("refs/") ? value : `refs/heads/${value}`;
 
-export const qualify = (oid: Oid): string => `sha1:${oid}`;
-
-export const unqualify = (value: string): Oid | null => {
-  const [algorithm, hex] = value.split(":");
-  if (algorithm !== "sha1" || hex === undefined || !/^[0-9a-f]{40}$/.test(hex)) return null;
-  // SAFETY: the pattern above is exactly the forty lowercase hex characters
-  // the `Oid` brand names.
-  return hex as Oid;
-};
+/**
+ * How a payload spells an object id — `sha1:<hex>` — and how one is read back.
+ *
+ * Re-exported rather than defined here: the trace namespace and the context
+ * protocol qualify oids in exactly this spelling, and a second copy of it is
+ * a second place a second object format has to be taught about.
+ */
+export { qualify, unqualify };
 
 // -- payloads -------------------------------------------------------------------
 
@@ -553,6 +548,8 @@ export const appendTo = Effect.fn("hub.Event.appendTo")(
     readonly message: string;
     readonly payload: Uint8Array;
     readonly signatures: ReadonlyArray<string>;
+    /** Further entries in the record's tree; see `trust/Record.write`. */
+    readonly attach?: ReadonlyArray<TreeEntry>;
   }) {
     const repository = yield* Repository;
 
@@ -568,6 +565,7 @@ export const appendTo = Effect.fn("hub.Event.appendTo")(
       signatures: input.signatures,
       parents: head === null ? [] : [head],
       message: input.message,
+      attach: input.attach,
     });
 
     yield* repository.setRef({ name: input.ref, to: commit, expected: head });

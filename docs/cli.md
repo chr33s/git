@@ -92,6 +92,7 @@ Conventions:
 `npm run docs:cli` replaces the block below with the executable's `--help` output.
 
 <!-- BEGIN GENERATED CLI HELP -->
+
 ```text
 USAGE
   git+ <subcommand> [flags]
@@ -111,6 +112,7 @@ SUBCOMMANDS
   cherry-pick         Replay one commit onto another
   clone               Clone a repository over smart HTTP
   commit              Commit what is staged
+  context             Git-native context packs, renders and exposures
   diff                Unified diff between two revisions
   files               List the files a revision's tree holds
   fetch               Fetch a remote's branches and tags into a cloned repository
@@ -148,6 +150,7 @@ SUBCOMMANDS
   credential          Mint a short-lived credential stock git can present
   credential-helper   Answer git's credential helper protocol
 ```
+
 <!-- END GENERATED CLI HELP -->
 
 ---
@@ -345,11 +348,24 @@ gitlink
 
 Retrieval scores, indexes, or graph paths may appear as diagnostics. They are not evidence identity.
 
+Nothing is recorded unless recording is asked for. Naming a session and a signing key writes the
+Context Exposure — pack, render commitment and retained view — and prints the Git record OID:
+
+```bash
+git+ context for --task="fix authentication policy" --session=<session-id> --key=<private-key>
+```
+
+`--retain-render=false` keeps the commitment and drops the exact render bytes, which is the shape a
+retention or redaction policy leaves behind.
+
 ### 7.2 Explain selection
 
 ```bash
 git+ context why <pack> src/auth.ts
 ```
+
+`<pack>` is a pack blob OID, an exposure record OID — the exposure retains its own pack — or a file
+holding a pack that was never persisted.
 
 The command separates verified Git evidence from descriptive selector explanations.
 
@@ -358,6 +374,9 @@ The command separates verified Git evidence from descriptive selector explanatio
 ```bash
 git+ context audit <invocation-or-exposure>
 ```
+
+The argument is a qualified Git record OID, or a session id — which audits every exposure that
+session recorded, oldest first.
 
 The audit checks each dimension independently:
 
@@ -375,6 +394,12 @@ optional OTel correlation
 ```
 
 A missing retained render body can coexist with a valid historical render commitment.
+
+What this implementation reports today: the signature over the exact payload bytes and whether a
+signer holding `hub.trace` could have written it, the repository/session binding, pack blob
+identity, the retained `context/view` edge, every blob and gitlink item with its range and
+instruction-provenance annotation, and the render as one of verified, absent or unreadable. The
+bound Invocation arrives with the runtime records in [telemetry.md](telemetry.md).
 
 ---
 

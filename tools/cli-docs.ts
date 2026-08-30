@@ -29,7 +29,10 @@ if (rendered.status !== 0) {
 const help = rendered.stdout.trimEnd();
 if (help === "") throw new Error("git+ --help produced no stdout");
 
-const block = `${START}\n\`\`\`text\n${help}\n\`\`\`\n${END}`;
+// Blank lines around the fence, because the formatter puts them there: written
+// without, `npm run docs:cli` and `vp fmt` each undid the other's work and
+// `npm run check` could not pass whichever order they ran in.
+const block = `${START}\n\n\`\`\`text\n${help}\n\`\`\`\n\n${END}`;
 const source = fs.readFileSync(document, "utf8");
 const start = source.indexOf(START);
 const end = source.indexOf(END);

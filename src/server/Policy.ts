@@ -42,6 +42,7 @@ import {
 import * as Event from "../hub/Event.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
+import * as Trace from "../hub/Trace.ts";
 import * as Task from "../hub/Task.ts";
 import * as Queue from "../hub/Queue.ts";
 import * as SocialLog from "../social/Log.ts";
@@ -1042,11 +1043,13 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
           ? { exact: ["hub.task", "hub.redact"] }
           : Session.sessionOf(name) !== null
             ? { exact: ["hub.session", "hub.redact"] }
-            : Queue.queueOf(name) !== null
-              ? { exact: ["hub.queue"] }
-              : name.startsWith("refs/hub/")
-                ? { prefix: "hub." }
-                : { prefix: "member." };
+            : Trace.traceOf(name) !== null
+              ? { exact: ["hub.trace", "hub.redact"] }
+              : Queue.queueOf(name) !== null
+                ? { exact: ["hub.queue"] }
+                : name.startsWith("refs/hub/")
+                  ? { prefix: "hub." }
+                  : { prefix: "member." };
     const charge = needed(update.name);
     const passes =
       "exact" in charge
@@ -1183,12 +1186,13 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     update.name.startsWith("refs/hub/") &&
     Event.prOf(update.name) === null &&
     Session.sessionOf(update.name) === null &&
+    Trace.traceOf(update.name) === null &&
     Task.taskOf(update.name) === null &&
     Queue.queueOf(update.name) === null
   ) {
     return refused(
       update.name,
-      `${update.name} does not name a pull request, session, task or queue`,
+      `${update.name} does not name a pull request, session, trace, task or queue`,
     );
   }
 
@@ -1227,24 +1231,28 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // let a fleet's ordinary week exhaust what a repository's pull requests
     // are allowed, and a session ref is exactly as undeletable as a pull
     // request's.
-    const classOf = (name: string): "sessions" | "tasks" | "queues" | "pull requests" =>
+    const classOf = (name: string): "sessions" | "traces" | "tasks" | "queues" | "pull requests" =>
       Session.sessionOf(name) !== null
         ? "sessions"
-        : Task.taskOf(name) !== null
-          ? "tasks"
-          : Queue.queueOf(name) !== null
-            ? "queues"
-            : "pull requests";
+        : Trace.traceOf(name) !== null
+          ? "traces"
+          : Task.taskOf(name) !== null
+            ? "tasks"
+            : Queue.queueOf(name) !== null
+              ? "queues"
+              : "pull requests";
 
     const kind = classOf(update.name);
     const held =
       kind === "sessions"
         ? yield* Session.sessions()
-        : kind === "tasks"
-          ? yield* Task.tasks()
-          : kind === "queues"
-            ? yield* Queue.queues()
-            : yield* Event.pullRequests();
+        : kind === "traces"
+          ? yield* Trace.traces()
+          : kind === "tasks"
+            ? yield* Task.tasks()
+            : kind === "queues"
+              ? yield* Queue.queues()
+              : yield* Event.pullRequests();
     const opened = [...opening].filter((name) => classOf(name) === kind).length;
     const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
