@@ -155,6 +155,21 @@ describe("cli session", () => {
       assert.equal(shown.notes.length, 1);
       assert.deepEqual(shown.usage, { inputTokens: 1200, outputTokens: 800 });
       assert.deepEqual(shown.unreadable, []);
+
+      // And a session this repository has never heard of is an error rather
+      // than an empty document. `Session.project` answers for any id — it
+      // walks a ref that need not exist — so a typo printed a projection with
+      // nothing in it and exited zero, which reads as "this session did
+      // nothing" rather than "there is no such session".
+      const missing = await failing([
+        "session",
+        "show",
+        "--root",
+        root,
+        "project",
+        "0192f000-0000-7000-8000-0000000000ff",
+      ]);
+      assert.match(missing, /has no session '0192f000-0000-7000-8000-0000000000ff'/);
     }),
   );
 

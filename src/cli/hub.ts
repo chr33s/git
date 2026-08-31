@@ -703,12 +703,23 @@ const enable = Command.make(
         const target = { objects: yield* ObjectStore, refs: yield* RefStore };
         const all: string[] = [];
         const joined: string[] = [];
-        for (const spec of Refspec.HUB_FETCH) {
+        // Two passes rather than one per refspec. The ordering is what the
+        // loop was for — an event is judged against the membership graph, so
+        // the grants have to arrive before the events that lean on them — and
+        // that is a split between the trust refs and the hub ones, not a
+        // reason to talk to the remote once per pattern. Each call begins with
+        // its own advertisement and, for the hidden namespaces, an `ls-refs`
+        // round trip, so enabling a hub paid four of those for two orderings.
+        // Rejections are still attributed: `result.rejected` carries ref names.
+        const hub = Refspec.HUB_FETCH.filter((spec) => spec.source.startsWith("refs/hub/"));
+        const groups = [Refspec.HUB_FETCH.filter((spec) => !hub.includes(spec)), hub];
+        for (const refspecs of groups) {
+          if (refspecs.length === 0) continue;
           const result = yield* fetchRepository({
             url,
             stores: target,
             token: credential,
-            refspecs: [spec],
+            refspecs,
           });
           all.push(...result.refs.map((update) => update.name));
 

@@ -16,6 +16,7 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import { Invalid } from "../git/Error.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import * as Memory from "../hub/Memory.ts";
+import { Repository } from "../git/Repository.ts";
 import * as Session from "../hub/Session.ts";
 import { readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
@@ -182,6 +183,19 @@ const show = Command.make(
                 branch === ""
                   ? "name a session, or pass --branch to look one up"
                   : `no session has produced ${branch}`,
+            });
+          }
+          // A session this repository has never heard of is an error, not an
+          // empty document. `Session.project` answers for any id — it walks a
+          // ref that need not exist — so a typo, or a name that was never a
+          // session, printed a projection with nothing in it and exited zero,
+          // which reads as "this session did nothing" rather than "there is no
+          // such session".
+          const repository = yield* Repository;
+          if ((yield* repository.resolve(Session.refOf(id))) === null) {
+            return yield* new Invalid({
+              field: "session",
+              reason: `this repository has no session '${id}'`,
             });
           }
           return yield* Session.project(id);
