@@ -30,17 +30,23 @@
  *    stopped at a length limit is a *successful* operation and collapsing them
  *    turns every long answer into an error.
  */
-import { DateTime, Effect, Schema } from "effect";
+import { DateTime, Effect, Predicate, Schema } from "effect";
 
 import type { PrivateKey } from "../crypto/SshSignature.ts";
-import { Capture } from "../context/Exposure.ts";
+import { Capture, checkCapture, STAGES } from "../context/Exposure.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
 import { TRUST_LOG } from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { isOid, type Oid } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
+import * as Secrets from "../hub/Secrets.ts";
+import * as Tombstone from "../hub/Tombstone.ts";
+import * as Claim from "../hub/Claim.ts";
 import * as Trace from "../hub/Trace.ts";
+import type { Projection } from "../trust/Projection.ts";
+import { trustReach } from "../hub/Projection.ts";
+import * as Verify from "../trust/Verify.ts";
 
 export { Capture, qualify, unqualify };
 
@@ -50,6 +56,8 @@ export const TOOL = "tool-operation";
 export const WORKSPACE = "workspace-transition";
 export const COMPACTION = "context-compaction";
 export const HEALTH = "trace-health";
+/** The tag every hub namespace spells the same way; see `hub/Tombstone.ts`. */
+export const REDACTED = Tombstone.TAG;
 
 /**
  * What every trace record carries, whatever it says.
@@ -95,15 +103,13 @@ export const LIMIT_SOURCES = [
   "other",
 ] as const;
 
-/** Where a capture was taken, before anything could sample it (§12). */
-export const STAGES = [
-  "sdk-export",
-  "local-collector",
-  "remote-collector",
-  "hook",
-  "embedded",
-  "other",
-] as const;
+/**
+ * Where a capture was taken, before anything could sample it (§12).
+ *
+ * Defined beside `Capture` and re-exported here, so the vocabulary a writer is
+ * held to and the one a `trace-health` record declares cannot drift apart.
+ */
+export { STAGES } from "../context/Exposure.ts";
 
 // -- invocation telemetry -------------------------------------------------------
 
@@ -312,7 +318,16 @@ export const TraceHealth = Schema.Struct({
   type: Schema.tag(HEALTH),
   ...envelope,
   source: Schema.String,
-  stage: Schema.optional(Schema.Literals(STAGES)),
+  /**
+   * A bare string, for the reason `context/Exposure.Capture.stage` is one: a
+   * closed vocabulary here is a closed vocabulary on the *read* path, so a
+   * health record naming a stage a newer producer knows failed `decode`
+   * outright — `entries` called it unreadable, `session show --audit` reported
+   * damage, and `coverageOf` lost it, dropping coverage from `complete` to
+   * `unknown` permanently on an append-only ref. `check` holds a writer to the
+   * vocabulary; see there.
+   */
+  stage: Schema.optional(Schema.String),
   /** `none` is the only value that supports a completeness claim. */
   sampling: Schema.String,
   transformed: Schema.Boolean,
@@ -324,12 +339,34 @@ export type TraceHealth = typeof TraceHealth.Type;
 
 // -- the union ------------------------------------------------------------------
 
+/**
+ * A record removed from this trace.
+ *
+ * The namespace needs one for the same reason a session does, and more
+ * urgently: a retained render carries the task string verbatim and the exact
+ * bytes of every exposed file, so a credential that leaked into a prompt is in
+ * the trace as well as in the session. Without a tombstone here, `session
+ * redact` removed the prompt from the account of the work and left it readable
+ * in the account of the runtime — a removal that was not one.
+ *
+ * The same tag all three namespaces spell the same way, so `Tombstone.claims`
+ * charges `hub.redact` at the boundary without knowing which ref it is on, and
+ * `Redaction` finds it with the walk it already makes.
+ */
+export const RecordRedacted = Schema.Struct({
+  type: Schema.tag(Tombstone.TAG),
+  ...envelope,
+  ...Tombstone.fields,
+});
+export type RecordRedacted = typeof RecordRedacted.Type;
+
 export const Payload = Schema.Union([
   InvocationTelemetry,
   ToolOperation,
   WorkspaceTransition,
   ContextCompaction,
   TraceHealth,
+  RecordRedacted,
 ]);
 export type Payload = typeof Payload.Type;
 
@@ -416,6 +453,8 @@ const KEYS = [
   "transformed",
   "dropped",
   "reasons",
+  "targetCommit",
+  "target",
 ];
 
 /** The bytes that are signed and the bytes that are stored, in one encoding. */
@@ -427,13 +466,12 @@ export const decode = Effect.fn("telemetry.Records.decode")(function* (bytes: Ui
     try: () => JSON.parse(decoder.decode(bytes)),
     catch: () => new Invalid({ field: "trace", reason: "trace record is not valid JSON" }),
   });
-  const payload = yield* decodePayload(json).pipe(
+  return yield* decodePayload(json).pipe(
     Effect.mapError(
       (issue) =>
         new Invalid({ field: "trace", reason: `malformed trace record: ${issue.message}` }),
     ),
   );
-  return yield* check(payload);
 });
 
 /**
@@ -444,7 +482,104 @@ export const decode = Effect.fn("telemetry.Records.decode")(function* (bytes: Ui
  * once it is in a table; and a qualified OID field has to hold one, because a
  * join by something that is not a record OID is a join §3 does not allow.
  */
+/**
+ * A count that cannot be negative, because none of these can be.
+ *
+ * `Schema.Int` is signed, and the `--event` path takes caller JSON straight
+ * through — `Semconv` guards its own reads and nothing guarded this one. A
+ * negative `inputTokens` rendered as `pressure -5% of the effective input
+ * limit (derived)`, which is a derived number presented as a measurement of
+ * something impossible.
+ */
+const counting = Effect.fnUntraced(function* (field: string, value: number | undefined) {
+  if (value !== undefined && value < 0) {
+    return yield* new Invalid({ field, reason: `${field} cannot be negative` });
+  }
+});
+
+/**
+ * What a record's *signed* payload says it is, or `null` where it will not
+ * decode.
+ *
+ * The commit message carries the same word, and it is the one a reader reaches
+ * for first because it survives redaction — but nobody signed it. Every
+ * decision that changes what is written or what is removed asks this instead.
+ */
+const typeOf = Effect.fnUntraced(function* (bytes: Uint8Array) {
+  const payload = yield* decode(bytes).pipe(Effect.orElseSucceed(() => null));
+  return payload?.type ?? null;
+});
+
+/**
+ * The rules a *writer* is held to, which is not the same as the rules a reader
+ * applies.
+ *
+ * `hub/Event` keeps these apart — `decode` gives you the payload and the fold
+ * calls `validate` separately, where a failure skips one event rather than
+ * making it unreadable — and this namespace collapsed the two by calling this
+ * from `decode`. So an open vocabulary became a closed one on the read path:
+ * `checkCapture` exists precisely because `stage` is a bare string "so an
+ * older reader can still read a stage a newer producer names", and folding it
+ * in here meant a record whose `capture.stage` this version does not know read
+ * as damage. `session show --audit` printed "No invocations recorded for this
+ * session." and "1 record(s) could not be read here." for a whole invocation —
+ * its usage, its attempts, its context join — permanently, on a ref nothing
+ * can rewind, because one field named a collector this version had not heard
+ * of.
+ *
+ * The rest go the same way for the same reason. A negative count and an
+ * unqualified reference are writer errors this refuses at the door; a reader
+ * that hits one is reading a record somebody already wrote, and dropping the
+ * whole record tells it less than reading it does. Both are then judged where
+ * they are used: `tombstonesOn` unqualifies and steps over, `verified` refuses
+ * a timestamp it cannot parse.
+ */
 export const check = Effect.fn("telemetry.Records.check")(function* (payload: Payload) {
+  // The one field a schema cannot state and every namespace but these two
+  // checked. `hub/Event.validate` refuses this before an event is treated as a
+  // statement, and both of these skipped it — so a record carrying
+  // `"issuedAt": "not-a-date"` decoded, and the `Verify.Made` built from it a
+  // few lines later carried an `Invalid Date`. Inert only because
+  // `Verify.authorize` happens never to read `made.at` today; `at` is on the
+  // public interface, and the next reader of it would have mis-judged exactly
+  // these two record kinds and no others.
+  if (Number.isNaN(Date.parse(payload.issuedAt))) {
+    return yield* new Invalid({ field: "issuedAt", reason: `not a date: '${payload.issuedAt}'` });
+  }
+
+  if (payload.type === INVOCATION) {
+    yield* counting("inputTokens", payload.usage?.inputTokens);
+    yield* counting("outputTokens", payload.usage?.outputTokens);
+    yield* counting("cacheReadInputTokens", payload.usage?.cacheReadInputTokens);
+    yield* counting("cacheWriteInputTokens", payload.usage?.cacheWriteInputTokens);
+    yield* counting("reasoningOutputTokens", payload.usage?.reasoningOutputTokens);
+    yield* counting("renderBytes", payload.context?.renderBytes);
+    yield* counting("contextWindowTokens", payload.context?.contextWindowTokens);
+    yield* counting("effectiveInputLimitTokens", payload.context?.effectiveInputLimitTokens);
+    for (const attempt of payload.attempts ?? []) yield* counting("index", attempt.index);
+  }
+  if (payload.type === HEALTH) {
+    yield* counting("dropped", payload.dropped);
+    // The same vocabulary `checkCapture` holds a capture to, asked directly
+    // rather than through a `Capture` this record does not have.
+    if (payload.stage !== undefined && !STAGES.some((known) => known === payload.stage)) {
+      return yield* new Invalid({
+        field: "stage",
+        reason: `'${payload.stage}' is not a capture stage; one of ${STAGES.join(", ")}`,
+      });
+    }
+  }
+  if (payload.type === INVOCATION || payload.type === TOOL) {
+    yield* checkCapture(payload.capture);
+  }
+  if (payload.type === TOOL) {
+    yield* counting("bytes", payload.result?.bytes);
+    yield* counting("paths", payload.mutation?.paths);
+  }
+  if (payload.type === COMPACTION) {
+    yield* counting("beforeTokens", payload.beforeTokens);
+    yield* counting("afterTokens", payload.afterTokens);
+  }
   if (payload.type === INVOCATION) {
     if (payload.usage?.source === "estimated" && payload.usage.estimator === undefined) {
       return yield* new Invalid({
@@ -455,6 +590,12 @@ export const check = Effect.fn("telemetry.Records.check")(function* (payload: Pa
     yield* reference("exposure", payload.exposure);
   }
   if (payload.type === TOOL) yield* reference("invocation", payload.invocation);
+  // The one field whose value drives an irreversible deletion, and the one
+  // that was not checked: an unqualified `targetCommit` is accepted, signed and
+  // appended, and `Redaction.tombstonesOn` then unqualifies it to `null` and
+  // steps over it — a redaction that reports success and is never honoured,
+  // leaving the bytes the operator was told were gone clonable forever.
+  if (payload.type === REDACTED) yield* reference("targetCommit", payload.targetCommit);
   if (payload.type === WORKSPACE) {
     yield* reference("beforeTree", payload.beforeTree);
     yield* reference("afterTree", payload.afterTree);
@@ -497,6 +638,92 @@ export const context = Effect.fn("telemetry.Records.context")(function* (
 });
 
 /**
+ * The parts of a trace record a person or an agent wrote.
+ *
+ * Object ids, ref names, model names and the envelope are this repository and
+ * its provider talking about themselves; a secret does not arrive that way,
+ * and scanning them only makes the scan wrong — the same reasoning
+ * `hub/Session.prose` gives. What is left is free text somebody typed.
+ *
+ * The render body is deliberately not here. It is the exposed repository bytes
+ * verbatim, which a heuristic scanner would refuse constantly and which
+ * `--retain-render=false` and `trace redact` are the answers for.
+ */
+const prose = (payload: Payload) => {
+  // Every writer-supplied string on the record, found by walking it, rather
+  // than a list of the ones somebody remembered. The list was wrong four times
+  // over: `TraceHealth.source`/`sampling`, `attempts[].errorType`,
+  // `usage.estimator` and `capture.transport` were each added only after a
+  // reviewer found the same token refused in one field and signed in the next,
+  // and `tool.name`, `agent.name`, `conversation.externalId`, `operation.name`
+  // and `response.finishReasons` were still open. A harness that records the
+  // invoked command line as the tool name puts the whole command, headers
+  // included, on a ref this version cannot rewind.
+  //
+  // What is skipped is what this repository and its provider say about
+  // themselves rather than what somebody typed: the envelope, and any value
+  // that is a qualified object id or digest. A secret does not arrive as
+  // `sha1:<forty hex>`, and scanning those only makes the scan wrong. Every
+  // other string goes in, including a field added tomorrow.
+  const said: Array<string> = [];
+  const opaque: Array<string> = [];
+  // The values inside a decoded payload: strings, numbers, booleans, and the
+  // objects and arrays that hold them. Not a parse boundary — `decodePayload`
+  // was that, above — so this walks what the schema already produced.
+  type Held = string | number | boolean | null | undefined | { [key: string]: Held } | Held[];
+  const walk = (value: Held, identifier: boolean): void => {
+    if (Predicate.isString(value)) {
+      if (!QUALIFIED.test(value)) (identifier ? opaque : said).push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, identifier);
+      return;
+    }
+    if (!Predicate.isObject(value)) return;
+    for (const [name, held] of Object.entries(value))
+      walk(held, identifier || IDENTIFIER.has(name));
+  };
+  for (const [name, held] of Object.entries(payload)) {
+    if (ENVELOPE.has(name)) continue;
+    // SAFETY: `payload` came from `decodePayload`, so every value in it is one
+    // of the JSON shapes `Held` names.
+    walk(held as Held, IDENTIFIER.has(name));
+  }
+  return { said: said.join("\n"), opaque: opaque.join("\n") } as const;
+};
+
+/**
+ * The fields the recorder fills in, not the caller; see `context`.
+ *
+ * Matched against the payload's *own* keys and no deeper. Applied at every
+ * depth, `id` and `version` also named `agent.id` and `agent.version` — two
+ * writer-supplied strings fed straight from `gen_ai.agent.id` and
+ * `gen_ai.agent.version` — so a token in `agent.name` was refused and the same
+ * token in `agent.id` was signed.
+ */
+const ENVELOPE = new Set(["type", "version", "repo", "session", "id", "issuedAt", "trustHead"]);
+
+/** A qualified object id or digest: this repository naming its own objects. */
+const QUALIFIED = /^(?:sha1|sha256):[0-9a-f]+$/;
+
+/**
+ * Fields whose value is an identifier somebody else minted.
+ *
+ * Still scanned, but only for the *shapes* a credential has — a `ghp_` prefix,
+ * a connection string, a `key=` — and not for entropy.
+ * `conversation.externalId` is documented as "the provider's own conversation
+ * id, as correlation and nothing else", `tool.callId` and `agent.id` are the
+ * same, and an opaque base62 id of thirty-two characters is indistinguishable
+ * from a token by entropy alone. Scanned as prose, `trace record` refused the
+ * whole `invocation-telemetry` record — no override, nothing written, and the
+ * only way through was for the harness to drop the correlation id §7.4 exists
+ * to record. UUID- and hex-shaped ids stay under the threshold, so it failed
+ * for some providers and not others, which is the worst way for it to fail.
+ */
+const IDENTIFIER = new Set(["externalId", "callId", "traceId", "spanId", "digest", "id"]);
+
+/**
  * Sign one trace record and append it, returning its canonical identity.
  *
  * Validated before it is signed rather than after it is written: an invalid
@@ -507,8 +734,52 @@ export const context = Effect.fn("telemetry.Records.context")(function* (
 export const record = Effect.fn("telemetry.Records.record")(function* (
   payload: Payload,
   key: PrivateKey,
+  /** Set only by `redact`, which has already checked what the tombstone names. */
+  writing = false,
 ) {
   yield* check(payload);
+  // Scanned before it is written, not after it has replicated — the reasoning
+  // `Session.issue` gives, and this namespace was the only one of the four
+  // without it while taking caller JSON straight through `trace record
+  // --event` onto an append-only ref.
+  const parts = prose(payload);
+  // The entropy rule is dropped for identifiers and kept for everything else;
+  // the pattern rules apply to both.
+  const leaked = [
+    ...Secrets.scan(parts.said),
+    ...Secrets.scan(parts.opaque).filter((finding) => finding.kind !== "high-entropy string"),
+  ];
+  if (leaked.length > 0) {
+    return yield* new Invalid({
+      field: "trace",
+      reason: `this record looks like it carries ${leaked
+        .map((finding) => `a ${finding.kind} (${finding.hint})`)
+        .join(", ")}`,
+    });
+  }
+  // Charged here rather than in `redact` alone, because this is the door every
+  // writer comes through: `trace record --event` feeds caller JSON straight
+  // into this function, so a member holding only `hub.trace` could write the
+  // tombstone tag by hand and skip the one local check that turns a lapsed or
+  // unauthorised redactor away. Worse than skipping it — the boundary charges
+  // `hub.redact` for any record whose bytes claim the tag, so the ref became
+  // unpushable for good on a namespace nothing can rewind.
+  if (payload.type === REDACTED) {
+    yield* Tombstone.permitted(key);
+    // And it has to have come through `redact`, which is the only path that
+    // checks the target is on *this* session's ref, is unambiguous, and is not
+    // itself a tombstone. A hand-written one reaching here satisfied none of
+    // those: `Redaction.marks` pools tombstones across refs and honours a
+    // cross-session one for `gc`, while the target session's own projection
+    // never lists it — so a record was removed and the session that held it
+    // reported it merely unreadable.
+    if (!writing) {
+      return yield* new Invalid({
+        field: "type",
+        reason: "a tombstone is written with `trace redact`, which checks what it names",
+      });
+    }
+  }
   const commit = yield* Trace.append({
     session: payload.session,
     type: payload.type,
@@ -519,12 +790,108 @@ export const record = Effect.fn("telemetry.Records.record")(function* (
   return { commit, id: payload.id, oid: qualify(commit) } as const;
 });
 
+/**
+ * Remove one record's content from this trace.
+ *
+ * `target` is the record's own id or its commit oid, whichever the caller
+ * holds — an operator acting on a leak has the oid an audit printed, not an
+ * event id buried in a payload. Either way the tombstone names the *commit*,
+ * because a commit is what stays stable across exactly the change a tombstone
+ * makes. Nothing is deleted: the tombstone replicates, and the bytes go at the
+ * next `gc`, which is the only pass that can tell whether the blob is
+ * reachable from anywhere else — see `hub/Redaction.ts`.
+ *
+ * What the tombstone covers is the record's own payload — `event.json`, and
+ * for a Context Exposure `context/pack.json` and `context/render.bin` too.
+ * The render is the point: it is where the verbatim prompt and the exposed
+ * file bytes are — and `context/view` goes too, because a dirty checkout's
+ * overlay is reachable through this record and nothing else. What a branch
+ * also reaches survives regardless; see `hub/Redaction.ATTACHED`.
+ *
+ * "Covers" is not "removes", and the gap is the whole of `Redaction.withheld`.
+ * A Pack and a ContextRender are deterministic, so two exposures of one view
+ * and one task name one object — and `gc` will not delete an object a live
+ * record still needs. The removal is then partial, which is the honest and
+ * only safe answer, but it has to be said out loud: `trace redact` asks
+ * `withheld` and names the records still holding the bytes, because otherwise
+ * this reports success while the verbatim prompt stays clonable off the ref.
+ */
+export const redact = Effect.fn("telemetry.Records.redact")(function* (input: {
+  readonly repo: string;
+  readonly session: string;
+  readonly target: string;
+  readonly reason: string;
+  readonly key: PrivateKey;
+}) {
+  // `record` charges the capability for any tombstone; asked again here only
+  // to refuse before the walk rather than after it.
+  yield* Tombstone.permitted(input.key);
+
+  const walked = yield* Trace.walk(input.session);
+  const wanted = unqualify(input.target);
+  const matches = (entry: { readonly id: string | null; readonly commit: Oid }) =>
+    entry.id === input.target || (wanted !== null && entry.commit === wanted);
+  // The unreadable records too. One whose payload another replica already
+  // collected is present on this ref and undecodable here, and refusing to
+  // name it left the operator unable to write the local tombstone that would
+  // explain the absence.
+  const readable = walked.records.filter((entry) => matches(entry));
+  const claimants = [...readable, ...walked.unreadable.filter((entry) => matches(entry))];
+  if (claimants.length === 0) {
+    return yield* new Invalid({
+      field: "target",
+      reason: `${input.session} has no trace record ${input.target}`,
+    });
+  }
+  if (claimants.length > 1) {
+    return yield* new Invalid({
+      field: "target",
+      reason: `${input.session} has ${claimants.length} records claiming ${input.target}`,
+    });
+  }
+  const found = claimants[0]!;
+  // From the payload where there is one, and only from the commit message
+  // where there is not — a record whose payload another replica collected is
+  // the one case with nothing else to go on. `type` comes off the *unsigned*
+  // commit message, so a tombstone whose message said anything else passed
+  // this guard: redacting it destroyed the only decodable record of the
+  // earlier removal, `Redaction.tombstonesOn` stopped finding it, and `gc`
+  // re-protected the payload the operator had been told was gone.
+  const decodable = readable[0];
+  const claimed = decodable === undefined ? found.type : yield* typeOf(decodable.payload);
+  if (claimed === REDACTED) {
+    return yield* new Invalid({
+      field: "target",
+      reason: "a tombstone is the record of a removal and is not itself removable",
+    });
+  }
+
+  const written = yield* record(
+    {
+      ...(yield* context(input.repo, input.session)),
+      type: REDACTED,
+      target: input.target,
+      targetCommit: qualify(found.commit),
+      reason: input.reason,
+    },
+    input.key,
+    true,
+  );
+  // The record the removal is *about*, beside the tombstone that states it. A
+  // caller asking what the removal will actually take needs the target, and
+  // recovering it meant re-walking the ref and re-decoding the tombstone that
+  // had just been written.
+  return { ...written, targetCommit: found.commit } as const;
+});
+
 // -- reading --------------------------------------------------------------------
 
 export interface Entry {
   readonly commit: Oid;
   readonly parents: ReadonlyArray<Oid>;
   readonly payload: Payload;
+  /** The exact bytes every signature covers. */
+  readonly bytes: Uint8Array;
   readonly signatures: ReadonlyArray<string>;
 }
 
@@ -535,10 +902,28 @@ export interface Entry {
  * `context/Exposure.ts` off the same walk — and reports a record that claims a
  * kind it then fails to decode, which is the only absence here that means
  * something is wrong.
+ *
+ * What it owns is decided by the signed payload, and only falls back to the
+ * commit message when there is no payload left to ask. The message is a hint
+ * that survives redaction, which is why `unreadable` still leans on it; it is
+ * also unsigned, which is why nothing else does.
  */
+
 export const entries = Effect.fn("telemetry.Records.entries")(function* (
   session: string,
   taken?: Trace.Walk,
+  /**
+   * This repository's own id, where the caller knows it.
+   *
+   * The other half of the binding, and it belongs here for the reason the
+   * session half does: `Invocation.project` was doing it with a bare filter
+   * whose rejects went nowhere — not into `foreign`, not into `unreadable` —
+   * so a record naming another repository vanished from the audit entirely,
+   * while the identical mismatch on the session was reported. A member holding
+   * `hub.trace` in two repositories is enough to land one, since the boundary
+   * does not read payload contents.
+   */
+  repo?: string,
 ) {
   // A caller that already holds the walk hands it in. `Invocation.project`
   // reads both this namespace and the exposures off one ref, and taking the
@@ -546,25 +931,121 @@ export const entries = Effect.fn("telemetry.Records.entries")(function* (
   // reads per record for one `session show --audit`.
   const walked = taken ?? (yield* Trace.walk(session));
   const records: Array<Entry> = [];
-  const unreadable: Array<Oid> = [...walked.unreadable];
+  /**
+   * Records on this ref whose own signed payload names a different session or
+   * repository, with what each says it is.
+   *
+   * The kind matters to a caller: an `invocation-telemetry` a peer landed is
+   * still a boundary in the history even though this session will not render
+   * it, and `Invocation.project` has to treat it as one or a transition after
+   * it is attributed to the invocation before.
+   */
+  const foreign: Array<{ readonly commit: Oid; readonly type: Payload["type"] }> = [];
+  // Through the same partition. A redaction takes the payload and leaves the
+  // commit, so the message is all that is left to say whose record it was —
+  // and each reader seeded this list with its own test of that message, which
+  // is where two of the six variants came from: a message naming nothing, and
+  // a message naming something neither namespace knows. `ownerOf` answers
+  // both, because it answers everything.
+  const unreadable: Array<Oid> = walked.unreadable
+    .filter((entry) => Claim.ownerOf(entry) === "telemetry")
+    .map((entry) => entry.commit);
 
-  const kinds = new Set([INVOCATION, TOOL, WORKSPACE, COMPACTION, HEALTH]);
   for (const entry of walked.records) {
-    if (entry.type === null || !kinds.has(entry.type)) continue;
+    // One question, asked in one place, for both readers; see `hub/Claim.ts`.
+    // Telemetry is the default side of that partition, which is what makes it
+    // total: a record nothing else claims is still something this ref holds,
+    // and a reader that says so is the difference between an audit somebody
+    // can walk around and one they cannot.
+    if (Claim.ownerOf(entry) !== "telemetry") continue;
+
     const payload = yield* decode(entry.payload).pipe(Effect.orElseSucceed(() => null));
+    // Ours and unreadable is damage — the absence an audit exists to report.
     if (payload === null) {
       unreadable.push(entry.commit);
       continue;
     }
+
+    // Bound to the ref it was read from and to this repository. Nothing on
+    // this read path checked either: `check` looks at timestamps, counts and
+    // oid shapes, and `verified` asks only for a good signature from a
+    // `hub.trace` holder — so a validly signed `trace-health` record from
+    // another session, appended here because replication is not policy-gated,
+    // folded into this session's coverage and flipped it from `unknown` to
+    // `complete`. Reported rather than dropped, for the reason
+    // `Exposure.entries` reports its own.
+    if (!Claim.bound(payload, { repo, session })) {
+      foreign.push({ commit: entry.commit, type: payload.type });
+      continue;
+    }
+
     records.push({
       commit: entry.commit,
       parents: entry.parents,
       payload,
+      bytes: entry.payload,
       signatures: entry.signatures,
     });
   }
 
-  return { records, unreadable, parents: walked.parents } as const;
+  return { records, unreadable, foreign, parents: walked.parents } as const;
 });
+
+/**
+ * Whether a trace record was signed by somebody this repository trusted then.
+ *
+ * The same question `context/Exposure.audit` asks of an exposure, asked of the
+ * runtime half — and for the same reason its docstring gives: a record that
+ * arrived by replication never passed this host's boundary, so "who signed it,
+ * and could they" is one the reader has to be able to ask for itself. Without
+ * it a `session show --audit` verified its Context half and took its Runtime
+ * half, its tool list and — worst — its `coverage: "complete"` claim entirely
+ * on faith.
+ *
+ * `made` dates the judgement, so a signer who has since left does not
+ * retroactively invalidate what they wrote; see `Exposure.trusted`.
+ */
+export const verified = Effect.fn("telemetry.Records.verified")(function* (input: {
+  readonly entry: Entry;
+  readonly bytes: Uint8Array;
+  readonly projection: Projection;
+  /** One trust-log walk shared across a run; see `context/Exposure.audit`. */
+  readonly reach?: ReturnType<typeof trustReach>;
+}) {
+  // Judged here rather than refused at `decode`, which would have made the
+  // whole record unreadable over a field only this needs. `Verify.Made` takes
+  // a `Date`, and `new Date("not-a-date")` is an `Invalid Date` that compares
+  // false against everything — so a record with an unparseable timestamp would
+  // be judged against a moment that does not exist. It is not trusted instead.
+  const at = Date.parse(input.entry.payload.issuedAt);
+  if (Number.isNaN(at))
+    return `record is dated '${input.entry.payload.issuedAt}', which is not a date`;
+  const made = new Date(at);
+
+  // `signed` for the reason `context/Exposure.trusted` passes it: `authorize`
+  // verifies the list itself otherwise, and a projection over a long session
+  // paid for every signature twice, over attacker-supplied input.
+  const asked = {
+    projection: input.projection,
+    bytes: input.bytes,
+    signatures: input.entry.signatures,
+    signed: yield* Verify.signers(input.bytes, input.entry.signatures),
+    capability: CAPABILITY,
+    made: {
+      at: made,
+      trustHead: headOf(input.entry.payload.trustHead),
+    },
+  };
+  const decision = yield* input.reach === undefined
+    ? Verify.authorize(asked)
+    : Verify.authorize({ ...asked, seen: input.reach.ancestry, contains: input.reach.contains });
+  return decision.ok ? null : decision.reason;
+});
+
+/** The capability a trace producer holds; the same one the boundary charges. */
+export const CAPABILITY = "hub.trace";
+
+const headOf = (value: string | null): Oid | null =>
+  value !== null && isOid(value) ? value : null;
 
 export type RecordError = Invalid | ObjectNotFound | StorageFailure;

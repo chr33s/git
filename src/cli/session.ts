@@ -17,6 +17,8 @@ import { Invalid } from "../git/Error.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import * as Memory from "../hub/Memory.ts";
 import * as Session from "../hub/Session.ts";
+import * as Trace from "../hub/Trace.ts";
+import { Repository } from "../git/Repository.ts";
 import * as Invocation from "../telemetry/Invocation.ts";
 import * as Audit from "./audit.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
@@ -220,6 +222,19 @@ const show = Command.make(
           // A branch, because that is the question an agent has on checkout:
           // "put me back in context for this" rather than "for this id", which
           // it holds only if it opened the session itself.
+          // Refused rather than resolved. This verb's repository moved from a
+          // positional to `--repo`, so the old `session show <repo> --branch=x`
+          // now parses `<repo>` as the session — which `--branch` then
+          // discards — and `--repo ""` quietly reads the current checkout
+          // instead. Wrong repository, no error. Naming both is ambiguous
+          // whichever way it was meant, so it is an error either way.
+          if (branch !== "" && session._tag === "Some") {
+            return yield* new Invalid({
+              field: "session",
+              reason: `name a session or --branch, not both; --repo selects the repository`,
+            });
+          }
+
           const id =
             branch === ""
               ? session._tag === "Some"
@@ -232,7 +247,42 @@ const show = Command.make(
               reason:
                 branch === ""
                   ? "name a session, or pass --branch to look one up"
-                  : `no session has produced ${branch}`,
+                  : (yield* Session.sessions()).length > 0
+                    ? `no session has produced ${branch}`
+                    : `this repository holds no session refs; fetch them with \`git+ hub enable --refs 'refs/hub/session/*'\``,
+            });
+          }
+
+          // A session this repository has never heard of is an error, not an
+          // empty document. `isSessionId` cannot help — it accepts any legal
+          // ref component, which a repository name is — so the old spelling,
+          // where this argument named the repository, went straight through
+          // the `--branch` guard above: `git+ session show <repo>` resolved
+          // whichever checkout the process was standing in, projected a
+          // session named after the repository, printed `exists: false` and
+          // exited zero. Existence is what actually separates the two.
+          //
+          // Either ref counts. `context for --session S` and `trace record`
+          // write only the trace ref, so a run with a full runtime account and
+          // no record of the work it was doing is an ordinary thing to ask
+          // about — and `--audit` is how you ask.
+          const repository = yield* Repository;
+          const known =
+            (yield* repository.resolve(Session.refOf(id))) !== null ||
+            (yield* repository.resolve(Trace.refOf(id))) !== null;
+          if (!known) {
+            // And say which of the two it is. `hub enable` does not fetch
+            // `refs/hub/session/*` — agents.md §10 makes it opt-in, so that a
+            // replica can hold review state without the provenance firehose —
+            // and a clone that took the default has no session refs at all,
+            // where "no session 'X'" reads as a typo rather than as a
+            // configuration.
+            const any = (yield* Session.sessions()).length > 0;
+            return yield* new Invalid({
+              field: "session",
+              reason: any
+                ? `this repository has no session '${id}'; --repo selects the repository`
+                : `this repository holds no session refs; fetch them with \`git+ hub enable --refs 'refs/hub/session/*'\``,
             });
           }
 
@@ -265,7 +315,9 @@ const show = Command.make(
           ),
         );
       }
-      for (const line of Audit.renderAll(projection.audit)) yield* Console.log(line);
+      for (const line of Audit.renderAll(projection.audit, projection.session)) {
+        yield* Console.log(line);
+      }
     }),
 );
 

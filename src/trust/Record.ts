@@ -158,6 +158,33 @@ export const read = Effect.fn("trust.Record.read")(function* (commit: Oid, name:
 });
 
 /** Whether a commit carries a record of this name, without reading it. */
+/**
+ * Whether a commit carries this record, and its payload if it still holds one.
+ *
+ * Both facts from one commit read, because the pair is what a *scan* needs and
+ * asking for them separately is what a scan cannot afford. `Redaction`'s walk
+ * ran `carries` and then `read` over every record on every session, task and
+ * trace ref — two commit reads, three path lookups and two blob reads each —
+ * to answer a question that discards all but a handful of them, on a path
+ * `context for --session` takes once per model invocation.
+ *
+ * The two are distinct on purpose. A redaction leaves the tree entry naming a
+ * blob that is gone, so `carried` is true where `bytes` is null, and a caller
+ * that conflated them would read a removal as a commit that was never a
+ * record at all.
+ */
+export const payloadOf = Effect.fn("trust.Record.payloadOf")(function* (commit: Oid, name: string) {
+  const repository = yield* Repository;
+  const info = yield* repository.readCommit(commit);
+  const entry = yield* repository.findPath(info.tree, `${name}.json`);
+  if (entry === null) return { carried: false, bytes: null } as const;
+
+  const bytes = yield* repository
+    .readBlob(entry.oid)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  return { carried: true, bytes } as const;
+});
+
 export const carries = Effect.fn("trust.Record.carries")(function* (commit: Oid, name: string) {
   const repository = yield* Repository;
   const info = yield* repository.readCommit(commit);

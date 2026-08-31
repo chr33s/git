@@ -101,6 +101,184 @@ describe("Repository View", () => {
     ),
   );
 
+  it.effect("peels an annotated tag to the commit it names", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const { commit, repository } = yield* checkout();
+          const tag = yield* repository.tag({
+            name: "v1.0",
+            message: "release\n",
+            target: commit,
+            tagger: author,
+          });
+
+          // `resolveRev` hands back what the ref holds, and an annotated tag
+          // holds a tag object. Read straight as a commit this failed with an
+          // object-type error instead of building a view of the tagged commit.
+          // The tag *object*, which is what `resolveRev` hands back for an
+          // annotated tag — not the commit it resolves to.
+          const view = yield* Pack.committed(tag.oid);
+          const info = yield* repository.readCommit(commit);
+          assert.equal(view.tree, Pack.qualify(info.tree));
+          // And `base` names the commit, not the tag: ancestry is asked about
+          // the commit, and a tag oid is not something it can be walked from.
+          assert.equal(view.base, Pack.qualify(commit));
+        }),
+      ),
+    ),
+  );
+
+  it.effect("peels a tag that names another tag", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const { commit, repository } = yield* checkout();
+          const first = yield* repository.tag({
+            name: "v1.0",
+            message: "release\n",
+            target: commit,
+            tagger: author,
+          });
+          // `git tag -a v2 v1`, which holds a tag whose object is a tag. One
+          // level of peeling handed that second tag to `readCommit`, whose
+          // type check reports `ObjectNotFound` — so `context for --rev v2`
+          // died saying the repository does not hold an object it does hold.
+          const second = yield* repository.tag({
+            name: "v2.0",
+            message: "re-tagged\n",
+            target: first.oid,
+            tagger: author,
+          });
+
+          const view = yield* Pack.committed(second.oid);
+          const info = yield* repository.readCommit(commit);
+          assert.equal(view.tree, Pack.qualify(info.tree));
+          assert.equal(view.base, Pack.qualify(commit));
+        }),
+      ),
+    ),
+  );
+
+  it.effect("names no submodule pointer while the submodule is conflicted", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { commit } = yield* checkout();
+          const index = yield* IndexStore;
+          const at = (message: string) =>
+            repository.commitTree({ tree: EMPTY_TREE_OID, parents: [], message, author });
+          const base = yield* at("base\n");
+          const ours = yield* at("ours\n");
+
+          // Three stages for one path, which is what a submodule-pointer
+          // conflict looks like. The loop keeps the *first* entry for an
+          // unmerged path — stage 1, the merge base — and for a regular file
+          // that is harmless because the bytes are re-read from disk. A
+          // gitlink has no bytes to re-read, so the view named the commit the
+          // submodule was at before the merge rather than the one the checkout
+          // is on, and `checkItem` verified that wrong pointer forever.
+          const held = yield* index.load;
+          const like = held[0]!;
+          yield* index.save([
+            ...held,
+            { ...like, path: "vendor/lib", oid: base, mode: 0o160000, stage: 1 },
+            { ...like, path: "vendor/lib", oid: ours, mode: 0o160000, stage: 2 },
+          ]);
+
+          const view = yield* Pack.capture(commit);
+          const found = yield* repository.findPath(Pack.unqualify(view.tree)!, "vendor/lib");
+          // A pointer nobody has agreed on is not one an agent was shown.
+          assert.equal(found, null);
+        }),
+      ),
+    ),
+  );
+
+  it.effect("refuses an item carrying a field its kind does not own", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const { commit } = yield* checkout();
+          const view = yield* Pack.committed(commit);
+          const of = (item: Readonly<object>) =>
+            new TextEncoder().encode(JSON.stringify({ version: 1, view, items: [item] }));
+
+          // `Schema.Union` drops an excess property silently, so this decoded
+          // to a clean blob while the persisted bytes — what `payload.pack`
+          // commits to, and what any other implementation reads — went on
+          // asserting a submodule pointer for a path that holds a file.
+          // `checkItem` never looks at a field the schema discarded, so the
+          // audit reported the whole thing verified.
+          const crossed = yield* Pack.decode(
+            of({
+              kind: "blob",
+              path: "src/auth.ts",
+              blob: `sha1:${"0".repeat(40)}`,
+              commit: `sha1:${"1".repeat(40)}`,
+            }),
+          ).pipe(Effect.flip);
+          assert.match(crossed.reason, /may not carry commit/);
+
+          // And the other way, which dropped an instruction-authority claim
+          // from the audit while the signed bytes kept it.
+          const authority = yield* Pack.decode(
+            of({
+              kind: "gitlink",
+              path: "vendor/lib",
+              commit: `sha1:${"1".repeat(40)}`,
+              authority: { source: "repository-instructions", root: view.tree, path: "AGENTS.md" },
+            }),
+          ).pipe(Effect.flip);
+          assert.match(authority.reason, /may not carry authority/);
+
+          // But a field this version has simply not heard of is read, not
+          // refused. Rejecting every unknown key made a pack from a newer
+          // producer decode nowhere — `audit` reporting no readable pack and
+          // `ok: false`, permanently, on a ref nothing can remove — which is
+          // the over-strictness this module avoids everywhere else. What §5.2
+          // forbids is a cross-kind *claim*.
+          const newer = yield* Pack.decode(
+            of({
+              kind: "blob",
+              path: "src/auth.ts",
+              blob: `sha1:${"0".repeat(40)}`,
+              confidence: "high",
+            }),
+          );
+          assert.equal(newer.items.length, 1);
+        }),
+      ),
+    ),
+  );
+
+  it.effect("refuses evidence that does not resolve under the view", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { commit } = yield* checkout();
+          const view = yield* Pack.committed(commit);
+
+          // A blob this repository holds, at a path the view knows, that is
+          // not the blob the view has there. `Select.render` turns these bytes
+          // into the exact segments hashed into the signed `renderDigest`, so
+          // a pack somebody else built could commit to bytes the view never
+          // had — the check that would catch it lives in `checkItem`, which is
+          // not on this path.
+          const other = yield* repository.writeBlob(encode("something else\n"));
+          const refused = yield* Pack.evidence(view, {
+            kind: "blob",
+            path: "src/auth.ts",
+            blob: Pack.qualify(other),
+          }).pipe(Effect.flip);
+          assert.equal(refused._tag, "Invalid");
+        }),
+      ),
+    ),
+  );
+
   it.effect("names the empty tree when nothing is tracked", () =>
     Effect.promise(() =>
       scenario(

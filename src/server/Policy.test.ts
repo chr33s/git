@@ -1883,11 +1883,12 @@ describe("Policy", () => {
           "writing somebody's exposures is not something hub.session buys",
         );
 
-        // And not something `hub.redact` buys either: this namespace defines
-        // no tombstone record, so admitting a redactor would sell the right to
-        // append in exchange for a removal they cannot express.
+        // A redactor is admitted, because the namespace now has something for
+        // one to write: a retained render holds the task verbatim and the
+        // exposed file bytes, so `hub.redact` has a removal to express here
+        // exactly as it does on a session.
         const redactor = await judged(["hub.redact", "source.push"]);
-        assert.equal(redactor.moved.ok, false);
+        assert.equal(redactor.moved.ok, true);
       }),
     );
 

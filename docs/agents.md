@@ -704,9 +704,16 @@ session refs get their **own refspec**, and `hub enable` does not configure
 it by default:
 
 ```bash
-git+ hub enable            # trust + PR refs
-git+ hub enable --sessions # additionally +refs/hub/session/*:refs/hub/session/*
+git+ hub enable                              # trust + PR refs
+git+ hub enable --refs=refs/hub/session/*    # additionally the session refs
 ```
+
+`--refs` takes comma-separated refspecs under `refs/hub/`, naming one namespace
+at each end, so the same escape hatch names `refs/hub/task/*` and
+`refs/hub/trace/*` — the other two namespaces automatic replication never
+carries under a default. It is bounded that way because `hub disable` removes
+what it fetched: a destination elsewhere would leave those refs behind with no
+command able to take them out.
 
 A replica that wants review state but not the provenance firehose is a
 legitimate configuration, and the default one. Servers likewise MAY serve

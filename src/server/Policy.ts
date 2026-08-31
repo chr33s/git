@@ -1037,13 +1037,12 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // ref name, so the namespace has no tombstone to admit a redactor for. See
     // `hub/Queue.ts`.
     //
-    // A trace ref is charged `hub.trace` alone for a narrower reason: this
-    // version defines no tombstone record for the namespace, so admitting a
-    // redactor bought a capability holder the right to append records they
-    // could not otherwise write, in exchange for a removal they cannot
-    // express. `Redaction.recordRefs` does not walk trace refs either, so a
-    // tombstone written here would never be honoured — see
-    // docs/internals.md on what retention this namespace does have.
+    // A trace ref admits a redactor for the reason a session does, and more
+    // urgently: a retained render holds the task string verbatim and the exact
+    // bytes of every exposed file, so a credential that leaked into a prompt
+    // is in this namespace as well as in the session's. `Records.RecordRedacted`
+    // is what a redactor may write here, and `Redaction.recordRefs` walks
+    // these refs so the tombstone is honoured at the next collection.
     const needed = (name: string): { exact: ReadonlyArray<string> } | { prefix: string } =>
       name === Refspec.SOCIAL_LOG
         ? { exact: ["social.write"] }
@@ -1052,7 +1051,7 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
           : Session.sessionOf(name) !== null
             ? { exact: ["hub.session", "hub.redact"] }
             : Trace.traceOf(name) !== null
-              ? { exact: ["hub.trace"] }
+              ? { exact: ["hub.trace", "hub.redact"] }
               : Queue.queueOf(name) !== null
                 ? { exact: ["hub.queue"] }
                 : name.startsWith("refs/hub/")

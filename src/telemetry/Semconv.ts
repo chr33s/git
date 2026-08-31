@@ -48,15 +48,18 @@ import * as Records from "./Records.ts";
 /** The semantic-convention profile this module claims to interpret. */
 export const PROFILE = "open-telemetry/semantic-conventions-genai";
 
-/** Attribute values an SDK puts on a span. */
-const AttributeValue = Schema.Union([
-  Schema.String,
-  Schema.Finite,
-  Schema.Boolean,
-  Schema.Array(Schema.String),
-]);
-
-const Attributes = Schema.Record(Schema.String, AttributeValue);
+/**
+ * Attribute values, taken as they come.
+ *
+ * Deliberately unconstrained. OTel's attribute model has `int[]`, `double[]`
+ * and `bool[]` beside the shapes this module reads, and exporters emit `null`
+ * for a value they could not resolve — so a schema listing only what is read
+ * here refused whole inference spans over an attribute that would have been
+ * ignored anyway, reporting a perfectly good span as "malformed". What a value
+ * has to be is decided by the reader that wants it, one attribute at a time,
+ * which is where the convention says what type it is.
+ */
+const Attributes = Schema.Record(Schema.String, Schema.Unknown);
 
 export const SpanEvent = Schema.Struct({
   name: Schema.String,
@@ -67,13 +70,31 @@ export const Span = Schema.Struct({
   name: Schema.optional(Schema.String),
   traceId: Schema.optional(Schema.String),
   spanId: Schema.optional(Schema.String),
+  /**
+   * Both spellings of the status code.
+   *
+   * The strings are OTLP's JSON form; the numbers are `SpanStatusCode` as an
+   * OpenTelemetry JS `ReadableSpan` carries it — 0 unset, 1 ok, 2 error — and
+   * this module's docstring calls "the flat one an SDK hands a processor" an
+   * accepted shape. Taking only the strings, a span exported that way failed
+   * `decodeSpan` and `trace record --otel` refused the whole thing as
+   * malformed: the same over-strict read the `Attributes` schema just above
+   * was deliberately loosened to avoid.
+   */
   status: Schema.optional(
     Schema.Struct({
-      code: Schema.Literals(["unset", "ok", "error"]),
+      code: Schema.Union([Schema.Literals(["unset", "ok", "error"]), Schema.Literals([0, 1, 2])]),
       message: Schema.optional(Schema.String),
     }),
   ),
-  attributes: Attributes,
+  /**
+   * Optional, as OTLP has it.
+   *
+   * Required, a span that carried none failed as "malformed" — the same
+   * dishonest answer the permissive value type above was written to stop,
+   * one field up.
+   */
+  attributes: Schema.optional(Attributes),
   events: Schema.optional(Schema.Array(SpanEvent)),
 });
 export type Span = typeof Span.Type;
@@ -105,17 +126,17 @@ export const decode = Effect.fn("telemetry.Semconv.decode")(function* (bytes: Ui
  * that the upstream signal did not contain.
  */
 const text = (span: Span, key: string): string | undefined => {
-  const value = span.attributes[key];
+  const value = span.attributes?.[key];
   return Predicate.isString(value) && value !== "" ? value : undefined;
 };
 
 const count = (span: Span, key: string): number | undefined => {
-  const value = span.attributes[key];
+  const value = span.attributes?.[key];
   return Predicate.isNumber(value) && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 };
 
 const flag = (span: Span, key: string): boolean | undefined => {
-  const value = span.attributes[key];
+  const value = span.attributes?.[key];
   return Predicate.isBoolean(value) ? value : undefined;
 };
 
@@ -129,8 +150,14 @@ const flag = (span: Span, key: string): boolean | undefined => {
  * changing it.
  */
 const list = (span: Span, key: string): ReadonlyArray<string> | undefined => {
-  const value = span.attributes[key];
-  if (Array.isArray(value)) return value.length === 0 ? undefined : value;
+  const value = span.attributes?.[key];
+  if (Array.isArray(value)) {
+    // Only the string members: a mixed array is an exporter writing something
+    // the convention does not describe, and coercing its numbers into strings
+    // would put values in the record that the signal did not contain.
+    const strings = value.filter((member) => Predicate.isString(member));
+    return strings.length === 0 ? undefined : strings;
+  }
   return Predicate.isString(value) && value !== "" ? [value] : undefined;
 };
 
@@ -200,11 +227,25 @@ export const usageOf = (span: Span): Records.Usage | undefined => {
  * generation that stopped at a length limit ended the way the caller asked it
  * to, and an audit that painted it red would teach its readers to ignore red.
  */
+/** The string name of either spelling of a status code. */
+const codeOf = (
+  code: Span["status"] extends undefined ? never : NonNullable<Span["status"]>["code"],
+) => (code === 0 ? "unset" : code === 1 ? "ok" : code === 2 ? "error" : code);
+
 export const outcomeOf = (span: Span) => {
-  const status = span.status?.code;
+  const status = span.status === undefined ? undefined : codeOf(span.status.code);
   const errorType = text(span, "error.type");
   if (status === undefined && errorType === undefined) return undefined;
-  return { status: status ?? (errorType === undefined ? "unset" : "error"), errorType } as const;
+  // `unset` is OTLP's *default* status code, so it is normally on the wire —
+  // and instrumentation that sets `error.type` in a catch block without
+  // calling `setStatus` is ordinary. Firing the fallback only when `status` is
+  // absent made the same failed call read `error` or `unset` depending on
+  // whether the producer happened to emit the default, and a tool span with
+  // `error.type: "not_found"` rendered as `read_file · unset` with no sign of
+  // failure anywhere in the audit. A declared `ok` still wins: that is a
+  // producer saying it succeeded, which is not this function's to overrule.
+  const said = status === undefined || status === "unset" ? undefined : status;
+  return { status: said ?? (errorType === undefined ? "unset" : "error"), errorType } as const;
 };
 
 export const responseOf = (span: Span) => {
@@ -293,24 +334,72 @@ export const ATTEMPT_EVENT = "gen_ai.attempt";
  * gets no `semconv` block: §4.1 lets us map, and forbids claiming adherence.
  */
 export const attemptsOf = (span: Span): ReadonlyArray<Records.Attempt> | undefined => {
-  const found: Array<Records.Attempt> = [];
+  // Collected with the index left open where the event did not state one, so
+  // the numbers that *were* stated are known before any are invented. Filling
+  // by position as they arrived produced collisions the moment instrumentation
+  // mixed the two — `[{no index}, {index: 1}]` gave two attempts both numbered
+  // 1, written into a signed, immutable record and printed as two identical
+  // rows.
+  const collected: Array<{
+    index: number | null;
+    status: Records.Attempt["status"];
+    errorType?: string;
+  }> = [];
   for (const event of span.events ?? []) {
     if (event.name !== ATTEMPT_EVENT) continue;
     const attributes = event.attributes ?? {};
     const raw = attributes["gen_ai.attempt.index"];
     const declared = attributes["gen_ai.attempt.status"];
     const failure = attributes["error.type"];
-    if (!Predicate.isNumber(raw) || !Number.isSafeInteger(raw)) continue;
+
+    // An event with no index is still an attempt somebody counted. Dropped, a
+    // harness emitting only `status`/`error.type` rendered as no Attempts
+    // section at all — "nobody was counting" for a run where somebody was,
+    // which is the conflation this field exists to prevent.
+    const index = Predicate.isNumber(raw) && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
 
     const errorType = Predicate.isString(failure) ? failure : undefined;
     const status =
       oneOf(Predicate.isString(declared) ? declared : undefined, Records.STATUSES) ??
       (errorType === undefined ? "unset" : "error");
-    found.push(
-      errorType === undefined ? { index: raw, status } : { index: raw, status, errorType },
-    );
+    collected.push(errorType === undefined ? { index, status } : { index, status, errorType });
   }
-  return found.length === 0 ? undefined : found.sort((left, right) => left.index - right.index);
+  if (collected.length === 0) return undefined;
+
+  // Every event stated its index: they are a total order, so order by them —
+  // and then number by position, exactly as the branch below does. Kept
+  // verbatim, the two branches numbered from different bases: a 0-based
+  // emitter rendered `0 ok / 1 error / 2 ok` here and `1 ok / 2 error / 3 ok`
+  // there, so one harness's three attempts came out with different numbers on
+  // two runs depending only on whether one event happened to omit its index —
+  // in a signed, immutable record. `index` means one thing on every record
+  // now: the position in the attempt sequence, counted from one. What a
+  // declared index contributes is the order, which is what is read from it.
+  //
+  // As long as they are actually distinct. Instrumentation that emits two events
+  // both carrying `gen_ai.attempt.index: 1` produced a signed, immutable
+  // record with two attempts numbered 1 and two identical rows in the audit,
+  // which is the failure this collection strategy exists to prevent, reached
+  // through this branch instead of the mixed one.
+  const declared = collected.flatMap((entry) => (entry.index === null ? [] : [entry.index]));
+  if (declared.length === collected.length && new Set(declared).size === declared.length) {
+    return collected
+      .map((entry) => ({ ...entry, index: entry.index ?? 0 }))
+      .sort((left, right) => left.index - right.index)
+      .map((entry, at) => ({ ...entry, index: at + 1 }));
+  }
+
+  // Some did and some did not, and the two cannot be reconciled: an index
+  // scanned up from the lowest free number puts an un-indexed event that was
+  // emitted *first* after a later one that declared `1`, and sorting then
+  // reverses them — so the audit asserted the first attempt succeeded and a
+  // second failed, which is the opposite of what happened.
+  //
+  // Emission order is what the span actually records, so it is kept and the
+  // numbers are the positions in it. That overrides a declared index, which is
+  // a real loss — and the alternative is a record whose order is wrong, which
+  // is the one thing an attempt list is for.
+  return collected.map((entry, at) => ({ ...entry, index: at + 1 }));
 };
 
 // -- §7.5 tools -----------------------------------------------------------------
@@ -341,6 +430,15 @@ export interface Options {
   readonly revision?: string;
   /** The Context Exposure this invocation was made against, by record OID. */
   readonly exposure?: string | null;
+  /**
+   * The invocation a tool span belongs beneath, by record OID.
+   *
+   * The tool half of `exposure`, and needed for the same reason: nothing on a
+   * `execute_tool` span names a Git record, so without this a tool operation
+   * can never be attached and `Invocation.Projection.tools` — "kept beneath
+   * the invocation each names when it names one" — always renders detached.
+   */
+  readonly invocation?: string | null;
 }
 
 export const captureOf = (span: Span, options: Options): Capture => {
@@ -427,7 +525,12 @@ export const normalize = (span: Span, options: Options = {}): Normalized => {
       ? { kind: "unsupported", operation: operation ?? null }
       : {
           kind: "tool",
-          fields: { invocation: null, capture, tool, outcome: outcomeOf(span) },
+          fields: {
+            invocation: options.invocation ?? null,
+            capture,
+            tool,
+            outcome: outcomeOf(span),
+          },
         };
   }
 

@@ -68,7 +68,30 @@ export const stateFetchPasses: ReadonlyArray<ReadonlyArray<Refspec.Refspec>> = [
     { force: false, source: "refs/meta/policy", destination: "refs/meta/policy" },
   ],
   [{ force: false, source: Refspec.SOCIAL_LOG, destination: Refspec.SOCIAL_LOG }],
-  [{ force: false, source: "refs/hub/*", destination: "refs/hub/*" }],
+  // Every hub namespace but the traces, and the difference from
+  // `Refspec.HUB_FETCH` is deliberate. That one is what `hub enable` gives a
+  // person's clone, and agents.md §10 makes it "trust + PR refs" — a replica
+  // that wants review state and not the provenance firehose. This is
+  // server-to-server *state* replication, and a host that folds policy needs
+  // what the fold reads: `Policy.evaluate` builds its session map by scanning
+  // for `Session.sessionOf`, and `provenanceOf` then requires
+  // `Session.producedBy` to name each introduced commit. Narrowed to pr and
+  // queue, `refs/hub/session/*` never arrived, so every push to a
+  // `requireProvenance` branch was refused with "session S does not say it
+  // produced C" on a replica while the origin accepted it — which is exactly
+  // the failure `Refspec`'s own docstring names: rules that do not replicate
+  // are rules with a second host they do not apply on.
+  //
+  // Traces are not part of any fold. What a retained `context/render.bin`
+  // holds is the verbatim task string and the exact bytes of every exposed
+  // file, and nothing here reads it, so `refs/hub/*` was pulling the most
+  // leak-prone namespace in the repository for nothing.
+  [
+    { force: false, source: "refs/hub/pr/*", destination: "refs/hub/pr/*" },
+    { force: false, source: "refs/hub/queue/*", destination: "refs/hub/queue/*" },
+    { force: false, source: "refs/hub/session/*", destination: "refs/hub/session/*" },
+    { force: false, source: "refs/hub/task/*", destination: "refs/hub/task/*" },
+  ],
 ];
 
 /**

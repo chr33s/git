@@ -613,6 +613,80 @@ Trace storage has its own host-defined resource bounds and must not inherit the 
 
 ---
 
+### 13.1 Known cost: the pre-call redaction lookup
+
+`context for --session` asks `hub/Redaction.removed()` which blobs a counted,
+bound tombstone names, so that a deterministic render cannot put removed bytes
+back into the object store. That answer is computed by walking every record on
+every session, task and trace ref. Each `context for` is a fresh process, so
+the in-process per-ref memo is always cold, and a trace ref gains a record per
+model invocation — the cost of invocation N therefore grows with every record
+written before it.
+
+Measured against the in-memory store, ten records per session, after the
+per-record read reduction in `trust/Record.payloadOf`:
+
+| total trace records | time per `context for --session` |
+| ------------------- | -------------------------------- |
+| 200                 | 5.6 ms                           |
+| 400                 | 10.4 ms                          |
+| 800                 | 20.9 ms                          |
+
+Linear, as the walk is. Extrapolated, a repository holding 20 000 trace records
+— a hundred sessions at two hundred invocations each — costs about half a
+second on the path that runs before every call. A filesystem store is slower
+per object than the one measured.
+
+`hub/Redaction.Answers` is the port for keeping that answer across a process
+boundary — the shape `git/Search.SearchIndex` already uses for derived state,
+so that where it is kept stays a deployment decision. It is asked for rather
+than required, so a host that provides no layer is unaffected and no caller of
+this module gains an opinion about durable state.
+
+It keeps one entry per _ref_, and that is what makes it work at all. A single
+repository-wide answer keyed on every record ref's head can never be read by
+this workload: `context for --session S` asks, and then appends to
+`refs/hub/trace/S`, so the next invocation computes a different key and misses
+every time while still paying to write. Per ref, an append invalidates the one
+ref it moved and the rest are read instead of walked, which is the part that
+grows with the repository.
+
+It is also the level with no trust in it. Whether a tombstone _counts_ is
+folded fresh against the trust log on every read, because a grant arriving
+after the tombstone it authorises moves no record ref — a kept answer that
+included that judgement would stand while the removal it should have honoured
+went unhonoured. What is kept is what the walk found: the target, whether it
+binds to this ref and repository, and who signed it.
+
+The key names the storage identity, the genesis, the namespace's ceiling, the
+ref and its head, which is everything the kept part depends on.
+
+No layer at all is the behaviour measured above, and what a host with nowhere
+durable to write gets. The CLI provides `Redaction.node.beside`, which keeps
+the answers in
+`<git-dir>/gitplus/redaction.json`: a file rather than a ref, because a ref
+would have to be hidden from the advertisement, cleaned up by `hub disable`
+and kept out of `gc`'s reachability, and none of those questions have anything
+to do with the answer. Git keeps its own derived state as files in the same
+place for the same reason, and treats every one of them as disposable. So does
+this: delete the file and the next run recomputes.
+
+An implementation MUST fail closed. `read` answers `null` for anything it is
+not certain of: a key it does not hold, a store it cannot read, a value it
+cannot parse. Answering "nothing was removed" instead re-opens the
+resurrection this lookup exists to prevent — the next identical `context for`
+retains a render whose bytes an operator removed, under the same oid, where
+the redacted record's surviving tree entry resolves them — and it does so
+silently, because a retained render is the ordinary case and raises no notice.
+
+Only a _whole_ answer is offered to the port. `marks` folds completeness over
+every record ref, and a short walk is never written: the refs do not move when
+the missing objects arrive, so a kept subset would never recover.
+
+The alternative is to drop the pre-call check and rely on the audit refusing to
+present a record a tombstone names (§14), which is cheaper and leaves removed
+bytes able to re-enter the object store.
+
 ## 14. Invocation projection
 
 The server owns trust verification, DAG folding, semconv normalization, joins, redaction state, coverage, and derived diagnostics.
@@ -734,7 +808,7 @@ Explicit repository/root selection remains available for bare/server use.
 ```bash
 cd project
 
-git+ session show --branch=HEAD --audit
+git+ session show --branch=refs/heads/feature/auth --audit
 git+ context audit abc123
 git+ knowledge check
 ```

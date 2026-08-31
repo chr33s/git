@@ -426,17 +426,19 @@ machinery — append-only, hash-linked — and is read by nothing in `Policy.ts`
 `Projection.ts`. That is deliberate: an agent's volume of exposures must not
 become an input to authorization, or a cost every protected-branch push pays.
 
-**Trace redaction is not built.** The namespace defines no tombstone record and
-`hub/Redaction.ts` does not walk trace refs, so `hub.redact` buys nothing here
-and the boundary charges `hub.trace` alone — the same reasoning `hub/Queue.ts`
-gets, arrived at from the other direction. What retention this namespace does
-have is per-record and up front: `--retain-render=false` keeps a render's
-commitment and drops its bytes, and raw prompts, model outputs and tool bodies
-are non-canonical by construction rather than removable after the fact. A
-namespace that needs a tombstone needs a payload kind, a walk in `Redaction`
-and a decoder that can tell one ref's records from another's; admitting a
-redactor without those would sell the right to append in exchange for a
-removal nobody can express.
+**Trace redaction is `git+ trace redact`.** The namespace needs it more than a
+session does, and that is easy to miss: a retained render holds the task string
+verbatim and the exact bytes of every exposed file, so a credential that leaked
+into a prompt is in the trace as well as in the session's account of the work.
+Redacting only the session removed the text from one ref and left it readable
+one ref over — a removal that was not one. So the namespace carries the same
+`event.redacted` tag the other two spell, `Redaction.recordRefs` walks these
+refs, and the boundary charges `hub.redact` beside `hub.trace`.
+
+Retention up front still matters and is cheaper: `--retain-render=false` keeps a
+render's commitment and drops its bytes, and raw prompts, model outputs and tool
+bodies are non-canonical by construction. A tombstone is recovery, not hygiene —
+it reaches every replica that syncs, but only once the bytes are already there.
 
 ### Runtime telemetry
 

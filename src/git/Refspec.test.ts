@@ -78,6 +78,38 @@ describe("Refspec", () => {
     }),
   );
 
+  it.effect("does not pull another host's renders by default, but still cleans them up", () =>
+    Effect.sync(() => {
+      // "trust + PR refs" is what agents.md §10 says `hub enable` configures.
+      for (const ref of [
+        "refs/hub/pr/1",
+        "refs/hub/queue/main",
+        "refs/hub/task/0192f000-0000-7000-8000-000000000000",
+      ]) {
+        assert.notEqual(Refspec.resolve(Refspec.HUB_FETCH, ref), null, ref);
+      }
+
+      // And not the three `Sending` refuses to push under a default. A
+      // retained `context/render.bin` holds the task string verbatim and the
+      // exact bytes of every file the exposure showed a model; a session ref
+      // holds every prompt. The fetch side carried all of them because
+      // `refs/hub/*` is one glob that says nothing about what is underneath,
+      // so `hub enable` put the whole provenance firehose onto every machine
+      // that ran it. `--refs` names any of them explicitly.
+      const trace = "refs/hub/trace/0192f000-0000-7000-8000-000000000000";
+      for (const ref of [trace, "refs/hub/session/0192f000-0000-7000-8000-000000000000"]) {
+        assert.equal(Refspec.resolve(Refspec.HUB_FETCH, ref), null, ref);
+      }
+
+      // And `hub disable` still owns it. It decides what to remove by asking
+      // which refs a managed refspec maps, so a fetch set narrowed without a
+      // superset beside it would have left a trace ref somebody fetched
+      // explicitly behind — on a repository the user has just stopped
+      // synchronizing with.
+      assert.notEqual(Refspec.resolve(Refspec.HUB_MANAGED, trace), null);
+    }),
+  );
+
   it.effect("knows which namespaces only grow, and which are withheld from a clone", () =>
     Effect.sync(() => {
       assert.equal(Refspec.isAppendOnly("refs/hub/pr/1"), true);

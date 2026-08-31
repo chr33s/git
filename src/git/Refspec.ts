@@ -129,11 +129,58 @@ export const DEFAULT_FETCH: ReadonlyArray<Refspec> = [
  * `Policy.rulesOf` asks — so a mirror sharing the same trust graph would let
  * through exactly the pushes the origin protects. Rules that do not replicate
  * are rules with a second host they do not apply on.
+ *
+ * Sessions and traces are not here. agents.md §10 states it as a
+ * requirement — "trust + PR refs" is what `hub enable` configures, and "a
+ * replica that wants review state but not the provenance firehose is a
+ * legitimate configuration, and the default one" — and the fetch side had
+ * carried all of them because `refs/hub/*` is one glob that says nothing about
+ * what is underneath.
+ *
+ * Traces are the more expensive of the two. A
+ * retained `context/render.bin` holds the task string verbatim and the exact
+ * bytes of every file the exposure showed a model — unbounded in size, and the
+ * most leak-prone thing this repository stores — while nothing on a replica
+ * reads it: `session show`, the projection and `Wake` all read sessions and
+ * tasks, and no code path needs another host's renders. So `hub enable` put
+ * every recorded prompt in the repository onto every machine that ran it,
+ * for nothing. `Sending` already refuses to *push* this namespace under a
+ * default (docs/agents.md §10, docs/context-pack.md §14); the fetch side
+ * carried it because `refs/hub/*` is one glob and says nothing about what is
+ * underneath. Named explicitly it still goes, which is what a provenance
+ * remote is — on both sides: `Sending` honours a remote's `sync.refs`, and
+ * `hub enable --refs refs/hub/trace/*` names them on the way in. Without the
+ * second, this change would have left no `git+` command able to obtain another
+ * host's traces at all, and a docstring promising an escape hatch that only
+ * existed for pushes.
  */
 export const HUB_FETCH: ReadonlyArray<Refspec> = [
   { force: false, source: "refs/meta/trust/*", destination: "refs/meta/trust/*" },
   { force: false, source: "refs/meta/policy", destination: "refs/meta/policy" },
   { force: false, source: "refs/social/log", destination: "refs/social/log" },
+  // The hub's namespaces one at a time rather than `refs/hub/*`, because a
+  // refspec cannot say "except". Traces are the exception; see below.
+  { force: false, source: "refs/hub/pr/*", destination: "refs/hub/pr/*" },
+  { force: false, source: "refs/hub/queue/*", destination: "refs/hub/queue/*" },
+  // Tasks stay. agents.md §10 makes the *session* refspec opt-in and says
+  // nothing about this one, and `git+ task list` reads the very directory
+  // `hub enable` populates — so dropping it took a working surface with it for
+  // no requirement. Sessions are the documented exception and the surface that
+  // reads them says so; see `cli/session.ts`.
+  { force: false, source: "refs/hub/task/*", destination: "refs/hub/task/*" },
+];
+
+/**
+ * Everything `git+` put in this repository, for the command that takes it out.
+ *
+ * A superset of `HUB_FETCH`, and it has to be: `hub disable` decides what it
+ * owns by asking which refs a managed refspec maps, so narrowing the fetch set
+ * to exclude traces would have left a trace ref somebody fetched *explicitly*
+ * behind — undeletable, on a repository the user has just stopped
+ * synchronizing with.
+ */
+export const HUB_MANAGED: ReadonlyArray<Refspec> = [
+  ...HUB_FETCH,
   { force: false, source: "refs/hub/*", destination: "refs/hub/*" },
 ];
 

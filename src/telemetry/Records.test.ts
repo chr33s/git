@@ -12,12 +12,12 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { generate } from "../crypto/SshSignature.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { qualify } from "../git/Oid.ts";
 import * as Trace from "../hub/Trace.ts";
+import { generate } from "../crypto/SshSignature.ts";
 import * as Records from "./Records.ts";
 
 const REPO = "SHA256:test";
@@ -244,5 +244,104 @@ describe("trace records", () => {
         }),
       ),
     ),
+  );
+});
+
+describe("reading what a newer producer wrote", () => {
+  it.effect("reads a capture stage this version does not know", () =>
+    Effect.gen(function* () {
+      const payload = {
+        type: "invocation-telemetry",
+        version: 1,
+        repo: REPO,
+        session: SESSION,
+        id: "0192f000-0000-7000-8000-00000000aaaa",
+        issuedAt: "2026-01-01T00:00:00.000Z",
+        trustHead: null,
+        exposure: null,
+        capture: { transport: "otlp", stage: "edge-collector" },
+        operation: { name: "chat" },
+      };
+
+      // `stage` is a bare string in the schema precisely so an older reader can
+      // read a stage a newer producer names, and `checkCapture` holds only a
+      // *writer* to the vocabulary. Applied on the read path, one unknown
+      // collector name made the whole invocation — usage, attempts, the
+      // context join — read as damage: "No invocations recorded for this
+      // session." beside "1 record(s) could not be read here.", permanently.
+      const read = yield* Records.decode(new TextEncoder().encode(JSON.stringify(payload)));
+      assert.equal(read.type, "invocation-telemetry");
+
+      // The writer is still held to it.
+      const refused = yield* Records.check(read).pipe(Effect.flip);
+      assert.equal(refused.field, "stage");
+    }),
+  );
+
+  it.effect("reads a health record whose stage this version does not know", () =>
+    Effect.gen(function* () {
+      const payload = {
+        type: "trace-health",
+        version: 1,
+        repo: REPO,
+        session: SESSION,
+        id: "0192f000-0000-7000-8000-00000000bbbb",
+        issuedAt: "2026-01-01T00:00:00.000Z",
+        trustHead: null,
+        source: "otel-collector",
+        stage: "edge-collector",
+        sampling: "none",
+        transformed: false,
+        dropped: 0,
+      };
+
+      // Declared as a closed literal union, this failed `decode` outright —
+      // and a health record is what `coverageOf` reads, so `session show
+      // --audit` reported damage *and* dropped coverage from `complete` to
+      // `unknown`, permanently, over one collector name.
+      const read = yield* Records.decode(new TextEncoder().encode(JSON.stringify(payload)));
+      assert.equal(read.type, "trace-health");
+
+      const refused = yield* Records.check(read).pipe(Effect.flip);
+      assert.equal(refused.field, "stage");
+    }),
+  );
+});
+
+describe("record timestamps", () => {
+  it.effect("refuses a payload whose issuedAt is not a date", () =>
+    Effect.gen(function* () {
+      const good = {
+        type: "tool-operation",
+        version: 1,
+        repo: REPO,
+        session: SESSION,
+        id: "0192f000-0000-7000-8000-00000000aaaa",
+        issuedAt: "2026-01-01T00:00:00.000Z",
+        trustHead: null,
+        invocation: null,
+        capture: null,
+        tool: { name: "Read" },
+      };
+      yield* Records.decode(new TextEncoder().encode(JSON.stringify(good)));
+
+      // `Verify.Made` is built as `new Date(payload.issuedAt)` at every call
+      // site, so a string the schema accepts and `Date.parse` does not carries
+      // an `Invalid Date` into the trust judgement. A writer is refused it.
+      const written = yield* Records.decode(
+        new TextEncoder().encode(JSON.stringify({ ...good, issuedAt: "not-a-date" })),
+      );
+      const bad = yield* Records.check(written).pipe(Effect.flip);
+      assert.equal(bad.field, "issuedAt");
+
+      // A reader is not — the decode above succeeded, which is the point.
+      // `hub/Event` keeps `decode` and `validate` apart for
+      // this reason: a record somebody already wrote is read, and each rule is
+      // applied where its answer is used. Refused here, one unparseable field
+      // made a whole invocation — its usage, attempts and context join —
+      // vanish from `session show --audit` as "could not be read", on a ref
+      // nothing can rewind.
+      assert.equal(written.issuedAt, "not-a-date");
+    }),
   );
 });

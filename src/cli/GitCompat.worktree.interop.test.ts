@@ -26,6 +26,12 @@ const environment: NodeJS.ProcessEnv = {
   LANG: "C",
   LC_ALL: "C",
   NO_COLOR: "1",
+  // Pinned together, because node refuses to honour one while the other is
+  // set: inheriting a `FORCE_COLOR` from the surrounding shell made every
+  // `git+` process print "the 'NO_COLOR' env is ignored…" to stderr, and these
+  // suites compare stderr byte for byte — so a developer whose terminal or CI
+  // sets it saw thirty-four failures that had nothing to do with the code.
+  FORCE_COLOR: "0",
   PAGER: "cat",
   TERM: "dumb",
   TZ: "UTC",

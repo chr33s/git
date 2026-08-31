@@ -30,6 +30,7 @@ import * as GitRepository from "../git/Repository.ts";
 import { Hooks, Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
+import * as Trace from "../hub/Trace.ts";
 import * as Record from "../trust/Record.ts";
 
 /** What this replica runs, and for what. */
@@ -222,7 +223,14 @@ const since = Effect.fn("wake.since")(function* (ref: string, tip: Oid, cursor: 
   // The ceiling this repository is held to, which an operator may have raised
   // or lowered — reading the constant behind it meant a wake walked further
   // than the fold that judges the same refs.
-  const parents = yield* Dag.reachable(tip, cursor, Event.isHubCommit, yield* Event.ceilingOf());
+  //
+  // And each namespace's own. Trace refs are bounded four times higher and the
+  // boundary accepts them at that length, so holding them to a pull request's
+  // ceiling made a session that legitimately grew past 4096 records fail this
+  // walk, leave its cursor unmoved, and never fire its rules again — the same
+  // defect `hub/Redaction.tombstonesOn` had, one file over.
+  const ceiling = Trace.traceOf(ref) !== null ? yield* Trace.ceilingOf() : yield* Event.ceilingOf();
+  const parents = yield* Dag.reachable(tip, cursor, Event.isHubCommit, ceiling);
   const found: Array<{ readonly commit: Oid; readonly type: string }> = [];
   const unreadable: Array<Oid> = [];
 

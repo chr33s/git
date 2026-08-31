@@ -11,17 +11,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
+import { Effect } from "effect";
+
 import * as Semconv from "./Semconv.ts";
 
 const span = (
-  attributes: Record<string, string | number | boolean | ReadonlyArray<string>>,
+  attributes: Semconv.Span["attributes"],
   rest: Partial<Semconv.Span> = {},
 ): Semconv.Span => ({ attributes, ...rest });
 
-const chat = (
-  extra: Record<string, string | number | boolean | ReadonlyArray<string>> = {},
-  rest: Partial<Semconv.Span> = {},
-) => span({ "gen_ai.operation.name": "chat", ...extra }, rest);
+const chat = (extra: Semconv.Span["attributes"] = {}, rest: Partial<Semconv.Span> = {}) =>
+  span({ "gen_ai.operation.name": "chat", ...extra }, rest);
 
 describe("GenAI normalization", () => {
   it("maps one compliant inference span to one logical Invocation", () => {
@@ -125,6 +125,172 @@ describe("GenAI normalization", () => {
     ]);
   });
 
+  it("takes a status code in either spelling", () => {
+    // An OpenTelemetry JS `ReadableSpan` carries `status.code` as the numeric
+    // `SpanStatusCode` enum, and this module accepts "the flat one an SDK
+    // hands a processor". Taking only OTLP's JSON strings, a span exported
+    // that way failed to decode and `trace record --otel` refused the whole
+    // thing as malformed.
+    assert.deepEqual(Semconv.outcomeOf(span({}, { status: { code: 2 } })), {
+      status: "error",
+      errorType: undefined,
+    });
+    assert.deepEqual(Semconv.outcomeOf(span({}, { status: { code: 1 } })), {
+      status: "ok",
+      errorType: undefined,
+    });
+    assert.deepEqual(
+      Semconv.outcomeOf(span({ "error.type": "timeout" }, { status: { code: 0 } })),
+      {
+        status: "error",
+        errorType: "timeout",
+      },
+    );
+  });
+
+  it.effect("decodes a span whose status code is the numeric enum", () =>
+    Effect.gen(function* () {
+      // The refusal was in the schema, not the reader: `decodeSpan` rejected
+      // the whole span, so `trace record --otel` called it malformed.
+      const decoded = yield* Semconv.decode(
+        new TextEncoder().encode(
+          JSON.stringify({ attributes: { "gen_ai.operation.name": "chat" }, status: { code: 2 } }),
+        ),
+      );
+      assert.equal(Semconv.outcomeOf(decoded)?.status, "error");
+    }),
+  );
+
+  it("reads a declared error type as an error even beside the default status", () => {
+    // `unset` is OTLP's *default* status code, so it is normally on the wire,
+    // and instrumentation that sets `error.type` in a catch block without
+    // calling `setStatus` is ordinary. Firing the fallback only when `status`
+    // was absent made the same failed call read `error` or `unset` depending
+    // on whether the producer emitted the default — and a tool span with
+    // `error.type: "not_found"` rendered as `read_file · unset`, with no sign
+    // of failure anywhere in the audit.
+    assert.deepEqual(
+      Semconv.outcomeOf(span({ "error.type": "not_found" }, { status: { code: "unset" } })),
+      { status: "error", errorType: "not_found" },
+    );
+
+    // A producer that says it succeeded is not this function's to overrule.
+    assert.deepEqual(
+      Semconv.outcomeOf(span({ "error.type": "not_found" }, { status: { code: "ok" } })),
+      { status: "ok", errorType: "not_found" },
+    );
+  });
+
+  it("numbers attempts from one whichever base the emitter counted from", () => {
+    // A 0-based emitter, every index declared and distinct — the branch that
+    // kept them verbatim. The mixed branch numbers by position from 1, so the
+    // same three attempts from the same harness came out `0 ok / 1 error /
+    // 2 ok` on a run where every event carried its index and `1 ok / 2 error /
+    // 3 ok` on one where a single event omitted it. Both go into a signed,
+    // immutable record, and neither says which base it used.
+    const observed = Semconv.attemptsOf(
+      span(
+        { "gen_ai.operation.name": "chat" },
+        {
+          events: [
+            {
+              name: Semconv.ATTEMPT_EVENT,
+              attributes: { "gen_ai.attempt.index": 0, "gen_ai.attempt.status": "ok" },
+            },
+            {
+              name: Semconv.ATTEMPT_EVENT,
+              attributes: { "gen_ai.attempt.index": 1, "error.type": "timeout" },
+            },
+          ],
+        },
+      ),
+    );
+    assert.deepEqual(observed, [
+      { index: 1, status: "ok" },
+      { index: 2, status: "error", errorType: "timeout" },
+    ]);
+  });
+
+  it("keeps attempts in the order the span emitted them", () => {
+    // A failure first, then a success that declared index 1. Renumbering the
+    // un-indexed event to the lowest free number and sorting put the success
+    // first — so the audit asserted the first attempt succeeded and a second
+    // failed, which is the opposite of what happened.
+    const observed = Semconv.attemptsOf(
+      span(
+        { "gen_ai.operation.name": "chat" },
+        {
+          events: [
+            { name: Semconv.ATTEMPT_EVENT, attributes: { "error.type": "overloaded" } },
+            {
+              name: Semconv.ATTEMPT_EVENT,
+              attributes: { "gen_ai.attempt.index": 1, "gen_ai.attempt.status": "ok" },
+            },
+          ],
+        },
+      ),
+    );
+    assert.deepEqual(
+      observed?.map((attempt) => attempt.errorType ?? attempt.status),
+      ["overloaded", "ok"],
+    );
+    assert.deepEqual(
+      observed?.map((attempt) => attempt.index),
+      [1, 2],
+    );
+  });
+
+  it("does not give two attempts the same number", () => {
+    // Instrumentation that indexes some events and not others. Filling by
+    // position produced a collision — two attempts both numbered 1, written
+    // into a signed, immutable record and printed as two identical rows.
+    const observed = Semconv.attemptsOf(
+      span(
+        { "gen_ai.operation.name": "chat" },
+        {
+          events: [
+            { name: Semconv.ATTEMPT_EVENT, attributes: { "error.type": "timeout" } },
+            { name: Semconv.ATTEMPT_EVENT, attributes: { "gen_ai.attempt.index": 1 } },
+            { name: Semconv.ATTEMPT_EVENT, attributes: { "gen_ai.attempt.status": "ok" } },
+          ],
+        },
+      ),
+    );
+    assert.deepEqual(
+      observed?.map((attempt) => attempt.index),
+      [1, 2, 3],
+    );
+    assert.equal(new Set(observed?.map((attempt) => attempt.index)).size, 3);
+  });
+
+  it("does not trust two events that declare the same index", () => {
+    // The all-declared branch used the values verbatim, so instrumentation
+    // emitting `index: 1` twice produced a signed record with two attempts
+    // numbered 1 and two identical rows in the audit.
+    const observed = Semconv.attemptsOf(
+      span(
+        { "gen_ai.operation.name": "chat" },
+        {
+          events: [
+            {
+              name: Semconv.ATTEMPT_EVENT,
+              attributes: { "gen_ai.attempt.index": 1, "error.type": "overloaded" },
+            },
+            {
+              name: Semconv.ATTEMPT_EVENT,
+              attributes: { "gen_ai.attempt.index": 1, "gen_ai.attempt.status": "ok" },
+            },
+          ],
+        },
+      ),
+    );
+    assert.equal(new Set(observed?.map((attempt) => attempt.index)).size, 2);
+    assert.deepEqual(
+      observed?.map((attempt) => attempt.errorType ?? attempt.status),
+      ["overloaded", "ok"],
+    );
+  });
+
   it("does not split retries inside one span into several Invocations", () => {
     // §6.1 and §19.3: one compliant inference span is one logical Invocation,
     // attempts and all. Two attempts ride along beneath it; they do not become
@@ -167,6 +333,49 @@ describe("GenAI normalization", () => {
     assert.equal(normalized.fields.tool.name, "read_file");
     assert.equal(normalized.fields.tool.callId, "call_7");
     assert.equal(normalized.fields.tool.kind, "function");
+  });
+
+  it.effect("reads a span carrying attribute types it does not use", () =>
+    Effect.promise(async () => {
+      // OTel's attribute model has `int[]`, `double[]` and `bool[]` beside the
+      // shapes read here, and exporters emit `null` for a value they could not
+      // resolve. A schema listing only what is read refused the whole span —
+      // reporting a good inference span as malformed over an attribute it
+      // would have ignored.
+      const json = JSON.stringify({
+        attributes: {
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 42,
+          "some.int.array": [1, 2, 3],
+          "some.bool.array": [true, false],
+          "some.unresolved": null,
+        },
+      });
+      const span = await Effect.runPromise(Semconv.decode(new TextEncoder().encode(json)));
+      const normalized = Semconv.normalize(span);
+      assert.equal(normalized.kind, "inference");
+      if (normalized.kind !== "inference") return;
+      assert.equal(normalized.fields.usage?.inputTokens, 42);
+    }),
+  );
+
+  it.effect("reads a span that carried no attributes at all", () =>
+    Effect.promise(async () => {
+      // `attributes` is optional in OTLP. Required, a span that carried none
+      // failed as "malformed" rather than as what it is: a span this version
+      // does not record.
+      const span = await Effect.runPromise(
+        Semconv.decode(new TextEncoder().encode(JSON.stringify({ spanId: "00f067aa0ba902b7" }))),
+      );
+      assert.equal(Semconv.normalize(span).kind, "unsupported");
+    }),
+  );
+
+  it("takes only the string members of a mixed list attribute", () => {
+    // Coercing the numbers would put values in the record the signal did not
+    // contain; dropping the whole attribute would lose the ones it did.
+    const mixed = span({ "gen_ai.response.finish_reasons": ["stop", 7, "length"] });
+    assert.deepEqual(Semconv.responseOf(mixed)?.finishReasons, ["stop", "length"]);
   });
 
   it("refuses a span whose operation this version does not read", () => {

@@ -18,6 +18,18 @@ import { Effect, Result } from "effect";
 import { bytesToHex } from "../git/Format.ts";
 import * as Render from "./Render.ts";
 
+const u32 = (value: number): Uint8Array => {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, value, false);
+  return out;
+};
+
+const u64 = (value: bigint): Uint8Array => {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, value, false);
+  return out;
+};
+
 const encode = (text: string) => new TextEncoder().encode(text);
 
 const framed = (segments: ReadonlyArray<Render.Segment>) => {
@@ -180,6 +192,97 @@ describe("ContextRender framing", () => {
     assert.equal(Render.isPlacement("/leading"), false);
     assert.equal(Render.isPlacement("trailing/"), false);
     assert.equal(Render.isPlacement("invented"), false);
+  });
+
+  it("bounds the whole render, not only each segment of it", () => {
+    // `MAX_SEGMENTS` times `MAX_BODY` is sixteen gigabytes, and the only other
+    // cap bounds what the *selector* chooses — not the task segment appended
+    // after it, and not a library caller handing `expose` its own segments.
+    // The result goes into `context/render.bin` on an append-only ref that
+    // replicates, so the writer bounds what it writes.
+    const chunk = new Uint8Array(4 * 1024 * 1024);
+    const many = Array.from({ length: 20 }, () => ({
+      placement: "user" as const,
+      mediaType: "text/plain",
+      body: chunk,
+    }));
+    assert.equal(many.length <= Render.MAX_SEGMENTS, true, "under the segment count");
+    assert.equal(chunk.length <= Render.MAX_BODY, true, "and each one under the body bound");
+
+    const framed = Render.frame(many);
+    assert.equal(Result.isFailure(framed), true);
+    if (Result.isFailure(framed)) assert.match(framed.failure.reason, /may not exceed/);
+  });
+
+  it("does not frame a render its own parser will refuse for size", () => {
+    // The header is twenty-five bytes — the preamble plus the segment count —
+    // and `parse` measures the whole blob. Counted only over the segments, the
+    // writer accepted a render just over the bound and wrote it to
+    // `context/render.bin`, and `recompute` then refused the intact retained
+    // bytes: an exposure auditing as unreadable forever on a record nothing
+    // can remove.
+    // Four segments whose bodies and per-segment headers come to exactly
+    // `MAX_RENDER`, so the writer's old count passed and the parser's did not.
+    // One buffer, shared: the point is the arithmetic, not the allocation.
+    const each = 30;
+    const body = new Uint8Array(Render.MAX_RENDER / 4 - each);
+    const framed = Render.frame(
+      Array.from({ length: 4 }, () => ({ placement: "user", mediaType: "text/plain", body })),
+    );
+    if (Result.isSuccess(framed)) {
+      assert.equal(
+        Result.isSuccess(Render.parse(framed.success)),
+        true,
+        "anything framed must parse",
+      );
+    }
+  });
+
+  it("refuses framing its own writer would never produce", () => {
+    // Hand-framed, because `frame` refuses to build these — which is the
+    // point: `parse` bounded only the lengths, so a retained render carrying
+    // an empty placement, a two-slash extension or a zero-length media type
+    // parsed cleanly and `recompute` answered `ok`. That is the one
+    // distinction `recompute` exists to make — "these are the bytes" versus
+    // "these are bytes that are not V1 framing" — and it means a second
+    // conforming implementation could write renders this one's writer rejects.
+    const hand = (placement: string, mediaType: string): Uint8Array => {
+      const parts = [
+        encode("git+ContextRender\0v1\0"),
+        new Uint8Array([0, 0, 0, 1]),
+        u32(encode(placement).length),
+        encode(placement),
+        u32(encode(mediaType).length),
+        encode(mediaType),
+        u64(1n),
+        encode("x"),
+      ];
+      const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+      let at = 0;
+      for (const part of parts) {
+        out.set(part, at);
+        at += part.length;
+      }
+      return out;
+    };
+
+    for (const [placement, mediaType] of [
+      ["", "text/plain"],
+      ["acme/scratch/pad", "text/plain"],
+      ["invented", "text/plain"],
+      ["user", ""],
+    ] as const) {
+      const parsed = Render.parse(hand(placement, mediaType));
+      assert.equal(Result.isFailure(parsed), true, `${placement} / ${mediaType}`);
+    }
+
+    // And the writer's own output still round-trips.
+    assert.equal(
+      Result.isSuccess(
+        Render.parse(framed([{ placement: "user", mediaType: "text/plain", body: encode("x") }])),
+      ),
+      true,
+    );
   });
 
   it.effect("recomputes a retained render against its commitment", () =>

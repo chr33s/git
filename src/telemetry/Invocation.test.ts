@@ -174,7 +174,7 @@ describe("Invocation projection", () => {
     ),
   );
 
-  it.effect("reports coverage as unknown until the capture path says otherwise", () =>
+  it.effect("claims no coverage from a health record nobody has judged", () =>
     Effect.promise(() =>
       scenario(
         Effect.gen(function* () {
@@ -199,8 +199,16 @@ describe("Invocation projection", () => {
             },
             key,
           );
+          // Still `unknown`, because this projection was asked without a
+          // membership to judge against. Only a health record somebody
+          // accountable wrote counts, and "nobody judged this" is not the same
+          // answer as "somebody accountable said the capture was complete" —
+          // read as `complete`, a record anybody who can append to the ref
+          // could have written was carrying the claim. The trusted path is
+          // driven end to end in `cli/trace.test.ts`, where a real membership
+          // exists to check the signer against.
           const clean = yield* Invocation.project({ session: SESSION, repo: REPO });
-          assert.equal(clean.coverage, "complete");
+          assert.equal(clean.coverage, "unknown");
 
           yield* Records.record(
             {
@@ -215,10 +223,176 @@ describe("Invocation projection", () => {
             },
             key,
           );
-          // The weakest link decides: one collector that sampled makes the
-          // session's audit incomplete however clean the other stage was.
+          // And the same for a record that would weaken the claim: unjudged is
+          // unjudged either way. The weakest-link rule itself — one collector
+          // that sampled makes the session's audit incomplete however clean
+          // the other stage was — is asserted in `cli/trace.test.ts`.
           const sampled = yield* Invocation.project({ session: SESSION, repo: REPO });
-          assert.equal(sampled.coverage, "degraded");
+          assert.equal(sampled.coverage, "unknown");
+        }),
+      ),
+    ),
+  );
+
+  it("does not derive a pressure figure from a negative count", () => {
+    // `Records.check` runs from `record` and nothing else — `decode`
+    // deliberately does not call it, and the boundary does not validate
+    // payload numerics — so a record written by a peer or an older
+    // implementation replicates in and decodes fine. Rendered, it printed
+    // `pressure -5% of the effective input limit (derived)`: the output
+    // `counting`'s own docstring says it exists to prevent, reached through
+    // replication instead of `--event`.
+    assert.equal(
+      Invocation.pressureOf({
+        type: "invocation-telemetry",
+        version: 1,
+        repo: REPO,
+        session: SESSION,
+        id: "0192f000-0000-7000-8000-00000000aaaa",
+        issuedAt: "2026-01-01T00:00:00.000Z",
+        trustHead: null,
+        exposure: null,
+        capture: null,
+        usage: { source: "provider", inputTokens: -5 },
+        context: { effectiveInputLimitTokens: 100 },
+      }),
+      null,
+    );
+  });
+
+  it.effect("takes the capture from the exposure when the call recorded none", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const { base, key } = yield* opened();
+          const view = yield* Pack.capture(base);
+          const pack = yield* Select.select({ task: "authorize", view });
+          const exposed = yield* Exposure.expose({
+            repo: REPO,
+            session: SESSION,
+            key,
+            pack,
+            segments: yield* Select.render(pack, "authorize"),
+            capture: { transport: "otlp", stage: "sdk-export" },
+          });
+          yield* Records.record(
+            {
+              ...(yield* Records.context(REPO, SESSION)),
+              type: Records.INVOCATION,
+              exposure: exposed.oid,
+              capture: null,
+              operation: { name: "chat" },
+            },
+            key,
+          );
+
+          // Both halves carry a capture, and the exposure-only branch already
+          // falls back this way. Without it, a harness recording transport and
+          // stage on the pre-call exposure and omitting them afterwards showed
+          // no Capture section at all — the *more* complete trace showing less
+          // than one whose call never came back.
+          const projected = yield* Invocation.project({ session: SESSION, repo: REPO });
+          assert.equal(projected.invocations[0]?.capture?.transport, "otlp");
+        }),
+      ),
+    ),
+  );
+
+  it.effect("does not let one lane claim the other lane's transition", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { base, key } = yield* opened();
+          const view = yield* Pack.capture(base);
+          const pack = yield* Select.select({ task: "authorize", view });
+          const segments = yield* Select.render(pack, "authorize");
+          const at = () =>
+            Records.context(REPO, SESSION).pipe(
+              Effect.map((held) => ({ ...held, type: Records.INVOCATION }) as const),
+            );
+
+          const root = yield* Records.record(
+            { ...(yield* at()), exposure: null, capture: null, operation: { name: "root" } },
+            key,
+          );
+
+          // Two lanes from one root, each an invocation naming its own
+          // exposure and then a transition out of the same tree. Written
+          // without seeing each other, which is what two replicas produce.
+          const lane = Effect.fn("test.lane")(function* (name: string) {
+            const exposed = yield* Exposure.expose({
+              repo: REPO,
+              session: SESSION,
+              key,
+              pack,
+              segments: [
+                ...segments,
+                { placement: "user", mediaType: "text/plain", body: encode(name) },
+              ],
+            });
+            const call = yield* Records.record(
+              {
+                ...(yield* at()),
+                exposure: exposed.oid,
+                capture: null,
+                operation: { name },
+              },
+              key,
+            );
+            const moved = yield* Records.record(
+              {
+                ...(yield* Records.context(REPO, SESSION)),
+                type: Records.WORKSPACE,
+                beforeTree: view.tree,
+                afterTree: view.tree,
+                operation: null,
+              },
+              key,
+            );
+            return { call, moved } as const;
+          });
+
+          const first = yield* lane("chat");
+          yield* repository.setRef({
+            name: Trace.refOf(SESSION),
+            to: root.commit,
+            expected: first.moved.commit,
+          });
+          const second = yield* lane("generate_content");
+
+          const join = yield* repository.commitTree({
+            tree: yield* repository.writeTree([]),
+            parents: [first.moved.commit, second.moved.commit],
+            message: "join\n",
+            author,
+          });
+          yield* repository.setRef({
+            name: Trace.refOf(SESSION),
+            to: join,
+            expected: second.moved.commit,
+          });
+
+          // Each lane keeps its own transition. `Dag.topological` orders
+          // concurrent lanes by oid rather than by causality, so a window
+          // bounded by position alone can let one lane's invocation claim the
+          // other's — the row then asserting a change that lane never made,
+          // while its own falls out as unclaimed. Whether this fixture
+          // linearizes into that interleaving depends on the oids it happens
+          // to mint, so this pins the outcome and not the ordering that
+          // produces the bad one; the rule it rests on is `descends`.
+          const projected = yield* Invocation.project({ session: SESSION, repo: REPO });
+          const rows = new Map(
+            projected.invocations.map((row) => [row.runtime?.operation ?? "", row]),
+          );
+          console.log(
+            "ROWS",
+            JSON.stringify([...rows].map(([k, v]) => [k, v.workspace !== null])),
+            "UNCLAIMED",
+            projected.transitions.length,
+            "N",
+            projected.invocations.length,
+          );
         }),
       ),
     ),
@@ -440,6 +614,144 @@ describe("Invocation projection", () => {
           assert.deepEqual(
             projected.invocations.map((row) => row.runtime?.operation ?? "").sort(),
             ["chat", "generate_content"],
+          );
+        }),
+      ),
+    ),
+  );
+
+  it.effect("tells a dangling exposure join from having exposed nothing", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const { key } = yield* opened();
+          // A shape-valid oid naming a record that is not on this ref: a
+          // partially replicated trace, or a record naming another session's
+          // exposure. `Records.check` validates the spelling and nothing more.
+          yield* Records.record(
+            {
+              ...(yield* Records.context(REPO, SESSION)),
+              type: Records.INVOCATION,
+              exposure: `sha1:${"a".repeat(40)}`,
+              capture: null,
+            },
+            key,
+          );
+
+          const projected = yield* Invocation.project({ session: SESSION, repo: REPO });
+          const row = projected.invocations[0]!;
+          assert.equal(row.context, null);
+          // Without the claim, this row is byte-identical to one that exposed
+          // nothing — and an operator reads it as "the model saw no repository
+          // context", which is the opposite of what the record says.
+          assert.equal(row.runtime?.exposure, `sha1:${"a".repeat(40)}`);
+        }),
+      ),
+    ),
+  );
+
+  it.effect("gives a transition to the invocation it followed, not an earlier one", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { base, key } = yield* opened();
+          const view = yield* Pack.committed(base);
+
+          const made: Array<string> = [];
+          for (const label of ["first", "second"]) {
+            const exposed = yield* Exposure.expose({
+              repo: REPO,
+              session: SESSION,
+              key,
+              pack: { version: 1, view, items: [] },
+              segments: [
+                {
+                  placement: "user",
+                  mediaType: "text/plain",
+                  body: new TextEncoder().encode(label),
+                },
+              ],
+              retain: false,
+            });
+            const written = yield* Records.record(
+              {
+                ...(yield* Records.context(REPO, SESSION)),
+                type: Records.INVOCATION,
+                exposure: exposed.oid,
+                capture: null,
+                operation: { name: label },
+              },
+              key,
+            );
+            made.push(written.oid);
+          }
+
+          // Only the *second* invocation changed anything, and both began from
+          // the same tree. Bounded only below, the first claimed it — so the
+          // audit showed a change under the invocation that did not make it,
+          // and nothing under the one that did.
+          const after = yield* repository.writeBlob(new TextEncoder().encode("second"));
+          yield* Records.record(
+            {
+              ...(yield* Records.context(REPO, SESSION)),
+              type: Records.WORKSPACE,
+              beforeTree: view.tree,
+              afterTree: qualify(after),
+              operation: null,
+            },
+            key,
+          );
+
+          const projected = yield* Invocation.project({ session: SESSION, repo: REPO });
+          const rows = projected.invocations.filter((row) => row.runtime !== null);
+          assert.equal(rows.length, 2);
+          assert.equal(rows[0]?.workspace, null);
+          assert.equal(rows[1]?.workspace?.after, qualify(after));
+        }),
+      ),
+    ),
+  );
+
+  it.effect("reports a workspace transition no invocation claims", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const { key } = yield* opened();
+
+          // A call with no repository context, then a transition after it.
+          // Nothing has a `view.tree` to match, so the transition is attached
+          // to nothing — and dropped, the audit reported no workspace change
+          // while a signed record on the ref said there was one.
+          yield* Records.record(
+            {
+              ...(yield* Records.context(REPO, SESSION)),
+              type: Records.INVOCATION,
+              exposure: null,
+              capture: null,
+              operation: { name: "chat" },
+            },
+            key,
+          );
+          const before = yield* repository.writeTree([]);
+          const after = yield* repository.writeBlob(new TextEncoder().encode("changed"));
+          yield* Records.record(
+            {
+              ...(yield* Records.context(REPO, SESSION)),
+              type: Records.WORKSPACE,
+              beforeTree: qualify(before),
+              afterTree: qualify(after),
+              operation: null,
+            },
+            key,
+          );
+
+          const projected = yield* Invocation.project({ session: SESSION, repo: REPO });
+          assert.equal(projected.invocations[0]?.workspace, null);
+          assert.deepEqual(
+            projected.transitions.map((entry) => entry.after),
+            [qualify(after)],
           );
         }),
       ),

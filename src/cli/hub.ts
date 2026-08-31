@@ -13,7 +13,7 @@
  */
 import * as readline from "node:readline/promises";
 
-import { Console, Effect, Layer } from "effect";
+import { Console, Effect, Layer, Result } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import {
@@ -27,6 +27,7 @@ import { Invalid } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
+import { checkRefName } from "../git/Store.ts";
 import { ObjectStore, RefStore } from "../git/Store.ts";
 import * as Introduce from "../social/Introduce.ts";
 import * as SocialLog from "../social/Log.ts";
@@ -621,10 +622,94 @@ const enable = Command.make(
       Flag.withDefault(""),
       Flag.withDescription("Credential for a repository that requires one"),
     ),
+    refs: Flag.string("refs").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription(
+        "Hub namespaces to fetch beside the defaults, comma-separated, under refs/hub/ (e.g. refs/hub/trace/*)",
+      ),
+    ),
     url: Argument.string("url"),
   },
-  ({ identity: identityRepo, minPaths, name, root, token, url, yes }) =>
+  ({ identity: identityRepo, minPaths, name, refs, root, token, url, yes }) =>
     Effect.gen(function* () {
+      // Parsed before anything is contacted, so a typo is one refusal rather
+      // than a half-enabled repository.
+      const extra: Array<Refspec.Refspec> = [];
+      for (const spec of refs.split(",").filter((part) => part.trim() !== "")) {
+        const named = spec.trim();
+        // A bare pattern means the same name at both ends, which is how every
+        // entry in `HUB_FETCH` is written and the only form anybody wants
+        // here: `--refs=refs/hub/session/*` rather than that spelled twice
+        // around a colon. The full `source:destination` form still works.
+        //
+        // The force marker comes off first. Duplicated whole,
+        // `+refs/hub/trace/*` became a destination of `+refs/hub/trace/*` —
+        // `parse` strips the `+` from the front of the spec, not from the half
+        // it was copied into — so the fetch talked to the remote and then died
+        // on an unrelated "must name something under 'refs/'".
+        const force = named.startsWith("+");
+        const body = force ? named.slice(1) : named;
+        const parsed = Refspec.parse(
+          body.includes(":") ? named : `${force ? "+" : ""}${body}:${body}`,
+        );
+        if (Result.isFailure(parsed)) return yield* parsed.failure;
+        // And the name, not only the shape. `Refspec.parse` checks the colon
+        // and the star and nothing about where the ref lives, so
+        // `--refs=hub/trace/*` parsed, the repository was created, its
+        // identity pinned and the remote contacted — and only then did
+        // `checkRefName` refuse it. That is the half-enabled state this loop
+        // exists to prevent.
+        // Under `refs/hub/`, both halves, and that is narrower than "a legal
+        // ref" on purpose. `hub disable` removes what `HUB_MANAGED` maps, so a
+        // destination anywhere else — `--refs 'refs/hub/trace/*:refs/traces/*'`
+        // — fetched the verbatim task strings and exposed file bytes of every
+        // retained render into a namespace no `git+` command can then take out
+        // again. And an unconstrained destination is worse than untidy: the
+        // extra specs run in the hub group, *after* the trust group, so
+        // `--refs 'refs/hub/pr/*:refs/meta/trust/*'` would write a remote's
+        // pull requests over the trust refs this command had just fetched.
+        //
+        // What the flag is for is the hub namespaces the default omits; see
+        // `Refspec.HUB_FETCH`.
+        for (const half of [parsed.success.source, parsed.success.destination]) {
+          if (!half.startsWith("refs/hub/")) {
+            return yield* new Invalid({
+              field: "refs",
+              reason: `'${half}' must name something under 'refs/hub/'`,
+            });
+          }
+          // And a legal ref name, which the prefix says nothing about.
+          // `checkRefName` runs inside the fetch, so `refs/hub/my..traces/*` —
+          // or a name with a space, a `~`, an `@{`, or a `.lock` suffix —
+          // passed this loop, the directory was created, the identity pinned
+          // and the remote contacted before anything refused it. That is the
+          // half-enabled state this loop exists to prevent, reached through
+          // the rest of the rule instead of the prefix. The `*` stands in for
+          // a component the refspec will fill.
+          const wrong = checkRefName(half.replace("*", "x"));
+          if (wrong !== null) {
+            return yield* new Invalid({ field: "refs", reason: `'${half}' ${wrong}` });
+          }
+        }
+        // And the same namespace at both ends. The prefix test closes the
+        // cross-*group* case and not the cross-*namespace* one:
+        // `refs/hub/trace/*:refs/hub/pr/*` passed it, joined the same fetch
+        // group as the built-in pull-request spec, and wrote a remote's trace
+        // refs into the local pull-request namespace — colliding with real
+        // pull requests on a name clash, and otherwise leaving trace commits
+        // where `Event.entries` folds them as pull requests and reports every
+        // record unreadable. A refspec here renames nothing; it only says
+        // which namespace to take.
+        const namespaceOf = (half: string) => half.split("/").slice(0, 3).join("/");
+        if (namespaceOf(parsed.success.source) !== namespaceOf(parsed.success.destination)) {
+          return yield* new Invalid({
+            field: "refs",
+            reason: `'${named}' must name one namespace at both ends`,
+          });
+        }
+        extra.push(parsed.success);
+      }
+
       const key = yield* canonicalUrl(url);
       const directory = `${root}/${name}`;
 
@@ -703,12 +788,28 @@ const enable = Command.make(
         const target = { objects: yield* ObjectStore, refs: yield* RefStore };
         const all: string[] = [];
         const joined: string[] = [];
-        for (const spec of Refspec.HUB_FETCH) {
+        // The trust refs one at a time and the hub namespaces together. The
+        // order is load-bearing — an event is judged against the membership
+        // graph, so the grants have to arrive before the events that lean on
+        // them — but within the hub group it is not, and a call per refspec
+        // meant an advertisement and an `ls-refs` round trip each. Splitting
+        // `refs/hub/*` into one entry per namespace made that a round trip per
+        // namespace for strictly less data than the single glob fetched.
+        // Rejections are still attributed: `result.rejected` carries ref
+        // names.
+        const hub = Refspec.HUB_FETCH.filter((spec) => spec.source.startsWith("refs/hub/"));
+        const groups = [
+          ...Refspec.HUB_FETCH.filter((spec) => !spec.source.startsWith("refs/hub/")).map(
+            (spec) => [spec],
+          ),
+          [...hub, ...extra],
+        ];
+        for (const specs of groups) {
           const result = yield* fetchRepository({
             url,
             stores: target,
             token: credential,
-            refspecs: [spec],
+            refspecs: specs,
           });
           all.push(...result.refs.map((update) => update.name));
 
@@ -746,7 +847,9 @@ const enable = Command.make(
  * pinned identity and the refs it fetched, and removing "only the refspecs
  * git+ manages" is removing only the refs it manages.
  *
- * Which is `HUB_FETCH` itself, and `hub enable`'s scratch ref, and nothing
+ * Which is `HUB_MANAGED` — the fetch defaults plus `refs/hub/*`, so a trace
+ * or session ref somebody named explicitly with `--refs` is cleaned up too —
+ * and `hub enable`'s scratch ref, and nothing
  * else. Listing the namespaces by hand instead left `refs/meta/policy` behind:
  * the origin's branch rules outliving the identity that could have changed
  * them, on a repository where nothing holds `policy.write` any more. And the
@@ -823,7 +926,7 @@ const disable = Command.make(
             (name) =>
               name !== GENESIS_REF &&
               (name === PRESENTED_REF ||
-                Refspec.HUB_FETCH.some((spec) => Refspec.map(spec, name) !== null)),
+                Refspec.HUB_MANAGED.some((spec) => Refspec.map(spec, name) !== null)),
           );
         if (managed.length > 0) {
           yield* refs.apply(managed.map((name) => ({ name, value: null, reason: "hub disable" })));

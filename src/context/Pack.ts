@@ -117,6 +117,15 @@ export const Gitlink = Schema.Struct({
 });
 export type Gitlink = typeof Gitlink.Type;
 
+/**
+ * What each item kind owns, for the raw-document check in `decode`.
+ *
+ * Spelled from the schemas rather than by hand, so a field added to either
+ * struct is covered without anybody remembering to come back here.
+ */
+const BLOB_FIELDS = new Set(Object.keys(Blob.fields));
+const GITLINK_FIELDS = new Set(Object.keys(Gitlink.fields));
+
 export const Item = Schema.Union([Blob, Gitlink]);
 export type Item = typeof Item.Type;
 
@@ -247,14 +256,38 @@ export const decode = Effect.fn("context.Pack.decode")(function* (bytes: Uint8Ar
   });
 
   // Asked of the *raw* document, before the schema has had a chance to discard
-  // the fields that make it wrong.
+  // the fields that make it wrong — and in both directions, which the gitlink
+  // check alone was not. `Schema.Union` drops an excess property silently, so
+  // a `kind: "blob"` item carrying `commit` decoded to a clean blob while the
+  // persisted `context/pack.json` — the bytes `payload.pack` commits to, and
+  // the bytes any other implementation reads — went on asserting a submodule
+  // pointer for a path that holds a file. `checkItem` never looks at a field
+  // the schema discarded, so the audit reported the whole thing verified: a
+  // permanent, append-only record making exactly the cross-kind claim §5.2 and
+  // the gitlink guard exist to refuse. The mirrored case drops an
+  // instruction-authority claim from the audit while the signed bytes keep it.
   if (Predicate.hasProperty(json, "items") && Array.isArray(json.items)) {
     for (const [index, entry] of json.items.entries()) {
-      if (!Predicate.hasProperty(entry, "kind") || entry.kind !== "gitlink") continue;
-      if (Predicate.hasProperty(entry, "blob") || Predicate.hasProperty(entry, "range")) {
+      if (!Predicate.isObject(entry) || !Predicate.hasProperty(entry, "kind")) continue;
+      const owned =
+        entry.kind === "gitlink" ? GITLINK_FIELDS : entry.kind === "blob" ? BLOB_FIELDS : null;
+      const other =
+        entry.kind === "gitlink" ? BLOB_FIELDS : entry.kind === "blob" ? GITLINK_FIELDS : null;
+      if (owned === null || other === null) continue;
+      // The *other kind's* fields, not every field this version has not heard
+      // of. Refusing all of them made a pack from a newer producer carrying
+      // one additive descriptive field decode nowhere — `audit` reporting no
+      // readable pack, no evidence and `ok: false`, permanently, on a ref
+      // nothing can remove — which is the read-path over-strictness this
+      // module avoids everywhere else: `Capture.stage` is a bare string, and
+      // an unknown render framing is `unsupported` rather than `unreadable`.
+      // What §5.2 forbids is a cross-kind *claim*, and that is what this
+      // refuses.
+      const extra = Object.keys(entry).filter((name) => !owned.has(name) && other.has(name));
+      if (extra.length > 0) {
         return yield* new Invalid({
           field: "items",
-          reason: `item ${index} is a gitlink and may not carry blob or range`,
+          reason: `item ${index} is a ${String(entry.kind)} and may not carry ${extra.sort().join(", ")}`,
         });
       }
     }
@@ -283,10 +316,38 @@ export const decode = Effect.fn("context.Pack.decode")(function* (bytes: Uint8Ar
  * `view.tree` is the commit's own root tree, so the clean-worktree identity in
  * §4.2 holds by construction rather than by assertion.
  */
+/**
+ * How deep a chain of annotated tags this will follow to reach a commit.
+ *
+ * Git imposes no limit, and the chain is data somebody else wrote, so this is
+ * a bound rather than a belief about how tags are used. Far past any real one.
+ */
+const TAG_DEPTH = 16;
+
 export const committed = Effect.fn("context.Pack.committed")(function* (base: Oid) {
   const repository = yield* Repository;
-  const commit = yield* repository.readCommit(base);
-  return { base: qualify(base), tree: qualify(commit.tree) } satisfies View;
+  // Peeled, because `resolveRev` hands back what the ref holds and an
+  // annotated tag holds a tag object. Read straight as a commit, `context for
+  // --rev v1.0` died with an object-type error instead of building a view of
+  // the commit the tag names — and `Repository.searchTree` peels in exactly
+  // this situation, so not peeling here made the CLI inconsistent with the
+  // rest of its own revision handling.
+  // Until it is not a tag, not once. `git tag -a v2 v1` holds a tag whose
+  // object is another tag, and one level of peeling handed that second tag to
+  // `readCommit` — which fails its type check by reporting `ObjectNotFound`,
+  // so `context for --rev v2` died saying the repository does not hold an
+  // object it does hold. Bounded, because a tag chain is somebody else's data
+  // and a cycle in it must not be an unreturning read.
+  let named = base;
+  for (let depth = 0; depth < TAG_DEPTH; depth += 1) {
+    const object = yield* repository.readObject(named);
+    if (object.type !== "tag") break;
+    named = (yield* repository.readTag(named)).object;
+  }
+  const commit = yield* repository.readCommit(named);
+  // The commit, not the tag: `base` is what ancestry is asked about, and a tag
+  // oid is not something `view.base` can be walked from.
+  return { base: qualify(named), tree: qualify(commit.tree) } satisfies View;
 });
 
 /**
@@ -295,9 +356,16 @@ export const committed = Effect.fn("context.Pack.committed")(function* (base: Oi
  * Built as an overlay tree rather than reported as `HEAD`, which is the whole
  * of §4.2 — an agent that read a modified file was shown bytes no commit
  * holds, and a view naming the commit would make the audit resolve different
- * bytes than the ones exposed. Written, not merely hashed: a view nothing can
- * resolve is not a view, and §10 needs a real tree to hang the record's
- * `context/view` edge from.
+ * bytes than the ones exposed.
+ *
+ * Written, not merely hashed, and on every path rather than only the recording
+ * one. §10 needs a real tree to hang the record's `context/view` edge from,
+ * and the selector needs one before that: it lists the view's files and reads
+ * their bytes through it, so a tree that exists only as an oid is a tree
+ * nothing can select from. The cost is that a read-only `context for` leaves
+ * objects behind — bounded by how many distinct states the tracked files have
+ * actually been in, since content-addressing makes an unchanged file free, and
+ * collectable like any other unreferenced object.
  *
  * The clean case falls out for free. Every entry then hashes to what the index
  * already holds, so `writePaths` reproduces `HEAD`'s own tree oid and the
@@ -336,6 +404,15 @@ export const capture = Effect.fn("context.Pack.capture")(function* (base: Oid) {
     // repository's work tree is its own business — so `stat` says nothing
     // about it and the index is the only thing that can.
     if (modeString(entry.mode) === GITLINK_MODE) {
+      // Except while it is conflicted, where the index holds three pointers
+      // and this loop kept the *first* — stage 1, the merge base. For a
+      // regular file that is harmless because the bytes are re-read from disk
+      // below; a gitlink has no bytes to re-read, so the view named the commit
+      // the submodule was at before the merge started rather than the one the
+      // checkout is on, and `checkItem` then verified that wrong pointer
+      // forever on an append-only ref. Naming nothing is the §4.2 answer: a
+      // pointer nobody has agreed on is not one an agent was shown.
+      if (!merged) continue;
       entries.push({ path: entry.path, oid: entry.oid, mode: GITLINK_MODE });
       continue;
     }
@@ -354,7 +431,18 @@ export const capture = Effect.fn("context.Pack.capture")(function* (base: Oid) {
       continue;
     }
 
-    const oid = yield* repository.writeBlob(yield* work.read(entry.path));
+    // A tracked path that is now a directory reaches here: `stat` is an
+    // `lstat`, so it answers, and `modeString` maps a directory's 0o755 to a
+    // plain executable — then `read` fails `EISDIR`, which `Work.node` reports
+    // as `ObjectNotFound` and this had no handler for, so `context for` died
+    // with "object not found: src/foo" on an ordinary `rm f && mkdir f`.
+    // Treated as the deletion it is from the index's point of view: retrieval
+    // cannot read the path, so the view must not say it could.
+    const bytes = yield* work
+      .read(entry.path)
+      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+    if (bytes === null) continue;
+    const oid = yield* repository.writeBlob(bytes);
     entries.push({ path: entry.path, oid, mode: modeString(stat.mode) });
   }
 
@@ -400,6 +488,26 @@ export const evidence = Effect.fn("context.Pack.evidence")(function* (view: View
   const oid = unqualify(item.blob);
   if (oid === null) {
     return yield* new Invalid({ field: "blob", reason: `'${item.blob}' is not an object id` });
+  }
+
+  // Resolved *through* the view, which the signature always promised and the
+  // body did not do. `Select.render` turns these bytes into the exact segments
+  // hashed into the signed `renderDigest`, so a caller handing `render` a pack
+  // it did not build with `select` could commit to an item whose blob does not
+  // resolve under `view.tree` at `path` — the one check that would catch it
+  // lives in `checkItem`, which is not on this path.
+  const tree = unqualify(view.tree);
+  const at =
+    tree === null
+      ? null
+      : yield* repository
+          .findPath(tree, item.path)
+          .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  if (at === null || at.oid !== oid) {
+    return yield* new Invalid({
+      field: "blob",
+      reason: `${item.path} does not resolve to ${item.blob} under ${view.tree}`,
+    });
   }
 
   const bytes = yield* repository.readBlob(oid);

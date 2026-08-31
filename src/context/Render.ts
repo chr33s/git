@@ -88,6 +88,22 @@ export const MAX_PLACEMENT = 128;
 export const MAX_MEDIA_TYPE = 256;
 export const MAX_BODY = 16 * 1024 * 1024;
 
+/**
+ * The whole framing, which no per-segment bound reaches.
+ *
+ * `MAX_SEGMENTS` and `MAX_BODY` bound the parts and multiply to sixteen
+ * gigabytes. `context for` caps the *selector's* budget at
+ * `Select.MAX_EVIDENCE`, which is the right place for the budget and covers
+ * neither the task segment the selector appends nor a library caller handing
+ * `expose` its own segments — and the result is written to
+ * `context/render.bin` on an append-only ref that replicates. So the writer
+ * bounds what it writes, which is the only place that sees the total.
+ *
+ * Well above any real render: `Select.MAX_EVIDENCE` is four megabytes, and the
+ * framing adds a header per segment.
+ */
+export const MAX_RENDER = 64 * 1024 * 1024;
+
 export interface Segment {
   /** Logical invocation placement understood by the harness. */
   readonly placement: string;
@@ -126,7 +142,15 @@ export const frame = (segments: ReadonlyArray<Segment>): Result.Result<Uint8Arra
     );
   }
 
-  const parts: Array<Uint8Array> = [encoder.encode(PREAMBLE), u32(segments.length)];
+  // Seeded with the header, because `parse` measures the whole blob. Counting
+  // only the segments, `frame` accepted a render twenty-five bytes over and
+  // wrote it to `context/render.bin` — and `recompute` then refused the intact
+  // retained bytes as "render is N bytes", which is an exposure auditing as
+  // unreadable forever on a record nothing can remove. The same failure the
+  // placement bound is written to avoid, reached through the total.
+  const header = encoder.encode(PREAMBLE);
+  let total = header.length + 4;
+  const parts: Array<Uint8Array> = [header, u32(segments.length)];
   for (const [index, segment] of segments.entries()) {
     if (!isPlacement(segment.placement)) {
       return Result.fail(
@@ -156,6 +180,20 @@ export const frame = (segments: ReadonlyArray<Segment>): Result.Result<Uint8Arra
     }
     parts.push(u32(placement.length), placement, u32(mediaType.length), mediaType);
     parts.push(u64(segment.body.length), segment.body);
+    // Accumulated as it goes, so a caller cannot reach the bound by adding
+    // segments each of which is under it. `MAX_SEGMENTS` times `MAX_BODY` is
+    // sixteen gigabytes, and the only other cap — `--max-bytes` — bounds what
+    // the *selector* chooses, not the task segment appended after it and not a
+    // library caller supplying its own segments.
+    total += 16 + placement.length + mediaType.length + segment.body.length;
+    if (total > MAX_RENDER) {
+      return Result.fail(
+        new Invalid({
+          field: "render",
+          reason: `a render may not exceed ${MAX_RENDER} bytes`,
+        }),
+      );
+    }
   }
   return Result.succeed(concatBytes(parts));
 };
@@ -204,6 +242,10 @@ export const parse = (bytes: Uint8Array): Result.Result<ReadonlyArray<Segment>, 
   const count = view.getUint32(at, false);
   at += 4;
   if (count > MAX_SEGMENTS) return failed(`render claims ${count} segments`);
+  // The reader is held to the same total the writer is, for the reason it is
+  // held to `isPlacement`: bytes this module would not write are not bytes it
+  // should call V1 framing.
+  if (bytes.length > MAX_RENDER) return failed(`render is ${bytes.length} bytes`);
 
   const segments: Array<Segment> = [];
   const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -217,6 +259,14 @@ export const parse = (bytes: Uint8Array): Result.Result<ReadonlyArray<Segment>, 
     }
     const placement = decoder.decode(bytes.subarray(at, at + placementLength));
     at += placementLength;
+    // The same rule the writer is held to. Bounded only in length, this
+    // accepted framing `frame` would never produce — an empty placement, or
+    // `vendor/a/b` — so `recompute` answered `ok` for bytes that are not V1
+    // framing, which is the one distinction it exists to make, and a second
+    // conforming implementation could write renders this one's writer rejects.
+    if (!isPlacement(placement)) {
+      return failed(`segment ${index} has placement '${placement}', which is not V1 framing`);
+    }
 
     if (at + 4 > bytes.length) return failed(`segment ${index} is truncated`);
     const mediaTypeLength = view.getUint32(at, false);
@@ -224,6 +274,7 @@ export const parse = (bytes: Uint8Array): Result.Result<ReadonlyArray<Segment>, 
     if (mediaTypeLength > MAX_MEDIA_TYPE || at + mediaTypeLength > bytes.length) {
       return failed(`segment ${index} has an unusable media type length`);
     }
+    if (mediaTypeLength === 0) return failed(`segment ${index} has no media type`);
     const mediaType = decoder.decode(bytes.subarray(at, at + mediaTypeLength));
     at += mediaTypeLength;
 

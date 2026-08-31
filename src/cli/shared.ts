@@ -22,6 +22,7 @@ import { Invalid } from "../git/Error.ts";
 import type { Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
+import * as RedactionCache from "../hub/Redaction.node.ts";
 import { Repository } from "../git/Repository.ts";
 import { IndexStore, WorkTree } from "../git/Work.ts";
 import { workspace } from "../git/Work.node.ts";
@@ -146,6 +147,12 @@ export const withRepo = <A, E>(
         GitRepository.layer.pipe(
           Layer.provideMerge(hooks),
           Layer.provide(stores(path.join(root, repo))),
+          // Kept beside the repository, because every verb here is its own
+          // process and an in-process answer would never be read a second
+          // time. See `hub/Redaction.node.beside` for why it is a file rather
+          // than a ref, and docs/telemetry.md §13.1 for what it costs when
+          // nothing is kept.
+          Layer.provideMerge(RedactionCache.beside(path.join(root, repo))),
         ),
       ),
     );
@@ -277,6 +284,7 @@ export const withWork = <A, E>(
           Layer.provide(GitRepository.hooksNoop),
           Layer.provide(stores(found.gitDir)),
           Layer.provideMerge(workspace(found.workTree)),
+          Layer.provideMerge(RedactionCache.beside(found.gitDir)),
         ),
       ),
     );
@@ -303,6 +311,18 @@ export const withDiscovered = <A, E>(
   if (repo !== "") return withRepo(root, repo, effect, { notify: false });
 
   return Effect.gen(function* () {
+    // `--root` names a directory of bare repositories, and on its own it names
+    // no repository at all. Ignored, a server script passing `--root /var/git`
+    // — the shape every other verb in this CLI takes — audited whatever
+    // checkout the process happened to be standing in and exited zero. Wrong
+    // repository, right-looking answer.
+    if (root !== "." && root !== "") {
+      return yield* new Invalid({
+        field: "repo",
+        reason: "--root names a directory of repositories; name one in it with --repo",
+      });
+    }
+
     const found = yield* discoverRepository(yield* GitInvocation);
     if (found === null) {
       return yield* new Invalid({
@@ -315,6 +335,7 @@ export const withDiscovered = <A, E>(
         GitRepository.layer.pipe(
           Layer.provideMerge(GitRepository.hooksNoop),
           Layer.provide(stores(found.gitDir)),
+          Layer.provideMerge(RedactionCache.beside(found.gitDir)),
         ),
       ),
     );

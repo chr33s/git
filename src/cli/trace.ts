@@ -20,6 +20,8 @@ import { Console, Effect, Predicate } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
+import { qualify } from "../git/Oid.ts";
+import * as Redaction from "../hub/Redaction.ts";
 import * as Records from "../telemetry/Records.ts";
 import * as Semconv from "../telemetry/Semconv.ts";
 import { readGenesis } from "../trust/Genesis.ts";
@@ -100,6 +102,10 @@ const record = Command.make(
       Flag.withDefault(""),
       Flag.withDescription("The Context Exposure this invocation was made against, by record OID"),
     ),
+    invocation: Flag.string("invocation").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("The invocation a tool span belongs beneath, by record OID"),
+    ),
     stage: Flag.string("stage").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Where the signal was captured: sdk-export, local-collector, hook, …"),
@@ -111,8 +117,34 @@ const record = Command.make(
       ),
     ),
   },
-  ({ event, exposure, key, otel, repo, revision, root, session, stage }) =>
+  ({ event, exposure, invocation, key, otel, repo, revision, root, session, stage }) =>
     Effect.gen(function* () {
+      // Refused rather than dropped. These four say how to *normalize* a span,
+      // so on the `--event` path — where the caller has already normalized —
+      // there is nothing for them to do, and silently ignoring a flag that
+      // names the record's join is how a record ends up joined to nothing.
+      const spanOnly = { exposure, invocation, stage, "semconv-revision": revision };
+      const ignored = Object.entries(spanOnly)
+        .filter(([, value]) => value !== "")
+        .map(([name]) => `--${name}`);
+      if (!otel && ignored.length > 0) {
+        return yield* new Invalid({
+          field: "event",
+          reason: `${ignored.join(", ")} ${ignored.length === 1 ? "describes" : "describe"} how to read a span; pass --otel, or put the field in the event itself`,
+        });
+      }
+
+      // Held to the vocabulary `Records.STAGES` declares. `Capture.stage` is a
+      // bare string so an older reader can still read a stage it does not
+      // know, which also means a typo lands in a signed, immutable record on
+      // an append-only ref and every later reader sees a stage that is not one.
+      if (stage !== "" && !Records.STAGES.some((known) => known === stage)) {
+        return yield* new Invalid({
+          field: "stage",
+          reason: `'${stage}' is not a capture stage; one of ${Records.STAGES.join(", ")}`,
+        });
+      }
+
       const signer = yield* readPrivateKey(key);
       const bytes = yield* readFile(event);
 
@@ -127,22 +159,53 @@ const record = Command.make(
           }
 
           const span = yield* Semconv.decode(bytes);
+          // The other half of the "refused rather than dropped" rule. Each of
+          // these two applies to exactly one span kind: `--exposure` to an
+          // inference span, `--invocation` to a tool span. Passed with the
+          // wrong kind they were read by nothing, and the record was written
+          // joined to nothing — the same failure, on the other path.
+          const operation = Semconv.operationOf(span);
+          // One normalization, read twice. Called again below with the real
+          // options, the check here ran against a throwaway `Capture` built
+          // with no stage and no revision — two results for one span, free to
+          // disagree the day the options reach the classification.
           const normalizedSpan = Semconv.normalize(span, {
             stage: stage === "" ? undefined : stage,
             revision: revision === "" ? undefined : revision,
             exposure: exposure === "" ? null : exposure,
+            invocation: invocation === "" ? null : invocation,
           });
+          const kind = normalizedSpan.kind;
+          // `inference` and `unsupported` both take `an`, and both were
+          // reachable here.
+          const named = `${/^[aeiou]/.test(kind) ? "an" : "a"} ${kind} span`;
+          if (exposure !== "" && kind !== "inference") {
+            return yield* new Invalid({
+              field: "exposure",
+              reason: `--exposure names the context an inference made use of; '${operation ?? "this span"}' is ${named}`,
+            });
+          }
+          if (invocation !== "" && kind !== "tool") {
+            return yield* new Invalid({
+              field: "invocation",
+              reason: `--invocation names the call a tool ran under; '${operation ?? "this span"}' is ${named}`,
+            });
+          }
 
+          // The envelope last, exactly as the `--event` path spreads it. No
+          // normalizer field is named `repo` or `session` today, so the two
+          // orders agree — but they are two orders for one security-relevant
+          // binding, and the day a field is added the wrong one wins silently.
           const base = yield* Records.context(identity, session);
           if (normalizedSpan.kind === "inference") {
             return yield* Records.record(
-              { type: Records.INVOCATION, ...base, ...normalizedSpan.fields },
+              { type: Records.INVOCATION, ...normalizedSpan.fields, ...base },
               signer,
             );
           }
           if (normalizedSpan.kind === "tool") {
             return yield* Records.record(
-              { type: Records.TOOL, ...base, ...normalizedSpan.fields },
+              { type: Records.TOOL, ...normalizedSpan.fields, ...base },
               signer,
             );
           }
@@ -166,10 +229,82 @@ const record = Command.make(
     }),
 );
 
+/**
+ * `git+ trace redact` — the way back out of a leaked prompt.
+ *
+ * The trace is where a retained render holds the task string verbatim and the
+ * exact bytes of every exposed file, so `session redact` alone left the text
+ * it was asked to remove readable one ref over. Nothing is deleted here: the
+ * tombstone is what replicates, and the bytes go at the next `gc`.
+ */
+const redact = Command.make(
+  "redact",
+  {
+    root: rootFlag,
+    repo: repoFlag,
+    key: Flag.string("key").pipe(
+      Flag.withDescription("Path to the SSH private key the tombstone is signed with"),
+    ),
+    session: Flag.string("session").pipe(Flag.withDescription("The session holding the record")),
+    target: Flag.string("target").pipe(Flag.withDescription("The record's own id")),
+    reason: Flag.string("reason").pipe(Flag.withDescription("Why it is being removed")),
+  },
+  ({ key, reason, repo, root, session, target }) =>
+    Effect.gen(function* () {
+      const signer = yield* readPrivateKey(key);
+      const done = yield* withDiscovered(
+        root,
+        repo,
+        Effect.gen(function* () {
+          const written = yield* Records.redact({
+            repo: yield* identityOf(),
+            session,
+            target,
+            reason,
+            key: signer,
+          });
+          // Asked after the tombstone is on the ref, because that is what
+          // decides the answer. A Pack and a ContextRender are deterministic,
+          // so a second exposure of the same view and task names the same
+          // objects — and `gc` will not delete an object a live record still
+          // needs. The removal is then partial, and it used to say nothing:
+          // this printed an oid, `gc` reported a count, and the verbatim task
+          // string and every exposed file byte stayed readable at
+          // `<record>^{tree}:context/render.bin` and clonable off the ref.
+          return { written, ...(yield* Redaction.withheld(written.targetCommit)) } as const;
+        }),
+      );
+      yield* Console.log(done.written.oid);
+      if (done.blobs.length > 0) {
+        // Two reasons an object stays, and they need different answers. A live
+        // record naming it is one, and redacting that record is what finishes
+        // the job — so they are named, since an operator told "partly removed"
+        // with no way to find the rest has been told the bad news and nothing
+        // else. A ref this host cannot walk is the other: `excluded` withholds
+        // the shared `context/` objects wholesale then, and there is no holder
+        // to name, so the message said "held by 0 other live record(s)" and
+        // stopped.
+        if (done.holders.length === 0) {
+          yield* Console.error(
+            `! ${done.blobs.length} object(s) this record names will not be collected; a record ref this host cannot walk may name them`,
+          );
+        } else {
+          yield* Console.error(
+            `! ${done.blobs.length} object(s) this record names are still held by ${done.holders.length} other live record(s) and will not be collected`,
+          );
+          for (const holder of done.holders) yield* Console.error(`  ${qualify(holder)}`);
+        }
+      }
+    }),
+);
+
 export const traceCommand = Command.make("trace", {}, () =>
   Console.log("Usage: git+ trace record --session <id> --key <key> --event <file>"),
 ).pipe(
   Command.withSubcommands([
     record.pipe(Command.withDescription("Sign one normalized trace record and append it")),
+    redact.pipe(
+      Command.withDescription("Remove one trace record's content, signed and replicated"),
+    ),
   ]),
 );

@@ -26,13 +26,13 @@ import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "bin.ts");
 
-const cli = async (args: ReadonlyArray<string>): Promise<string> => {
-  const result = await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" });
+const cli = async (args: ReadonlyArray<string>, cwd?: string): Promise<string> => {
+  const result = await execFileAsync(process.execPath, [entry, ...args], { cwd, encoding: "utf8" });
   return `${result.stdout}${result.stderr}`;
 };
 
-const failing = (args: ReadonlyArray<string>): Promise<string> =>
-  cli(args).then(
+const failing = (args: ReadonlyArray<string>, cwd?: string): Promise<string> =>
+  cli(args, cwd).then(
     () => "",
     (error: { stdout?: string; stderr?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
   );
@@ -146,6 +146,16 @@ describe("cli session", () => {
         await cli(["session", "show", "--root", root, "--repo", "project", session]),
       );
       assert.equal(shown.session, session);
+
+      // And the old spelling, where this argument named the repository. The
+      // `--branch` guard catches the two-argument form; this one went through,
+      // resolving whichever checkout the process was standing in, projecting a
+      // session named after the repository, printing `exists: false` and
+      // exiting zero — the silent misread the move to `--repo` was supposed to
+      // prevent.
+      const misread = await failing(["session", "show", "project"], path.join(root, "project"));
+      assert.match(misread, /has no session 'project'/);
+
       assert.equal(shown.agent.kind, "claude-code");
       assert.equal(shown.agent.model, "claude-fable-5");
       assert.deepEqual(
@@ -206,6 +216,36 @@ describe("cli session", () => {
         "refs/heads/nowhere",
       ]);
       assert.match(missing, /no session has produced/);
+
+      // The old shape, where the repository was a positional. It now parses as
+      // a session, `--branch` discards it, and `--root` on its own names no
+      // repository — so without a check this read whatever checkout the
+      // process was standing in and answered for the wrong repository.
+      const positional = await failing([
+        "session",
+        "show",
+        "--root",
+        root,
+        "project",
+        "--branch",
+        "refs/heads/topic",
+      ]);
+      assert.match(positional, /--root names a directory of repositories/);
+
+      // And a session and a branch together are ambiguous whichever way they
+      // were meant, so that is refused on its own terms.
+      const ambiguous = await failing([
+        "session",
+        "show",
+        "--root",
+        root,
+        "--repo",
+        "project",
+        "0192f000-0000-7000-8000-000000000001",
+        "--branch",
+        "refs/heads/topic",
+      ]);
+      assert.match(ambiguous, /name a session or --branch, not both/);
     }),
   );
 

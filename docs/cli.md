@@ -47,9 +47,9 @@ Repo-scoped commands follow ordinary Git ergonomics:
 ```bash
 cd project
 
-git+ session show --branch=HEAD --audit
+git+ session show --branch=refs/heads/feature/auth --audit
 git+ context for --task="fix authentication policy"
-git+ knowledge check
+git+ trace record --session="$session" --key=~/.ssh/agent --event=span.json
 ```
 
 The current checkout is the default repository context. Explicit root/repository selection remains available for bare repositories, servers, automation, and administration.
@@ -208,6 +208,13 @@ git+ session show "$session"
 git+ session show --branch=feature/auth
 ```
 
+`show` is the one `session` subcommand whose positional argument is the session rather than the
+repository — the session is what it is _for_, and requiring a repository ahead of it made the
+common call name two things to select one. The repository moves to `--repo`, which every read-only
+verb in §7 already takes, and is not needed at all inside a checkout. The other seven subcommands
+are unchanged. An older `git+ session show <repo> <session>` fails rather than misreading: with
+`--root` set and no `--repo`, the command says so and names the flag.
+
 ### 5.3 Session audit
 
 The session is also the normal audit entry point:
@@ -264,6 +271,11 @@ The answer becomes signed causal provenance instead of an ephemeral chat message
 ---
 
 ## 6. Knowledge
+
+> **Not yet implemented.** `git+ knowledge` is specified in [knowledge.md](knowledge.md) and no
+> such command is registered; invoking one exits non-zero with the top-level usage. This section
+> describes the intended surface, in the same state `context` and `trace` were in before they were
+> built.
 
 The knowledge corpus is ordinary repository content under `.gitplus/knowledge/`. Each Concept is directly OKF-compatible Markdown/YAML with optional stronger Git+ provenance under `gitplus:` frontmatter.
 
@@ -365,8 +377,8 @@ retention or redaction policy leaves behind.
 git+ context why <pack> src/auth.ts
 ```
 
-`<pack>` is a pack blob OID, an exposure record OID — the exposure retains its own pack — or a file
-holding a pack that was never persisted.
+`<pack>` is a pack blob OID, an exposure record OID — the exposure retains its own pack — an
+ordinary revision naming either, or a file holding a pack that was never persisted.
 
 The command separates verified Git evidence from descriptive selector explanations.
 
@@ -376,8 +388,15 @@ The command separates verified Git evidence from descriptive selector explanatio
 git+ context audit <invocation-or-exposure>
 ```
 
-The argument is a qualified Git record OID, or a session id — which audits every exposure that
-session recorded, oldest first.
+The argument is a qualified Git record OID, an ordinary revision naming one, or a session id —
+which audits every exposure that session recorded, oldest first. An `invocation-telemetry` OID,
+which is what `git+ trace record` prints, audits the exposure that invocation names. A record
+that names no exposure — a tool operation, a workspace transition, an invocation that used no
+context — is refused, with a pointer to `git+ session show <session> --audit`.
+
+`why` and `audit` read objects and nothing else, so they take `--root`/`--repo` and work on a bare
+repository; inside a checkout neither flag is needed. `for` takes `--work`, because capturing a
+Repository View needs the work tree.
 
 The audit checks each dimension independently:
 
@@ -409,8 +428,12 @@ bound Invocation arrives with the runtime records in [telemetry.md](telemetry.md
 Harness-native OpenTelemetry GenAI is the preferred runtime capture path. Users read the resulting Invocations through:
 
 ```bash
-git+ session show --audit
+git+ session show <session-id> --audit
+git+ session show --branch=<ref> --audit
 ```
+
+One or the other: a session to read, or a branch to look one up from. `--audit` has nothing to
+project without knowing which run it is about.
 
 Raw trace writing exists for integrations without suitable native OTel:
 
@@ -436,6 +459,16 @@ git+ trace record \
 `--stage` records where the signal was captured before anything could sample it. `--semconv-revision` is what makes the record claim strict semconv adherence; without it the mapping is best-effort and says so by omitting the `semconv` block. `--exposure` names the Context Exposure this invocation was made against, which is the only join the projection uses.
 
 Both forms discover the current checkout by default; `--root` and `--repo` select a bare repository for server use.
+
+A record whose prompt or exposed bytes should not have replicated comes back out the same way a
+session record does:
+
+```bash
+git+ trace redact --session=<session-id> --target=<record-oid> --reason="the prompt carried a token"
+```
+
+Nothing is deleted by that command. The tombstone is what replicates, and the bytes go at the next
+`gc`; removing a record needs `hub.redact` beside `hub.trace`.
 
 There is no normal `trace show` workflow. The session/Invocation projection is the human-facing read path.
 

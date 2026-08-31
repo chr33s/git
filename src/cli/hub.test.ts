@@ -643,6 +643,120 @@ describe("cli hub", () => {
           (await refsOf()).some((line) => line.includes("refs/meta/trust/")),
           "enable brought trust refs in",
         );
+        // A refspec this cannot parse is one refusal before anything is
+        // contacted, rather than a half-enabled repository. Which namespaces
+        // the default carries is pinned in `git/Refspec.test.ts`.
+        const bad = await cli([
+          "hub",
+          "enable",
+          "--root",
+          root,
+          "--as",
+          "other",
+          "--yes",
+          "--refs",
+          "refs/hub/session/*:",
+          url,
+        ]).then(
+          () => "",
+          (error: { stdout?: string; stderr?: string }) =>
+            `${error.stdout ?? ""}${error.stderr ?? ""}`,
+        );
+        assert.match(bad, /empty half/);
+
+        // And the ref name, not only the shape. `Refspec.parse` checks the
+        // colon and the star and nothing about where the ref lives, so
+        // `hub/trace/*` parsed, the repository was created, its identity
+        // pinned and the remote contacted — and only then did `checkRefName`
+        // refuse it: the half-enabled state this guard exists to prevent.
+        const outside = await cli([
+          "hub",
+          "enable",
+          "--root",
+          root,
+          "--as",
+          "elsewhere",
+          "--yes",
+          "--refs",
+          "hub/trace/*",
+          url,
+        ]).then(
+          () => "",
+          (error: { stdout?: string; stderr?: string }) =>
+            `${error.stdout ?? ""}${error.stderr ?? ""}`,
+        );
+        assert.match(outside, /must name something under 'refs\/hub\//);
+
+        // And a destination outside it, which is worse than untidy. `hub
+        // disable` removes what `HUB_MANAGED` maps, so this fetched every
+        // retained render — verbatim task strings and exposed file bytes —
+        // into a namespace no `git+` command can take out again; and because
+        // the extra specs run after the trust group, an unconstrained
+        // destination could write a remote's pull requests over the trust refs
+        // this command had just fetched.
+        const elsewhere = await cli([
+          "hub",
+          "enable",
+          "--root",
+          root,
+          "--as",
+          "diverted",
+          "--yes",
+          "--refs",
+          "refs/hub/trace/*:refs/traces/*",
+          url,
+        ]).then(
+          () => "",
+          (error: { stdout?: string; stderr?: string }) =>
+            `${error.stdout ?? ""}${error.stderr ?? ""}`,
+        );
+        assert.match(elsewhere, /must name something under 'refs\/hub\//);
+
+        // And the rest of the rule, not only the prefix. `checkRefName` runs
+        // inside the fetch, so a name with a `..`, a space or a `.lock` suffix
+        // passed this loop, the directory was created, the identity pinned and
+        // the remote contacted before anything refused it — the same
+        // half-enabled state.
+        const malformed = await cli([
+          "hub",
+          "enable",
+          "--root",
+          root,
+          "--as",
+          "malformed",
+          "--yes",
+          "--refs",
+          "refs/hub/my..traces/*",
+          url,
+        ]).then(
+          () => "",
+          (error: { stdout?: string; stderr?: string }) =>
+            `${error.stdout ?? ""}${error.stderr ?? ""}`,
+        );
+        assert.match(malformed, /refs\/hub\/my\.\.traces/);
+
+        // And one namespace at both ends. The prefix test closes the
+        // cross-group case and not the cross-namespace one: this passed it,
+        // joined the same fetch group as the built-in pull-request spec, and
+        // wrote a remote's trace refs into the local pull-request namespace,
+        // where `Event.entries` folds them as pull requests.
+        const crossed = await cli([
+          "hub",
+          "enable",
+          "--root",
+          root,
+          "--as",
+          "crossed",
+          "--yes",
+          "--refs",
+          "refs/hub/trace/*:refs/hub/pr/*",
+          url,
+        ]).then(
+          () => "",
+          (error: { stdout?: string; stderr?: string }) =>
+            `${error.stdout ?? ""}${error.stderr ?? ""}`,
+        );
+        assert.match(crossed, /one namespace at both ends/);
 
         const disabled = await cli(["hub", "disable", "--root", root, "--as", "clone", url]);
         assert.match(disabled, /hub\/trust ref\(s\) removed/);

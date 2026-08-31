@@ -98,7 +98,27 @@ const DENSE = /\b[A-Za-z0-9+/_=-]{32,}\b/g;
  * are configuration, and configuration belongs in `refs/meta/policy` where
  * every replica applies the same rules.
  */
-export const scan = (text: string): ReadonlyArray<Finding> => {
+/**
+ * Whether the value being scanned is an identifier somebody else minted.
+ *
+ * Every pattern rule still applies — a `ghp_` prefix is a token wherever it is
+ * put — but the entropy rule does not, because an opaque base62 id of
+ * thirty-two characters is indistinguishable from a token by entropy alone.
+ * Scanned as prose, an OTel trace id or a provider's conversation id refused
+ * the whole record, with no override and nothing written, and it did so for
+ * some providers and not others: hex- and UUID-shaped ids stay under the
+ * threshold and base62 ones do not.
+ *
+ * Named here rather than in either caller so both hold the same line.
+ * `telemetry/Records.record` and `context/Exposure.expose` each write to an
+ * append-only ref that this version cannot rewind, and each had its own idea
+ * of which fields this covers.
+ */
+export interface Reading {
+  readonly opaque?: boolean;
+}
+
+export const scan = (text: string, reading: Reading = {}): ReadonlyArray<Finding> => {
   const found: Array<Finding> = [];
   const seen = new Set<string>();
 
@@ -135,7 +155,7 @@ export const scan = (text: string): ReadonlyArray<Finding> => {
     }
   }
   for (const [match] of text.matchAll(DENSE)) {
-    if (entropy(match) > 4.5) note("high-entropy string", match);
+    if (reading.opaque !== true && entropy(match) > 4.5) note("high-entropy string", match);
   }
 
   return found;

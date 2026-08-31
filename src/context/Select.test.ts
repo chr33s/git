@@ -188,6 +188,144 @@ describe("the default selector", () => {
     ),
   );
 
+  it.effect("counts the standing instructions against the budget it was given", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          // Small enough to fit its share, so it is included — and then has to
+          // be paid for out of the same budget the search spends.
+          const instructions = "authorize policy\n".repeat(50);
+          yield* work.write("AGENTS.md", encode(instructions), 0o100644);
+          yield* work.write(
+            "src/auth.ts",
+            encode(`authorize policy\n${"filler line\n".repeat(4_000)}`),
+            0o100644,
+          );
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "instructions\n", author });
+          const view = yield* Pack.capture(made.oid);
+
+          const maxBytes = 4096;
+          const pack = yield* Select.select({ task: "authorize policy", view, maxBytes });
+          assert.equal(
+            pack.items.some((item) => item.path === "AGENTS.md"),
+            true,
+            "an instruction file that fits is always included",
+          );
+
+          const searched = pack.items.find((item) => item.reason === "search");
+          assert.notEqual(searched, undefined);
+          if (searched?.kind !== "blob" || searched.range === undefined) return;
+          // What the search adds is what is left, not the whole budget over
+          // again: uncounted, the instructions went in *and* the search still
+          // received its full allowance.
+          assert.equal(
+            searched.range[1] - searched.range[0] <= maxBytes - instructions.length,
+            true,
+          );
+        }),
+      ),
+    ),
+  );
+
+  it.effect("does not let the instructions starve the search", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          // Larger than the whole budget: counting it without a share of its
+          // own emptied the pack of everything the task asked about.
+          yield* work.write("AGENTS.md", encode("standing\n".repeat(9_000)), 0o100644);
+          yield* work.write(
+            "src/auth.ts",
+            encode("export const authorize = (policy: string) => policy\n"),
+            0o100644,
+          );
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "big instructions\n", author });
+          const view = yield* Pack.capture(made.oid);
+
+          const pack = yield* Select.select({ task: "authorize policy", view, maxBytes: 4096 });
+          assert.equal(
+            pack.items.some((item) => item.path === "src/auth.ts"),
+            true,
+            "the task still gets evidence",
+          );
+          // And the file that could not fit is accounted for rather than
+          // dropped: the pack says what it did with it.
+          assert.equal(
+            (pack.omissions ?? []).some((omission) => omission.path === "AGENTS.md"),
+            true,
+          );
+        }),
+      ),
+    ),
+  );
+
+  it.effect("never both omits and selects the same instruction file", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          yield* work.write("AGENTS.md", encode("authorize policy\n".repeat(600)), 0o100644);
+          yield* work.write(
+            "src/auth.ts",
+            encode("export const authorize = (policy: string) => policy\n"),
+            0o100644,
+          );
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "instructions\n", author });
+          const view = yield* Pack.capture(made.oid);
+
+          const pack = yield* Select.select({ task: "authorize policy", view, maxBytes: 4096 });
+          const omitted = (pack.omissions ?? []).some((entry) => entry.path === "AGENTS.md");
+          const selected = pack.items.some((item) => item.path === "AGENTS.md");
+          // One or the other. Both is a record contradicting itself — and the
+          // selected form is worse than useless: it carries the instruction
+          // file as `implementation / search`, with no authority annotation.
+          assert.equal(omitted && selected, false);
+          if (selected) {
+            const item = pack.items.find((entry) => entry.path === "AGENTS.md");
+            assert.equal(item?.kind === "blob" && item.role, "instruction");
+          }
+        }),
+      ),
+    ),
+  );
+
+  it.effect("omits an instruction file it will not read rather than exposing it", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          yield* work.write(
+            "AGENTS.md",
+            encode(`authorize\n${"padding line\n".repeat(100_000)}`),
+            0o100644,
+          );
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "huge\n", author });
+          const view = yield* Pack.capture(made.oid);
+
+          const pack = yield* Select.select({ task: "authorize", view });
+          // Recorded as an omission rather than as evidence: `render` would
+          // otherwise frame bytes the selector never looked at.
+          assert.equal(
+            pack.items.some((item) => item.path === "AGENTS.md"),
+            false,
+          );
+          assert.equal(
+            (pack.omissions ?? []).some(
+              (omission) => omission.path === "AGENTS.md" && omission.reason === "filtered",
+            ),
+            true,
+          );
+        }),
+      ),
+    ),
+  );
+
   it.effect("records evidence a text renderer can hand over intact", () =>
     Effect.promise(() =>
       scenario(
@@ -226,6 +364,99 @@ describe("the default selector", () => {
     ),
   );
 
+  it.effect("does not let files the index never read crowd out the real omissions", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          yield* project();
+
+          // Past `Search.MAX_FILE_BYTES`, and mentioning none of the task's
+          // words. `search` reports it as skipped anyway: the size check runs
+          // before the match, so this file was never a candidate for this task
+          // — it is in the tree, and that is all.
+          yield* work.write("vendor/blob.bin", encode("z".repeat(5 * 1024 * 1024)), 0o100644);
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "second\n", author });
+          const captured = yield* Pack.capture(made.oid);
+
+          const pack = yield* Select.select({
+            task: "authorize policy",
+            view: captured,
+            maxItems: 1,
+          });
+
+          // Named omissions are filled in the order they are recorded, and
+          // there are only 64 slots. Recorded first, the skipped files took
+          // them in tree order — so on a repository with that many large files
+          // every omission a reader was asking about became an anonymous
+          // count, and the signed pack named paths nobody had asked about.
+          const named = (pack.omissions ?? []).filter((omission) => "path" in omission);
+          assert.notEqual(named.length, 0);
+          assert.equal(named[0]?.path === "vendor/blob.bin", false);
+          assert.equal(
+            named.some((omission) => omission.reason === "budget"),
+            true,
+          );
+
+          // Still accounted for, just last: a pack that said nothing about it
+          // would understate what was left out.
+          assert.equal(
+            named.some((omission) => omission.path === "vendor/blob.bin"),
+            true,
+          );
+        }),
+      ),
+    ),
+  );
+
+  it.effect("records a gitlink the budget cut instead of dropping it silently", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const submodule = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "submodule\n",
+            author,
+          });
+          const tree = yield* repository.writePaths([
+            { path: "vendor/policy-engine", oid: submodule, mode: "160000" },
+            {
+              path: "AGENTS.md",
+              oid: yield* repository.writeBlob(encode("Standing.\n")),
+              mode: "100644",
+            },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "with a submodule\n",
+            author,
+          });
+          const view = yield* Pack.committed(commit);
+
+          // One item, taken by the instructions, so the submodule the task
+          // names by hand does not fit. This was the only cut in the selector
+          // that went unrecorded — and it `break`s — so the signed pack read
+          // as though no submodule had been considered.
+          const pack = yield* Select.select({
+            task: "vendor/policy-engine",
+            view,
+            maxItems: 1,
+          });
+          assert.equal(
+            (pack.omissions ?? []).some(
+              (omission) => "path" in omission && omission.path === "vendor/policy-engine",
+            ),
+            true,
+          );
+        }),
+      ),
+    ),
+  );
+
   it.effect("records a gitlink the selected evidence points at", () =>
     Effect.promise(() =>
       scenario(
@@ -255,10 +486,121 @@ describe("the default selector", () => {
           const pack = yield* Select.select({ task: "authorize", view });
           const gitlink = pack.items.find((item) => item.kind === "gitlink");
           assert.equal(gitlink?.path, "vendor/policy-engine");
-          assert.equal(gitlink?.reason, "import");
+          // `reference`, not `import`: what the selector established is that
+          // the path is named in the evidence.
+          assert.equal(gitlink?.reason, "reference");
           // The gitlink is the parent repository's claim about a commit, and
           // nothing more: it carries no bytes, and it verifies at mode 160000.
           assert.equal((yield* Pack.verify(pack)).ok, true);
+        }),
+      ),
+    ),
+  );
+
+  it.effect("does not claim a submodule the evidence only looks like it names", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const submodule = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "submodule\n",
+            author,
+          });
+
+          // A submodule at `lib`, and evidence that contains those three
+          // letters three times over without referring to it once. A bare
+          // `includes` recorded a signed `{kind:"gitlink", path:"lib"}` claim
+          // that the exposed evidence pointed at that commit — permanent, on a
+          // ref nothing can rewind, and verifying, since `checkItem` reads
+          // mode and oid and has nothing to check the claim against.
+          const source = yield* repository.writeBlob(
+            encode(
+              "#include <stdlib.h>\nimport { authorize } from './src/lib/x.ts'\n// the library loader\n",
+            ),
+          );
+          const tree = yield* repository.writePaths([
+            { path: "lib", oid: submodule, mode: "160000" },
+            { path: "src/auth.ts", oid: source, mode: "100644" },
+          ]);
+          const commit = yield* repository.commitTree({
+            tree,
+            parents: [],
+            message: "with a submodule\n",
+            author,
+          });
+          const view = yield* Pack.committed(commit);
+
+          const pack = yield* Select.select({ task: "authorize", view });
+          assert.equal(
+            pack.items.some((item) => item.kind === "gitlink"),
+            false,
+          );
+        }),
+      ),
+    ),
+  );
+
+  it.effect("keeps the matched line when the budget is exactly its context", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          const repository = yield* Repository;
+          // Four leading lines of exactly a hundred bytes, the only match on
+          // the fifth, and a budget of exactly four hundred. Compared against
+          // the context alone the guard took the `wanted` branch and `end`
+          // collapsed to the start of the matched line: the range held the
+          // four lines before the match and stopped there.
+          const filler = `${"x".repeat(99)}\n`;
+          yield* work.write(
+            "src/edge.ts",
+            encode(`${filler.repeat(4)}const authorize = 1\n${filler.repeat(4)}`),
+            0o100644,
+          );
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "edge\n", author });
+          const view = yield* Pack.capture(made.oid);
+
+          const pack = yield* Select.select({ task: "authorize", view, maxBytes: 400 });
+          const item = pack.items.find((entry) => entry.path === "src/edge.ts");
+          if (item?.kind !== "blob" || item.range === undefined) return;
+          const bytes = yield* repository.readBlob(Pack.unqualify(item.blob)!);
+          const shown = new TextDecoder().decode(bytes.subarray(item.range[0], item.range[1]));
+          assert.equal(shown.includes("authorize"), true);
+        }),
+      ),
+    ),
+  );
+
+  it.effect("keeps the matched line when the budget cannot hold its context", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          const repository = yield* Repository;
+          // Long lines, with the only match well past the fourth. `rangeOf`
+          // starts four lines *before* the first match and truncated the tail
+          // to the budget, so a tight budget yielded a window that stopped
+          // before the match — signed permanently as `reason: "search"`
+          // evidence containing no search term.
+          const filler = `${"x".repeat(200)}\n`;
+          yield* work.write(
+            "src/wide.ts",
+            encode(`${filler.repeat(6)}const authorize = 1\n${filler.repeat(6)}`),
+            0o100644,
+          );
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "wide\n", author });
+          const view = yield* Pack.capture(made.oid);
+
+          const pack = yield* Select.select({ task: "authorize", view, maxBytes: 200 });
+          const item = pack.items.find((entry) => entry.path === "src/wide.ts");
+          if (item?.kind !== "blob" || item.range === undefined) return;
+          const bytes = yield* repository.readBlob(Pack.unqualify(item.blob)!);
+          const shown = new TextDecoder().decode(bytes.subarray(item.range[0], item.range[1]));
+          assert.equal(shown.includes("authorize"), true);
         }),
       ),
     ),

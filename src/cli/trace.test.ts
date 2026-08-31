@@ -62,6 +62,9 @@ describe("cli trace", () => {
       "source.push",
       "hub.trace",
       "hub.session",
+      // Removing a record is charged separately from writing one, so the
+      // fixture has to hold both to exercise the way back out.
+      "hub.redact",
     ]);
     await fs.writeFile(key, opensshPrivateKey(fixture.member, "agent@example.com"), {
       mode: 0o600,
@@ -298,20 +301,23 @@ describe("cli trace", () => {
       // the file claimed.
       assert.equal(shown.audit.invocations[0].runtime.record.startsWith("sha1:"), true);
 
-      const elsewhere = JSON.parse(
-        await cli([
-          "session",
-          "show",
-          "--root",
-          root,
-          "--repo",
-          path.join("project", ".git"),
-          "--audit",
-          "--json",
-          "0192f000-0000-7000-8000-0000000000ff",
-        ]),
-      );
-      assert.equal(elsewhere.audit.invocations.length, 0);
+      // And the session it claimed does not exist here at all, which is now
+      // what the reader says rather than handing back an empty document. An
+      // id nothing in the repository knows is an error: `isSessionId` accepts
+      // any legal ref component, so an empty projection was also what
+      // `session show <a repository name>` produced.
+      const elsewhere = await failing([
+        "session",
+        "show",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--audit",
+        "--json",
+        "0192f000-0000-7000-8000-0000000000ff",
+      ]);
+      assert.match(elsewhere, /no session refs|has no session/);
     }),
   );
 
@@ -347,10 +353,650 @@ describe("cli trace", () => {
       assert.equal(shown.audit.invocations[0].id, written);
 
       // And the same run, rendered: one Invocation, without the reader having
-      // to know it came from two signed records (§19.14).
+      // to know it came from two signed records (§19.14) — and joined to the
+      // policy-visible session projection, which is what `--audit` promises
+      // and what rendering only the trace half quietly dropped.
       const rendered = await inside(project, ["session", "show", "--audit", SESSION]);
+      assert.match(rendered, new RegExp(`Session ${SESSION}`));
       assert.match(rendered, new RegExp(`Invocation ${written}`));
       assert.match(rendered, /Capture\n {2}coverage unknown|coverage unknown/);
+    }),
+  );
+
+  it.effect("refuses span-shaping flags on the normalized-event path", () =>
+    Effect.promise(async () => {
+      const event = await write("plain.json", {
+        type: "invocation-telemetry",
+        exposure: null,
+        capture: null,
+      });
+      // Dropped silently, `--exposure` named the record's join and the record
+      // was written joined to nothing. Refused, the caller learns which half
+      // of the surface they are on.
+      const refused = await failing([
+        "trace",
+        "record",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--session",
+        SESSION,
+        "--key",
+        key,
+        "--event",
+        event,
+        "--exposure",
+        `sha1:${"a".repeat(40)}`,
+      ]);
+      assert.match(refused, /--exposure describes how to read a span/);
+    }),
+  );
+
+  it.effect("lets a tool span name the invocation it belongs beneath", () =>
+    Effect.promise(async () => {
+      const exposed = await exposure();
+      const inference = await write("inference.json", {
+        type: "invocation-telemetry",
+        exposure: exposed,
+        capture: null,
+        operation: { name: "chat" },
+      });
+      const parent = (await record(inference)).trim();
+
+      const span = await write("tool.json", {
+        attributes: {
+          "gen_ai.operation.name": "execute_tool",
+          "gen_ai.tool.name": "read_file",
+          "gen_ai.tool.call.id": "call_7",
+        },
+      });
+      await record(span, ["--otel", "--invocation", parent]);
+
+      const shown = await audit();
+      assert.equal(shown.audit.tools.length, 1);
+      // Nothing on a tool span names a Git record, so without a way to say it
+      // the operation could never be attached to anything.
+      assert.equal(shown.audit.tools[0].payload.invocation, parent);
+    }),
+  );
+
+  it.effect("refuses a span-shaping flag that does not apply to the span given", () =>
+    Effect.promise(async () => {
+      const tool = await write("tool-only.json", {
+        attributes: {
+          "gen_ai.operation.name": "execute_tool",
+          "gen_ai.tool.name": "read_file",
+        },
+      });
+      // `--exposure` is read only for an inference span. Passed with a tool
+      // span it was read by nothing and the record was written joined to
+      // nothing — the same failure the `--event` guard exists to prevent.
+      const refused = await failing([
+        "trace",
+        "record",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--session",
+        SESSION,
+        "--key",
+        key,
+        "--event",
+        tool,
+        "--otel",
+        "--exposure",
+        `sha1:${"a".repeat(40)}`,
+      ]);
+      assert.match(refused, /--exposure names the context an inference made use of/);
+    }),
+  );
+
+  it.effect("removes a leaked prompt from the trace, not only from the session", () =>
+    Effect.promise(async () => {
+      // The retained render holds the task string verbatim, which is exactly
+      // why this namespace needs a way back out and not only the session does.
+      const built = JSON.parse(
+        await cli([
+          "context",
+          "for",
+          "--work",
+          project,
+          "--task",
+          "rotate the deploy token hunter2",
+          "--json",
+          "--session",
+          SESSION,
+          "--key",
+          key,
+        ]),
+      );
+
+      const written = (
+        await cli([
+          "trace",
+          "redact",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          "--key",
+          key,
+          "--session",
+          SESSION,
+          "--target",
+          built.exposure,
+          "--reason",
+          "the prompt carried a token",
+        ])
+      ).trim();
+      assert.match(written, /^sha1:[0-9a-f]{40}$/);
+
+      const after = await audit();
+      // The removal is recorded and names what it removed.
+      assert.deepEqual(after.audit.redacted, [built.exposure]);
+
+      // And the bytes actually go. This is the whole point: the tombstone
+      // replicates, and `gc` is what removes the payload — including
+      // `context/render.bin`, which is where the task string and the exposed
+      // file contents are. Redacting only `event.json` left the leak readable.
+      await cli(["gc", "--root", root, path.join("project", ".git")]);
+
+      const single = JSON.parse(
+        await cli([
+          "context",
+          "audit",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          "--json",
+          built.exposure,
+        ]),
+      );
+      // The record is still on the ref — a hash chain with a hole in it is not
+      // a hash chain — its content is gone, and the removal is accounted for.
+      // Both forms of the command have to say the same thing about it: for a
+      // while `audit <session>` exited zero here while `audit <record>` failed
+      // forever, on the same repository, for the same removal.
+      assert.deepEqual(single.redacted, [built.exposure]);
+      assert.deepEqual(single.audits, []);
+    }),
+  );
+
+  it.effect("keeps auditing a session after an unrelated record is redacted", () =>
+    Effect.promise(async () => {
+      const exposed = await exposure();
+      const tool = await write("tool.json", {
+        type: "tool-operation",
+        invocation: null,
+        capture: null,
+        tool: { name: "read_file" },
+      });
+      const written = (await record(tool)).trim();
+
+      await cli([
+        "trace",
+        "redact",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--key",
+        key,
+        "--session",
+        SESSION,
+        "--target",
+        written,
+        "--reason",
+        "the result carried a token",
+      ]);
+      await cli(["gc", "--root", root, path.join("project", ".git")]);
+
+      // A routine, sanctioned redaction of a *tool operation* must not make
+      // the session's exposures unauditable. Counting every unreadable commit
+      // on the ref as this reader's own broke `context audit … && deploy`
+      // permanently the first time anybody redacted anything.
+      const audited = JSON.parse(
+        await cli([
+          "context",
+          "audit",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          "--json",
+          SESSION,
+        ]),
+      );
+      assert.equal(audited.audits.length, 1);
+      assert.equal(audited.audits[0].exposure, exposed);
+      assert.equal(audited.audits[0].ok, true);
+      assert.deepEqual(audited.unreadable, []);
+    }),
+  );
+
+  it.effect("keeps auditing a session whose own exposure was redacted", () =>
+    Effect.promise(async () => {
+      const built = JSON.parse(
+        await cli([
+          "context",
+          "for",
+          "--work",
+          project,
+          "--task",
+          "authorize policy",
+          "--json",
+          "--session",
+          SESSION,
+          "--key",
+          key,
+        ]),
+      );
+      await cli([
+        "trace",
+        "redact",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--key",
+        key,
+        "--session",
+        SESSION,
+        "--target",
+        built.exposure,
+        "--reason",
+        "leaked",
+      ]);
+      await cli(["gc", "--root", root, path.join("project", ".git")]);
+
+      // A removal is not an unreadable record. Counted together, using the
+      // removal path the CLI documents made every later
+      // `context audit S && deploy` fail permanently.
+      const audited = JSON.parse(
+        await cli([
+          "context",
+          "audit",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          "--json",
+          SESSION,
+        ]),
+      );
+      assert.deepEqual(audited.redacted, [built.exposure]);
+      assert.deepEqual(audited.unreadable, []);
+      assert.deepEqual(audited.audits, []);
+    }),
+  );
+
+  it.effect("will not remove a tombstone", () =>
+    Effect.promise(async () => {
+      const built = JSON.parse(
+        await cli([
+          "context",
+          "for",
+          "--work",
+          project,
+          "--task",
+          "authorize",
+          "--json",
+          "--session",
+          SESSION,
+          "--key",
+          key,
+        ]),
+      );
+      const redaction = (
+        await cli([
+          "trace",
+          "redact",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          "--key",
+          key,
+          "--session",
+          SESSION,
+          "--target",
+          built.exposure,
+          "--reason",
+          "leaked",
+        ])
+      ).trim();
+
+      const refused = await failing([
+        "trace",
+        "redact",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--key",
+        key,
+        "--session",
+        SESSION,
+        "--target",
+        redaction,
+        "--reason",
+        "again",
+      ]);
+      assert.match(refused, /a tombstone is the record of a removal/);
+    }),
+  );
+
+  it.effect("does not present a trace-only run under a session heading", () =>
+    Effect.promise(async () => {
+      // `context for --session X` writes the trace ref and nothing else, so
+      // this session has a full runtime account and no record of the work it
+      // was doing. `Session.project` reports that as `exists: false` and the
+      // `--json` path prints it; the prose header printed `Session <id>`
+      // unconditionally, presenting the account of the runtime as the account
+      // of the work.
+      await exposure();
+      const shown = await cli([
+        "session",
+        "show",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        SESSION,
+        "--audit",
+      ]);
+      assert.match(shown, /no session record/);
+    }),
+  );
+
+  it.effect("says so when a removal cannot take the bytes with it", () =>
+    Effect.promise(async () => {
+      // Two sessions, one task, one tree. A Pack and a ContextRender are
+      // deterministic, so both exposures name the same `context/render.bin`.
+      const other = "0192f000-0000-7000-8000-0000000000bb";
+      const mine = await exposure();
+      const theirs: { readonly exposure: string } = JSON.parse(
+        await cli([
+          "context",
+          "for",
+          "--work",
+          project,
+          "--task",
+          "authorize policy",
+          "--json",
+          "--session",
+          other,
+          "--key",
+          key,
+        ]),
+      );
+      assert.notEqual(mine, theirs.exposure);
+
+      const said = await cli([
+        "trace",
+        "redact",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--key",
+        key,
+        "--session",
+        SESSION,
+        "--target",
+        mine,
+        "--reason",
+        "leaked",
+      ]);
+
+      // `gc` will not delete an object the other exposure still needs — it is
+      // live, nobody asked for it to go, and `Maintenance.gc` re-walks only
+      // the source refs, so deleting it would leave that audit reporting its
+      // own render unavailable forever. So the removal is partial, and the
+      // command used to print an oid and nothing else: the verbatim task
+      // string and every exposed file byte stayed readable at
+      // `<record>^{tree}:context/render.bin` and clonable off the ref, while
+      // the operator had been told the removal happened.
+      assert.match(said, /^sha1:[0-9a-f]{40}$/m);
+      assert.match(said, /will not be collected/);
+      // And which record holds them, because redacting that one is the only
+      // thing that finishes the job.
+      assert.match(said, new RegExp(theirs.exposure));
+      assert.match(said, /held by 1 other live record/);
+
+      // A third, so that redacting the second still leaves the object held.
+      // Only the *live* holder counts: a record an accepted tombstone already
+      // names is holding nothing — `stillNamed` skips exactly those when it
+      // computes the protection — so listing it told the operator to redact
+      // something already redacted, and got "other live record(s)" wrong.
+      const third = "0192f000-0000-7000-8000-0000000000cc";
+      const spare: { readonly exposure: string } = JSON.parse(
+        await cli([
+          "context",
+          "for",
+          "--work",
+          project,
+          "--task",
+          "authorize policy",
+          "--json",
+          "--session",
+          third,
+          "--key",
+          key,
+        ]),
+      );
+      const second = await cli([
+        "trace",
+        "redact",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--key",
+        key,
+        "--session",
+        other,
+        "--target",
+        theirs.exposure,
+        "--reason",
+        "leaked",
+      ]);
+      assert.match(second, /held by 1 other live record/);
+      assert.match(second, new RegExp(spare.exposure));
+      assert.doesNotMatch(second, new RegExp(mine));
+    }),
+  );
+
+  it.effect("scans every free-text field on a health record, not just the reasons", () =>
+    Effect.promise(async () => {
+      // `source` and `sampling` are bare strings with no vocabulary — an
+      // exporter name and a sampling description somebody wrote. Scanned only
+      // for `reasons`, the same bytes were signed and appended to a ref that
+      // replicates to every clone, while `reasons` refused them.
+      const leaked = await write("health.json", {
+        type: "trace-health",
+        source: `otel-collector token=ghp_${"A".repeat(36)}`,
+        sampling: "none",
+        transformed: false,
+        dropped: 0,
+      });
+      assert.match(
+        await failing([
+          "trace",
+          "record",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          "--session",
+          SESSION,
+          "--key",
+          key,
+          "--event",
+          leaked,
+        ]),
+        /looks like it carries/,
+      );
+
+      const sampled = await write("sampling.json", {
+        type: "trace-health",
+        source: "otel-collector",
+        sampling: `head 10% key=glpat-${"A".repeat(20)}`,
+        transformed: false,
+        dropped: 0,
+      });
+      assert.match(
+        await failing([
+          "trace",
+          "record",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          "--session",
+          SESSION,
+          "--key",
+          key,
+          "--event",
+          sampled,
+        ]),
+        /looks like it carries/,
+      );
+    }),
+  );
+
+  it.effect("audits the exposure an invocation record names", () =>
+    Effect.promise(async () => {
+      const exposed = await exposure();
+      const event = await write("bound.json", {
+        type: "invocation-telemetry",
+        exposure: exposed,
+        capture: null,
+        operation: { name: "chat" },
+      });
+      const written = (await record(event)).trim();
+
+      // context-pack.md §13 calls this argument `<invocation-or-exposure>`,
+      // and `trace record` prints this oid — so piping the one into the other
+      // is the documented path. Refused, the documented command failed on the
+      // oid the neighbouring command had just printed; followed, it is the
+      // same audit the exposure's own id reaches.
+      const audited = await cli([
+        "context",
+        "audit",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        written,
+      ]);
+      assert.match(audited, /blob src\/auth\.ts: verified/);
+      assert.equal(
+        audited,
+        await cli([
+          "context",
+          "audit",
+          "--root",
+          root,
+          "--repo",
+          path.join("project", ".git"),
+          exposed,
+        ]),
+      );
+    }),
+  );
+
+  it.effect("says what a trace record is when it is not an exposure", () =>
+    Effect.promise(async () => {
+      const event = await write("runtime.json", {
+        type: "invocation-telemetry",
+        exposure: null,
+        capture: null,
+        operation: { name: "chat" },
+      });
+      const written = (await record(event)).trim();
+
+      // `trace record` prints this oid, and the docs call the audit's argument
+      // "a qualified Git record OID" — so one arriving there is the ordinary
+      // case. Matching only exposures reported it as "on no trace ref in this
+      // repository", which is false: it is on one.
+      const refused = await failing([
+        "context",
+        "audit",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        written,
+      ]);
+      assert.match(refused, /is not a context exposure/);
+      assert.match(refused, new RegExp(`session show ${SESSION} --audit`));
+
+      // And the bare spelling, which `resolveRev` returns as-is and which
+      // `isTraceId` accepts as a legal ref component — so testing the exposure
+      // lookup instead of the record lookup sent it to the session branch, to
+      // walk a `refs/hub/trace/<40 hex>` that does not exist. The qualified
+      // form escaped only because `:` is reserved in a ref name.
+      const bare = await failing([
+        "context",
+        "audit",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        written.slice("sha1:".length),
+      ]);
+      assert.match(bare, /is not a context exposure/);
+    }),
+  );
+
+  it.effect("refuses a capture stage the vocabulary does not name, on either path", () =>
+    Effect.promise(async () => {
+      // The CLI flag is checked, and so is the value that comes straight
+      // through `--event`: a typo lands in a signed, immutable record on an
+      // append-only ref, and every later reader sees a stage that is not one.
+      const flagged = await failing([
+        "trace",
+        "record",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--session",
+        SESSION,
+        "--key",
+        key,
+        "--event",
+        await write("span-stage.json", { attributes: { "gen_ai.operation.name": "chat" } }),
+        "--otel",
+        "--stage",
+        "sdk-exprot",
+      ]);
+      assert.match(flagged, /is not a capture stage/);
+
+      const supplied = await write("typo.json", {
+        type: "invocation-telemetry",
+        exposure: null,
+        capture: { transport: "otel", stage: "sdk-exprot" },
+      });
+      const refused = await failing([
+        "trace",
+        "record",
+        "--root",
+        root,
+        "--repo",
+        path.join("project", ".git"),
+        "--session",
+        SESSION,
+        "--key",
+        key,
+        "--event",
+        supplied,
+      ]);
+      assert.match(refused, /is not a capture stage/);
     }),
   );
 

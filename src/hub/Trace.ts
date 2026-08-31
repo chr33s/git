@@ -188,13 +188,27 @@ export interface Entry {
   readonly signatures: ReadonlyArray<string>;
 }
 
+export interface Unreadable {
+  readonly commit: Oid;
+  readonly type: string | null;
+  readonly id: string | null;
+}
+
 export interface Walk {
   /** Oldest first, parents before children. */
   readonly records: ReadonlyArray<Entry>;
   /** The DAG the walk was taken over, so a reader can keep concurrent lanes. */
   readonly parents: Dag.Parents;
-  /** Commits carrying a record whose payload this replica could not read. */
-  readonly unreadable: ReadonlyArray<Oid>;
+  /**
+   * Commits carrying a record whose payload this replica could not read.
+   *
+   * The declared type comes along, because the commit message survives a
+   * redaction when the payload does not — that is what `summaryOf` is for.
+   * Without it a reader could not tell one of its own damaged records from a
+   * different namespace's deliberately removed one, and every consumer had to
+   * treat all of them as its own.
+   */
+  readonly unreadable: ReadonlyArray<Unreadable>;
   /** Every commit reached, joins and unreadable records included. */
   readonly walked: number;
 }
@@ -224,19 +238,41 @@ export const walk = Effect.fn("hub.Trace.walk")(function* (session: string) {
     return { records: [], parents: new Map(), unreadable: [], walked: 0 } satisfies Walk;
   }
 
-  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, yield* ceilingOf()).pipe(
+  // The ceiling actually in force, not the compile-time default: a host that
+  // lowered it reported "more than 16384 records" for a ref holding far fewer,
+  // which sends an operator looking for a problem that is not there.
+  const ceiling = yield* ceilingOf();
+  const parents = yield* Dag.reachable(head, null, Event.isHubCommit, ceiling).pipe(
     Effect.mapError((error) =>
       error._tag === "Invalid"
         ? new Invalid({
             field: "session",
-            reason: `trace '${session}' holds more than ${MAX_RECORDS} records and cannot be read`,
+            reason: `trace '${session}' holds more than ${ceiling} records and cannot be read`,
           })
         : error,
     ),
   );
 
+  // A head the walk could not classify is a ref this replica cannot read, not
+  // an empty one. `Dag.reachable` drops the head itself when `belongs` says no,
+  // and `Event.isHubCommit` deliberately answers `false` for a commit whose
+  // tree never arrived — the partial-replication state it is written for, since
+  // refs are applied without a connectivity check. Read as empty, `session show
+  // --audit` reported "No invocations recorded" for a session that has them and
+  // `trace redact` reported "has no trace record", leaving the operator unable
+  // to write the tombstone. Reported as `Invalid`, it lands where the
+  // over-ceiling case already lands and every caller already handles it.
+  //
+  // `Redaction.tombstonesOn` makes the same check for the same reason.
+  if (!parents.has(head)) {
+    return yield* new Invalid({
+      field: "session",
+      reason: `trace '${session}' cannot be read here; its head is missing an object`,
+    });
+  }
+
   const records: Array<Entry> = [];
-  const unreadable: Array<Oid> = [];
+  const unreadable: Array<Unreadable> = [];
 
   for (const commit of Dag.topological(parents)) {
     // Joins carry nothing: they are how two lanes became one again.
@@ -252,7 +288,7 @@ export const walk = Effect.fn("hub.Trace.walk")(function* (session: string) {
     // A redaction deletes the payload blob and leaves the tree entry naming
     // it, so the read fails where every other record's succeeds.
     if (read === null) {
-      unreadable.push(commit);
+      unreadable.push({ commit, ...summaryOf(info.message) });
       continue;
     }
 
