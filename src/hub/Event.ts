@@ -30,7 +30,7 @@ import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid } from "../git/Error.ts";
 import type { TreeEntry } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
@@ -631,12 +631,10 @@ export const join = Effect.fn("hub.Event.join")(function* (pr: string, heads: Re
  * redacted event that survives, and "something was removed here" is a more
  * useful thing for a projection to be able to say than a silent gap.
  */
-const summaryOf = Effect.fn("hub.Event.summaryOf")(function* (commit: Oid) {
-  const repository = yield* Repository;
-  const info = yield* repository.readCommit(commit);
-  const [type = "", id = ""] = info.message.split("\n")[0]?.split(" ") ?? [];
+export const summaryOf = (message: string): { type: string; id: string } | null => {
+  const [type = "", id = ""] = message.split("\n")[0]?.split(" ") ?? [];
   return type === "" || id === "" ? null : { type, id };
-});
+};
 
 /**
  * Every event in a pull request, oldest first, parents before children.
@@ -685,7 +683,7 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
     // Joins carry nothing: they are how two histories became one.
     if (!(yield* Record.carries(oid, RECORD))) continue;
 
-    const summary = yield* summaryOf(oid);
+    const summary = summaryOf((yield* repository.readCommit(oid)).message);
 
     // A redaction deletes the payload blob but leaves the tree entry naming
     // it, so the read fails where every other event's succeeds. That is the
@@ -926,5 +924,3 @@ export const pullRequests = Effect.fn("hub.Event.pullRequests")(function* () {
   }
   return ids.sort();
 });
-
-export type EventError = Invalid | ObjectNotFound | StorageFailure;

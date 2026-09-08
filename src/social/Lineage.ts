@@ -1,7 +1,7 @@
 /** Deterministic earliest-unique-commit lineage keys for repository discovery. */
 import { Effect } from "effect";
 
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 
@@ -68,5 +68,3 @@ export const earliestUnique = Effect.fn("social.Lineage.earliestUnique")(functio
   }
   return lineage;
 });
-
-export type LineageError = Invalid | ObjectNotFound | StorageFailure;

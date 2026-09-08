@@ -18,14 +18,13 @@
  */
 import { Effect, Stream } from "effect";
 
-import { Invalid, type ObjectNotFound, type RefConflict, type StorageFailure } from "./Error.ts";
+import { Invalid } from "./Error.ts";
 import type { CommitInfo, Signature } from "./Format.ts";
 import { mergeTrees } from "./Merge.ts";
 import { type MergeConflict, Repository, type TreeFile } from "./Repository.ts";
 import { isOid, type Oid } from "./Store.ts";
 
 /** Everything replaying a commit can go wrong with, ref move included. */
-export type RebaseError = Invalid | ObjectNotFound | RefConflict | StorageFailure;
 
 export interface Replayed {
   readonly original: Oid;

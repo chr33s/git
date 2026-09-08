@@ -483,6 +483,24 @@ export const HubPullDetail = Schema.Struct({
 export type HubPullDetail = (typeof HubPullDetail)["Type"];
 
 /**
+ * One object a trace record keeps reachable beside its payload.
+ *
+ * A Context Exposure is more than its signed bytes: `Trace.append` attaches
+ * `context/pack.json`, the `context/view` tree edge and, when retention keeps
+ * it, `context/render.bin`. Over HTTP those arrive here — a blob as its bytes
+ * (`content`, base64), the view as the qualified oid of a tree this repository
+ * already holds (`tree`), since a view is the source tree a push delivered
+ * and never travels in a JSON body. Exactly one of the two per entry.
+ */
+export const HubEventAttachment = Schema.Struct({
+  /** A path `Exposure` writes: `context/pack.json`, `context/view` or `context/render.bin`. */
+  path: Schema.String,
+  content: Schema.optional(Schema.String),
+  tree: Schema.optional(Schema.String),
+});
+export type HubEventAttachment = (typeof HubEventAttachment)["Type"];
+
+/**
  * A pre-signed hub event, exactly as `Event.issue` would have written it.
  *
  * The server never holds a member's key, so it cannot author events over
@@ -490,10 +508,14 @@ export type HubPullDetail = (typeof HubPullDetail)["Type"];
  * signed bytes (base64), `signatures` the armored SSH signatures over them.
  * The projection remains the judge of authority; this endpoint only refuses
  * what could never count — bytes no offered signature covers.
+ *
+ * A trace record — a Context Exposure or a runtime record — is appended the
+ * same way, and carries `attachments` where an exposure keeps its evidence.
  */
 export const HubEventRequest = Schema.Struct({
   payload: Schema.String,
   signatures: Schema.Array(Schema.String),
+  attachments: Schema.optional(Schema.Array(HubEventAttachment)),
 });
 export type HubEventRequest = (typeof HubEventRequest)["Type"];
 

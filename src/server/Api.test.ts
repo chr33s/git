@@ -20,6 +20,12 @@ import * as HubEvent from "../hub/Event.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as HubTask from "../hub/Task.ts";
 import * as HubSession from "../hub/Session.ts";
+import * as Trace from "../hub/Trace.ts";
+import * as Exposure from "../context/Exposure.ts";
+import * as Pack from "../context/Pack.ts";
+import * as Render from "../context/Render.ts";
+import * as Records from "../telemetry/Records.ts";
+import { hashObject } from "../git/Format.ts";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -1961,6 +1967,174 @@ describe("Api hub extensions", () => {
 
         const detail = yield* client.hub.session({ params: { repo: "r", id: session } });
         assert.equal(detail.prompts[0]?.prompt, "opened over JSON");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("appends a context exposure with its evidence, as push would carry it", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const git = yield* GitRepository.Repository;
+
+        const root = yield* generate("root@example.com");
+        const tracer = yield* generate("tracer@example.com");
+        const scribe = yield* generate("scribe@example.com");
+        const genesis = yield* create([formatPublicKey(root.publicKey)], 1);
+        yield* writeGenesis(genesis, [yield* signGenesis(genesis, root)]);
+        for (const [key, capability] of [
+          [tracer, "hub.trace"],
+          [scribe, "hub.session"],
+        ] as const) {
+          yield* Log.issue(
+            yield* Certificate.grant({
+              repo: genesis.repoId,
+              publicKey: formatPublicKey(key.publicKey),
+              capabilities: ["repo.read", "source.push", capability],
+              id: Log.newId(),
+            }),
+            [root],
+          );
+        }
+
+        // The view is the source tree a push delivered; here, the one every
+        // repository holds.
+        const view = { base: Pack.qualify(EMPTY_TREE_OID), tree: Pack.qualify(EMPTY_TREE_OID) };
+        const pack: Pack.Pack = { version: Pack.VERSION, view, items: [] };
+        const packBytes = Pack.encode(pack);
+        const rendered = yield* Render.commit([
+          { placement: "user", mediaType: "text/plain", body: new TextEncoder().encode("task") },
+        ]);
+        const session = HubSession.newId();
+        const payload: Exposure.Payload = {
+          type: Exposure.TYPE,
+          version: 1,
+          repo: genesis.repoId,
+          session,
+          id: HubEvent.newId(),
+          issuedAt: new Date(1_700_000_001_000).toISOString(),
+          trustHead: yield* git.resolve(Log.LOG_REF),
+          pack: Pack.qualify(yield* hashObject({ type: "blob", data: packBytes })),
+          renderFormat: Render.FORMAT,
+          renderDigest: rendered.digest,
+          capture: null,
+        };
+        const bytes = Exposure.encode(payload);
+        const base64 = (data: Uint8Array) => btoa(String.fromCharCode(...data));
+        const attachments = [
+          { path: Exposure.PACK, content: base64(packBytes) },
+          { path: Exposure.VIEW, tree: view.tree },
+          { path: Exposure.RENDER, content: base64(rendered.bytes) },
+        ];
+
+        // The transport principal, as `serve` would have authenticated it;
+        // authority over the record is still judged over its signers.
+        const projection = yield* project(genesis);
+        const signer = yield* fingerprint(tracer.publicKey);
+        const asTracer = Effect.provideService(Auth.Requester, {
+          principal: projection.members.get(signer) ?? null,
+          signer,
+          capabilities: ["repo.read", "source.push", "hub.trace"],
+          projection,
+          envelope: null,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const appended = yield* client.hub
+          .append({
+            params: { repo: "r" },
+            payload: {
+              payload: base64(bytes),
+              signatures: [yield* sign(tracer, bytes, NAMESPACE)],
+              attachments,
+            },
+          })
+          .pipe(asTracer);
+        assert.equal(appended.ref, Trace.refOf(session));
+
+        // The same tree shape `Trace.append` writes, so the same audit reads
+        // it: pack, view edge and render all verify.
+        const audited = yield* Exposure.audit({
+          commit: appended.commit,
+          repo: genesis.repoId,
+          session,
+          trust: projection,
+        });
+        assert.equal(audited.ok, true, JSON.stringify(audited));
+        assert.equal(audited.pack.ok, true);
+        assert.equal(audited.retained.ok, true);
+        assert.equal(audited.trust?.ok, true);
+        assert.equal(audited.render.state, "verified");
+
+        // A runtime record beside it, with nothing to attach.
+        const runtime = Records.encode({
+          type: Records.WORKSPACE,
+          version: 1,
+          repo: genesis.repoId,
+          session,
+          id: HubEvent.newId(),
+          issuedAt: new Date(1_700_000_002_000).toISOString(),
+          trustHead: null,
+          beforeTree: view.tree,
+          afterTree: view.tree,
+          operation: null,
+        });
+        const second = yield* client.hub
+          .append({
+            params: { repo: "r" },
+            payload: {
+              payload: base64(runtime),
+              signatures: [yield* sign(tracer, runtime, NAMESPACE)],
+            },
+          })
+          .pipe(asTracer);
+        assert.equal(second.ref, Trace.refOf(session));
+        assert.deepEqual(yield* git.readRef(Trace.refOf(session)), second.commit);
+
+        // `hub.session` is not `hub.trace`: the namespaces are charged apart.
+        const wrongHands = yield* client.hub
+          .append({
+            params: { repo: "r" },
+            payload: {
+              payload: base64(bytes),
+              signatures: [yield* sign(scribe, bytes, NAMESPACE)],
+              attachments,
+            },
+          })
+          .pipe(asTracer, Effect.flip);
+        assert.equal(wrongHands._tag, "Invalid");
+        assert.match(wrongHands.reason, /hub\.trace/);
+
+        // A path `expose` never writes is bytes no reader accounts for.
+        const strayPath = yield* client.hub
+          .append({
+            params: { repo: "r" },
+            payload: {
+              payload: base64(bytes),
+              signatures: [yield* sign(tracer, bytes, NAMESPACE)],
+              attachments: [...attachments, { path: "../escape", content: base64(packBytes) }],
+            },
+          })
+          .pipe(asTracer, Effect.flip);
+        assert.equal(strayPath._tag, "Invalid");
+        assert.match(strayPath.reason, /not a path a context exposure retains/);
+
+        // And evidence that does not match its own payload is refused before
+        // it can fail its first audit.
+        const wrongPack = yield* client.hub
+          .append({
+            params: { repo: "r" },
+            payload: {
+              payload: base64(bytes),
+              signatures: [yield* sign(tracer, bytes, NAMESPACE)],
+              attachments: [
+                { path: Exposure.PACK, content: base64(new TextEncoder().encode("{}")) },
+                { path: Exposure.VIEW, tree: view.tree },
+              ],
+            },
+          })
+          .pipe(asTracer, Effect.flip);
+        assert.equal(wrongPack._tag, "Invalid");
+        assert.match(wrongPack.reason, /hashes to/);
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );

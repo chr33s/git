@@ -71,6 +71,9 @@ const PREFIXES = [
   "npm_",
 ];
 
+/** What a token prefix may not follow: the inside of a word. */
+const WORD = /[\p{L}\p{N}_]/u;
+
 /** A credential inside a URL: `scheme://user:secret@host`. */
 const CREDENTIALED_URI = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:([^\s/@]{4,})@/gi;
 
@@ -135,6 +138,13 @@ export const scan = (text: string, reading: Reading = {}): ReadonlyArray<Finding
     // the key beside it. Nothing else covers a 20-character token: `DENSE`
     // wants 32, and `NAMED_SECRET` wants a `key=` in front.
     for (let at = text.indexOf(prefix); at >= 0; at = text.indexOf(prefix, at + 1)) {
+      // At the start of a word only. A provider mints its prefix at the front
+      // of a token, never inside one — and inside ordinary words is exactly
+      // where `sk-` and `npm_` turn up: `risk-assessment-tool`,
+      // `disk-usage-report`, `my_npm_helper`. Scanned unanchored, a tool
+      // record naming any of those was refused as carrying a token, with no
+      // override, on the write path of every telemetry record.
+      if (at > 0 && WORD.test(text[at - 1] ?? "")) continue;
       const rest = text.slice(at).split(/[\s"',;]/)[0] ?? prefix;
       // The prefix alone is a word — `sk-` appears in prose — so it counts
       // only with a body behind it long enough to be the token it announces.

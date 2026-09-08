@@ -17,7 +17,7 @@
  *   - **durability** — `storage.sql` writes are committed when the handler
  *     returns, so a batch that throws part-way is rolled back by the runtime.
  */
-import { Effect, Layer, Option, Stream } from "effect";
+import { Effect, Layer, Option, Predicate, Stream } from "effect";
 
 import { ObjectNotFound, StorageFailure } from "./Error.ts";
 import { hashObject } from "./Format.ts";
@@ -69,11 +69,7 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
         Effect.tryPromise({
           try: () => bucket.get(key(oid)),
           catch: failure("read", key(oid)),
-        }).pipe(
-          Effect.flatMap((object) =>
-            object === null ? Effect.fail(new ObjectNotFound({ oid })) : Effect.succeed(object),
-          ),
-        );
+        }).pipe(Effect.filterOrFail(Predicate.isNotNull, () => new ObjectNotFound({ oid })));
 
       const typeOf = (object: R2Object, oid: Oid) => {
         const type = object.customMetadata?.["type"];

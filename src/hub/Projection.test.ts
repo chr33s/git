@@ -3831,7 +3831,7 @@ describe("what a compare-and-swap compares against", () => {
         ),
       );
 
-      const outcome = await Effect.runPromise(
+      const outcome = await Effect.runPromiseExit(
         Effect.gen(function* () {
           const where = yield* world();
           const say = (type: "pr.closed" | "pr.reopened") => {
@@ -3850,7 +3850,7 @@ describe("what a compare-and-swap compares against", () => {
           const second = yield* say("pr.reopened");
           const repository = yield* Repository;
           return { first, second, held: yield* repository.readRef("refs/hub/pr/1") };
-        }).pipe(Effect.provide(symbolic), Effect.exit),
+        }).pipe(Effect.provide(symbolic)),
       );
 
       assert.ok(

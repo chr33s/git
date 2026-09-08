@@ -16,7 +16,7 @@
 import { DateTime, Effect } from "effect";
 
 import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { readGenesis, type RepoId } from "../trust/Genesis.ts";
@@ -466,5 +466,3 @@ export const redact = Effect.fn("hub.PullRequest.redact")(function* (input: {
   // and it is the one that can see the whole repository.
   return commit;
 });
-
-export type PullRequestError = Invalid | ObjectNotFound | StorageFailure;

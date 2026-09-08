@@ -175,6 +175,16 @@ const record = Command.make(
             exposure: exposure === "" ? null : exposure,
             invocation: invocation === "" ? null : invocation,
           });
+          // Refused by name rather than read with another revision's mapping
+          // and stamped with the declared one (§11.1) — and before the flag
+          // checks below, which would otherwise blame `--exposure` for a span
+          // whose only problem is the revision it declared.
+          if (normalizedSpan.kind === "unsupported-profile") {
+            return yield* new Invalid({
+              field: "semconv-revision",
+              reason: `'${normalizedSpan.revision}' is not a semantic-convention revision this version maps; supported: ${Semconv.PROFILES.map((profile) => profile.revision).join(", ")}`,
+            });
+          }
           const kind = normalizedSpan.kind;
           // `inference` and `unsupported` both take `an`, and both were
           // reachable here.

@@ -123,6 +123,18 @@ export const ceilingOf = Effect.fnUntraced(function* () {
   return Option.getOrElse(yield* Effect.serviceOption(Ceiling), () => MAX_RECORDS);
 });
 
+/**
+ * The ceiling a ref is walked under: its own namespace's.
+ *
+ * Trace refs are bounded four times higher than the pull-request fold, and
+ * every walker that asked `Event`'s ceiling of a trace ref failed on an honest
+ * session past 4096 records — tombstones vanished, wake rules stopped firing.
+ * Each of them then carried its own copy of this ternary; one answer here.
+ */
+export const ceilingFor = Effect.fnUntraced(function* (ref: string) {
+  return traceOf(ref) !== null ? yield* ceilingOf() : yield* Event.ceilingOf();
+});
+
 /** Whether a trace ref's history is short enough for this host to walk. */
 export const withinCeiling = Effect.fn("hub.Trace.withinCeiling")(function* (head: Oid) {
   return yield* Dag.reachable(head, null, Event.isHubCommit, yield* ceilingOf()).pipe(
@@ -213,9 +225,16 @@ export interface Walk {
   readonly walked: number;
 }
 
+/**
+ * `Event.summaryOf`'s answer in this module's shape: the two halves apart, so
+ * a message with a type and no id still says what kind of record was here.
+ * One parser rather than two, because the message is written once and read in
+ * both places — and two readers of one format drift.
+ */
 const summaryOf = (message: string) => {
   const [type = "", id = ""] = message.split("\n")[0]?.split(" ") ?? [];
-  return { type: type === "" ? null : type, id: id === "" ? null : id };
+  const whole = Event.summaryOf(message);
+  return whole ?? { type: type === "" ? null : type, id: id === "" ? null : id };
 };
 
 /**
@@ -275,11 +294,14 @@ export const walk = Effect.fn("hub.Trace.walk")(function* (session: string) {
   const unreadable: Array<Unreadable> = [];
 
   for (const commit of Dag.topological(parents)) {
-    // Joins carry nothing: they are how two lanes became one again.
-    if (!(yield* Record.carries(commit, Event.RECORD))) continue;
-
+    // Read once. `carries`, `readCommit` and `read` each fetched the commit
+    // for themselves, so a walk over a long trace paid three object reads per
+    // record for one commit's worth of information.
     const info = yield* repository.readCommit(commit);
-    const read = yield* Record.read(commit, Event.RECORD).pipe(
+    // Joins carry nothing: they are how two lanes became one again.
+    if (!(yield* Record.carriesIn(info, Event.RECORD))) continue;
+
+    const read = yield* Record.readFrom(commit, info, Event.RECORD).pipe(
       Effect.catchTags({
         ObjectNotFound: () => Effect.succeed(null),
         Invalid: () => Effect.succeed(null),

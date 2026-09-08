@@ -606,6 +606,35 @@ describe("the default selector", () => {
     ),
   );
 
+  it.effect("never hands over a range longer than the budget it was given", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const work = yield* WorkTree;
+          // Two-byte characters after the match, and an odd budget: the cut
+          // falls inside a character, and snapping it *forward* handed over
+          // one byte more than the caller had just checked against.
+          const filler = `${"é".repeat(100)}\n`;
+          yield* work.write(
+            "src/wide.ts",
+            encode(`${filler.repeat(6)}const authorize = 1\n${filler.repeat(6)}`),
+            0o100644,
+          );
+          yield* Checkout.add(["."]);
+          const made = yield* Checkout.commit({ message: "wide\n", author });
+          const view = yield* Pack.capture(made.oid);
+
+          const pack = yield* Select.select({ task: "authorize", view, maxBytes: 199 });
+          const item = pack.items.find((entry) => entry.path === "src/wide.ts");
+          assert.equal(item?.kind, "blob");
+          if (item?.kind !== "blob") return;
+          assert.notEqual(item.range, undefined);
+          assert.ok((item.range?.[1] ?? 0) - (item.range?.[0] ?? 0) <= 199);
+        }),
+      ),
+    ),
+  );
+
   it("takes only terms long enough to discriminate", () => {
     assert.deepEqual(Select.terms("fix the auth policy"), ["fix", "the", "auth", "policy"]);
     assert.deepEqual(Select.terms("a an of"), []);

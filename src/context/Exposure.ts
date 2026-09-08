@@ -27,7 +27,7 @@
  * thereby become a repository whose pushes are slow, or whose merge rules
  * depend on what a harness said it showed a model.
  */
-import { DateTime, Effect, Result, Schema } from "effect";
+import { DateTime, Effect, Schema } from "effect";
 
 import {
   fingerprint,
@@ -460,27 +460,30 @@ export const expose = Effect.fn("context.Exposure.expose")(function* (input: {
   // size — the orphaned objects every other hoisted check here exists to
   // prevent, reached through the one that was not. Hashed rather than written
   // so the bound can be checked before anything lands.
+  //
+  // The payload itself, built once: the blob's oid is the same whether it is
+  // hashed or written, so nothing the record says depends on the write, and a
+  // second literal with a guessed margin for the trust head was one more copy
+  // of the field list to keep in step.
   const packOid = yield* hashObject({ type: "blob", data: bytes });
-  const size = encode({
+  const payload: Payload = {
     type: "context-exposure",
     version: 1,
     repo: input.repo,
     session: input.session,
     id: Event.newId(),
     issuedAt: DateTime.formatIso(yield* DateTime.now),
-    trustHead: null,
+    trustHead: yield* repository.resolve(TRUST_LOG),
     pack: qualify(packOid),
     renderFormat: Render.FORMAT,
     renderDigest: rendered.digest,
     capture: input.capture ?? null,
-  }).length;
-  // A margin for the fields the real payload fills in: a trust head is one
-  // qualified oid longer than the `null` measured here, and nothing else
-  // differs in length.
-  if (size + 64 > Trace.MAX_PAYLOAD) {
+  };
+  const encoded = encode(payload);
+  if (encoded.length > Trace.MAX_PAYLOAD) {
     return yield* new Invalid({
       field: "capture",
-      reason: `a trace record may not exceed ${Trace.MAX_PAYLOAD} bytes; this one is ${size}`,
+      reason: `a trace record may not exceed ${Trace.MAX_PAYLOAD} bytes; this one is ${encoded.length}`,
     });
   }
 
@@ -533,26 +536,11 @@ export const expose = Effect.fn("context.Exposure.expose")(function* (input: {
     });
   }
 
-  const trustHead = yield* repository.resolve(TRUST_LOG);
-  const payload: Payload = {
-    type: "context-exposure",
-    version: 1,
-    repo: input.repo,
-    session: input.session,
-    id: Event.newId(),
-    issuedAt: DateTime.formatIso(yield* DateTime.now),
-    trustHead,
-    pack: qualify(pack),
-    renderFormat: Render.FORMAT,
-    renderDigest: rendered.digest,
-    capture: input.capture ?? null,
-  };
-
   const commit = yield* Trace.append({
     session: input.session,
     type: payload.type,
     id: payload.id,
-    payload: encode(payload),
+    payload: encoded,
     key: input.key,
     attach: [
       {
@@ -889,7 +877,7 @@ export const audit = Effect.fn("context.Exposure.audit")(function* (input: {
               { at: new Date(dated), trustHead: headOf(payload.trustHead) },
               found,
               input.reach,
-            );
+            ).pipe(Effect.map((decision) => (decision.ok ? ok : bad(decision.reason))));
 
   if (payload === null) {
     return {
@@ -1014,10 +1002,15 @@ export const audit = Effect.fn("context.Exposure.audit")(function* (input: {
  * everything", which is the conservative answer a record that cannot show
  * otherwise deserves.
  */
-const headOf = (value: string | null): Oid | null =>
+export const headOf = (value: string | null): Oid | null =>
   value !== null && isOid(value) ? value : null;
 
-const trusted = Effect.fn("context.Exposure.trusted")(function* (
+/**
+ * Whether a signer this repository trusted *then* could have written a trace
+ * record. Shared with `telemetry/Records.verified`: the runtime half of a
+ * record is held to the same rule as its context half.
+ */
+export const trusted = Effect.fn("context.Exposure.trusted")(function* (
   projection: Projection,
   bytes: Uint8Array,
   signatures: ReadonlyArray<string>,
@@ -1030,10 +1023,9 @@ const trusted = Effect.fn("context.Exposure.trusted")(function* (
   // already done exactly that work — over attacker-supplied input, on a path
   // that runs once per record.
   const asked = { projection, bytes, signatures, capability: CAPABILITY, made, signed };
-  const decision = yield* reach === undefined
+  return yield* reach === undefined
     ? Verify.authorize(asked)
     : Verify.authorize({ ...asked, seen: reach.ancestry, contains: reach.contains });
-  return decision.ok ? ok : bad(decision.reason);
 });
 
 const renderStatus = Effect.fn("context.Exposure.renderStatus")(function* (
@@ -1111,36 +1103,5 @@ export const packOf = Effect.fn("context.Exposure.packOf")(function* (commit: Oi
   return { oid: entry.oid, bytes } as const;
 });
 
-/**
- * The payload one record carries, without auditing anything.
- *
- * For a caller that needs what a record *says* rather than whether it holds —
- * locating which ref a commit belongs to, say. `audit` answers that too, at
- * the cost of a tree walk per evidence item and a SHA-256 over the retained
- * render, which is a great deal of work to read one field.
- */
-export const payloadOf = Effect.fn("context.Exposure.payloadOf")(function* (commit: Oid) {
-  const read = yield* Record.read(commit, Event.RECORD).pipe(
-    Effect.catchTags({
-      ObjectNotFound: () => Effect.succeed(null),
-      Invalid: () => Effect.succeed(null),
-    }),
-  );
-  if (read === null) return null;
-  return yield* decode(read.payload).pipe(Effect.orElseSucceed(() => null));
-});
-
 /** `sha1:<hex>` for a record commit, which is an exposure's canonical id. */
 export const identify = (commit: Oid): string => qualify(commit);
-
-/** The record commit a qualified exposure id names. */
-export const resolve = (value: string): Result.Result<Oid, Invalid> => {
-  const oid = unqualify(value);
-  return oid === null
-    ? Result.fail(
-        new Invalid({ field: "exposure", reason: `'${value}' is not a qualified record oid` }),
-      )
-    : Result.succeed(oid);
-};
-
-export type ExposureError = Invalid | ObjectNotFound | StorageFailure;

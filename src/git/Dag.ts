@@ -134,5 +134,3 @@ export const topological = (parents: Parents): ReadonlyArray<Oid> => {
   }
   return ordered;
 };
-
-export type DagError = ObjectNotFound | StorageFailure;

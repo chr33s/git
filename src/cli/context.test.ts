@@ -28,8 +28,11 @@ const cli = async (args: ReadonlyArray<string>): Promise<string> => {
   return `${result.stdout}${result.stderr}`;
 };
 
-const failing = (args: ReadonlyArray<string>): Promise<string> =>
-  cli(args).then(
+const failing = (args: ReadonlyArray<string>, env: Record<string, string> = {}): Promise<string> =>
+  execFileAsync(process.execPath, [entry, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  }).then(
     () => "",
     (error: { stdout?: string; stderr?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
   );
@@ -328,6 +331,55 @@ describe("cli context", () => {
         "2000",
       ]);
       assert.match(oversized, /--max-items must be between 1 and 1023/);
+
+      // A clock with nothing to date.
+      const undated = await failing([
+        "context",
+        "for",
+        "--work",
+        project,
+        "--task",
+        "x",
+        "--at",
+        "2026-09-08T00:00:00Z",
+      ]);
+      assert.match(undated, /--at only dates Concept freshness/);
+    }),
+  );
+
+  it.effect("refuses two checkout selectors that disagree", () =>
+    Effect.promise(async () => {
+      // `GIT_WORK_TREE` used to win over `--work` in silence, and the signed
+      // exposure named whichever checkout it had picked.
+      const other = path.join(root, "elsewhere");
+      await fs.mkdir(other, { recursive: true });
+      const refused = await failing(
+        ["context", "for", "--work", project, "--task", "authorize policy"],
+        { GIT_WORK_TREE: other },
+      );
+      assert.match(refused, /--work names .* but --work-tree or GIT_WORK_TREE names/);
+    }),
+  );
+
+  it.effect("dates Concept freshness at the instant it was given, and says so", () =>
+    Effect.promise(async () => {
+      const dated = JSON.parse(
+        await cli([
+          "context",
+          "for",
+          "--work",
+          project,
+          "--task",
+          "authorize policy",
+          "--knowledge",
+          "--at",
+          "2026-09-08T00:00:00Z",
+          "--json",
+        ]),
+      );
+      assert.equal(dated.evaluatedAt, "2026-09-08T00:00:00.000Z");
+      // And `null` when no Concept was asked for: nothing was dated.
+      assert.equal((await packOf()).evaluatedAt, null);
     }),
   );
 

@@ -75,6 +75,23 @@ describe("an answer kept beside the repository", () => {
     assert.equal(await ask((answers) => answers.read("key-one")), null);
   });
 
+  it("treats a refreshed answer as the newest, not the oldest", async () => {
+    // Eviction is oldest-first by insertion order, and rewriting an existing
+    // key kept its old position — so the entry just written was the first to
+    // go once the file filled up.
+    await ask((answers) => answers.write("key-one", marks("a".repeat(40))));
+    for (let at = 0; at < Cache.ENTRIES - 1; at += 1) {
+      await ask((answers) => answers.write(`filler-${at}`, []));
+    }
+    await ask((answers) => answers.write("key-one", marks("b".repeat(40))));
+    await ask((answers) => answers.write("one-more", []));
+    assert.deepEqual(
+      (await ask((answers) => answers.read("key-one")))?.map((mark) => mark.target),
+      ["b".repeat(40)],
+    );
+    assert.equal(await ask((answers) => answers.read("filler-0")), null);
+  });
+
   it("keeps one answer per ref rather than one per file", async () => {
     // The port is asked per ref, so a file holding a single answer has each
     // ref's write clobber the last — a repository with any history would cache

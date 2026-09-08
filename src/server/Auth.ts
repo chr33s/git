@@ -1257,5 +1257,4 @@ export const anonymousReadAllowed = (projection: Projection): boolean => {
   return true;
 };
 
-export type AuthError = Invalid;
 export type AuthRequirements = Repository | Nonces;

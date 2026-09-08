@@ -12,15 +12,7 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import { Invalid } from "../git/Error.ts";
 import * as Task from "../hub/Task.ts";
 import { readGenesis } from "../trust/Genesis.ts";
-import { readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
-
-const listOf = (value: string): ReadonlyArray<string> =>
-  value === ""
-    ? []
-    : value
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter((entry) => entry !== "");
+import { commaList, readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
 
 const identityOf = Effect.fn("task.identityOf")(function* (repo: string) {
   const stored = yield* readGenesis();
@@ -71,8 +63,8 @@ const open = Command.make(
             repo: yield* identityOf(repo),
             title,
             description,
-            refs: listOf(ref),
-            pulls: listOf(pull),
+            refs: commaList(ref),
+            pulls: commaList(pull),
             parent,
             key: signer,
           });
@@ -171,8 +163,8 @@ const close = Command.make(
             task,
             key: signer,
             outcome,
-            pulls: listOf(pull),
-            sessions: listOf(session),
+            pulls: commaList(pull),
+            sessions: commaList(session),
           });
         }),
       );

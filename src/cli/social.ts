@@ -28,6 +28,7 @@ import {
   repoArgument,
   rootFlag,
   withRepo,
+  commaList,
 } from "./shared.ts";
 
 const keyFlag = Flag.string("key").pipe(
@@ -150,7 +151,7 @@ const vouch = Command.make(
       repo,
       Effect.gen(function* () {
         const current = yield* identity(repo);
-        const requested = scope.split(",").map((value) => value.trim());
+        const requested = commaList(scope);
         const accepted = requested.filter((value): value is Statement.SocialScope =>
           Statement.SOCIAL_SCOPES.some((candidate) => candidate === value),
         );

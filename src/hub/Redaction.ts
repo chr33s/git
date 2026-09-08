@@ -47,7 +47,6 @@ import { Context, Effect, Option } from "effect";
 
 import type { Fingerprint } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
-import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import { type Oid, storageOf } from "../git/Store.ts";
 import * as Record from "../trust/Record.ts";
@@ -213,7 +212,7 @@ const tombstonesOn = Effect.fn("hub.Redaction.tombstonesOn")(function* (ref: str
   // made every tombstone on a trace ref longer than 4096 records vanish: the
   // walk failed, `parents` came back null, and this returned nothing at all —
   // a redaction that pushed fine and was then never honoured.
-  const ceiling = kind === "trace" ? yield* Trace.ceilingOf() : yield* Event.ceilingOf();
+  const ceiling = yield* Trace.ceilingFor(ref);
   const parents = yield* Dag.reachable(head, null, Event.isHubCommit, ceiling).pipe(
     Effect.catchTags({
       Invalid: () => Effect.succeed(null),
@@ -593,7 +592,7 @@ const tombstonesFor = Effect.fn("hub.Redaction.tombstonesFor")(function* (ref: s
   // tombstones on it, so two ceilings are two answers under what would
   // otherwise be one key — and the stale one is a redaction silently not
   // honoured.
-  const ceiling = Trace.traceOf(ref) !== null ? yield* Trace.ceilingOf() : yield* Event.ceilingOf();
+  const ceiling = yield* Trace.ceilingFor(ref);
   // The head is *validated*, not keyed on. In the key, every append left the
   // previous entry behind permanently dead — and `REFS` is one global map
   // shared by every repository this process serves, so a fleet of agents on
@@ -1369,5 +1368,3 @@ const memo: Memo = new Map();
  * and sharing one entry would make either question pay for the other's walk.
  */
 const names: Memo = new Map();
-
-export type RedactionError = Invalid | ObjectNotFound | StorageFailure;

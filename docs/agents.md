@@ -709,9 +709,9 @@ git+ hub enable --refs=refs/hub/session/*    # additionally the session refs
 ```
 
 `--refs` takes comma-separated refspecs under `refs/hub/`, naming one namespace
-at each end, so the same escape hatch names `refs/hub/task/*` and
-`refs/hub/trace/*` — the other two namespaces automatic replication never
-carries under a default. It is bounded that way because `hub disable` removes
+at each end, so the same escape hatch names `refs/hub/trace/*` — the one
+namespace neither `hub enable` nor server replication carries under a default;
+task refs are fetched by default. It is bounded that way because `hub disable` removes
 what it fetched: a destination elsewhere would leave those refs behind with no
 command able to take them out.
 

@@ -67,3 +67,27 @@ export const outboundUrl = (raw: string, secretField?: string): string | null =>
   }
   return null;
 };
+
+/**
+ * The terms a task is searched for.
+ *
+ * Shared by the two searches so neither owns the other's: `context/Select`
+ * searches source files, `knowledge/Recall` searches Concepts, and §9.1 ranks
+ * knowledge by the same terms the source search uses — two copies of the rule
+ * would drift, and the selector importing the knowledge layer for a tokenizer
+ * made it depend on the whole of it.
+ *
+ * Deliberately dull: split on non-word characters, drop what is too short to
+ * discriminate, and keep the order the operator typed so the ranking is
+ * reproducible. A stemmer or a synonym list would make the *selection*
+ * marginally better and the *explanation* materially worse.
+ */
+export const terms = (task: string): ReadonlyArray<string> => {
+  const seen = new Set<string>();
+  for (const word of task.split(/[^\p{L}\p{N}_]+/u)) {
+    const term = word.toLowerCase();
+    if (term.length < 3) continue;
+    seen.add(term);
+  }
+  return [...seen].slice(0, 16);
+};

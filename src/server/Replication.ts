@@ -24,7 +24,6 @@
 import { Effect } from "effect";
 
 import { fetchRepository, type FetchStores } from "../client/Fetch.ts";
-import type { Invalid, ObjectNotFound, PackCorrupt, StorageFailure } from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import * as Policy from "./Policy.ts";
 import { Repository } from "../git/Repository.ts";
@@ -231,5 +230,3 @@ const joinInto = Effect.fn("Replication.joinInto")(function* (
   yield* repository.setRef({ name: ref, to: commit, expected: heads[0] ?? null });
   return commit;
 });
-
-export type ReplicationError = Invalid | ObjectNotFound | PackCorrupt | StorageFailure;

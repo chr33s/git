@@ -33,13 +33,11 @@ import { Effect } from "effect";
 
 import * as Exposure from "../context/Exposure.ts";
 import * as Pack from "../context/Pack.ts";
-import type { ObjectNotFound, StorageFailure, Invalid } from "../git/Error.ts";
 import { qualify } from "../git/Oid.ts";
 import type { Oid } from "../git/Store.ts";
 import { trustReach } from "../hub/Projection.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
 import * as Trace from "../hub/Trace.ts";
-import * as Verify from "../trust/Verify.ts";
 import * as Records from "./Records.ts";
 
 /**
@@ -330,16 +328,14 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
       if (refusal !== null) untrusted.set(entry.commit, refusal);
     }
   }
-  // Who could have removed something, by the capability that removes it. The
-  // same test `cli/context.ts` makes for the same decision.
-  const removable = new Set<Oid>();
-  if (input.trust != null) {
-    for (const entry of telemetry.records) {
-      if (entry.payload.type !== Records.REDACTED) continue;
-      const signers = yield* Verify.signers(entry.bytes, entry.signatures);
-      if (Tombstone.counts(input.trust, signers)) removable.add(entry.commit);
-    }
-  }
+  // What a counted tombstone names, judged on the capability that writes one
+  // — the same fold `cli/context.ts` and the citation checker take, so the
+  // four readers cannot disagree about which removals count. Recorded once
+  // per record removed, not once per tombstone naming it: `redact`
+  // deliberately permits a tombstone for an already-unreadable record, so
+  // two tombstones for one removal are ordinary, and `N record(s) removed by
+  // a signed redaction` once counted them as two.
+  const removals = yield* Tombstone.removals(telemetry.records, input.repo, input.trust);
 
   const verdict = (commit: Oid): Exposure.Check | null => {
     if (input.trust == null) return null;
@@ -360,10 +356,8 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
   }> = [];
   const workspaces: Array<{ commit: Oid; payload: Records.WorkspaceTransition }> = [];
   const runtimes: Array<{ commit: Oid; payload: Records.InvocationTelemetry }> = [];
-  const redacted: Array<string> = [];
-  /** The same set, for membership: `includes` on a growing array inside a loop
-   * over every record is quadratic on a ref bounded at 16 384 of them. */
-  const removals = new Set<string>();
+  /** In ref order, which is the fold's insertion order. */
+  const redacted: Array<string> = [...removals];
   /** Health records this projection could not attribute; see the gate below. */
   const unjudged: Array<{
     record: string;
@@ -371,42 +365,17 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
     trust: Exposure.Check | null;
   }> = [];
 
-  // The tombstones first, in a pass of their own. Every other kind is filtered
-  // by what they name, and a record's removal can be stated after the record
-  // it removes — the tombstone is always *later* on the ref — so a single pass
-  // decided each record before it knew whether it had been removed.
-  // `Records.entries` does both halves of the binding now, and reports what it
-  // drops. Done here as a bare filter, the rejects went nowhere: a record
-  // naming another repository was in no section of the audit at all, while the
-  // identical mismatch on the session was named.
+  // The tombstones were folded first, in a pass of their own, because every
+  // other kind is filtered by what they name and a record's removal is stated
+  // *after* the record it removes: a single pass decided each record before
+  // it knew whether it had been removed. Recorded, not applied to the bytes —
+  // the record a tombstone names usually reads as unreadable already, once
+  // its payload is gone; what the fold adds is the account of *why*, since an
+  // absence with a tombstone beside it is a removal and one without is a
+  // replica that has not caught up. `Records.entries` does both halves of the
+  // binding and reports what it drops, so a record naming another repository
+  // is in the audit's `foreign` section rather than in no section at all.
   const bound = telemetry.records;
-
-  for (const entry of bound) {
-    const payload = entry.payload;
-    if (payload.type !== Records.REDACTED) continue;
-    // Recorded, not applied to the bytes: the record it names usually reads as
-    // unreadable already, once its payload is gone. What this adds is the
-    // account of *why* — an absence with a tombstone beside it is a removal,
-    // and one without is a replica that has not caught up.
-    //
-    // And only from a signer who could have removed anything — judged on
-    // `hub.redact`, which is what writes a tombstone, not on the `hub.trace`
-    // every other record here is judged by. `permits` gives no implication
-    // between the two, so a dedicated redactor holding only `hub.redact` had
-    // their removal reported as a record nobody could read: the exact
-    // distinction the comment above says this is making, inverted.
-    //
-    // Recorded once per record removed, not once per tombstone naming it.
-    // `redact` deliberately permits a tombstone for an already-unreadable
-    // record — a replica whose payload another host collected still needs to
-    // be able to write the local one — so two tombstones for one removal are
-    // ordinary, and `N record(s) removed by a signed redaction` counted them
-    // as two removals. Every other consumer already wraps this in a `Set`.
-    if (removable.has(entry.commit) && !removals.has(payload.targetCommit)) {
-      removals.add(payload.targetCommit);
-      redacted.push(payload.targetCommit);
-    }
-  }
 
   // What a counted tombstone names is gone from every reader, whatever this
   // replica still happens to hold. Applied to exposures and to nothing else,
@@ -589,6 +558,18 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
   };
   const descends = (from: Oid, to: Oid): boolean => ownerOf(to) === from;
   const unclaimed = workspaces.map((entry) => ({ ...entry, claimed: false }));
+  // Bucketed by the tree a transition starts from, which is the first thing
+  // `fits` asks and the only one that needs no walk: scanned whole per runtime
+  // record, the join was O(runtimes × transitions) on a session long enough
+  // for anyone to want this projection, and a claimed entry stayed in the
+  // scan for good. Walk order inside a bucket is preserved, because "the
+  // first that fits" is part of the rule below.
+  const byBefore = new Map<string, Array<(typeof unclaimed)[number]>>();
+  for (const entry of unclaimed) {
+    const bucket = byBefore.get(entry.payload.beforeTree);
+    if (bucket === undefined) byBefore.set(entry.payload.beforeTree, [entry]);
+    else bucket.push(entry);
+  }
   // Where the *next* invocation begins. A transition after that point belongs
   // to it, not to this one: bounded only below, an invocation whose own run
   // wrote nothing claimed the transition its successor wrote, and the audit
@@ -604,13 +585,23 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
     .map((commit) => position.get(commit))
     .filter((at) => at !== undefined)
     .sort((left, right) => left - right);
-  const nextAfter = (at: number) => starts.find((start) => start > at) ?? Number.MAX_SAFE_INTEGER;
+  // Sorted, so the next start is a binary search rather than a scan.
+  const nextAfter = (at: number) => {
+    let low = 0;
+    let high = starts.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if ((starts[middle] ?? Number.MAX_SAFE_INTEGER) > at) high = middle;
+      else low = middle + 1;
+    }
+    return starts[low] ?? Number.MAX_SAFE_INTEGER;
+  };
 
   const transitionAfter = (from: Oid, before: string) => {
     const at = position.get(from) ?? 0;
     const until = nextAfter(at);
+    const candidates = byBefore.get(before) ?? [];
     const fits = (entry: (typeof unclaimed)[number]) => {
-      if (entry.claimed || entry.payload.beforeTree !== before) return false;
       const where = position.get(entry.commit) ?? 0;
       if (where < at || where >= until) return false;
       return descends(from, entry.commit);
@@ -621,10 +612,13 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
     // showed the forgery and the real change was reported as belonging to
     // nobody.
     const found =
-      unclaimed.find((entry) => fits(entry) && verdict(entry.commit)?.ok !== false) ??
-      unclaimed.find((entry) => fits(entry));
+      candidates.find((entry) => fits(entry) && verdict(entry.commit)?.ok !== false) ??
+      candidates.find((entry) => fits(entry));
     if (found === undefined) return null;
     found.claimed = true;
+    // Out of its bucket as well as marked: what is claimed is never asked
+    // about again, so the bucket only shrinks.
+    candidates.splice(candidates.indexOf(found), 1);
     return { payload: found.payload, trust: verdict(found.commit) } as const;
   };
 
@@ -781,5 +775,3 @@ export const project = Effect.fn("telemetry.Invocation.project")(function* (inpu
     ],
   } satisfies Projection;
 });
-
-export type InvocationError = Invalid | ObjectNotFound | StorageFailure;

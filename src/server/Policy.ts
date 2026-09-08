@@ -1619,7 +1619,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // what it cannot do is arrive by push.
     for (const signer of signed) {
       if (openWindow(trust.revoked.get(signer)) !== null) {
-        return `${signer} has been revoked and may not add a ${kind ?? (social ? "statement" : "event")}`;
+        return `${signer} has been revoked and may not add ${kind === null ? (social ? "a statement" : "an event") : `a ${kind}`}`;
       }
     }
 

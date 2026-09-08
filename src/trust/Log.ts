@@ -26,7 +26,7 @@
 import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
@@ -274,5 +274,3 @@ export const contains = AppendOnly.containsOf(LOG);
 export const ancestry = AppendOnly.ancestryOf(LOG);
 
 export const RecordName = Schema.Literal(RECORD);
-
-export type LogError = Invalid | ObjectNotFound | StorageFailure;

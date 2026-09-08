@@ -504,16 +504,23 @@ export const redact = Effect.fn("hub.Session.redact")(function* (input: {
  * account down with it.
  */
 export const entries = Effect.fn("hub.Session.entries")(function* (session: string) {
+  const repository = yield* Repository;
   // No signer read at all: nothing a session projection decides turns on which
   // key signed which event, which is the whole reason the walk hands back
-  // signatures rather than verifying them.
+  // signatures rather than verifying them. The bytes and signatures ride
+  // along for the one reader that does verify — `Tombstone.removals` — so a
+  // memory fold or a citation check takes this ref once rather than once to
+  // read it and once more to re-read each tombstone.
+  const head = yield* repository.resolve(refOf(session));
   const walked = yield* Event.walk(refOf(session), decode);
   const events = walked.records.map((record) => ({
     commit: record.commit,
     payload: record.payload,
+    bytes: record.bytes,
+    signatures: record.signatures,
   }));
 
-  return { events, unreadable: walked.unreadable } as const;
+  return { head, events, unreadable: walked.unreadable } as const;
 });
 
 /**

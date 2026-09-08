@@ -54,6 +54,23 @@ describe("Secrets", () => {
     }),
   );
 
+  it.effect("leaves a prefix alone inside an ordinary word", () =>
+    Effect.sync(() => {
+      const caught = (text: string) => scan(text).map((finding) => finding.kind);
+      // Each of these carries `sk-` or `npm_` mid-word with a long tail behind
+      // it — the shape a tool name or a task sentence takes, and the shape
+      // that refused every record naming one.
+      assert.deepEqual(caught("run risk-assessment-tool over the tree"), []);
+      assert.deepEqual(caught("disk-usage-report for the build cache"), []);
+      assert.deepEqual(caught("mask-secrets-in-output is on"), []);
+      assert.deepEqual(caught("call my_npm_publish_helper first"), []);
+      // And still finds the token at the front of a word, however it is fenced.
+      assert.deepEqual(caught("key=sk-abcdefghijklmnop"), ["provider token"]);
+      assert.deepEqual(caught('"sk-abcdefghijklmnop"'), ["provider token"]);
+      assert.deepEqual(caught("(npm_abcdefghijklmnop)"), ["provider token"]);
+    }),
+  );
+
   it.effect("says what it found without repeating it", () =>
     Effect.sync(() => {
       const [finding] = scan("token=ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789");

@@ -264,7 +264,7 @@ export class GpCode extends GitPlusElement {
   /** The fetched previous version behind a view-mode diff, keyed by anchor+path. */
   #viewDiffOld: { anchor: string; path: string; contents: string | null } | null = null;
   /** One editor for the screen's lifetime; attached and detached per edit. */
-  #editSession: Editor<undefined> | null = null;
+  #editSession: Editor<"file"> | null = null;
   /** The detach `Editor.edit` returned — non-null exactly while attached. */
   #detachEditor: (() => void) | null = null;
   #paths: readonly string[] = [];
@@ -1230,7 +1230,7 @@ export class GpCode extends GitPlusElement {
     // the abandoned draft on screen.
     this.#viewer.render({ file, containerWrapper: host, forceRender: discarded });
     if (editing) {
-      this.#editSession ??= new Editor<undefined>();
+      this.#editSession ??= new Editor("file");
       const session = this.#editSession;
       this.#detachEditor = session.edit(this.#viewer);
       // A new file needs its name before its content — the caret belongs in

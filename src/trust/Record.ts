@@ -25,8 +25,8 @@
  */
 import { Effect, Schema } from "effect";
 
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
-import type { Signature, TreeEntry } from "../git/Format.ts";
+import { Invalid } from "../git/Error.ts";
+import type { CommitInfo, Signature, TreeEntry } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 
@@ -125,8 +125,23 @@ export const write = Effect.fn("trust.Record.write")(function* (input: {
  */
 export const read = Effect.fn("trust.Record.read")(function* (commit: Oid, name: string) {
   const repository = yield* Repository;
+  return yield* readFrom(commit, yield* repository.readCommit(commit), name);
+});
 
-  const info = yield* repository.readCommit(commit);
+/**
+ * `read`, for a caller that has already fetched the commit.
+ *
+ * A walk asks three questions of one commit — does it carry a record, what
+ * does its message say, what does the record hold — and answering each with
+ * its own `readCommit` tripled the object reads on the longest refs there are.
+ */
+export const readFrom = Effect.fn("trust.Record.readFrom")(function* (
+  commit: Oid,
+  info: CommitInfo,
+  name: string,
+) {
+  const repository = yield* Repository;
+
   const payloadEntry = yield* repository.findPath(info.tree, `${name}.json`);
   if (payloadEntry === null) {
     return yield* new Invalid({ field: "record", reason: `${commit} carries no ${name}.json` });
@@ -187,8 +202,14 @@ export const payloadOf = Effect.fn("trust.Record.payloadOf")(function* (commit: 
 
 export const carries = Effect.fn("trust.Record.carries")(function* (commit: Oid, name: string) {
   const repository = yield* Repository;
-  const info = yield* repository.readCommit(commit);
-  return (yield* repository.findPath(info.tree, `${name}.json`)) !== null;
+  return yield* carriesIn(yield* repository.readCommit(commit), name);
 });
 
-export type RecordError = Invalid | ObjectNotFound | StorageFailure;
+/** `carries`, for a caller that has already fetched the commit. */
+export const carriesIn = Effect.fn("trust.Record.carriesIn")(function* (
+  info: CommitInfo,
+  name: string,
+) {
+  const repository = yield* Repository;
+  return (yield* repository.findPath(info.tree, `${name}.json`)) !== null;
+});

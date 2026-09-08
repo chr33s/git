@@ -20,7 +20,6 @@ import * as Exposure from "../context/Exposure.ts";
 import * as Pack from "../context/Pack.ts";
 import * as Records from "../telemetry/Records.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
-import * as Verify from "../trust/Verify.ts";
 import * as Render from "../context/Render.ts";
 import * as Select from "../context/Select.ts";
 import { Invalid } from "../git/Error.ts";
@@ -30,12 +29,13 @@ import * as Event from "../hub/Event.ts";
 import * as Record from "../trust/Record.ts";
 import * as Redaction from "../hub/Redaction.ts";
 import * as Secrets from "../hub/Secrets.ts";
-import * as Claim from "../hub/Claim.ts";
+import * as Concept from "../knowledge/Concept.ts";
 import * as Trace from "../hub/Trace.ts";
 import { trustReach } from "../hub/Projection.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { project as projectTrust } from "../trust/Projection.ts";
 import {
+  membershipOrNull,
   mustResolve,
   readPrivateKey,
   repoFlag,
@@ -163,9 +163,38 @@ const forCommand = Command.make(
       Flag.withDefault(true),
       Flag.withDescription("Keep the exact render bytes so the digest can be recomputed"),
     ),
+    knowledge: Flag.boolean("knowledge").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription(
+        "Also recall eligible Knowledge Concepts, each with the evidence it declares",
+      ),
+    ),
+    at: Flag.string("at").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription(
+        "The instant --knowledge judges freshness at, as an ISO 8601 datetime with an offset",
+      ),
+    ),
   },
-  ({ json, key, maxBytes, maxItems, retain, rev, session, task, work }) =>
+  ({ at, json, key, knowledge, maxBytes, maxItems, retain, rev, session, task, work }) =>
     Effect.gen(function* () {
+      // The clock is an argument, never ambient (INV-14): `stale_after` is
+      // the one input that moves between two runs over identical refs, and
+      // `knowledge check` already refuses to read it off the wall. Left
+      // implicit here, two signed exposures over the same view and task
+      // disagreed on a Concept with the deciding input recorded nowhere — so
+      // it is taken explicitly, and printed either way.
+      if (at !== "" && !knowledge) {
+        return yield* new Invalid({
+          field: "at",
+          reason: "--at only dates Concept freshness; ask for Concepts with --knowledge",
+        });
+      }
+      const instant = at === "" ? null : Concept.instantOf(at);
+      if (instant !== null && instant.state === "invalid") {
+        return yield* new Invalid({ field: "at", reason: instant.reason });
+      }
+      const evaluationTime = instant === null ? new Date() : new Date(instant.at);
       // Read before the repository layer is built: a private key is the one
       // input no command takes as an argument, and the file is on this
       // machine, not in the repository.
@@ -267,7 +296,16 @@ const forCommand = Command.make(
           const repo = signer === null ? null : yield* identityOf();
 
           const view = base === head ? yield* Pack.capture(base) : yield* Pack.committed(base);
-          const pack = yield* Select.select({ task, view, maxItems, maxBytes });
+          // Knowledge competes for the same budget as source evidence, and
+          // only when it is asked for: a Concept recalled without the current
+          // bytes of what it depends on is prose standing in for source, and
+          // §9.2 makes that a group that is taken whole or omitted whole.
+          const recall = knowledge ? yield* membershipOrNull() : null;
+          const pack = yield* Select.select(
+            recall === null
+              ? { task, view, maxItems, maxBytes }
+              : { task, view, maxItems, maxBytes, knowledge: { ...recall, evaluationTime } },
+          );
           if (signer === null) return { pack, exposure: null } as const;
 
           const segments = yield* Select.render(pack, task);
@@ -317,6 +355,11 @@ const forCommand = Command.make(
               // here and only one did.
               renderWithheld: result.exposure?.withheld ?? null,
               resurrected: (result.exposure?.resurrected ?? []).map((oid) => Pack.qualify(oid)),
+              // The instant Concept freshness was judged at, or `null` when no
+              // Concept was asked for. The pack does not carry it, so this is
+              // where a reader of two differing packs finds the input that
+              // differed.
+              evaluatedAt: knowledge ? evaluationTime.toISOString() : null,
             },
             null,
             2,
@@ -338,6 +381,7 @@ const forCommand = Command.make(
       }
 
       yield* printPack(result.pack);
+      if (knowledge) yield* Console.log(`evaluated ${evaluationTime.toISOString()}`);
       if (result.exposure !== null) {
         yield* Console.log("");
         yield* Console.log(`exposure  ${Exposure.identify(result.exposure.commit)}`);
@@ -377,6 +421,10 @@ const packBytes = Effect.fn("context.packBytes")(function* (reference: string) {
     if (object?.type === "blob") return object.data;
     // A record: the pack it retains is the one its signature commits to.
     if (object?.type === "commit") {
+      // The pack first. `membership` and `locate` walk every trace ref in the
+      // repository, and for a commit that retains no pack — a branch head, a
+      // session record — all of that ran before the refusal saying so.
+      const retained = yield* Exposure.packOf(named);
       // Unless a counted tombstone names it. `context audit` honours one in
       // both of its branches and `session show --audit` does too — because a
       // Pack is deterministic, so reading "whatever resolves" flips a removed
@@ -396,7 +444,7 @@ const packBytes = Effect.fn("context.packBytes")(function* (reference: string) {
           });
         }
       }
-      return (yield* Exposure.packOf(named)).bytes;
+      return retained.bytes;
     }
     if (object !== null) {
       return yield* new Invalid({
@@ -503,24 +551,17 @@ const removalsOn = Effect.fn("context.removalsOn")(function* (
   /** The walk the caller already took; see `Records.entries`. */
   taken?: Trace.Walk,
 ) {
-  const removals = new Set<string>();
-  if (trust == null) return removals;
-  for (const entry of (yield* Records.entries(session, taken)).records) {
-    // Bound to this repository, which `Records.entries` deliberately leaves to
-    // its caller — `Invocation.project` does the same filter for the same
-    // reason. Traces are transferable by explicit refspec and replication is
-    // not gated on payload contents, so a key holding `hub.redact` in two
-    // repositories could redact an exposure in one and have the record reach
-    // the other: the exposure it names then landed in `redacted` here, which
-    // is excluded from `audits`, from `unreadable` and so from the non-zero
-    // exit — and `context audit <session> && deploy` deployed having never
-    // checked that exposure's signature, trust, binding or evidence.
-    if (!Claim.bound(entry.payload, { repo })) continue;
-    if (entry.payload.type !== Records.REDACTED) continue;
-    const signers = yield* Verify.signers(entry.bytes, entry.signatures);
-    if (Tombstone.counts(trust, signers)) removals.add(entry.payload.targetCommit);
-  }
-  return removals;
+  // Bound to this repository inside the fold, which `Records.entries`
+  // deliberately leaves to its caller — `Invocation.project` does the same
+  // filter for the same reason. Traces are transferable by explicit refspec
+  // and replication is not gated on payload contents, so a key holding
+  // `hub.redact` in two repositories could redact an exposure in one and have
+  // the record reach the other: the exposure it names then landed in
+  // `redacted` here, which is excluded from `audits`, from `unreadable` and so
+  // from the non-zero exit — and `context audit <session> && deploy` deployed
+  // having never checked that exposure's signature, trust, binding or
+  // evidence.
+  return yield* Tombstone.removals((yield* Records.entries(session, taken)).records, repo, trust);
 });
 
 /**

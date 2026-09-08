@@ -26,7 +26,7 @@
  */
 import { Effect, Predicate, Schema } from "effect";
 
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid } from "../git/Error.ts";
 import { isGitlink, isTree } from "../git/Format.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
 import { Repository } from "../git/Repository.ts";
@@ -698,5 +698,3 @@ export const verify = Effect.fn("context.Pack.verify")(function* (pack: Pack) {
     ok: items.every((checked) => checked.evidence.ok),
   } satisfies Report;
 });
-
-export type PackError = Invalid | ObjectNotFound | StorageFailure;

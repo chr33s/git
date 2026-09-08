@@ -33,10 +33,12 @@ import { isBinary, unified } from "../git/Diff.ts";
 import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
 import {
   EMPTY_TREE_OID,
+  hashObject,
   isGitlink,
   isTree,
   type CommitInfo,
   type Signature,
+  type TreeEntry,
 } from "../git/Format.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { forPath as pathHistory } from "../git/History.ts";
@@ -51,6 +53,11 @@ import {
 } from "../hub/Projection.ts";
 import * as HubTask from "../hub/Task.ts";
 import * as HubSession from "../hub/Session.ts";
+import * as Trace from "../hub/Trace.ts";
+import * as Exposure from "../context/Exposure.ts";
+import * as Pack from "../context/Pack.ts";
+import * as Render from "../context/Render.ts";
+import * as Records from "../telemetry/Records.ts";
 import { archive as archiveTree, type Format as ArchiveFormat } from "./Archive.ts";
 import {
   project as projectTrust,
@@ -93,6 +100,7 @@ import {
   BisectAnswer,
   HistoryPage,
   HubEventAppended,
+  type HubEventAttachment,
   HubEventRequest,
   type HubMergeable,
   HubMerged,
@@ -2502,6 +2510,226 @@ const fromBase64 = (content: string): Uint8Array | null => {
   }
 };
 
+/** Where a pre-signed record lands, and what it is charged. */
+interface AppendTarget {
+  readonly ref: string;
+  readonly message: string;
+  readonly valid: boolean;
+  readonly field: string;
+  readonly repo: string;
+  readonly capability: string;
+  /** Set for a trace record; a Context Exposure also decodes its payload. */
+  readonly trace?: { readonly exposure: Exposure.Payload | null };
+}
+
+/**
+ * A trace record, which push has always accepted and this endpoint had not.
+ *
+ * Two shapes share the namespace: a Context Exposure and the runtime records
+ * (`telemetry/Records`). Each is tried in turn, because neither decoder reads
+ * the other's — and a tombstone is charged `hub.redact` here as it is at the
+ * push boundary, since a redactor is the one writer a trace ref admits from
+ * outside its own capability. The payload bound is `Trace.append`'s: an
+ * oversized record on a ref this version cannot rewind is one every replica
+ * pays for.
+ */
+const traceTarget = Effect.fn("Api.traceTarget")(function* (
+  bytes: Uint8Array,
+): Effect.fn.Return<AppendTarget, Invalid> {
+  const exposure = yield* Exposure.decode(bytes).pipe(Effect.orElseSucceed(() => null));
+  const record =
+    exposure !== null
+      ? null
+      : yield* Records.decode(bytes).pipe(
+          Effect.catchTag("Invalid", () =>
+            Effect.fail(
+              new Invalid({
+                field: "payload",
+                reason: "the payload is not a pull-request, task, session or trace record",
+              }),
+            ),
+          ),
+        );
+  if (bytes.length > Trace.MAX_PAYLOAD) {
+    return yield* new Invalid({
+      field: "payload",
+      reason: `a trace record may not exceed ${Trace.MAX_PAYLOAD} bytes; this one is ${bytes.length}`,
+    });
+  }
+  const payload = exposure ?? record;
+  if (payload === null) {
+    return yield* new Invalid({ field: "payload", reason: "the payload is not a trace record" });
+  }
+  return {
+    ref: Trace.refOf(payload.session),
+    message: `${payload.type} ${payload.id}\n`,
+    valid: Trace.isTraceId(payload.session),
+    field: "session",
+    repo: payload.repo,
+    capability: payload.type === Records.REDACTED ? "hub.redact" : Records.CAPABILITY,
+    trace: { exposure },
+  };
+});
+
+/** The largest blob a trace writer attaches: a retained render. */
+const MAX_ATTACHMENT = Render.MAX_RENDER;
+
+/** The modes `Exposure.expose` writes its `context/` entries with. */
+const BLOB_MODE = "100644";
+const TREE_MODE = "40000";
+
+/**
+ * The tree entries a record carries beside its payload, or why it may not.
+ *
+ * Held to what `Exposure.expose` writes and nothing wider: the three paths
+ * under `context/`, each at most once, the view as an edge to a tree this
+ * repository already holds. Anything else — a path of the caller's choosing,
+ * a blob under a name the audit never reads — would be bytes on an
+ * append-only ref that no reader accounts for and no retention policy names.
+ * And what `expose` refuses before writing, this refuses too: a pack that
+ * does not hash to `payload.pack`, a view that is not the pack's own, a
+ * render that does not hash to its commitment. An exposure whose evidence
+ * fails its own audit the moment it lands is not one to append.
+ */
+const attachmentsFor = Effect.fn("Api.attachmentsFor")(function* (
+  target: AppendTarget,
+  attachments: ReadonlyArray<HubEventAttachment>,
+) {
+  if (attachments.length === 0 && target.trace?.exposure == null) return [];
+  if (target.trace?.exposure == null) {
+    return yield* new Invalid({
+      field: "attachments",
+      reason: "only a context exposure carries attachments",
+    });
+  }
+  const exposure = target.trace.exposure;
+  const repository = yield* Repository;
+
+  const seen = new Set<string>();
+  const decoded = new Map<
+    string,
+    { readonly bytes: Uint8Array | null; readonly tree: Oid | null }
+  >();
+  for (const attachment of attachments) {
+    if (seen.has(attachment.path)) {
+      return yield* new Invalid({
+        field: "attachments",
+        reason: `'${attachment.path}' is attached more than once`,
+      });
+    }
+    seen.add(attachment.path);
+    const wantsTree = attachment.path === Exposure.VIEW;
+    if (attachment.path !== Exposure.PACK && attachment.path !== Exposure.RENDER && !wantsTree) {
+      return yield* new Invalid({
+        field: "attachments",
+        reason: `'${attachment.path}' is not a path a context exposure retains; one of ${Exposure.PACK}, ${Exposure.VIEW}, ${Exposure.RENDER}`,
+      });
+    }
+    if ((attachment.content === undefined) === (attachment.tree === undefined)) {
+      return yield* new Invalid({
+        field: "attachments",
+        reason: `'${attachment.path}' must carry exactly one of content or tree`,
+      });
+    }
+    if (wantsTree !== (attachment.tree !== undefined)) {
+      return yield* new Invalid({
+        field: "attachments",
+        reason: wantsTree
+          ? `'${attachment.path}' is a tree edge; name the tree, not its bytes`
+          : `'${attachment.path}' is a blob; send its bytes, not a tree`,
+      });
+    }
+    if (attachment.content !== undefined) {
+      const bytes = fromBase64(attachment.content);
+      if (bytes === null) {
+        return yield* new Invalid({
+          field: "attachments",
+          reason: `'${attachment.path}' is not valid base64`,
+        });
+      }
+      if (bytes.length > MAX_ATTACHMENT) {
+        return yield* new Invalid({
+          field: "attachments",
+          reason: `'${attachment.path}' may not exceed ${MAX_ATTACHMENT} bytes`,
+        });
+      }
+      decoded.set(attachment.path, { bytes, tree: null });
+    } else {
+      const tree = Pack.unqualify(attachment.tree ?? "");
+      if (tree === null) {
+        return yield* new Invalid({
+          field: "attachments",
+          reason: `'${attachment.tree}' is not a qualified tree oid`,
+        });
+      }
+      decoded.set(attachment.path, { bytes: null, tree });
+    }
+  }
+
+  // The pack and the view are what an audit reads first; `expose` never
+  // writes a record without them, so neither does this.
+  const packBytes = decoded.get(Exposure.PACK)?.bytes;
+  const view = decoded.get(Exposure.VIEW)?.tree;
+  if (packBytes === undefined || packBytes === null || view === undefined || view === null) {
+    return yield* new Invalid({
+      field: "attachments",
+      reason: `a context exposure attaches ${Exposure.PACK} and ${Exposure.VIEW}`,
+    });
+  }
+  const packOid = yield* hashObject({ type: "blob", data: packBytes });
+  if (Pack.qualify(packOid) !== exposure.pack) {
+    return yield* new Invalid({
+      field: "attachments",
+      reason: `${Exposure.PACK} hashes to ${Pack.qualify(packOid)}, not the payload's ${exposure.pack}`,
+    });
+  }
+  const pack = yield* Pack.decode(packBytes);
+  if (pack.view.tree !== Pack.qualify(view)) {
+    return yield* new Invalid({
+      field: "attachments",
+      reason: `${Exposure.VIEW} names ${Pack.qualify(view)}, not the pack's ${pack.view.tree}`,
+    });
+  }
+  // A tree this repository holds, for the reason `expose` reads it: a `view`
+  // entry naming an absent object is an edge git will fetch and then refuse
+  // to walk, on a record that can never be deleted.
+  yield* repository.readTree(view).pipe(
+    Effect.catchTag("ObjectNotFound", () =>
+      Effect.fail(
+        new Invalid({
+          field: "attachments",
+          reason: `${Exposure.VIEW} names ${Pack.qualify(view)}, which is not a tree this repository holds`,
+        }),
+      ),
+    ),
+  );
+  const render = decoded.get(Exposure.RENDER)?.bytes ?? null;
+  if (render !== null) {
+    const digest = yield* Render.sha256(render);
+    if (digest !== exposure.renderDigest) {
+      return yield* new Invalid({
+        field: "attachments",
+        reason: `${Exposure.RENDER} hashes to ${digest}, not the payload's commitment ${exposure.renderDigest}`,
+      });
+    }
+  }
+
+  const attached: Array<TreeEntry> = [
+    { mode: BLOB_MODE, name: "pack.json", oid: yield* repository.writeBlob(packBytes) },
+    { mode: TREE_MODE, name: "view", oid: view },
+  ];
+  if (render !== null) {
+    attached.push({
+      mode: BLOB_MODE,
+      name: "render.bin",
+      oid: yield* repository.writeBlob(render),
+    });
+  }
+  return [
+    { mode: TREE_MODE, name: Exposure.DIRECTORY, oid: yield* repository.writeTree(attached) },
+  ] satisfies ReadonlyArray<TreeEntry>;
+});
+
 export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
   group
     .handle("tasks", ({ query }) =>
@@ -2733,14 +2961,7 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
                     repo: event.repo,
                     capability: event.type === "event.redacted" ? "hub.redact" : "hub.session",
                   })),
-                  Effect.catchTag("Invalid", () =>
-                    Effect.fail(
-                      new Invalid({
-                        field: "payload",
-                        reason: "the payload is not a pull-request, task or session event",
-                      }),
-                    ),
-                  ),
+                  Effect.catchTag("Invalid", () => traceTarget(bytes)),
                 ),
               ),
             ),
@@ -2752,6 +2973,11 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
             reason: "the event names an id that cannot name a ref",
           });
         }
+        // What the record keeps reachable beside its bytes, checked and
+        // written before the gate for the reason the record commit is: an
+        // object write changes nothing reachable, and the gate judges the
+        // ref update that would make it so.
+        const attach = yield* attachmentsFor(target, payload.attachments ?? []);
 
         // With a genesis, who signed decides. The transport principal already
         // passed the guard, but a relay may submit bytes somebody else signed
@@ -2794,6 +3020,7 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
             signatures: payload.signatures,
             parents: head === null ? [] : [head],
             message: target.message,
+            attach,
           });
           const verdict = yield* Policy.gate(
             [{ name: target.ref, value: record, expected: head }],

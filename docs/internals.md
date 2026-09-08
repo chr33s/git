@@ -376,6 +376,19 @@ token in a request body is a token in an access log), and `pull` reports a
 non-fast-forward as its own outcome rather than guessing whether a merge or a
 rebase was wanted.
 
+The hub's own append is `POST /:repo/hub/events`: the exact signed bytes of a
+record (base64) and the armored signatures over them, decoded to find which
+ref it names — a pull request, task, session or trace — and judged by the same
+gate a push meets. The server never holds a key, so it authors nothing; it
+appends what a member signed elsewhere. A Context Exposure is appended with
+`attachments`, which is where its evidence goes: `context/pack.json` and an
+optional `context/render.bin` as bytes, `context/view` as the qualified oid of
+a tree the repository already holds, since a view is the source tree a push
+delivered. The three paths are the only ones accepted, and each is checked
+against the payload it supports — the pack must hash to `pack`, the view must
+be the pack's own, the render must hash to its commitment — so an exposure
+lands with the tree shape `Trace.append` writes and audits the same way.
+
 ### Working tree
 
 `status`, `add`, `rm`, `mv`, `restore`, `switch`, `commit`, over an index at

@@ -397,6 +397,54 @@ describe("GenAI normalization", () => {
     assert.equal(declared.semconv?.revision, "1.37.0");
   });
 
+  it("T-01: dispatches through the supported profile registry", () => {
+    // §11.1: the registry is the compatibility boundary, and every advertised
+    // revision has to be one this version actually maps — no placeholders.
+    assert.equal(Semconv.PROFILES.length > 0, true);
+    for (const profile of Semconv.PROFILES) {
+      assert.equal(profile.profile, Semconv.PROFILE);
+      assert.match(profile.revision, /^\d+\.\d+\.\d+$/u);
+      assert.equal(Semconv.profileFor(profile.revision), profile);
+    }
+
+    const supported = Semconv.mappingFor(Semconv.PROFILES[0]!.revision);
+    assert.equal(supported.state, "supported");
+    // Absent is best-effort, which is a mapping and not a conformance claim.
+    assert.equal(Semconv.mappingFor(undefined).state, "best-effort");
+    // And an exact match, never a prefix guess: a neighbouring revision is
+    // unsupported until somebody adds fixtures for it.
+    assert.equal(Semconv.mappingFor("1.37").state, "unsupported");
+    assert.equal(Semconv.mappingFor("99.0.0").state, "unsupported");
+  });
+
+  it("T-01: an unsupported declared revision is a typed refusal, not a stamp", () => {
+    const normalized = Semconv.normalize(chat(), { revision: "99.0.0", stage: "sdk-export" });
+    assert.equal(normalized.kind, "unsupported-profile");
+    if (normalized.kind !== "unsupported-profile") return;
+    assert.equal(normalized.revision, "99.0.0");
+
+    // And nothing carries the claim onward: `captureOf` writes no `semconv`
+    // block for a revision no mapping here read.
+    assert.equal(Semconv.captureOf(chat(), { revision: "99.0.0" }).semconv, undefined);
+  });
+
+  it("T-01: a supported revision normalizes and preserves its profile", () => {
+    const revision = Semconv.PROFILES[0]!.revision;
+    const normalized = Semconv.normalize(chat(), { revision, stage: "sdk-export" });
+    assert.equal(normalized.kind, "inference");
+    if (normalized.kind !== "inference") return;
+    assert.equal(normalized.fields.capture.semconv?.revision, revision);
+    assert.equal(normalized.fields.capture.semconv?.profile, Semconv.PROFILE);
+  });
+
+  it("T-01: a recognized revision with an operation it does not cover is unsupported", () => {
+    const normalized = Semconv.normalize(span({ "gen_ai.operation.name": "invented" }), {
+      revision: Semconv.PROFILES[0]!.revision,
+    });
+    // An explicit unsupported-operation outcome, never an invented inference.
+    assert.equal(normalized.kind, "unsupported");
+  });
+
   it("reads the context limits as Git+ extensions, under their own names", () => {
     const facts = Semconv.contextOf(
       chat({

@@ -30,6 +30,7 @@ import type { Fingerprint } from "../crypto/SshSignature.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { openWindow, project as projectTrust } from "../trust/Projection.ts";
 import type { Projection as TrustProjection } from "../trust/Projection.ts";
+import * as Verify from "../trust/Verify.ts";
 
 /** The one tag all three record namespaces spell the same way. */
 export const TAG = "event.redacted";
@@ -136,3 +137,61 @@ export const counts = (trust: TrustProjection, signers: ReadonlyArray<Fingerprin
     if (member === undefined) return false;
     return member.history.some((grant) => permits(grant.capabilities, "hub.redact"));
   });
+
+/**
+ * A walked record, as every namespace's walk hands one back.
+ *
+ * The three envelopes differ; what a tombstone fold reads of them does not —
+ * the tag, the repository the record was minted for, the commit it names, and
+ * the exact bytes a signature covers.
+ */
+export interface Walked {
+  readonly bytes: Uint8Array;
+  readonly signatures: ReadonlyArray<string>;
+  readonly payload: {
+    readonly type: string;
+    readonly repo: string;
+    readonly targetCommit?: string | undefined;
+  };
+}
+
+/**
+ * What the counted tombstones among these records have removed.
+ *
+ * One fold for every reader — `context audit`, the invocation projection,
+ * citation checking and repository memory each had a copy, and the copies
+ * disagreed on the one input that matters: what a tombstone means when there
+ * is no membership to judge its signer by. The rule, now in one place:
+ *
+ * **A tombstone nobody can judge does not count.** Replication is not
+ * policy-gated, so a fetched-in commit whose payload merely claims the tag
+ * must not be able to reclassify anything on its own — `context audit`
+ * would otherwise file a tampered exposure under `redacted`, which is outside
+ * the non-zero exit, and `audit && deploy` would deploy having checked
+ * nothing. A reader with no membership is a reader whose every record is
+ * already unverified data, and it is labelled that way by the surface that
+ * shows it; withholding on the strength of an unverifiable statement would
+ * let anybody who can append to a ref suppress what everybody else sees.
+ *
+ * Bound to `repo` first: a key holding `hub.redact` in two repositories can
+ * land a tombstone from one in the other by explicit refspec, and a target
+ * commit is only meaningful in the repository it was minted for. Counted on
+ * `hub.redact` ever held (`counts`), which is the monotone reading `gc`
+ * needs. Insertion order is record order, so a caller listing removals lists
+ * them as the ref states them.
+ */
+export const removals = Effect.fn("hub.Tombstone.removals")(function* (
+  records: ReadonlyArray<Walked>,
+  repo: string,
+  trust: TrustProjection | null | undefined,
+) {
+  const removed = new Set<string>();
+  if (trust == null) return removed;
+  for (const entry of records) {
+    if (entry.payload.type !== TAG || entry.payload.targetCommit === undefined) continue;
+    if (entry.payload.repo !== repo) continue;
+    const signers = yield* Verify.signers(entry.bytes, entry.signatures);
+    if (counts(trust, signers)) removed.add(entry.payload.targetCommit);
+  }
+  return removed;
+});

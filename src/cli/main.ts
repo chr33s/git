@@ -50,6 +50,7 @@ import { parseInvocation, runCoreCompatibility } from "./GitCompat.node.ts";
 import { contextCommand } from "./context.ts";
 import { hubCommand } from "./hub.ts";
 import { idCommand } from "./id.ts";
+import { knowledgeCommand } from "./knowledge.ts";
 import * as replay from "./replay.ts";
 import {
   cliSignature,
@@ -60,6 +61,7 @@ import {
   resolveRev,
   rootFlag,
   withRepo,
+  commaList,
 } from "./shared.ts";
 import { sessionCommand } from "./session.ts";
 import { serveCommand } from "./serve.ts";
@@ -218,7 +220,7 @@ const credential = Command.make(
           return yield* mintDelegation({
             key: signer,
             repo: stored.genesis.repoId,
-            capabilities: capability.split(",").map((value) => value.trim()),
+            capabilities: commaList(capability),
             ttlSeconds: ttl,
           });
         }),
@@ -375,7 +377,7 @@ const credentialHelper = Command.make(
           return yield* mintDelegation({
             key: signer,
             repo: stored.genesis.repoId,
-            capabilities: capability.split(",").map((value) => value.trim()),
+            capabilities: commaList(capability),
             audience,
             ttlSeconds: ttl,
           });
@@ -1049,6 +1051,9 @@ const git = Command.make("git+").pipe(
     idCommand.pipe(Command.withDescription("Stable principal identity and device rotation")),
     history.pipe(Command.withDescription("Commits that changed one path")),
     init.pipe(Command.withDescription("Create an empty bare repository")),
+    knowledgeCommand.pipe(
+      Command.withDescription("Knowledge Concepts: check structure, provenance and freshness"),
+    ),
     log.pipe(Command.withDescription("Commit history, newest first")),
     merge.pipe(Command.withDescription("Three-way merge two revisions")),
     work.mv.pipe(Command.withDescription("Move a tracked path, staging both halves")),

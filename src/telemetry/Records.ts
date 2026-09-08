@@ -33,12 +33,19 @@
 import { DateTime, Effect, Predicate, Schema } from "effect";
 
 import type { PrivateKey } from "../crypto/SshSignature.ts";
-import { Capture, checkCapture, STAGES } from "../context/Exposure.ts";
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import {
+  CAPABILITY as EXPOSURE_CAPABILITY,
+  Capture,
+  checkCapture,
+  headOf,
+  STAGES,
+  trusted,
+} from "../context/Exposure.ts";
+import { Invalid } from "../git/Error.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
 import { TRUST_LOG } from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
-import { isOid, type Oid } from "../git/Store.ts";
+import { type Oid } from "../git/Store.ts";
 import * as Event from "../hub/Event.ts";
 import * as Secrets from "../hub/Secrets.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
@@ -589,7 +596,14 @@ export const check = Effect.fn("telemetry.Records.check")(function* (payload: Pa
     }
     yield* reference("exposure", payload.exposure);
   }
-  if (payload.type === TOOL) yield* reference("invocation", payload.invocation);
+  if (payload.type === TOOL) {
+    yield* reference("invocation", payload.invocation);
+    // The trees a tool says it moved between, held to the same rule as a
+    // workspace record's: an unqualified oid here is a claim nothing can
+    // resolve, signed onto an append-only ref.
+    yield* reference("mutation.beforeTree", payload.mutation?.beforeTree ?? null);
+    yield* reference("mutation.afterTree", payload.mutation?.afterTree ?? null);
+  }
   // The one field whose value drives an irreversible deletion, and the one
   // that was not checked: an unqualified `targetCommit` is accepted, signed and
   // appended, and `Redaction.tombstonesOn` then unqualifies it to `null` and
@@ -744,11 +758,9 @@ export const record = Effect.fn("telemetry.Records.record")(function* (
   // --event` onto an append-only ref.
   const parts = prose(payload);
   // The entropy rule is dropped for identifiers and kept for everything else;
-  // the pattern rules apply to both.
-  const leaked = [
-    ...Secrets.scan(parts.said),
-    ...Secrets.scan(parts.opaque).filter((finding) => finding.kind !== "high-entropy string"),
-  ];
+  // the pattern rules apply to both. `Secrets.Reading` is where that line is
+  // drawn, so it is not redrawn here as a filter over the findings.
+  const leaked = [...Secrets.scan(parts.said), ...Secrets.scan(parts.opaque, { opaque: true })];
   if (leaked.length > 0) {
     return yield* new Invalid({
       field: "trace",
@@ -1022,30 +1034,23 @@ export const verified = Effect.fn("telemetry.Records.verified")(function* (input
     return `record is dated '${input.entry.payload.issuedAt}', which is not a date`;
   const made = new Date(at);
 
-  // `signed` for the reason `context/Exposure.trusted` passes it: `authorize`
-  // verifies the list itself otherwise, and a projection over a long session
-  // paid for every signature twice, over attacker-supplied input.
-  const asked = {
-    projection: input.projection,
-    bytes: input.bytes,
-    signatures: input.entry.signatures,
-    signed: yield* Verify.signers(input.bytes, input.entry.signatures),
-    capability: CAPABILITY,
-    made: {
-      at: made,
-      trustHead: headOf(input.entry.payload.trustHead),
-    },
-  };
-  const decision = yield* input.reach === undefined
-    ? Verify.authorize(asked)
-    : Verify.authorize({ ...asked, seen: input.reach.ancestry, contains: input.reach.contains });
+  // The same judgement an exposure gets, from the same function: the two
+  // halves of one record are held to one rule, and this module carried its
+  // own copy of it — with its own `CAPABILITY` and `headOf` — until the two
+  // were found to agree only by inspection.
+  const decision = yield* trusted(
+    input.projection,
+    input.bytes,
+    input.entry.signatures,
+    { at: made, trustHead: headOf(input.entry.payload.trustHead) },
+    // `signed` for the reason `trusted` takes it: `authorize` verifies the
+    // list itself otherwise, and a projection over a long session paid for
+    // every signature twice, over attacker-supplied input.
+    yield* Verify.signers(input.bytes, input.entry.signatures),
+    input.reach,
+  );
   return decision.ok ? null : decision.reason;
 });
 
 /** The capability a trace producer holds; the same one the boundary charges. */
-export const CAPABILITY = "hub.trace";
-
-const headOf = (value: string | null): Oid | null =>
-  value !== null && isOid(value) ? value : null;
-
-export type RecordError = Invalid | ObjectNotFound | StorageFailure;
+export const CAPABILITY = EXPOSURE_CAPABILITY;

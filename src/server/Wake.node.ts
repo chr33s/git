@@ -229,7 +229,7 @@ const since = Effect.fn("wake.since")(function* (ref: string, tip: Oid, cursor: 
   // ceiling made a session that legitimately grew past 4096 records fail this
   // walk, leave its cursor unmoved, and never fire its rules again — the same
   // defect `hub/Redaction.tombstonesOn` had, one file over.
-  const ceiling = Trace.traceOf(ref) !== null ? yield* Trace.ceilingOf() : yield* Event.ceilingOf();
+  const ceiling = yield* Trace.ceilingFor(ref);
   const parents = yield* Dag.reachable(tip, cursor, Event.isHubCommit, ceiling);
   const found: Array<{ readonly commit: Oid; readonly type: string }> = [];
   const unreadable: Array<Oid> = [];

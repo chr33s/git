@@ -123,6 +123,7 @@ SUBCOMMANDS
   id                  Stable principal identity and device rotation
   history             Commits that changed one path
   init                Create an empty bare repository
+  knowledge           Knowledge Concepts: check structure, provenance and freshness
   log                 Commit history, newest first
   merge               Three-way merge two revisions
   mv                  Move a tracked path, staging both halves
@@ -272,11 +273,6 @@ The answer becomes signed causal provenance instead of an ephemeral chat message
 
 ## 6. Knowledge
 
-> **Not yet implemented.** `git+ knowledge` is specified in [knowledge.md](knowledge.md) and no
-> such command is registered; invoking one exits non-zero with the top-level usage. This section
-> describes the intended surface, in the same state `context` and `trace` were in before they were
-> built.
-
 The knowledge corpus is ordinary repository content under `.gitplus/knowledge/`. Each Concept is directly OKF-compatible Markdown/YAML with optional stronger Git+ provenance under `gitplus:` frontmatter.
 
 Use normal file and Git operations to edit and inspect it:
@@ -294,11 +290,31 @@ The directory already is the portable interchange artifact, so Git+ does not req
 Git+ adds the check ordinary file tools cannot perform:
 
 ```bash
-# Check the entire bundle
+# Check the entire bundle, against the permitted effective working view
 git+ knowledge check
 
-# Check one Concept
+# Check one Concept, by id or by repository-relative path
 git+ knowledge check gotchas/worker-auth
+git+ knowledge check .gitplus/knowledge/gotchas/worker-auth.md
+
+# A committed revision rather than the working tree, as JSON
+git+ knowledge check --ref HEAD --json
+
+# Turn selected findings into a gate
+git+ knowledge check --strict
+
+# A bare repository on a server
+git+ knowledge check --root ./repos --repo project --ref main
+```
+
+Checking is read-only: it stages nothing, writes no Concept, persists no Memory and appends no exposure. Capturing a dirty view does materialize blobs for the files it reads, which is how the working view is addressed at all.
+
+Exit **0** when the requested scope was evaluated, its structural and provenance checks hold, and the selected gate passed — a missing bundle is a successful no-op. Exit **1** for malformed input, invalid declared provenance, incomplete evaluation, or a failed gate. Warnings alone do not fail the default gate; `--strict` additionally fails on changed or missing declared dependencies, on expired or invalid freshness deadlines, and on citations this replica could not verify.
+
+A cited record this replica does not hold is reported `unavailable`, never accepted or invalid. `hub enable` does not fetch session refs by default, so on a fresh clone every citation reads that way until they are fetched:
+
+```bash
+git+ hub enable --refs 'refs/hub/session/*'
 ```
 
 The check keeps these dimensions separate:
@@ -322,14 +338,30 @@ Portable OKF `verified` metadata is editorial metadata. It never grants Git+ mem
 Repository Memory is the bounded projection suitable for every session start:
 
 ```bash
-# Read current Memory
+# Read the stored note, which is a historical cache and says so
 git+ session memory
 
-# Rebuild from durable provenance / current knowledge first
+# Re-derive from current Concepts and session records, without persisting
+git+ session memory --derive
+
+# Re-derive and persist
 git+ session memory --distill
 ```
 
+The note is where Memory is kept, not what automatic recall trusts. `--derive` and `--distill` rebuild it from the Concepts and signed session records that are eligible _now_, so a redaction, a revoked key, a changed Concept or a passed `stale_after` takes an entry out before any collection has run. The account of the derivation — what did not fit, what was excluded and why, whether the note was written — goes to stderr, so stdout stays the note.
+
 Memory is a cache. Eviction does not delete Knowledge Concepts or their signed source records.
+
+### 6.3 Recording what a session learned
+
+The component that can judge the work supplies the learning; a stop hook cannot infer one from a branch name. `session produce` takes it either way:
+
+```bash
+git+ session produce --session <id> --note "gotcha: …" project
+git+ session produce --session <id> --note-file ./learning.txt project
+```
+
+`--note-file` reads from a path or from `-` for stdin, and is mutually exclusive with `--note`. It exists so multiline or sensitive text never passes through process arguments; the record schema, the size bound and the secret scan are the same on both paths. No learning is a valid outcome — nothing is written when there is none.
 
 ---
 
@@ -347,7 +379,14 @@ git+ context audit <invocation-or-exposure>
 
 ```bash
 git+ context for --task="fix authentication policy"
+
+# …with eligible Knowledge Concepts competing for the same budget
+git+ context for --task="fix authentication policy" --knowledge
 ```
+
+With `--knowledge`, a recalled Concept is selected together with the current bytes of the repository evidence it declares. A group that does not fit is omitted whole, with a `budget` diagnostic naming the Concept: prose whose support was silently dropped reads as supported when it is not.
+
+Concept freshness is judged at an instant, and the instant is printed (`evaluated`, or `evaluatedAt` under `--json`) because the pack does not carry it. `--at <ISO 8601 datetime>` names it explicitly, as `knowledge check` does; left out, it is the wall clock, and two runs over identical refs can then differ on a Concept whose `stale_after` fell between them.
 
 The output identifies one Repository View and typed evidence:
 

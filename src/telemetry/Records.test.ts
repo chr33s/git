@@ -208,6 +208,26 @@ describe("trace records", () => {
     }),
   );
 
+  it.effect("refuses a mutation tree that is not a qualified oid", () =>
+    Effect.promise(async () => {
+      // A workspace record's trees were checked and a tool record's were not,
+      // so a tool could sign "before tree: HEAD" onto an append-only ref.
+      const refused = await scenario(
+        Effect.result(
+          Records.check({
+            type: Records.TOOL,
+            ...envelope,
+            invocation: null,
+            capture: { transport: "hook", stage: "hook" },
+            tool: { name: "write_file" },
+            mutation: { paths: 1, beforeTree: "HEAD", afterTree: OID },
+          }),
+        ),
+      );
+      assert.equal(refused._tag, "Failure");
+    }),
+  );
+
   it.effect("appends to the trace ref, chaining onto what is there", () =>
     Effect.promise(() =>
       scenario(

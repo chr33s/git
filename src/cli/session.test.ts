@@ -31,6 +31,25 @@ const cli = async (args: ReadonlyArray<string>, cwd?: string): Promise<string> =
   return `${result.stdout}${result.stderr}`;
 };
 
+/**
+ * The note itself, without the derivation's account of itself.
+ *
+ * `cli` concatenates stdout and stderr; the note is stdout, and every notice
+ * about budgets, exclusions and persistence goes to stderr so a hook can pipe
+ * one without parsing the other.
+ */
+const noteIn = (output: string): string =>
+  output
+    .split("\n")
+    .filter(
+      (line) =>
+        !line.startsWith("!") &&
+        !line.startsWith("note ") &&
+        line !== "unchanged; the derivation matches the stored note",
+    )
+    .join("\n")
+    .trim();
+
 const failing = (args: ReadonlyArray<string>, cwd?: string): Promise<string> =>
   cli(args, cwd).then(
     () => "",
@@ -350,11 +369,14 @@ describe("cli session", () => {
       // synchronous form takes `input` — the async one leaves the pipe open and
       // the script waits on it forever.
       execFileSync(process.execPath, [script, "start"], {
-        input: JSON.stringify({ prompt: "fix the flaky test" }),
+        input: JSON.stringify({ session_id: "harness-a", prompt: "fix the flaky test" }),
         encoding: "utf8",
       });
 
-      const id = (await fs.readFile(path.join(work, ".chr33s", "session.id"), "utf8")).trim();
+      // Keyed by the harness's own session: two agents in one checkout must
+      // not share a state file, or the second reports against the first's id.
+      const state = path.join(work, ".chr33s", "session.harness-a.id");
+      const id = (await fs.readFile(state, "utf8")).trim();
       const shown = JSON.parse(
         await cli(["session", "show", "--root", root, "--repo", "project", id]),
       );
@@ -365,19 +387,31 @@ describe("cli session", () => {
 
       // A second start is the same session, not a second account of it.
       execFileSync(process.execPath, [script, "start"], {
-        input: JSON.stringify({ prompt: "and again" }),
+        input: JSON.stringify({ session_id: "harness-a", prompt: "and again" }),
         encoding: "utf8",
       });
-      assert.equal(
-        (await fs.readFile(path.join(work, ".chr33s", "session.id"), "utf8")).trim(),
-        id,
-        "one opening per session",
-      );
+      assert.equal((await fs.readFile(state, "utf8")).trim(), id, "one opening per session");
+
+      // A concurrent harness session opens its own, and reports its own.
+      execFileSync(process.execPath, [script, "start"], {
+        input: JSON.stringify({ session_id: "harness-b", prompt: "something else" }),
+        encoding: "utf8",
+      });
+      const other = (
+        await fs.readFile(path.join(work, ".chr33s", "session.harness-b.id"), "utf8")
+      ).trim();
+      assert.notEqual(other, id, "concurrent harness sessions do not share an id");
 
       // Stopping reports what it produced and clears the state, so the next
       // prompt opens a new session rather than appending to a finished one.
+      // A learning the agent left behind is handed over by file rather than on
+      // a command line, and a session that left none records none.
+      await fs.writeFile(
+        path.join(work, ".chr33s", "learning.harness-a.txt"),
+        "gotcha: the flaky test needs the production fixture\n",
+      );
       execFileSync(process.execPath, [script, "stop"], {
-        input: "{}",
+        input: JSON.stringify({ session_id: "harness-a" }),
         encoding: "utf8",
         env: { ...process.env, CHR33S_GIT_BRANCH: "refs/heads/topic" },
       });
@@ -385,7 +419,26 @@ describe("cli session", () => {
         await cli(["session", "show", "--root", root, "--repo", "project", id]),
       );
       assert.deepEqual(after.refs, ["refs/heads/topic"]);
-      assert.equal(fsSync.existsSync(path.join(work, ".chr33s", "session.id")), false);
+      assert.deepEqual(after.notes, ["gotcha: the flaky test needs the production fixture"]);
+      assert.equal(fsSync.existsSync(state), false);
+      // The learning goes with the state: redelivering it would count one
+      // observation twice.
+      const learning = path.join(work, ".chr33s", "learning.harness-a.txt");
+      assert.equal(fsSync.existsSync(learning), false);
+
+      // A report that does not land keeps the learning for the next stop of
+      // the same harness session: discarded, it would have been counted never
+      // (§10.3). The state still clears, so the next prompt opens afresh.
+      await fs.writeFile(state, `${id}\n`);
+      // Over the record cap, which `produce` refuses before writing anything.
+      await fs.writeFile(learning, `gotcha: ${"kept until it is recorded ".repeat(12_000)}\n`);
+      execFileSync(process.execPath, [script, "stop"], {
+        input: JSON.stringify({ session_id: "harness-a" }),
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      assert.equal(fsSync.existsSync(state), false);
+      assert.equal(fsSync.existsSync(learning), true, "an unrecorded learning is not discarded");
     }),
   );
 
@@ -409,7 +462,9 @@ describe("cli session", () => {
         return session;
       };
 
-      await note("gotcha: run npm install before typecheck; postinstall applies patches");
+      const first = await note(
+        "gotcha: run npm install before typecheck; postinstall applies patches",
+      );
       await note("gotcha: run npm install before typecheck; postinstall applies patches");
       const only = await note("convention: tests colocate as *.test.ts beside sources");
 
@@ -425,12 +480,19 @@ describe("cli session", () => {
         `what was seen more often comes first: ${memory}`,
       );
 
-      // Cited, so a reader can check it against the record rather than trust it.
-      assert.ok(memory.includes(only), `entries name the sessions they came from: ${memory}`);
+      // Cited, so a reader can check it against the record rather than trust
+      // it — in the entries themselves, not only in the stamp line, which
+      // names the newest session whatever the entries cite.
+      const entries = noteIn(memory);
+      assert.ok(entries.includes(first), `entries name the sessions they came from: ${memory}`);
+      assert.ok(entries.includes(only), `entries name the sessions they came from: ${memory}`);
 
-      // Read back without distilling: it is a note now, not a computation.
+      // Read back without distilling: it is a note now, not a computation —
+      // and it says so, because a stored note can come from another branch or
+      // from before a redaction (§8.4).
       const stored = await cli(["session", "memory", "--root", root, "project"]);
-      assert.equal(stored.trim(), memory.trim());
+      assert.match(stored, /historical cache/);
+      assert.equal(noteIn(stored), noteIn(memory));
     }),
   );
 

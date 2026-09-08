@@ -49,6 +49,75 @@ import * as Records from "./Records.ts";
 export const PROFILE = "open-telemetry/semantic-conventions-genai";
 
 /**
+ * The mapping profiles this version supports.
+ *
+ * A registry rather than one hard-coded mapping with whatever revision a
+ * caller declared copied in beside it: a record must never claim conformance
+ * to a revision nothing here read (docs/context-pack.knowledge.md §11.1). That
+ * rule is what every branch below is enforcing.
+ *
+ * The upstream specification is not restated here — a copy of a specification
+ * is a copy that drifts. `Semconv.test.ts` is the executable half.
+ */
+export interface MappingProfile {
+  readonly profile: string;
+  /** An immutable upstream revision — a release tag, not a moving branch. */
+  readonly revision: string;
+  /** This repository's mapping version for that revision. */
+  readonly mapping: string;
+  readonly inference: ReadonlySet<string>;
+  readonly tool: ReadonlySet<string>;
+  readonly retrieval: ReadonlySet<string>;
+}
+
+/** The operation classes this module's mapping reads (§6.1, §7.5, §7.6). */
+const INFERENCE_OPERATIONS = new Set([
+  "chat",
+  "generate_content",
+  "text_completion",
+  "invoke_agent",
+]);
+const TOOL_OPERATIONS = new Set(["execute_tool"]);
+const RETRIEVAL_OPERATIONS = new Set(["embeddings", "retrieve"]);
+
+export const PROFILES: ReadonlyArray<MappingProfile> = [
+  {
+    profile: PROFILE,
+    // Adding an entry here means adding fixtures for it.
+    revision: "1.37.0",
+    mapping: "gitplus-genai/1",
+    inference: INFERENCE_OPERATIONS,
+    tool: TOOL_OPERATIONS,
+    retrieval: RETRIEVAL_OPERATIONS,
+  },
+];
+
+/**
+ * How a declared revision resolved.
+ *
+ * `best-effort` is "no revision was declared, so this is our documented
+ * mapping and not a conformance claim".
+ */
+export type Mapping =
+  | { readonly state: "supported"; readonly profile: MappingProfile }
+  | { readonly state: "best-effort" }
+  | { readonly state: "unsupported"; readonly revision: string };
+
+/** Exact match only: a neighbouring revision is not a tested one. */
+export const profileFor = (revision: string): MappingProfile | undefined =>
+  PROFILES.find((profile) => profile.revision === revision);
+
+export const mappingFor = (revision: string | undefined): Mapping =>
+  revision === undefined || revision === ""
+    ? { state: "best-effort" }
+    : (() => {
+        const profile = profileFor(revision);
+        return profile === undefined
+          ? { state: "unsupported", revision }
+          : { state: "supported", profile };
+      })();
+
+/**
  * Attribute values, taken as they come.
  *
  * Deliberately unconstrained. OTel's attribute model has `int[]`, `double[]`
@@ -442,15 +511,19 @@ export interface Options {
 }
 
 export const captureOf = (span: Span, options: Options): Capture => {
-  const capture = {
+  const mapping = mappingFor(options.revision);
+  return {
     transport: "otel",
     stage: options.stage,
     traceId: span.traceId,
     spanId: span.spanId,
+    // Only for a revision this version maps: an absent block is how a record
+    // says "interpreted as well as we could".
     semconv:
-      options.revision === undefined ? undefined : { profile: PROFILE, revision: options.revision },
+      mapping.state === "supported"
+        ? { profile: mapping.profile.profile, revision: mapping.profile.revision }
+        : undefined,
   };
-  return capture;
 };
 
 // -- normalization --------------------------------------------------------------
@@ -479,7 +552,9 @@ export type Normalized =
        */
       readonly diagnostics: { readonly operation: string; readonly capture: Capture };
     }
-  | { readonly kind: "unsupported"; readonly operation: string | null };
+  | { readonly kind: "unsupported"; readonly operation: string | null }
+  /** A revision this version does not map: a refusal, not a half-normalization. */
+  | { readonly kind: "unsupported-profile"; readonly revision: string };
 
 export interface InferenceFields {
   readonly exposure: string | null;
@@ -502,9 +577,6 @@ export interface ToolFields {
   readonly outcome?: ReturnType<typeof outcomeOf>;
 }
 
-/** Operations this module reads as one logical inference call (§6.1). */
-const INFERENCE = new Set(["chat", "generate_content", "text_completion", "invoke_agent"]);
-
 /**
  * One span, normalized — or refused, without a half-answer.
  *
@@ -516,10 +588,25 @@ const INFERENCE = new Set(["chat", "generate_content", "text_completion", "invok
  * upstream said happened (§6.3).
  */
 export const normalize = (span: Span, options: Options = {}): Normalized => {
+  const mapping = mappingFor(options.revision);
+  if (mapping.state === "unsupported") {
+    return { kind: "unsupported-profile", revision: mapping.revision };
+  }
+  // The selected profile where there is one, this module's documented mapping
+  // where no revision was declared.
+  const classes =
+    mapping.state === "supported"
+      ? mapping.profile
+      : {
+          inference: INFERENCE_OPERATIONS,
+          tool: TOOL_OPERATIONS,
+          retrieval: RETRIEVAL_OPERATIONS,
+        };
+
   const operation = operationOf(span);
   const capture = captureOf(span, options);
 
-  if (operation === "execute_tool") {
+  if (operation !== undefined && classes.tool.has(operation)) {
     const tool = toolOf(span);
     return tool === undefined
       ? { kind: "unsupported", operation: operation ?? null }
@@ -534,11 +621,13 @@ export const normalize = (span: Span, options: Options = {}): Normalized => {
         };
   }
 
-  if (operation === "embeddings" || operation === "retrieve") {
+  if (operation !== undefined && classes.retrieval.has(operation)) {
     return { kind: "retrieval", diagnostics: { operation, capture } };
   }
 
-  if (operation === undefined || !INFERENCE.has(operation)) {
+  // A recognized revision whose operation this mapping does not cover is an
+  // explicit unsupported-operation outcome, never an invented inference.
+  if (operation === undefined || !classes.inference.has(operation)) {
     return { kind: "unsupported", operation: operation ?? null };
   }
 

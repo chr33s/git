@@ -23,6 +23,9 @@ import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.
 import { isGitlink } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
+import * as Recall from "../knowledge/Recall.ts";
+import { terms } from "../text.ts";
+import type { Projection } from "../trust/Projection.ts";
 import * as Pack from "./Pack.ts";
 
 /** Recorded as `selector` so a reader can tell which implementation chose. */
@@ -82,25 +85,32 @@ export interface Options {
    * the reader has no access to.
    */
   readonly diagnostics?: "path" | "aggregate";
+  /**
+   * Whether eligible Knowledge Concepts compete for the same budget.
+   *
+   * Absent means the selector behaves exactly as it did: source files only.
+   * Supplied, Concepts are searched in the *same* view — the startup Memory
+   * note is not the corpus, so a rare learning that never fit in it is still
+   * findable here (INV-09) — and each recalled Concept is selected together
+   * with the current bytes of the repository evidence it declares (§9.2).
+   */
+  readonly knowledge?: {
+    readonly bundle?: string | undefined;
+    readonly evaluationTime?: Date | undefined;
+    readonly repo?: string | null | undefined;
+    readonly trust?: Projection | null | undefined;
+    readonly maxGroups?: number | undefined;
+  };
 }
 
 /**
- * The terms a task is searched for.
+ * The terms a task is searched for; see `text.terms`.
  *
- * Deliberately dull: split on non-word characters, drop what is too short to
- * discriminate, and keep the order the operator typed so the ranking is
- * reproducible. A stemmer or a synonym list would make the *selection* better
- * and the *explanation* worse, and the explanation is what this surface is for.
+ * Re-exported here because this is the surface a reader of the selector
+ * looks at, and because the rule is shared with Concept recall: §9.1 ranks
+ * knowledge by the same terms the source search uses.
  */
-export const terms = (task: string): ReadonlyArray<string> => {
-  const seen = new Set<string>();
-  for (const word of task.split(/[^\p{L}\p{N}_]+/u)) {
-    const term = word.toLowerCase();
-    if (term.length < 3 || seen.has(term)) continue;
-    seen.add(term);
-  }
-  return [...seen].slice(0, 16);
-};
+export { terms } from "../text.ts";
 
 /** Byte offset of the start of each 1-based line, plus the end of the blob. */
 const lineOffsets = (bytes: Uint8Array): ReadonlyArray<number> => {
@@ -256,7 +266,12 @@ const rangeOf = (
   // permanently as `reason: "search"` evidence containing no search term,
   // which is the failure this line exists to prevent.
   const start = matched - wanted + (after - matched) <= budget ? wanted : matched;
-  const end = Math.min(offsets[last] ?? bytes.length, start + budget);
+  let end = Math.min(offsets[last] ?? bytes.length, start + budget);
+  // Backed off to a codepoint boundary rather than widened to one. `snap`
+  // moves an end that falls inside a character *forward*, and `start` is a
+  // line offset so it never moves — which put the range up to three bytes
+  // past the budget the caller had just checked it against.
+  while (end > start + 1 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
   // A range that ends where it starts is not evidence (§5.1); a file whose
   // matched line is longer than the budget still has to hand over something.
   const snapped = Pack.snap(bytes, start, Math.max(start + 1, end));
@@ -302,7 +317,10 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   const counted = new Map<string, number>();
   /** Reasons whose extent is not known; recorded without a count (§6.1). */
   const unbounded = new Set<string>();
+  /** Why each claimed path was refused, so a group that depends on it can say. */
+  const refused = new Map<string, string>();
   const omit = (path: string, reason: string) => {
+    refused.set(path, reason);
     // Bounded like the items are. Once the budget is spent every remaining
     // candidate is an omission, and `candidates()` returns one entry per file
     // matching any task term — a common word on a large repository is
@@ -378,6 +396,102 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   }
 
   let spent = instructed;
+
+  // Knowledge next, and as whole groups: prose admitted without the support it
+  // summarizes reads as supported when it is not (§9.2).
+  if (options.knowledge !== undefined) {
+    const recalled = yield* Recall.search({
+      view: options.view,
+      task: options.task,
+      bundle: options.knowledge.bundle,
+      evaluationTime: options.knowledge.evaluationTime,
+      repo: options.knowledge.repo ?? null,
+      trust: options.knowledge.trust ?? null,
+      maxGroups: options.knowledge.maxGroups,
+      // Listed once, above, for the source search; the bundle is in it.
+      files,
+    });
+
+    // What the pack holds, as distinct from what was claimed: `chosen` also
+    // names every path refused above, and a dependency refused for budget is
+    // missing support, not support already present.
+    const admitted = new Set(items.map((item) => item.path));
+    for (const group of recalled.groups) {
+      const fresh = group.items.filter((item) => !admitted.has(item.path));
+      if (fresh.length === 0) continue;
+      // Claimed however this turns out, like an instruction file above: a
+      // group omitted for budget must not return as a truncated search hit.
+      chosen.add(group.checked.path);
+      // One diagnostic naming the Concept: the omission a reader asks about
+      // is the learning, not each supporting file.
+      const lost = fresh.find((item) => chosen.has(item.path) && item.path !== group.checked.path);
+      if (lost !== undefined) {
+        omit(group.checked.path, refused.get(lost.path) ?? "budget");
+        continue;
+      }
+      if (items.length + fresh.length > maxItems) {
+        omit(group.checked.path, "budget");
+        continue;
+      }
+
+      let cost = 0;
+      let reason: "budget" | "filtered" | "unavailable" | null = null;
+      for (const item of fresh) {
+        if (item.kind === "gitlink") continue;
+        const file = blobs.get(item.path);
+        const bytes =
+          file === undefined
+            ? null
+            : yield* repository
+                .readBlob(file.oid)
+                .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+        // The same three words the loops above and below use, because a
+        // signed record that says `unavailable` for a binary it holds sends
+        // its reader to fetch objects already present (§5.3).
+        if (bytes === null) {
+          reason = "unavailable";
+          break;
+        }
+        if (bytes.length > MAX_FILE_BYTES || isBinary(bytes)) {
+          reason = "filtered";
+          break;
+        }
+        cost += bytes.length;
+        if (spent + cost > maxBytes) {
+          reason = "budget";
+          break;
+        }
+      }
+      if (reason !== null) {
+        omit(group.checked.path, reason);
+        continue;
+      }
+
+      spent += cost;
+      for (const item of fresh) {
+        chosen.add(item.path);
+        admitted.add(item.path);
+        items.push(item);
+      }
+    }
+
+    for (const entry of recalled.excluded) {
+      if (chosen.has(entry.path)) continue;
+      // Claimed like an instruction file (see above), so a Concept this policy
+      // excluded cannot re-enter as a search hit. A Concept that only ranked
+      // past the recall cut was left out for room, not by a filter; one whose
+      // cited record or evidence this replica lacks was left out by neither.
+      chosen.add(entry.path);
+      omit(
+        entry.path,
+        entry.reasons.includes(Recall.OVERFLOW)
+          ? "budget"
+          : entry.reasons.some((why) => Recall.UNAVAILABLE.includes(why))
+            ? "unavailable"
+            : "filtered",
+      );
+    }
+  }
 
   const searched = yield* candidates(tree, terms(options.task));
   // The search stopped at its match cap, so every file past the cut-off went
@@ -474,6 +588,9 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   const mentioned = mentions.join("\n");
 
   for (const file of gitlinks) {
+    // Already in the pack — a Concept that declares the submodule brought it
+    // in with its group — or already accounted for as an omission.
+    if (chosen.has(file.path)) continue;
     const asked = refers(options.task, file.path);
     if (!asked && !refers(mentioned, file.path)) continue;
     // Recorded, and every one of them — this was the only cut in the selector

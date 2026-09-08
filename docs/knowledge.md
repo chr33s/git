@@ -103,6 +103,8 @@ https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
 
 That link tracks `main` and can drift. Programmatic consumers SHOULD pin the profiled upstream revision (tag or commit) rather than rely on the moving branch; this document profiles OKF v0.2 as published at the time of the revision above.
 
+The implementation pins it. `src/knowledge/Concept.ts` records the upstream commit `62432a095456147ee71e70ac6e4dc0d2dea3ac30` and its own parser-profile version, and every `knowledge check` report carries both, so a reader can tell which interpretation produced a verdict.
+
 The root `index.md` MAY carry OKF's `okf_version` metadata. Tools that rewrite a Concept SHOULD preserve unknown portable metadata.
 
 Git+ adds stronger repository provenance under a namespaced `gitplus:` extension. Generic OKF consumers can ignore that extension and still read the Concept.
@@ -374,6 +376,8 @@ unknown
 
 `changed` or `missing` means **revalidate the Concept**. It does not make the prose automatically false.
 
+A citation whose record this replica does not hold is `unavailable`: not verified, and not invalid either. Session refs are not fetched by default, so a fresh clone reports every citation that way until `git+ hub enable --refs 'refs/hub/session/*'` brings them in. `knowledge check --strict` fails on unverified citations; the default gate reports them and passes.
+
 ### 9.2 Temporal freshness
 
 A Concept is temporally stale when:
@@ -546,7 +550,7 @@ Git+ adds the operation ordinary file tooling cannot provide:
 git+ knowledge check [concept]
 ```
 
-With no Concept argument, `knowledge check` validates the configured bundle. With a Concept ID/path, it validates one Concept.
+With no Concept argument, `knowledge check` validates the configured bundle. With a Concept ID/path, it validates one Concept. See [cli.md §6](cli.md) for the flags, exit behaviour and JSON projection.
 
 The check reports independently:
 

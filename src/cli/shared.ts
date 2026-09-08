@@ -29,8 +29,23 @@ import { workspace } from "../git/Work.node.ts";
 import * as AfterPush from "../server/AfterPush.node.ts";
 import { isOid } from "../git/Store.ts";
 import { readGenesis } from "../trust/Genesis.ts";
+import { project as projectTrust, type Projection } from "../trust/Projection.ts";
 import { GitInvocation } from "./GitCompat.ts";
 import { discoverRepository } from "./GitCompat.node.ts";
+
+/**
+ * A comma-separated flag value as the list it names.
+ *
+ * Trimmed and with empties dropped, so `a, b` and `a,,b` and a trailing comma
+ * all read as the same two entries — and an empty flag is an empty list rather
+ * than a list holding one empty string, which is what `"".split(",")` gives and
+ * what every hand-rolled copy of this had to remember to guard.
+ */
+export const commaList = (value: string): ReadonlyArray<string> =>
+  value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
 
 export const rootFlag = Flag.string("root").pipe(
   Flag.withDefault("."),
@@ -128,6 +143,22 @@ export const mustBeEnabled = Effect.fn("cli.mustBeEnabled")(function* (repo: str
     });
   }
   return stored;
+});
+
+/**
+ * The repository's identity and membership, where it has them.
+ *
+ * The tolerant half of `mustBeEnabled`: a repository with no genesis can still
+ * check portable source Concepts and select source evidence — that is §18's
+ * compatibility promise — and cannot judge signed provenance, which the
+ * report says rather than papers over. One definition, because the null
+ * policy is the whole content of the difference from `mustBeEnabled`.
+ */
+export const membershipOrNull = Effect.fn("cli.membershipOrNull")(function* () {
+  const stored = yield* readGenesis();
+  if (stored === null) return { repo: null, trust: null } as const;
+  const trust: Projection = yield* projectTrust(stored.genesis);
+  return { repo: stored.genesis.repoId, trust } as const;
 });
 
 export const withRepo = <A, E>(
@@ -267,10 +298,23 @@ export const withWork = <A, E>(
         reason: "this command requires a work tree",
       });
     }
-    const selected =
-      invocation.workTree !== undefined || work._tag === "None"
-        ? invocation
-        : { ...invocation, workTree: path.resolve(invocation.cwd, work.value) };
+    // Two selectors that disagree are refused, not resolved by precedence.
+    // `--work-tree` and `GIT_WORK_TREE` arrive as `invocation.workTree`, and
+    // an explicit `--work` used to lose to them in silence — which for
+    // `context for` meant a signed exposure over whichever checkout won,
+    // with nothing to say the operator had named the other one.
+    const explicit = work._tag === "None" ? null : path.resolve(invocation.cwd, work.value);
+    if (
+      explicit !== null &&
+      invocation.workTree !== undefined &&
+      path.resolve(invocation.workTree) !== explicit
+    ) {
+      return yield* new Invalid({
+        field: "work",
+        reason: `--work names '${explicit}' but --work-tree or GIT_WORK_TREE names '${invocation.workTree}'; name one checkout`,
+      });
+    }
+    const selected = explicit === null ? invocation : { ...invocation, workTree: explicit };
     const found = yield* discoverRepository(selected);
     if (found === null || found.workTree === null) {
       return yield* new Invalid({

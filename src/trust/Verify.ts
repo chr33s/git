@@ -535,5 +535,3 @@ export const fresh = (
     reason: `every trust checkpoint on record (${ahead}) is dated in the future`,
   };
 };
-
-export type VerifyError = Invalid | ObjectNotFound | StorageFailure;

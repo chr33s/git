@@ -75,6 +75,7 @@ import {
   repoArgument,
   rootFlag,
   withRepo,
+  commaList,
 } from "./shared.ts";
 
 /**
@@ -147,7 +148,7 @@ const init = Command.make(
   ({ also, key, repo, root, threshold }) =>
     Effect.gen(function* () {
       const signers = yield* Effect.forEach(key, readPrivateKey);
-      const extra = also === "" ? [] : also.split(",").map((value) => value.trim());
+      const extra = commaList(also);
       // The private keys carry their own public halves, so there is no need to
       // go looking for a `.pub` beside them — and no failure when there is none.
       const lines = [
@@ -243,7 +244,7 @@ const grant = Command.make(
         repo,
         Effect.gen(function* () {
           const stored = yield* mustBeEnabled(repo);
-          const capabilities = capability.split(",").map((value) => value.trim());
+          const capabilities = commaList(capability);
           const details = {
             repo: stored.genesis.repoId,
             capabilities,
@@ -635,8 +636,7 @@ const enable = Command.make(
       // Parsed before anything is contacted, so a typo is one refusal rather
       // than a half-enabled repository.
       const extra: Array<Refspec.Refspec> = [];
-      for (const spec of refs.split(",").filter((part) => part.trim() !== "")) {
-        const named = spec.trim();
+      for (const named of commaList(refs)) {
         // A bare pattern means the same name at both ends, which is how every
         // entry in `HUB_FETCH` is written and the only form anybody wants
         // here: `--refs=refs/hub/session/*` rather than that spelled twice

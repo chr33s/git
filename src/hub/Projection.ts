@@ -1492,5 +1492,3 @@ export const checksPassedAt = (
 /** Whether every named check has succeeded against the current head. */
 export const checksPassed = (pullRequest: PullRequest, required: ReadonlyArray<string>): boolean =>
   checksPassedAt(pullRequest, required, pullRequest.head);
-
-export type ProjectionError = Invalid | ObjectNotFound | StorageFailure;

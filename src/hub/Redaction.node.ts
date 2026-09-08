@@ -108,7 +108,7 @@ const decodeKept = Schema.decodeUnknownEffect(Kept);
  * from — so the bound is about the file not growing without limit, not about
  * correctness.
  */
-const ENTRIES = 4096;
+export const ENTRIES = 4096;
 
 /**
  * The answers kept beside one repository, one per ref.
@@ -140,7 +140,13 @@ export const beside = (gitDir: string): Layer.Layer<Answers> =>
       write: (key, found) =>
         Effect.gen(function* () {
           const kept = yield* held(gitDir);
-          const entries = { ...kept?.entries, [key]: found };
+          // Removed before it is re-added, so a refreshed key takes the newest
+          // position: spread over an object keeps an existing key where it
+          // was, and the eviction below then took the entry just written as
+          // the oldest.
+          const { [key]: _refreshed, ...rest } = kept?.entries ?? {};
+          void _refreshed;
+          const entries = { ...rest, [key]: found };
 
           // Oldest first, which for a string-keyed object is insertion order.
           // Two processes writing at once can lose one of their entries, since
