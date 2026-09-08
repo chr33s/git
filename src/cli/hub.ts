@@ -23,7 +23,7 @@ import {
   isFingerprint,
 } from "../crypto/SshSignature.ts";
 import { fetchRepository, lsRemote } from "../client/Fetch.ts";
-import { Invalid } from "../git/Error.ts";
+import { Invalid, StorageFailure } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
@@ -837,7 +837,18 @@ const disable = Command.make(
                 Refspec.HUB_FETCH.some((spec) => Refspec.map(spec, name) !== null)),
           );
         if (managed.length > 0) {
-          yield* refs.apply(managed.map((name) => ({ name, value: null, reason: "hub disable" })));
+          const applied = yield* refs.apply(
+            managed.map((name) => ({ name, value: null, reason: "hub disable" })),
+            { atomic: true },
+          );
+          const refused = applied.find((result) => !result.applied);
+          if (refused !== undefined) {
+            return yield* new StorageFailure({
+              operation: "hub.disable",
+              path: refused.name,
+              cause: refused.reason ?? "ref deletion refused",
+            });
+          }
         }
         return managed.length;
       }).pipe(Effect.provide(localRepository(`${root}/${name}`)));

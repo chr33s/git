@@ -6,16 +6,16 @@
  * on disk that are edited, an index that records what has been staged, and
  * three states a path can disagree across — HEAD, index, disk.
  *
- * Two ports rather than one, because they answer different questions and not
- * every host has both: `WorkTree` is "what is on disk", `IndexStore` is "what
- * has been staged". A server has neither, a CLI has both, and a browser could
- * have the second without the first.
+ * `WorkTree` describes the files on disk and `IndexStore` holds what has been
+ * staged. `MergeState` separately records a merge waiting to be committed.
+ * A server has none of these; a CLI has all three, and a browser can keep an
+ * index without a filesystem worktree.
  *
  * `git/Index.ts` is the codec underneath `IndexStore` — git's own `DIRC` v2
  * format, so a repository this writes can be handed to the `git` binary and
  * back without either noticing.
  */
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Semaphore } from "effect";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 import { type IndexEntry } from "./Index.ts";
@@ -39,36 +39,66 @@ export interface FileStat {
 export class WorkTree extends Context.Service<
   WorkTree,
   {
-    /** Every tracked-able path, relative and slash-separated, sorted. */
-    readonly list: Effect.Effect<ReadonlyArray<string>, StorageFailure>;
+    /** Whether executable-bit changes on regular files are meaningful. */
+    readonly trustExecutableBit: Effect.Effect<boolean, StorageFailure>;
+    /** Unignored paths; indexed paths distinguish ordinary directories from gitlinks. */
+    readonly list: (
+      tracked: ReadonlyArray<{ readonly path: string; readonly mode: number }>,
+    ) => Effect.Effect<ReadonlyArray<string>, StorageFailure>;
     readonly read: (path: string) => Effect.Effect<Uint8Array, ObjectNotFound | StorageFailure>;
     readonly stat: (path: string) => Effect.Effect<FileStat | null, StorageFailure>;
+    /** An embedded repository's checked-out commit; a null OID means unborn HEAD. */
+    readonly gitlink: (
+      path: string,
+    ) => Effect.Effect<
+      { readonly oid: Oid | null; readonly stat: FileStat } | null,
+      StorageFailure
+    >;
     readonly write: (
       path: string,
       content: Uint8Array,
       mode: number,
     ) => Effect.Effect<void, StorageFailure>;
+    /** Remove file/directory obstructions after checkout has approved overwriting them. */
+    readonly prepareWrites: (paths: ReadonlyArray<string>) => Effect.Effect<void, StorageFailure>;
     readonly remove: (path: string) => Effect.Effect<void, StorageFailure>;
   }
 >()("git/WorkTree") {}
 
+export interface IndexAccess {
+  readonly load: Effect.Effect<ReadonlyArray<IndexEntry>, StorageFailure>;
+  readonly save: (entries: ReadonlyArray<IndexEntry>) => Effect.Effect<void, StorageFailure>;
+}
+
 export class IndexStore extends Context.Service<
   IndexStore,
-  {
-    readonly load: Effect.Effect<ReadonlyArray<IndexEntry>, StorageFailure>;
-    readonly save: (entries: ReadonlyArray<IndexEntry>) => Effect.Effect<void, StorageFailure>;
+  IndexAccess & {
+    /** The callback owns exclusive access until it completes, fails or is interrupted. */
+    readonly withLock: <A, E>(
+      use: (access: IndexAccess) => Effect.Effect<A, E>,
+    ) => Effect.Effect<A, E | StorageFailure>;
   }
 >()("git/IndexStore") {}
 
 /** An index in memory: enough for a browser, and for tests. */
 export const indexMemory = Layer.sync(IndexStore, () => {
   let entries: ReadonlyArray<IndexEntry> = [];
-  return IndexStore.of({
+  const semaphore = Semaphore.makeUnsafe(1);
+  const access: IndexAccess = {
     load: Effect.sync(() => entries),
     save: (next) =>
       Effect.sync(() => {
         entries = next;
       }),
+  };
+  const withLock = Effect.fn("IndexStore.withLock")(
+    <A, E>(use: (access: IndexAccess) => Effect.Effect<A, E>) =>
+      semaphore.withPermit(Effect.suspend(() => use(access))),
+  );
+  return IndexStore.of({
+    load: access.load,
+    save: (next) => withLock((locked) => locked.save(next)),
+    withLock,
   });
 });
 
@@ -93,7 +123,21 @@ export const workTreeMemory = Layer.sync(WorkTree, () => {
   const times = new Map<string, number>();
 
   return WorkTree.of({
-    list: Effect.sync(() => [...files.keys()].sort()),
+    trustExecutableBit: Effect.succeed(true),
+    list: () => Effect.sync(() => [...files.keys()].sort()),
+    gitlink: () => Effect.succeed(null),
+    prepareWrites: Effect.fn("WorkTree.prepareWrites")((paths) =>
+      Effect.sync(() => {
+        for (const target of paths) {
+          for (const file of files.keys()) {
+            if (file.startsWith(`${target}/`) || target.startsWith(`${file}/`)) {
+              files.delete(file);
+              times.delete(file);
+            }
+          }
+        }
+      }),
+    ),
     read: (path) => {
       const file = files.get(path);
       return file === undefined
@@ -151,7 +195,7 @@ export const modeString = (mode: number): string => mode.toString(8).padStart(6,
  * An index entry for a path as it is on disk right now.
  *
  * The stat fields are carried so `status` can skip re-hashing a file whose
- * size and mtime are unchanged — which is the difference between a status
+ * size, mtime and ctime are unchanged — which is the difference between a status
  * that reads every byte in the tree and one that reads almost none.
  */
 export const entryFor = (path: string, oid: Oid, stat: FileStat): IndexEntry => ({
@@ -176,6 +220,8 @@ export const unchanged = (entry: IndexEntry, stat: FileStat): boolean =>
   entry.size === stat.size &&
   entry.mtimeSeconds === stat.mtimeSeconds &&
   entry.mtimeNanos === stat.mtimeNanos &&
+  entry.ctimeSeconds === stat.ctimeSeconds &&
+  entry.ctimeNanos === stat.ctimeNanos &&
   entry.mode === stat.mode;
 
 export type { IndexEntry };

@@ -108,7 +108,7 @@ export const chain = (options: ChainOptions): Layer.Layer<GitRepository.Hooks> =
           using: (effect) => effect.pipe(Effect.provide(unhooked(directory))),
           options: { background },
         }),
-        ...(options.wake === true ? [Wake.service(directory, options.repo)] : []),
+        ...(options.wake === true ? [Wake.service(directory, options.repo, { background })] : []),
       ]);
     }),
   ).pipe(
@@ -174,7 +174,19 @@ export const collected = (inner: Layer.Layer<GitRepository.Hooks>): Collected =>
   ).pipe(Layer.provide(inner));
 
   const flush = Effect.suspend(() => {
-    const batch = held.splice(0);
+    // One command per ref: a queue pass can advance its queue log repeatedly.
+    // Sending every intermediate value in one receive-pack is an invalid batch.
+    // Keep the first old value (also the deletion lease) and the final new one.
+    const updates = new Map<string, GitRepository.ReceiveResult>();
+    for (const result of held.splice(0)) {
+      if (!result.ok) continue;
+      const previous = updates.get(result.ref);
+      updates.set(result.ref, {
+        ...result,
+        from: previous === undefined ? result.from : previous.from,
+      });
+    }
+    const batch = [...updates.values()];
     const sink = downstream;
     return batch.length === 0 || sink === null ? Effect.void : sink.postReceive(batch);
   });

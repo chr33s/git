@@ -34,6 +34,7 @@ const failing = (args: ReadonlyArray<string>): Promise<string> =>
 describe("cli task", () => {
   let root = "";
   let key = "";
+  let otherKey = "";
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-task-"));
@@ -41,6 +42,10 @@ describe("cli task", () => {
     await cli(["init", "--root", root, "project"]);
     const fixture = await enableHubUnder(root, "project", ["repo.read", "hub.task"]);
     await fs.writeFile(key, opensshPrivateKey(fixture.member, "agent@example.com"), {
+      mode: 0o600,
+    });
+    otherKey = path.join(root, "other-agent");
+    await fs.writeFile(otherKey, opensshPrivateKey(fixture.root, "other@example.com"), {
       mode: 0o600,
     });
   });
@@ -51,6 +56,63 @@ describe("cli task", () => {
 
   const openTask = async (title: string) =>
     (await cli(["task", "open", "--root", root, "--key", key, "--title", title, "project"])).trim();
+
+  for (const verb of ["release", "close", "reopen"]) {
+    it.live(`reports failure when ${verb} is ignored by the task projection`, () =>
+      Effect.promise(async () => {
+        const task = await openTask("owned work");
+        await cli(["task", "claim", "--root", root, "--key", key, "project", task]);
+        if (verb === "reopen") {
+          await cli(["task", "close", "--root", root, "--key", key, "project", task]);
+        }
+        const before = JSON.parse(await cli(["task", "show", "--root", root, "project", task]));
+        const output = await failing([
+          "task",
+          verb,
+          "--root",
+          root,
+          "--key",
+          otherKey,
+          "project",
+          task,
+        ]);
+        assert.match(output, /event was ignored/, verb);
+        const after = JSON.parse(await cli(["task", "show", "--root", root, "project", task]));
+        assert.deepEqual(after.claim, before.claim, verb);
+        assert.deepEqual(after.closed, before.closed, verb);
+        assert.equal(after.ignored.length, before.ignored.length + 1, verb);
+      }),
+    );
+  }
+
+  it.live("refuses claims on missing or closed tasks without appending events", () =>
+    Effect.promise(async () => {
+      const task = await openTask("already finished");
+      await cli(["task", "close", "--root", root, "--key", key, "project", task]);
+      const ref = path.join(root, "project", "refs", "hub", "task", task);
+      const before = await fs.readFile(ref, "utf8");
+      for (const [id, reason] of [
+        ["missing-task", /does not exist/],
+        [task, /closed/],
+      ] as const) {
+        const result = await failing([
+          "task",
+          "claim",
+          "--root",
+          root,
+          "--key",
+          key,
+          "project",
+          id,
+        ]);
+        assert.match(result, reason);
+      }
+      assert.equal(await fs.readFile(ref, "utf8"), before);
+      await assert.rejects(
+        fs.access(path.join(root, "project", "refs", "hub", "task", "missing-task")),
+      );
+    }),
+  );
 
   it.effect("offers a task until somebody takes it, and again once they let go", () =>
     Effect.promise(async () => {
@@ -111,6 +173,32 @@ describe("cli task", () => {
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiry - Date.now())));
       const after = JSON.parse(await cli(["task", "list", "--root", root, "project"]));
       assert.equal(after.length, 1, "an expired lease frees the work by doing nothing");
+    }),
+  );
+
+  it.live("reports only the winning claim when local workers race", () =>
+    Effect.promise(async () => {
+      const task = await openTask("one worker should start");
+      const outcomes = await Promise.allSettled(
+        Array.from({ length: 8 }, () =>
+          cli(["task", "claim", "--root", root, "--key", key, "project", task]),
+        ),
+      );
+      const claimed = outcomes.filter((outcome) => outcome.status === "fulfilled");
+      assert.equal(claimed.length, 1, "only one worker may report a successful claim");
+    }),
+  );
+
+  it.live("refuses lifecycle changes to absent tasks without creating refs", () =>
+    Effect.promise(async () => {
+      for (const verb of ["release", "close", "reopen", "reparent"]) {
+        const task = `missing-${verb}`;
+        const output = await failing(["task", verb, "--root", root, "--key", key, "project", task]);
+        assert.match(output, /does not exist/, verb);
+        await assert.rejects(fs.readFile(path.join(root, "project", "refs", "hub", "task", task)), {
+          code: "ENOENT",
+        });
+      }
     }),
   );
 
@@ -224,6 +312,10 @@ describe("cli task", () => {
       assert.deepEqual(JSON.parse(await cli(["task", "list", "--root", root, "project"])), []);
       const all = JSON.parse(await cli(["task", "list", "--root", root, "--all", "project"]));
       assert.equal(all.length, 1);
+      await cli(["task", "reopen", "--root", root, "--key", key, "project", task]);
+      const reopened = JSON.parse(await cli(["task", "show", "--root", root, "project", task]));
+      assert.equal(reopened.closed, null);
+      assert.equal(reopened.available, true);
     }),
   );
 });

@@ -62,6 +62,43 @@ const viewOf = Effect.fn("pr.viewOf")(function* (repo: string) {
   return { genesis: stored.genesis, trust: yield* projectTrust(stored.genesis) };
 });
 
+/** Existing-PR commands must not create a permanent ref from a mistyped id. */
+const withPull = <A, E>(
+  root: string,
+  repo: string,
+  pr: string,
+  effect: Effect.Effect<A, E, Repository>,
+) =>
+  withRepo(
+    root,
+    repo,
+    Effect.gen(function* () {
+      const repository = yield* Repository;
+      if ((yield* repository.resolve(Event.refOf(pr))) === null) {
+        return yield* new Invalid({
+          field: "pr",
+          reason: `this repository has no pull request '${pr}'`,
+        });
+      }
+      return yield* effect;
+    }),
+  );
+
+const discussion = Effect.fn("pr.discussion")(function* (repo: string, pr: string) {
+  const view = yield* viewOf(repo);
+  return yield* project(view.genesis, view.trust, pr);
+});
+
+const existingThread = Effect.fn("pr.existingThread")(function* (
+  repo: string,
+  pr: string,
+  thread: string,
+) {
+  if (!(yield* discussion(repo, pr)).threads.some((found) => found.id === thread)) {
+    return yield* new Invalid({ field: "thread", reason: `${pr} has no thread '${thread}'` });
+  }
+});
+
 const open = Command.make(
   "open",
   {
@@ -114,9 +151,10 @@ const update = Command.make(
   ({ head, key, pr, repo, root }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      yield* withRepo(
+      yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
           const repository = yield* Repository;
           yield* PullRequest.update({
@@ -138,9 +176,10 @@ const lifecycle = (name: "close" | "reopen", description: string, verb: typeof P
     ({ key, pr, repo, root }) =>
       Effect.gen(function* () {
         const signer = yield* readPrivateKey(key);
-        yield* withRepo(
+        yield* withPull(
           root,
           repo,
+          pr,
           Effect.gen(function* () {
             yield* verb({ repo: yield* identityOf(repo), pr, key: signer });
           }),
@@ -167,9 +206,10 @@ const review = Command.make(
   ({ body, decision, head, key, pr, repo, root }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      yield* withRepo(
+      yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
           const repository = yield* Repository;
           const view = yield* viewOf(repo);
@@ -209,10 +249,17 @@ const dismiss = Command.make(
   ({ key, pr, reason, repo, review: target, root }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      yield* withRepo(
+      yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
+          if (!(yield* discussion(repo, pr)).reviews.some((found) => found.id === target)) {
+            return yield* new Invalid({
+              field: "review",
+              reason: `${pr} has no review '${target}'`,
+            });
+          }
           yield* PullRequest.dismissReview({
             repo: yield* identityOf(repo),
             pr,
@@ -242,9 +289,10 @@ const comment = Command.make(
   ({ body, key, line, path, pr, repo, root }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      yield* withRepo(
+      yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
           const repoId = yield* identityOf(repo);
           const base = { repo: repoId, pr, body, key: signer };
@@ -269,10 +317,12 @@ const reply = Command.make(
   ({ body, key, pr, repo, root, thread }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      yield* withRepo(
+      yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
+          yield* existingThread(repo, pr, thread);
           yield* PullRequest.reply({
             repo: yield* identityOf(repo),
             pr,
@@ -303,10 +353,12 @@ const threadState = (
     ({ key, pr, repo, root, thread }) =>
       Effect.gen(function* () {
         const signer = yield* readPrivateKey(key);
-        yield* withRepo(
+        yield* withPull(
           root,
           repo,
+          pr,
           Effect.gen(function* () {
+            yield* existingThread(repo, pr, thread);
             yield* verb({ repo: yield* identityOf(repo), pr, thread, key: signer });
           }),
         );
@@ -331,9 +383,10 @@ const check = Command.make(
   ({ head, key, name, pr, provider, repo, root, status, url }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      yield* withRepo(
+      yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
           const repository = yield* Repository;
           const repoId = yield* identityOf(repo);
@@ -373,9 +426,10 @@ const merge = Command.make(
   ({ key, pr, repo, root, strategy }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      const outcome = yield* withRepo(
+      const outcome = yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
           const repository = yield* Repository;
           const view = yield* viewOf(repo);
@@ -470,9 +524,10 @@ const show = Command.make(
   { root: rootFlag, repo: repoArgument, pr: prArgument },
   ({ pr, repo, root }) =>
     Effect.gen(function* () {
-      const state = yield* withRepo(
+      const state = yield* withPull(
         root,
         repo,
+        pr,
         Effect.gen(function* () {
           const view = yield* viewOf(repo);
           return yield* project(view.genesis, view.trust, pr);

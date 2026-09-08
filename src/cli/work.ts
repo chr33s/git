@@ -7,11 +7,13 @@
  */
 import * as path from "node:path";
 
-import { Console, Effect, Layer } from "effect";
+import { Console, Context, Effect, Layer } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import * as Checkout from "../git/Checkout.ts";
+import { quoteListPath } from "../git/Diff.ts";
 import { Invalid } from "../git/Error.ts";
+import { MergeState } from "../git/MergeState.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -19,7 +21,7 @@ import { IndexStore, WorkTree } from "../git/Work.ts";
 import { workspace } from "../git/Work.node.ts";
 import { GitInvocation } from "./GitCompat.ts";
 import { discoverRepository } from "./GitCompat.node.ts";
-import { cliSignature } from "./shared.ts";
+import { cliSignature, mustResolve } from "./shared.ts";
 
 /**
  * A checkout, rather than one of the bare repositories under `--root`.
@@ -34,9 +36,21 @@ const workFlag = Flag.string("work").pipe(
   Flag.withDescription("Explicit checkout selector for extension commands"),
 );
 
+class WorkPaths extends Context.Service<
+  WorkPaths,
+  { readonly root: string; readonly base: string }
+>()("cli/WorkPaths") {}
+
+const workPath = Effect.fn("cli.workPath")(function* (value: string) {
+  const paths = yield* WorkPaths;
+  return (
+    path.relative(paths.root, path.resolve(paths.base, value)).split(path.sep).join("/") || "."
+  );
+});
+
 const withWork = <A, E>(
   work: { readonly _tag: "None" } | { readonly _tag: "Some"; readonly value: string },
-  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore>,
+  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore | MergeState | WorkPaths>,
 ) =>
   Effect.gen(function* () {
     const invocation = yield* GitInvocation;
@@ -46,10 +60,16 @@ const withWork = <A, E>(
         reason: "this command requires a work tree",
       });
     }
-    const selected =
-      invocation.workTree !== undefined || work._tag === "None"
-        ? invocation
-        : { ...invocation, workTree: path.resolve(invocation.cwd, work.value) };
+    let selected = invocation;
+    if (invocation.workTree === undefined && work._tag === "Some") {
+      const location = path.resolve(invocation.cwd, work.value);
+      // The extension's checkout selector chooses a repository to discover;
+      // an explicit Git directory already selects its metadata separately.
+      selected =
+        invocation.gitDir === undefined
+          ? { ...invocation, cwd: location }
+          : { ...invocation, workTree: location };
+    }
     const found = yield* discoverRepository(selected);
     if (found === null || found.workTree === null) {
       return yield* new Invalid({
@@ -57,12 +77,18 @@ const withWork = <A, E>(
         reason: "not a Git work tree",
       });
     }
+    const relative = path.relative(found.workTree, invocation.cwd);
+    const base =
+      relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+        ? found.workTree
+        : invocation.cwd;
     return yield* effect.pipe(
+      Effect.provideService(WorkPaths, { root: found.workTree, base }),
       Effect.provide(
         GitRepository.layer.pipe(
           Layer.provide(GitRepository.hooksNoop),
           Layer.provide(stores(found.gitDir)),
-          Layer.provideMerge(workspace(found.workTree)),
+          Layer.provideMerge(workspace(found.workTree, found.gitDir)),
         ),
       ),
     );
@@ -84,12 +110,19 @@ export const statusCommand = Command.make("status", { work: workFlag }, ({ work 
 
       const staged = new Map(current.staged.map((entry) => [entry.path, letter[entry.change]]));
       const unstaged = new Map(current.unstaged.map((entry) => [entry.path, letter[entry.change]]));
+      const unmerged = new Map(current.unmerged.map((entry) => [entry.path, entry.status]));
 
       yield* Console.log(`## ${current.branch.replace(/^refs\/heads\//, "")}`);
-      for (const path of [...new Set([...staged.keys(), ...unstaged.keys()])].sort()) {
-        yield* Console.log(`${staged.get(path) ?? " "}${unstaged.get(path) ?? " "} ${path}`);
+      for (const path of [
+        ...new Set([...staged.keys(), ...unstaged.keys(), ...unmerged.keys()]),
+      ].sort()) {
+        const code = unmerged.get(path) ?? `${staged.get(path) ?? " "}${unstaged.get(path) ?? " "}`;
+        // Quoted as git quotes it: the format claimed above is one whose
+        // readers take the path as the rest of the line, so a name carrying a
+        // newline, a tab or a space has to arrive the way they expect it.
+        yield* Console.log(`${code} ${quoteListPath(path)}`);
       }
-      for (const path of current.untracked) yield* Console.log(`?? ${path}`);
+      for (const path of current.untracked) yield* Console.log(`?? ${quoteListPath(path)}`);
     }),
   ),
 );
@@ -101,7 +134,8 @@ export const addCommand = Command.make(
     withWork(
       work,
       Effect.gen(function* () {
-        for (const staged of yield* Checkout.add(paths)) yield* Console.log(staged);
+        for (const staged of yield* Checkout.add(yield* Effect.forEach(paths, workPath)))
+          yield* Console.log(staged);
       }),
     ),
 );
@@ -110,17 +144,21 @@ export const rm = Command.make(
   "rm",
   {
     work: workFlag,
+    force: Flag.boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
     cached: Flag.boolean("cached").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Unstage only, and leave the file on disk"),
     ),
     paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })),
   },
-  ({ cached, paths, work }) =>
+  ({ cached, force, paths, work }) =>
     withWork(
       work,
       Effect.gen(function* () {
-        for (const removed of yield* Checkout.remove(paths, { cached }))
+        for (const removed of yield* Checkout.remove(yield* Effect.forEach(paths, workPath), {
+          cached,
+          force,
+        }))
           yield* Console.log(removed);
       }),
     ),
@@ -133,7 +171,7 @@ export const mv = Command.make(
     withWork(
       work,
       Effect.gen(function* () {
-        const moved = yield* Checkout.move(from, to);
+        const moved = yield* Checkout.move(yield* workPath(from), yield* workPath(to));
         yield* Console.log(`${moved.from} -> ${moved.to}`);
       }),
     ),
@@ -159,8 +197,11 @@ export const restore = Command.make(
       Effect.gen(function* () {
         const options = { staged, worktree: !staged };
         const restored = yield* source._tag === "Some"
-          ? Checkout.restore(paths, { ...options, source: source.value })
-          : Checkout.restore(paths, options);
+          ? Checkout.restore(yield* Effect.forEach(paths, workPath), {
+              ...options,
+              source: yield* mustResolve(yield* Repository, source.value),
+            })
+          : Checkout.restore(yield* Effect.forEach(paths, workPath), options);
         for (const path of restored) yield* Console.log(path);
       }),
     ),

@@ -12,11 +12,10 @@
  *   <root>/refs/heads/main    one file per ref
  *   <root>/HEAD               symbolic ref
  *
- * Atomicity comes from `rename(2)`, which is atomic within a filesystem: a ref
- * update writes a temp file and renames it over the target. That is the same
- * guarantee `RefStore.apply` promises on Workers via the DO input gate, which
- * is why the port can demand it of every backend instead of leaving it
- * optional.
+ * A ref update reserves Git's `.lock` path before comparing the old value,
+ * then renames a temporary file over the ref while retaining that reservation.
+ * Rename prevents partial reads; the lock protects compare-and-swap against
+ * other processes using this store or stock Git.
  */
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -52,6 +51,81 @@ import {
 
 const failure = (operation: string, target: string) => (cause: unknown) =>
   new StorageFailure({ operation, path: target, cause });
+
+const writeAtomic = (target: string, contents: string) =>
+  Effect.tryPromise({
+    try: async () => {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.writeFile(temporary, contents);
+        // Readers see complete bytes; reserve() keeps writers out.
+        await fs.rename(temporary, target);
+      } finally {
+        await fs.rm(temporary, { force: true }).catch(() => undefined);
+      }
+    },
+    catch: failure("write", target),
+  });
+
+// Stock Git also reserves <ref>.lock. Keep that reservation while the
+// separate temporary file is renamed, so batch rollback and reflog
+// writes cannot race another cooperating writer after the first rename.
+const reserve = (target: string) =>
+  Effect.acquireRelease(
+    Effect.tryPromise({
+      try: async () => {
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        const lock = `${target}.lock`;
+        const handle = await fs.open(lock, "wx");
+        try {
+          // Existence is the reservation. Keeping every descriptor open
+          // would exhaust ordinary limits during a large atomic batch.
+          await handle.close();
+        } catch (cause) {
+          await fs.rm(lock, { force: true }).catch(() => undefined);
+          throw cause;
+        }
+        return lock;
+      },
+      catch: failure("lock", target),
+    }),
+    (lock) =>
+      Effect.promise(async () => {
+        await fs.rm(lock, { force: true }).catch(() => undefined);
+      }),
+  );
+
+/** Create Git's minimum bare layout. Opening stores alone remains read-only. */
+export const initializeBare = Effect.fn("Node.initializeBare")(
+  function* (root: string, branch = "main") {
+    const head = `refs/heads/${branch}`;
+    yield* checkHeadTarget(head);
+    yield* Effect.tryPromise({
+      try: async () => {
+        await fs.mkdir(path.join(root, "objects"), { recursive: true });
+        await fs.mkdir(path.join(root, "refs"), { recursive: true });
+      },
+      catch: failure("initialize", root),
+    });
+    const target = path.join(root, "HEAD");
+    const hasHead = Effect.try({
+      try: () => {
+        if (!existsSync(target)) return false;
+        if (!statSync(target).isFile()) throw new Error("HEAD is not a file");
+        return true;
+      },
+      catch: failure("initialize", target),
+    });
+    // Like git init, reinitialization preserves HEAD, including a detached one.
+    // A fresh HEAD still participates in the same reservation as other writers.
+    if (yield* hasHead) return;
+    yield* reserve(target);
+    if (!(yield* hasHead)) yield* writeAtomic(target, `ref: ${head}\n`);
+  },
+  Effect.scoped,
+  Effect.uninterruptible,
+);
 
 /**
  * The repositories that read this one's objects.
@@ -386,10 +460,13 @@ const alternatesIn = (objectsDir: string): ReadonlyArray<string> => {
  * to the end — git resolves them transitively, so a fork of a fork reaches its
  * grandparent's objects, and stopping at one hop loses that history.
  */
-export const alternatesOf = (root: string): ReadonlyArray<string> => {
+const walkAlternates = (
+  root: string,
+  read: (objectsDir: string) => ReadonlyArray<string>,
+): ReadonlyArray<string> => {
   const found: string[] = [];
   const seen = new Set<string>();
-  const queue = [...alternatesIn(path.join(root, "objects"))];
+  const queue = [...read(path.join(root, "objects"))];
 
   while (queue.length > 0) {
     const directory = queue.shift()!;
@@ -397,37 +474,48 @@ export const alternatesOf = (root: string): ReadonlyArray<string> => {
     seen.add(directory);
     found.push(directory);
     // A cycle is a misconfiguration, not a reason to loop forever.
-    queue.push(...alternatesIn(directory));
+    queue.push(...read(directory));
   }
 
   return found;
 };
 
+export const alternatesOf = (root: string): ReadonlyArray<string> =>
+  walkAlternates(root, alternatesIn);
+
 /**
- * The same, re-read only when the file changes.
- *
- * The read path asks whenever an object is not here, so re-reading and
- * re-resolving per object would be a syscall storm on a fork. Keying the memo
- * on the file's mtime rather than on elapsed time is what makes a fork created
- * after this store was built visible to it — and what stops a directory that
- * was dropped and recreated under the same name from serving the previous
- * occupant's objects.
+ * Validate each dependency in the chain, while rereading only changed files.
+ * A parent's alternates can change without touching the child's file. File
+ * identity and ctime also detect replacement with preserved mtimes.
  */
 const rememberAlternates = (root: string): (() => ReadonlyArray<string>) => {
-  const file = path.join(root, "objects", "info", "alternates");
-  let stamp: number | null = null;
-  let dirs: ReadonlyArray<string> = [];
+  const cache = new Map<string, { stamp: string | null; dirs: ReadonlyArray<string> }>();
+  const read = (objectsDir: string): ReadonlyArray<string> => {
+    let stamp: string | null = null;
+    try {
+      const stat = statSync(path.join(objectsDir, "info", "alternates"), {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      if (stat !== undefined)
+        stamp = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch {
+      // Missing or unreadable, like alternatesIn's direct read.
+    }
+    const cached = cache.get(objectsDir);
+    if (cached !== undefined && cached.stamp === stamp) return cached.dirs;
+    // Stamp before reading, so a concurrent replacement is checked next time.
+    const dirs = stamp === null ? [] : alternatesIn(objectsDir);
+    cache.set(objectsDir, { stamp, dirs });
+    return dirs;
+  };
 
   return () => {
-    let now: number | null = null;
-    try {
-      now = existsSync(file) ? statSync(file).mtimeMs : null;
-    } catch {
-      now = null;
+    const dirs = walkAlternates(root, read);
+    const live = new Set([path.join(root, "objects"), ...dirs]);
+    for (const directory of cache.keys()) {
+      if (!live.has(directory)) cache.delete(directory);
     }
-    if (now === stamp) return dirs;
-    stamp = now;
-    dirs = now === null ? [] : alternatesOf(root);
     return dirs;
   };
 };
@@ -1096,17 +1184,16 @@ export const filePacks = (root: string): PackStore["Service"] => {
 /**
  * Refs on disk.
  *
- * The batch is checked before anything is written, so an atomic batch with one
- * stale entry writes nothing. Serializing concurrent batches is the host's job
- * (the readme's "One Durable Object per repository"), exactly as the DO input
- * gate does it on Workers; this layer assumes it is not racing itself.
+ * Reserve every affected ref before checking an atomic batch. The Node host
+ * also queues requests, but separate CLI processes and stock Git share only
+ * these on-disk reservations.
  */
-export const refStore = (root: string) =>
+export const refStore = (root: string, worktreeRoot = root) =>
   Layer.effect(
     RefStore,
     Effect.sync(() => {
-      const pathFor = (name: string) => path.join(root, name);
-      const headPath = path.join(root, "HEAD");
+      const pathFor = (name: string) => path.join(name === "HEAD" ? worktreeRoot : root, name);
+      const headPath = path.join(worktreeRoot, "HEAD");
 
       const readFile = (target: string) =>
         Effect.tryPromise({
@@ -1118,19 +1205,6 @@ export const refStore = (root: string) =>
             return (await fs.readFile(target, "utf8")).trim();
           },
           catch: failure("read", target),
-        });
-
-      const writeAtomic = (target: string, contents: string) =>
-        Effect.tryPromise({
-          try: async () => {
-            await fs.mkdir(path.dirname(target), { recursive: true });
-            const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-            await fs.writeFile(temporary, contents);
-            // rename(2) is atomic within a filesystem: a concurrent reader sees
-            // either the old ref or the new one, never a half-written file.
-            await fs.rename(temporary, target);
-          },
-          catch: failure("write", target),
         });
 
       /**
@@ -1263,9 +1337,13 @@ export const refStore = (root: string) =>
 
         if (kept.length === lines.filter((line) => line.length > 0).length) return;
         const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-        await fs.writeFile(temporary, kept.length === 0 ? "" : `${kept.join("\n")}\n`);
-        await fs.rename(temporary, target);
-        forgetPackedRefs();
+        try {
+          await fs.writeFile(temporary, kept.length === 0 ? "" : `${kept.join("\n")}\n`);
+          await fs.rename(temporary, target);
+          forgetPackedRefs();
+        } finally {
+          await fs.rm(temporary, { force: true }).catch(() => undefined);
+        }
       };
 
       const head = readFile(headPath).pipe(
@@ -1275,7 +1353,11 @@ export const refStore = (root: string) =>
       const appendReflog = (update: RefUpdate, from: Oid | null, at: Date) =>
         Effect.tryPromise({
           try: async () => {
-            const target = path.join(root, "logs", update.name);
+            const target = path.join(
+              update.name === "HEAD" ? worktreeRoot : root,
+              "logs",
+              update.name,
+            );
             await fs.mkdir(path.dirname(target), { recursive: true });
             const line = encodeReflogLine({
               from,
@@ -1311,8 +1393,177 @@ export const refStore = (root: string) =>
           catch: failure("reflog", update.name),
         });
 
+      const applyLocked = (
+        updates: ReadonlyArray<RefUpdate>,
+        options?: { readonly atomic?: boolean },
+      ) =>
+        Effect.gen(function* () {
+          // Before any name is joined onto `root`: `pathFor` would happily
+          // resolve `refs/../../etc/passwd` outside the repository.
+          yield* checkRefNames(updates);
+
+          const at = new Date();
+          const results: RefUpdateResult[] = [];
+          const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
+
+          const locked = new Set<string>();
+          for (const name of [...new Set(updates.map((update) => update.name))].sort()) {
+            const held = yield* reserve(pathFor(name)).pipe(
+              Effect.as(true),
+              Effect.catchTag("StorageFailure", () => Effect.succeed(false)),
+            );
+            if (held) locked.add(name);
+          }
+          // Multi-ref rollback may delete a ref it just created. Reserve the
+          // packed file too, so pack-refs cannot preserve that transient value.
+          const needsPacked =
+            updates.some((update) => update.value === null) ||
+            (options?.atomic === true && updates.length > 1);
+          const packedReady =
+            !needsPacked ||
+            (yield* reserve(packedRefsPath).pipe(
+              Effect.as(true),
+              Effect.catchTag("StorageFailure", () => Effect.succeed(false)),
+            ));
+          // A writer outside this instance can replace packed-refs without
+          // changing its coarse timestamp or length. Compare fresh bytes.
+          forgetPackedRefs();
+
+          // Check everything first: an atomic batch that fails must not have
+          // written anything, and rename(2) cannot be undone.
+          for (const update of updates) {
+            const actual = yield* read(update.name);
+            if (!locked.has(update.name) || !packedReady) {
+              results.push({
+                name: update.name,
+                applied: false,
+                current: actual,
+                reason: "cannot lock ref",
+              });
+              continue;
+            }
+            const matches = update.expected === undefined || update.expected === actual;
+            results.push({
+              name: update.name,
+              applied: matches,
+              current: matches ? update.value : actual,
+            });
+            if (matches) pending.push({ from: actual, update });
+          }
+
+          if (options?.atomic === true && results.some((result) => !result.applied)) {
+            return yield* Effect.forEach(results, (result) =>
+              read(result.name).pipe(
+                Effect.map((current) => ({ ...result, applied: false, current })),
+              ),
+            );
+          }
+
+          /** One update, as a ref write: `null` deletes. */
+          const put = (name: string, value: Oid | null) =>
+            value === null
+              ? Effect.tryPromise({
+                  try: async () => {
+                    // Keep the loose tip authoritative until the older packed
+                    // entry is gone. A failed rewrite must not expose that old
+                    // value while reporting the deletion as unapplied.
+                    await removePacked(name);
+                    await fs.rm(pathFor(name), { force: true });
+                  },
+                  catch: failure("delete", pathFor(name)),
+                })
+              : writeAtomic(pathFor(name), `${value}\n`);
+
+          /** What has been written, newest last, for an atomic undo. */
+          const done: Array<{ from: Oid | null; update: RefUpdate }> = [];
+
+          for (const { from, update } of pending) {
+            const written = yield* put(update.name, update.value).pipe(
+              Effect.as(true),
+              // One ref that cannot be written — `refs/heads/x` where
+              // `refs/heads/x/y` is a directory, a full disk — must not
+              // report the refs that *were* written as untouched.
+              Effect.catchTag("StorageFailure", () => Effect.succeed(false)),
+            );
+
+            if (!written) {
+              // `atomic` is a promise about the batch, not about this ref.
+              // rename(2) cannot be undone, so the refs already moved are
+              // put back where they were and the whole batch reports as
+              // unapplied — which is what the caller asked for.
+              if (options?.atomic === true) {
+                for (const undo of done.reverse()) {
+                  yield* put(undo.update.name, undo.from).pipe(Effect.ignore);
+                }
+                return yield* Effect.forEach(results, (result) =>
+                  read(result.name).pipe(
+                    Effect.map((current) => ({
+                      name: result.name,
+                      applied: false,
+                      current,
+                      // The batch failed because one ref could not be
+                      // written, not because anyone else moved these.
+                      reason: "cannot lock ref",
+                    })),
+                  ),
+                );
+              }
+
+              const index = results.findIndex((result) => result.name === update.name);
+              if (index !== -1) {
+                results[index] = {
+                  name: update.name,
+                  applied: false,
+                  current: yield* read(update.name),
+                  reason: "cannot lock ref",
+                };
+              }
+              continue;
+            }
+
+            done.push({ from, update });
+          }
+
+          // Once every write in the batch has landed, not as each one does.
+          // An atomic batch that rolls back puts the refs themselves back,
+          // but a line already appended here cannot be taken out of the
+          // log — so `logs/refs/heads/x` recorded a move that was undone,
+          // and `Maintenance.gc` reads reflog entries as roots, pinning
+          // those rolled-back commits for the whole grace window.
+          //
+          // A reflog is the record of a move that has already happened:
+          // failing the update because the record could not be written
+          // would report a ref as untouched while it sits at its new
+          // value. `fsck` is where an unwritable `logs/` is diagnosed.
+          for (const { from, update } of done) {
+            yield* appendReflog(update, from, at).pipe(Effect.ignore);
+          }
+
+          return results;
+        }).pipe(Effect.scoped, Effect.uninterruptible);
+
       return RefStore.of(
         tracedRefStore("Node", {
+          shallow: readFile(path.join(root, "shallow")).pipe(
+            Effect.map((value) => new Set((value ?? "").split(/\s+/).filter(isOid))),
+          ),
+          updateShallow: ({ add, remove }) =>
+            Effect.gen(function* () {
+              if (add.length === 0 && remove.length === 0) return;
+              const target = path.join(root, "shallow");
+              yield* reserve(target);
+              const current = new Set(((yield* readFile(target)) ?? "").split(/\s+/).filter(isOid));
+              for (const oid of remove) current.delete(oid);
+              for (const oid of add) current.add(oid);
+              if (current.size === 0) {
+                yield* Effect.tryPromise({
+                  try: () => fs.rm(target, { force: true }),
+                  catch: failure("write", target),
+                });
+              } else {
+                yield* writeAtomic(target, `${[...current].sort().join("\n")}\n`);
+              }
+            }).pipe(Effect.scoped, Effect.uninterruptible),
           read,
           resolve: (name) =>
             Effect.gen(function* () {
@@ -1361,6 +1612,9 @@ export const refStore = (root: string) =>
 
                   const walk = async (dir: string): Promise<void> => {
                     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+                      // Reservations are not refs and may disappear while a
+                      // reader lists this directory. Git reserves this suffix.
+                      if (entry.name.endsWith(".lock")) continue;
                       const full = path.join(dir, entry.name);
                       if (entry.isDirectory()) {
                         await walk(full);
@@ -1399,127 +1653,27 @@ export const refStore = (root: string) =>
                 .map(([name, value]) => [name, value] as const);
             }),
           apply: (updates, options) =>
-            Effect.gen(function* () {
-              // Before any name is joined onto `root`: `pathFor` would happily
-              // resolve `refs/../../etc/passwd` outside the repository.
-              yield* checkRefNames(updates);
-
-              const at = new Date();
-              const results: RefUpdateResult[] = [];
-              const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
-
-              // Check everything first: an atomic batch that fails must not have
-              // written anything, and rename(2) cannot be undone.
-              for (const update of updates) {
-                const actual = yield* read(update.name);
-                const matches = update.expected === undefined || update.expected === actual;
-                results.push({
-                  name: update.name,
-                  applied: matches,
-                  current: matches ? update.value : actual,
-                });
-                if (matches) pending.push({ from: actual, update });
-              }
-
-              if (options?.atomic === true && results.some((result) => !result.applied)) {
-                return yield* Effect.forEach(results, (result) =>
-                  read(result.name).pipe(
-                    Effect.map((current) => ({ name: result.name, applied: false, current })),
-                  ),
-                );
-              }
-
-              /** One update, as a ref write: `null` deletes. */
-              const put = (name: string, value: Oid | null) =>
-                value === null
-                  ? Effect.tryPromise({
-                      try: async () => {
-                        await fs.rm(pathFor(name), { force: true });
-                        // The loose file is only half of a ref that git has
-                        // packed: leaving the `packed-refs` entry would let
-                        // the next read resurrect a branch just deleted, and
-                        // report the deletion as having worked.
-                        await removePacked(name);
-                      },
-                      catch: failure("delete", pathFor(name)),
-                    })
-                  : writeAtomic(pathFor(name), `${value}\n`);
-
-              /** What has been written, newest last, for an atomic undo. */
-              const done: Array<{ from: Oid | null; update: RefUpdate }> = [];
-
-              for (const { from, update } of pending) {
-                const written = yield* put(update.name, update.value).pipe(
-                  Effect.as(true),
-                  // One ref that cannot be written — `refs/heads/x` where
-                  // `refs/heads/x/y` is a directory, a full disk — must not
-                  // report the refs that *were* written as untouched.
-                  Effect.catchTag("StorageFailure", () => Effect.succeed(false)),
-                );
-
-                if (!written) {
-                  // `atomic` is a promise about the batch, not about this ref.
-                  // rename(2) cannot be undone, so the refs already moved are
-                  // put back where they were and the whole batch reports as
-                  // unapplied — which is what the caller asked for.
-                  if (options?.atomic === true) {
-                    for (const undo of done.reverse()) {
-                      yield* put(undo.update.name, undo.from).pipe(Effect.ignore);
-                    }
-                    return yield* Effect.forEach(results, (result) =>
-                      read(result.name).pipe(
-                        Effect.map((current) => ({
-                          name: result.name,
-                          applied: false,
-                          current,
-                          // The batch failed because one ref could not be
-                          // written, not because anyone else moved these.
-                          reason: "cannot lock ref",
-                        })),
-                      ),
-                    );
-                  }
-
-                  const index = results.findIndex((result) => result.name === update.name);
-                  if (index !== -1) {
-                    results[index] = {
-                      name: update.name,
-                      applied: false,
-                      current: yield* read(update.name),
-                      reason: "cannot lock ref",
-                    };
-                  }
-                  continue;
-                }
-
-                done.push({ from, update });
-              }
-
-              // Once every write in the batch has landed, not as each one does.
-              // An atomic batch that rolls back puts the refs themselves back,
-              // but a line already appended here cannot be taken out of the
-              // log — so `logs/refs/heads/x` recorded a move that was undone,
-              // and `Maintenance.gc` reads reflog entries as roots, pinning
-              // those rolled-back commits for the whole grace window.
-              //
-              // A reflog is the record of a move that has already happened:
-              // failing the update because the record could not be written
-              // would report a ref as untouched while it sits at its new
-              // value. `fsck` is where an unwritable `logs/` is diagnosed.
-              for (const { from, update } of done) {
-                yield* appendReflog(update, from, at).pipe(Effect.ignore);
-              }
-
-              return results;
-            }),
+            checkRefNames(updates).pipe(
+              Effect.andThen(
+                options?.atomic === true
+                  ? applyLocked(updates, options)
+                  : Effect.forEach(updates, (update) => applyLocked([update])).pipe(
+                      Effect.map((results) => results.flat()),
+                    ),
+              ),
+            ),
           head,
           setHead: (target) =>
-            checkHeadTarget(target).pipe(Effect.andThen(writeAtomic(headPath, `ref: ${target}\n`))),
+            Effect.gen(function* () {
+              yield* checkHeadTarget(target);
+              yield* reserve(headPath);
+              yield* writeAtomic(headPath, `ref: ${target}\n`);
+            }).pipe(Effect.scoped, Effect.uninterruptible),
           reflog: (name) =>
             Effect.tryPromise({
               try: async () => {
                 if (!addressable(name)) return [];
-                const target = path.join(root, "logs", name);
+                const target = path.join(name === "HEAD" ? worktreeRoot : root, "logs", name);
                 if (!existsSync(target)) return [];
                 return (await fs.readFile(target, "utf8"))
                   .split("\n")
@@ -1553,6 +1707,19 @@ export const refStore = (root: string) =>
 
 /** Both stores over one directory. */
 export const stores = (root: string) =>
-  Layer.mergeAll(objectStore(root), refStore(root), Layer.succeed(Storage)(root)).pipe(
-    Layer.provideMerge(packStore(root)),
+  Layer.unwrap(
+    Effect.try({
+      try: () => {
+        const commonFile = path.join(root, "commondir");
+        const common = existsSync(commonFile)
+          ? path.resolve(root, readFileSync(commonFile, "utf8").trim())
+          : root;
+        return Layer.mergeAll(
+          objectStore(common),
+          refStore(common, root),
+          Layer.succeed(Storage)(common),
+        ).pipe(Layer.provideMerge(packStore(common)));
+      },
+      catch: failure("commondir", root),
+    }).pipe(Effect.orDie),
   );

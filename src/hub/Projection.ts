@@ -154,21 +154,29 @@ export interface PullRequest {
 }
 
 /**
- * Which head-setting event wins.
+ * Which accepted event supplies a causally ordered value.
  *
- * Causality first: an event that descends from the current one replaces it.
- * Where neither descends from the other the two are genuinely concurrent, and
- * the greater id wins — arbitrary, but identically arbitrary everywhere.
+ * Remove superseded events before comparing concurrent IDs. A running winner
+ * loses the information that a discarded event superseded another: with clock
+ * rollback, that older event can incorrectly defeat a concurrent candidate.
  */
-const supersedes = (
-  candidate: { readonly commit: Oid; readonly id: string },
-  current: { readonly commit: Oid; readonly id: string } | null,
-  ancestors: ReadonlyMap<Oid, Ancestors>,
-): boolean => {
-  if (current === null) return true;
-  if (ancestors.get(candidate.commit)?.has(current.commit) === true) return true;
-  if (ancestors.get(current.commit)?.has(candidate.commit) === true) return false;
-  return candidate.id > current.id;
+const causalWinner = <A extends { readonly commit: Oid; readonly id: string }>(
+  candidates: ReadonlyArray<A>,
+  parents: Dag.Parents,
+): A | null => {
+  const maximal = new Set(
+    Dag.maximal(
+      parents,
+      candidates.map((candidate) => candidate.commit),
+    ),
+  );
+  let winner: A | null = null;
+  for (const candidate of candidates) {
+    if (maximal.has(candidate.commit) && (winner === null || candidate.id > winner.id)) {
+      winner = candidate;
+    }
+  }
+  return winner;
 };
 
 /** One commit's ancestors: asked about one, or walked through. */
@@ -520,7 +528,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
 
   // Ancestry over the *whole* DAG, join commits and all. Building it from the
   // payload-carrying events alone would cut every chain at the join where two
-  // concurrent histories met, and `supersedes` would fall back to comparing
+  // concurrent histories met, and causal selection would fall back to comparing
   // ids for events that are genuinely ordered.
   const ancestors = ancestorSets(parents, walked.ordered);
   const { ancestry, contains: inTrustLog, reaches: reachesTrust } = trustReach();
@@ -727,18 +735,19 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     return { commit: best[2], contested } satisfies Opening;
   });
 
-  let title = "";
-  let description = "";
-  let base = "";
-  /** Which `pr.opened` supplied the content above; see the `pr.opened` case. */
-  let opened: { readonly commit: Oid; readonly id: string } | null = null;
-  /** Every accepted `pr.opened` and the base it named, in fold order. */
-  const openings: Array<{ readonly commit: Oid; readonly base: string }> = [];
+  /** Accepted content revisions, settled together after the fold. */
+  const openings: Array<{
+    readonly commit: Oid;
+    readonly id: string;
+    readonly title: string;
+    readonly description: string;
+    readonly base: string;
+  }> = [];
   let state: PullRequest["state"] = "open";
   let author: Fingerprint | null = null;
   let mergeCommit: Oid | null = null;
   let at = new Date(0);
-  let headSetter: { readonly commit: Oid; readonly id: string; readonly head: Oid } | null = null;
+  const headSetters: Array<{ readonly commit: Oid; readonly id: string; readonly head: Oid }> = [];
   /** Every revision an accepted event proposed, which is what a merge may name. */
   const proposed = new Set<Oid>();
   /** Merges, settled after the loop; see the `pr.merged` case. */
@@ -1006,13 +1015,13 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // `pr.opened`.
         openers.add(signer);
         for (const principal of yield* principalsOf(authorized)) openerPrincipals.add(principal);
-        openings.push({ commit: entry.commit, base: Event.branchRef(payload.base) });
-        if (supersedes({ commit: entry.commit, id: payload.id }, opened, ancestors)) {
-          opened = { commit: entry.commit, id: payload.id };
-          title = payload.title;
-          description = payload.description;
-          base = Event.branchRef(payload.base);
-        }
+        openings.push({
+          commit: entry.commit,
+          id: payload.id,
+          title: payload.title,
+          description: payload.description,
+          base: Event.branchRef(payload.base),
+        });
         // Authorship comes from the opening that *won*, and from nothing else.
         // Applied to every accepted `pr.opened`, a second one the pre-pass had
         // refused but the loop accepted — the floor raises the head it is
@@ -1022,11 +1031,8 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         if (opens && !opening.contested) author ??= signer;
         const head = Event.unqualify(payload.head);
         if (head !== null) proposed.add(head);
-        if (
-          head !== null &&
-          supersedes({ commit: entry.commit, id: payload.id }, headSetter, ancestors)
-        ) {
-          headSetter = { commit: entry.commit, id: payload.id, head };
+        if (head !== null) {
+          headSetters.push({ commit: entry.commit, id: payload.id, head });
         }
         break;
       }
@@ -1062,11 +1068,8 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
         // request and then approve it — self-approval wearing another event's
         // name.
         if (head !== null) proposed.add(head);
-        if (
-          head !== null &&
-          supersedes({ commit: entry.commit, id: payload.id }, headSetter, ancestors)
-        ) {
-          headSetter = { commit: entry.commit, id: payload.id, head };
+        if (head !== null) {
+          headSetters.push({ commit: entry.commit, id: payload.id, head });
         }
         break;
       }
@@ -1350,28 +1353,31 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     mergeCommit = merge.landed;
   }
 
-  const head = headSetter?.head ?? null;
+  const head = causalWinner(headSetters, parents)?.head ?? null;
+  const opened = causalWinner(openings, parents);
+  const title = opened?.title ?? "";
+  const description = opened?.description ?? "";
+  const base = opened?.base ?? "";
 
   /**
    * The base a review was actually given for.
    *
-   * The last opening the review descends from, and not the last one the walk
-   * reached before it. Fold order breaks ties by oid, which whoever writes the
+   * The winning opening among the review's ancestors, using the same causal/ID
+   * rule as the PR content. Fold order breaks ties by oid, which whoever writes the
    * commit grinds — so a sibling `pr.opened` ground below an existing approval
    * folded first, the approval was recorded against the base that sibling
    * chose, and an approval given for `refs/heads/docs` satisfied a protected
    * `refs/heads/main`. Descent is the relation nobody can grind, which is why
    * the head already uses it.
    */
-  const baseGiven = (commit: Oid): string => {
-    for (let at = openings.length - 1; at >= 0; at--) {
-      const opening = openings[at]!;
-      if (opening.commit === commit || ancestors.get(commit)?.has(opening.commit) === true) {
-        return opening.base;
-      }
-    }
-    return base;
-  };
+  const baseGiven = (commit: Oid): string =>
+    causalWinner(
+      openings.filter(
+        (opening) =>
+          opening.commit === commit || ancestors.get(commit)?.has(opening.commit) === true,
+      ),
+      parents,
+    )?.base ?? base;
 
   return {
     id: pr,
@@ -1443,9 +1449,9 @@ export const approvals = (pullRequest: PullRequest): ReadonlyArray<Review> => {
     // written by whoever signed it, so ordering on it let a reviewer withdraw
     // an approval in a way that did not withdraw it: back-date the "request
     // changes" and the earlier approval still counts, on every replica. Fold
-    // order is `Dag.topological`, which is ancestry with a deterministic
-    // tie-break — the same discipline `supersedes` applies for the same
-    // reason, and `reviews` is built in it.
+    // order is `Dag.topological`, so a descendant review replaces its ancestor
+    // even if its clock went backwards; concurrent reviews have a stable
+    // commit-order tie-break, and `reviews` is built in that order.
     latest.set(review.principal ?? review.author, review);
   }
   return [...latest.values()].filter((review) => review.decision === "approve");

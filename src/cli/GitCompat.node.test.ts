@@ -24,35 +24,44 @@ describe("Git-compatible invocation", () => {
     assert.deepEqual(manifestProblems(coreCompatibility), []);
   });
 
-  it("consumes repeated -C and all declared global options before the command", () => {
-    const parsed = parseInvocation(
-      input([
-        "-C",
-        "project",
-        "-C",
-        "nested",
-        "--git-dir=meta",
-        "--work-tree",
-        "tree",
-        "-c",
-        "core.abbrev=12",
-        "-ccolor.ui=false",
-        "--bare",
-        "--no-pager",
-        "status",
-        "--short",
-      ]),
-    );
-    if (parsed._tag === "InvalidInvocation") assert.fail(parsed.message);
-    assert.deepEqual(parsed.invocation, {
-      argv: ["status", "--short"],
-      cwd: "/workspace/project/nested",
-      gitDir: "/workspace/project/nested/meta",
-      workTree: "/workspace/project/nested/tree",
-      config: ["core.abbrev=12", "color.ui=false"],
-      bare: true,
-      noPager: true,
-    });
+  it("consumes repeated -C and all declared global options before the command", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "git-invocation-")));
+    try {
+      await fs.mkdir(path.join(root, "project", "nested"), { recursive: true });
+      const parsed = parseInvocation(
+        input(
+          [
+            "-C",
+            "project",
+            "-C",
+            "nested",
+            "--git-dir=meta",
+            "--work-tree",
+            "tree",
+            "-c",
+            "core.abbrev=12",
+            "-ccolor.ui=false",
+            "--bare",
+            "--no-pager",
+            "status",
+            "--short",
+          ],
+          root,
+        ),
+      );
+      if (parsed._tag === "InvalidInvocation") assert.fail(parsed.message);
+      assert.deepEqual(parsed.invocation, {
+        argv: ["status", "--short"],
+        cwd: path.join(root, "project", "nested"),
+        gitDir: path.join(root, "project", "nested", "meta"),
+        workTree: path.join(root, "project", "nested", "tree"),
+        config: ["core.abbrev=12", "color.ui=false"],
+        bare: true,
+        noPager: true,
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   describe("which implementation a shared command name reaches", () => {

@@ -2213,7 +2213,8 @@ export const mayWrite = Effect.fn("Policy.mayWrite")(function* (
     }
     return null;
   }
-  const principal = { member: who.principal, capabilities: who.capabilities };
+  const trust = yield* membership(stored.genesis, who.projection);
+  const principal = yield* standing(who, trust);
   if (principal.member === null) return "authentication required to write refs";
   return may(principal, capability) ? null : `this needs ${capability}`;
 });
@@ -2356,6 +2357,18 @@ const identityFreshness = (
     : { ok: false, reason: `the member's identity view is stale: ${fresh.reason}` };
 };
 
+export const permitsRequester = Effect.fn("Policy.permitsRequester")(function* (
+  capability: string,
+) {
+  const stored = yield* readGenesis();
+  if (stored === null) return false;
+  const requester = yield* Effect.serviceOption(Auth.Requester);
+  const who = Option.getOrElse(requester, () => Auth.anonymous);
+  const trust = yield* membership(stored.genesis, who.projection);
+  const principal = yield* standing(who, trust);
+  return principal.member !== null && may(principal, capability);
+});
+
 export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   ref: string,
   /**
@@ -2418,7 +2431,8 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
 
   const requester = yield* Effect.serviceOption(Auth.Requester);
   const who = Option.getOrElse(requester, () => Auth.anonymous);
-  const principal = { member: who.principal, capabilities: who.capabilities };
+  const trust = yield* membership(stored.genesis, who.projection);
+  const principal = yield* standing(who, trust);
 
   if (principal.member === null) return "authentication required to write refs";
   if (!may(principal, "source.push")) return "pushing needs source.push";
@@ -2454,7 +2468,6 @@ export const gateWrite = Effect.fn("Policy.gateWrite")(function* (
   // against a membership view of any age — which is most of the ways a ref
   // moves.
   if (rules.maxTrustAgeSeconds > 0 && boundApplies(ref)) {
-    const trust = yield* membership(stored.genesis, who.projection);
     const stale = Verify.fresh(trust, rules.maxTrustAgeSeconds * 1000);
     if (!stale.ok) return stale.reason;
     const foreign = identityFreshness(who, rules);

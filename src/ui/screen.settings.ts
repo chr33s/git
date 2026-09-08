@@ -75,6 +75,7 @@ export class GpSettings extends GitPlusElement {
   @property({ attribute: false }) accessor who: Whoami | null = null;
 
   @state() private accessor branches: readonly Ref[] = [];
+  @state() private accessor defaultBranch: string | null = null;
   @state() private accessor tags: readonly Ref[] = [];
   @state() private accessor remotes: readonly RemoteWire[] = [];
   @state() private accessor webhooks: readonly WebhookWire[] = [];
@@ -107,7 +108,9 @@ export class GpSettings extends GitPlusElement {
       // rest settle one by one, because the administrative registries can
       // refuse a reader (`repo.admin`) whose branches and policy are still
       // theirs to see — one refused card must not blank the other five.
-      this.branches = (await api.branches()).filter((ref) => ref.name.startsWith(HEADS));
+      const state = await api.refState();
+      this.branches = state.refs.filter((ref) => ref.name.startsWith(HEADS));
+      this.defaultBranch = state.head.startsWith(HEADS) ? state.head.slice(HEADS.length) : null;
       this.offline = false;
       this.denied = false;
       const [tags, remotes, webhooks, rules] = await Promise.all([
@@ -131,8 +134,7 @@ export class GpSettings extends GitPlusElement {
   }
 
   get #defaultBranch(): string | null {
-    const names = this.branches.map((ref) => short(ref.name));
-    return names.includes("main") ? "main" : (names[0] ?? null);
+    return this.defaultBranch;
   }
 
   #note(card: string, text: string): void {

@@ -35,6 +35,7 @@ type RepoRow = {
   readonly created_at: string;
   readonly updated_at: string;
   readonly last_push_at: string | null;
+  readonly initializing: "create" | "import" | "fork" | null;
 };
 
 const toRecord = (row: RepoRow): RepoRecord => ({
@@ -44,6 +45,7 @@ const toRecord = (row: RepoRow): RepoRecord => ({
   defaultBranch: row.default_branch,
   readOnly: row.read_only === 1,
   source: row.source,
+  initializing: row.initializing,
   createdAt: new Date(row.created_at),
   updatedAt: new Date(row.updated_at),
   lastPushAt: row.last_push_at === null ? null : new Date(row.last_push_at),
@@ -63,6 +65,16 @@ const createTables = (sql: Sql): void => {
       last_push_at   TEXT
     )
   `);
+  // Existing registries predate initialization tracking. A NULL migration
+  // preserves their completed repositories without guessing from source URLs.
+  if (
+    !sql
+      .exec<{ name: string }>(`SELECT name FROM pragma_table_info('repos')`)
+      .toArray()
+      .some((column) => column.name === "initializing")
+  ) {
+    sql.exec(`ALTER TABLE repos ADD COLUMN initializing TEXT`);
+  }
   sql.exec(`
     CREATE TABLE IF NOT EXISTS tokens (
       id         TEXT PRIMARY KEY,
@@ -97,8 +109,8 @@ export const registrySqlite = (sql: Sql) =>
           const id = crypto.randomUUID();
           sql.exec(
             `INSERT INTO repos
-               (id, name, description, default_branch, read_only, source, created_at, updated_at, last_push_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+               (id, name, description, default_branch, read_only, source, created_at, updated_at, last_push_at, initializing)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
             id,
             name,
             meta.description,
@@ -107,6 +119,7 @@ export const registrySqlite = (sql: Sql) =>
             meta.source,
             now,
             now,
+            meta.initializing ?? null,
           );
           return Effect.succeed(find(name)!);
         }),
@@ -147,6 +160,13 @@ export const registrySqlite = (sql: Sql) =>
         Effect.sync(() => {
           sql.exec(`UPDATE repos SET default_branch = ? WHERE name = ?`, branch, name);
         }),
+      finish: Effect.fn("Artifacts.Registry.finish")(function* (name: string, id: string) {
+        const record = find(name);
+        if (record === null || record.id !== id) {
+          return yield* failure("NOT_FOUND", `initializing repo '${name}' no longer exists`);
+        }
+        sql.exec(`UPDATE repos SET initializing = NULL WHERE name = ? AND id = ?`, name, id);
+      }),
     });
   });
 

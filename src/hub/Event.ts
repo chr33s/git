@@ -536,7 +536,8 @@ export interface Entry {
  *
  * The compare-and-swap is on the head the event was built against, so two
  * authors appending at once produce one winner and one retry rather than a
- * lost event. Retrying is safe: adding an event does not change what it says.
+ * lost event. State-dependent callers pass an explicit expectation and must
+ * revalidate their decision themselves after a conflict.
  */
 /**
  * Add one signed record to the end of an append-only hub ref.
@@ -553,6 +554,8 @@ export const appendTo = Effect.fn("hub.Event.appendTo")(
     readonly message: string;
     readonly payload: Uint8Array;
     readonly signatures: ReadonlyArray<string>;
+    /** A state-dependent append must fail rather than rebase onto an unseen event. */
+    readonly expected?: Oid | null | undefined;
   }) {
     const repository = yield* Repository;
 
@@ -560,7 +563,8 @@ export const appendTo = Effect.fn("hub.Event.appendTo")(
     // compare-and-swap, and a symbolic ref resolves to an oid the store never
     // wrote — so the swap would conflict against a value nobody holds, on
     // every append, with nothing to point at as the cause.
-    const head = yield* repository.readRef(input.ref);
+    const head =
+      input.expected === undefined ? yield* repository.readRef(input.ref) : input.expected;
 
     const commit = yield* Record.write({
       name: RECORD,
@@ -573,19 +577,27 @@ export const appendTo = Effect.fn("hub.Event.appendTo")(
     yield* repository.setRef({ name: input.ref, to: commit, expected: head });
     return commit;
   },
-  Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }),
+  (effect, input) =>
+    effect.pipe(
+      Effect.retry({
+        times: 3,
+        while: (error) => input.expected === undefined && error._tag === "RefConflict",
+      }),
+    ),
 );
 
 export const append = Effect.fn("hub.Event.append")(function* (
   payload: HubPayload,
   bytes: Uint8Array,
   signatures: ReadonlyArray<string>,
+  expected?: Oid | null,
 ) {
   return yield* appendTo({
     ref: refOf(payload.pr),
     message: `${payload.type} ${payload.id}\n`,
     payload: bytes,
     signatures,
+    expected,
   });
 });
 
@@ -596,10 +608,14 @@ export const append = Effect.fn("hub.Event.append")(function* (
  * agree today are two that can drift, and the failure would be signatures that
  * verify nowhere.
  */
-export const issue = Effect.fn("hub.Event.issue")(function* (payload: HubPayload, key: PrivateKey) {
+export const issue = Effect.fn("hub.Event.issue")(function* (
+  payload: HubPayload,
+  key: PrivateKey,
+  expected?: Oid | null,
+) {
   const bytes = encode(payload);
   const signature = yield* sign(key, bytes, NAMESPACE);
-  return yield* append(payload, bytes, [signature]);
+  return yield* append(payload, bytes, [signature], expected);
 });
 
 /**
@@ -793,6 +809,8 @@ export interface WalkedRecord<A> {
 
 export interface Walk<A> {
   readonly records: ReadonlyArray<WalkedRecord<A>>;
+  /** Full walked ancestry, including joins, for causal projection decisions. */
+  readonly parents: Dag.Parents;
   /** Commits carrying a record this replica could not read or decode. */
   readonly unreadable: ReadonlyArray<Oid>;
   /**
@@ -826,7 +844,9 @@ export const walk = Effect.fn("hub.Event.walk")(function* <A>(
 ) {
   const repository = yield* Repository;
   const head = yield* repository.resolve(ref);
-  if (head === null) return { records: [], unreadable: [], walked: 0 } satisfies Walk<A>;
+  if (head === null) {
+    return { records: [], parents: new Map(), unreadable: [], walked: 0 } satisfies Walk<A>;
+  }
 
   const parents = yield* Dag.reachable(head, null, isHubCommit, yield* ceilingOf());
   const records: Array<WalkedRecord<A>> = [];
@@ -860,7 +880,7 @@ export const walk = Effect.fn("hub.Event.walk")(function* <A>(
     });
   }
 
-  return { records, unreadable, walked: parents.size } satisfies Walk<A>;
+  return { records, parents, unreadable, walked: parents.size } satisfies Walk<A>;
 });
 
 export const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {

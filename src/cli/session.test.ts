@@ -95,6 +95,54 @@ describe("cli session", () => {
       ])
     ).trim();
 
+  it.live("refuses session reports and decisions with absent targets", () =>
+    Effect.promise(async () => {
+      for (const [verb, flags] of [
+        ["produce", []],
+        ["ask", ["--question", "What should happen?"]],
+        ["answer", ["--decision", "missing", "--chose", "continue"]],
+      ] as const) {
+        const session = `missing-${verb}`;
+        const output = await failing([
+          "session",
+          verb,
+          "--root",
+          root,
+          "--key",
+          key,
+          "--session",
+          session,
+          ...flags,
+          "project",
+        ]);
+        assert.match(output, /no session/, verb);
+        await assert.rejects(fs.readFile(path.join(project, "refs", "hub", "session", session)), {
+          code: "ENOENT",
+        });
+      }
+      const session = await openSession("a real session with no question");
+      const ref = path.join(project, "refs", "hub", "session", session);
+      const before = await fs.readFile(ref, "utf8");
+      const output = await failing([
+        "session",
+        "answer",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--session",
+        session,
+        "--decision",
+        "missing",
+        "--chose",
+        "continue",
+        "project",
+      ]);
+      assert.match(output, /no decision/);
+      assert.equal(await fs.readFile(ref, "utf8"), before);
+    }),
+  );
+
   it.effect("records what was asked, and reads it back after the sandbox is gone", () =>
     Effect.promise(async () => {
       const session = await openSession("document how to set up agents with their own ssh key");
@@ -212,6 +260,39 @@ describe("cli session", () => {
     }),
   );
 
+  it.effect("finds the latest production even when an older session resumes", () =>
+    Effect.promise(async () => {
+      const first = await openSession("older session");
+      const second = await openSession("newer session");
+      const produce = (session: string) =>
+        cli([
+          "session",
+          "produce",
+          "--root",
+          root,
+          "--key",
+          key,
+          "--session",
+          session,
+          "--ref",
+          "refs/heads/topic",
+          "project",
+        ]);
+      const show = async (branch: string) =>
+        JSON.parse(await cli(["session", "show", "--root", root, "--branch", branch, "project"]));
+      await produce(first);
+      await produce(second);
+      assert.equal((await show("refs/heads/topic")).session, second);
+      await produce(first);
+      assert.equal((await show("refs/heads/topic")).session, first);
+      assert.equal(
+        (await show("topic")).session,
+        first,
+        "the documented short branch spelling works",
+      );
+    }),
+  );
+
   it.effect("keeps one session's events on one ref, and hides them from a source clone", () =>
     Effect.promise(async () => {
       const session = await openSession("first");
@@ -291,8 +372,32 @@ describe("cli session", () => {
 
   it.effect("installs hooks that record a session, and installs them once", () =>
     Effect.promise(async () => {
-      const work = path.join(root, "work");
+      const work = path.join(root, "work ' tree");
       await fs.mkdir(work, { recursive: true });
+      const legacyScript = path.join(work, ".chr33s", "session.mjs");
+      const custom = { hooks: [{ type: "command", command: "echo custom" }] };
+      await fs.mkdir(path.join(work, ".claude"));
+      await fs.writeFile(
+        path.join(work, ".claude", "settings.json"),
+        JSON.stringify({
+          hooks: Object.fromEntries(
+            [
+              ["UserPromptSubmit", "start"],
+              ["Stop", "stop"],
+            ].map(([event, phase]) => [
+              event,
+              [
+                custom,
+                {
+                  hooks: [
+                    { type: "command", command: `node ${JSON.stringify(legacyScript)} ${phase}` },
+                  ],
+                },
+              ],
+            ]),
+          ),
+        }),
+      );
 
       await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
       await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
@@ -303,16 +408,18 @@ describe("cli session", () => {
       const settings = JSON.parse(
         await fs.readFile(path.join(work, ".claude", "settings.json"), "utf8"),
       );
-      assert.equal(settings.hooks.UserPromptSubmit.length, 1);
-      assert.equal(settings.hooks.Stop.length, 1);
+      assert.equal(settings.hooks.UserPromptSubmit.length, 2);
+      assert.equal(settings.hooks.Stop.length, 2);
+      assert.deepEqual(settings.hooks.UserPromptSubmit[0], custom);
+      assert.deepEqual(settings.hooks.Stop[0], custom);
 
       // And the hook actually records, driven the way the harness drives it:
       // the prompt arrives as JSON on stdin.
-      const script = path.join(work, ".chr33s", "session.mjs");
+      const script = path.join(work, ".chr33s", "session.sh");
       // `execFileSync`, because the hook reads its event from stdin and only the
       // synchronous form takes `input` — the async one leaves the pipe open and
       // the script waits on it forever.
-      execFileSync(process.execPath, [script, "start"], {
+      execFileSync("/bin/sh", [script, "start"], {
         input: JSON.stringify({ prompt: "fix the flaky test" }),
         encoding: "utf8",
       });
@@ -325,7 +432,7 @@ describe("cli session", () => {
       );
 
       // A second start is the same session, not a second account of it.
-      execFileSync(process.execPath, [script, "start"], {
+      execFileSync("/bin/sh", [script, "start"], {
         input: JSON.stringify({ prompt: "and again" }),
         encoding: "utf8",
       });
@@ -337,7 +444,7 @@ describe("cli session", () => {
 
       // Stopping reports what it produced and clears the state, so the next
       // prompt opens a new session rather than appending to a finished one.
-      execFileSync(process.execPath, [script, "stop"], {
+      execFileSync("/bin/sh", [script, "stop"], {
         input: "{}",
         encoding: "utf8",
         env: { ...process.env, CHR33S_GIT_BRANCH: "refs/heads/topic" },
@@ -345,6 +452,53 @@ describe("cli session", () => {
       const after = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
       assert.deepEqual(after.refs, ["refs/heads/topic"]);
       assert.equal(fsSync.existsSync(path.join(work, ".chr33s", "session.id")), false);
+    }),
+  );
+
+  it.live("keeps overlapping harness sessions separate in one checkout", () =>
+    Effect.promise(async () => {
+      const work = path.join(root, "shared-work");
+      await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
+      const script = path.join(work, ".chr33s", "session.sh");
+      const invoke = (phase: string, session: string, prompt: string, branch = "") =>
+        execFileSync("/bin/sh", [script, phase], {
+          input: JSON.stringify({ session_id: session, prompt }),
+          encoding: "utf8",
+          env: { ...process.env, CHR33S_GIT_BRANCH: branch },
+        });
+
+      invoke("start", "harness-a", "first session's work");
+      invoke("start", "harness-b", "second session's work");
+      invoke("start", "harness-a", "duplicate start");
+      const ids = await inRepository(
+        project,
+        Effect.gen(function* () {
+          const repository = yield* GitRepository.Repository;
+          return (yield* repository.refs)
+            .map(([name]) => name)
+            .filter((name) => name.startsWith("refs/hub/session/"))
+            .map((name) => name.slice("refs/hub/session/".length));
+        }),
+      );
+      assert.equal(ids.length, 2, "each harness opens its own session; duplicate starts reuse it");
+
+      invoke("stop", "never-started", "", "refs/heads/unrelated");
+      invoke("stop", "harness-b", "", "refs/heads/second");
+      invoke("stop", "harness-a", "", "refs/heads/first");
+      for (const id of ids) {
+        const shown = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+        assert.equal(shown.prompts.length, 1);
+        const prompt = shown.prompts[0].prompt;
+        assert.ok(["first session's work", "second session's work"].includes(prompt));
+        assert.deepEqual(shown.refs, [
+          prompt === "first session's work" ? "refs/heads/first" : "refs/heads/second",
+        ]);
+      }
+      assert.deepEqual(
+        (await fs.readdir(path.join(work, ".chr33s"))).filter((name) => name.endsWith(".id")),
+        [],
+        "stopping both harnesses clears both pending records",
+      );
     }),
   );
 

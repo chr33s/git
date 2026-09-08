@@ -85,22 +85,45 @@ export const registryContract = (label: string, backend: Backend, runner: Runner
       );
     });
 
+    it("publishes readiness only for the repository incarnation being initialized", async () => {
+      await run(
+        Effect.gen(function* () {
+          const registry = yield* Registry;
+          const imported = yield* registry.create("pending", meta({ initializing: "import" }));
+          equal((yield* registry.get("pending"))?.initializing, "import", "import stays pending");
+          yield* registry.finish("pending", imported.id);
+          equal((yield* registry.get("pending"))?.initializing, null, "completed import is ready");
+          yield* registry.delete("pending");
+          const replacement = yield* registry.create("pending", meta({ initializing: "fork" }));
+          const stale = yield* registry.finish("pending", imported.id).pipe(Effect.result);
+          equal(stale._tag, "Failure", "old completion cannot finish a replacement");
+          equal(
+            (yield* registry.get("pending"))?.initializing,
+            "fork",
+            "replacement stays pending",
+          );
+          yield* registry.finish("pending", replacement.id);
+          equal((yield* registry.get("pending"))?.initializing, null, "replacement completes");
+        }),
+      );
+    });
+
     it("pages by cursor, in name order, with a stable total", async () => {
       await run(
         Effect.gen(function* () {
           const registry = yield* Registry;
-          for (const name of ["delta", "alpha", "charlie", "bravo"]) {
+          for (const name of ["a_b", "a-b", "a.b", "a0b"]) {
             yield* registry.create(name, meta());
           }
 
           const first = yield* registry.list({ limit: 2 });
           equal(first.total, 4, "total");
-          equal(first.repos.map((repo) => repo.name).join(","), "alpha,bravo", "first page");
+          equal(first.repos.map((repo) => repo.name).join(","), "a-b,a.b", "first page");
           check(first.cursor !== undefined, "a cursor when more remain");
 
           const second = yield* registry.list({ limit: 2, cursor: first.cursor! });
           equal(second.total, 4, "total is the whole set, not the page");
-          equal(second.repos.map((repo) => repo.name).join(","), "charlie,delta", "second page");
+          equal(second.repos.map((repo) => repo.name).join(","), "a0b,a_b", "second page");
           equal(second.cursor, undefined, "no cursor on the last page");
         }),
       );

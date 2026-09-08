@@ -98,6 +98,7 @@ const fetchIdentity = (input: {
   readonly principal: PrincipalId;
   readonly url: string;
   readonly token?: string | undefined;
+  readonly signal: AbortSignal;
 }) =>
   Effect.runPromise(
     Effect.gen(function* () {
@@ -132,6 +133,7 @@ const fetchIdentity = (input: {
       }
       return { fetched, joined };
     }).pipe(Effect.provide(localRepository(input.directory))),
+    { signal: input.signal },
   );
 
 /** Verify the remote pin before allowing it to mutate a held identity clone. */
@@ -142,7 +144,7 @@ export const syncIdentity = Effect.fn("social.Sync.syncIdentity")(function* (inp
   readonly token?: string | undefined;
 }) {
   const presented = yield* Effect.tryPromise({
-    try: () => identityAt(input.url),
+    try: (signal) => identityAt(input.url, signal),
     catch: (cause) =>
       new Invalid({
         field: "identity",
@@ -165,8 +167,14 @@ export const syncIdentity = Effect.fn("social.Sync.syncIdentity")(function* (inp
   // nested provide merges with that ambient context and lets the ambient
   // Repository win, so the followed clone must run in a fresh runtime.
   const state = yield* Effect.tryPromise({
-    try: () =>
-      fetchIdentity({ directory, principal: input.principal, url: input.url, token: input.token }),
+    try: (signal) =>
+      fetchIdentity({
+        directory,
+        principal: input.principal,
+        url: input.url,
+        token: input.token,
+        signal,
+      }),
     catch: (cause) =>
       new Invalid({
         field: "sync",

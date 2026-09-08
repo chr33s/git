@@ -23,11 +23,12 @@
 import type { Namespace as ArtifactsNamespace } from "alchemy/Cloudflare/Artifacts/Namespace";
 import {
   ArtifactsError,
+  type ListOptions,
   ReadWriteNamespace,
   type ReadWriteNamespaceClient,
   type RepoClient,
 } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
-import { Context, Effect, Layer, Result, Schema, Stream } from "effect";
+import { Context, Effect, Exit, Layer, Result, Schema, Semaphore, Stream } from "effect";
 
 import { realpathSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -35,9 +36,16 @@ import * as path from "node:path";
 
 import { fetchRepository } from "../client/Fetch.ts";
 import { stores as memoryStores } from "../git/Memory.ts";
-import { borrowersOf, retirePacksAndRemove, stores as nodeStores } from "../git/Node.ts";
+import {
+  borrowersOf,
+  initializeBare,
+  retirePacksAndRemove,
+  stores as nodeStores,
+} from "../git/Node.ts";
 import { bytesToHex } from "../git/Format.ts";
 import { checkRefName, ObjectStore, RefStore } from "../git/Store.ts";
+import { make as registryFile } from "./RegistryFile.node.ts";
+import { reserve as reserveFiles } from "./Lifecycle.node.ts";
 
 /**
  * Whether a path is definitely not there.
@@ -76,6 +84,8 @@ export interface RepoMeta {
   readonly readOnly: boolean;
   /** `artifacts:ns/repo` for forks, the source URL for imports, else null. */
   readonly source: string | null;
+  /** Durable until every initialization step succeeds; absent on legacy rows. */
+  readonly initializing?: "create" | "import" | "fork" | null;
 }
 
 export interface RepoRecord extends RepoMeta {
@@ -95,46 +105,71 @@ export class Registry extends Context.Service<
   Registry,
   {
     readonly create: (name: string, meta: RepoMeta) => Effect.Effect<RepoRecord, ArtifactsError>;
-    readonly get: (name: string) => Effect.Effect<RepoRecord | null>;
+    readonly get: (name: string) => Effect.Effect<RepoRecord | null, ArtifactsError>;
     readonly list: (options?: {
       readonly limit?: number;
       readonly cursor?: string;
-    }) => Effect.Effect<{
-      readonly repos: ReadonlyArray<RepoRecord>;
-      readonly total: number;
-      readonly cursor?: string;
-    }>;
-    readonly delete: (name: string) => Effect.Effect<boolean>;
-    readonly touch: (name: string, at: Date) => Effect.Effect<void>;
+    }) => Effect.Effect<
+      {
+        readonly repos: ReadonlyArray<RepoRecord>;
+        readonly total: number;
+        readonly cursor?: string;
+      },
+      ArtifactsError
+    >;
+    readonly delete: (name: string) => Effect.Effect<boolean, ArtifactsError>;
+    readonly touch: (name: string, at: Date) => Effect.Effect<void, ArtifactsError>;
     /** The default branch an import discovered, which `create` could only guess. */
-    readonly setDefaultBranch: (name: string, branch: string) => Effect.Effect<void>;
+    readonly setDefaultBranch: (
+      name: string,
+      branch: string,
+    ) => Effect.Effect<void, ArtifactsError>;
+    readonly finish: (name: string, id: string) => Effect.Effect<void, ArtifactsError>;
   }
 >()("artifacts/Registry") {}
 
-const makeRegistry = (rows: Map<string, RepoRecord>, persist: () => Promise<void>) =>
-  Registry.of({
-    create: (name, meta) =>
-      Effect.gen(function* () {
-        if (rows.has(name)) {
-          return yield* failure("ALREADY_EXISTS", `repo '${name}' exists`);
-        }
-        const now = new Date();
-        const record: RepoRecord = {
-          ...meta,
-          id: crypto.randomUUID(),
-          name,
-          createdAt: now,
-          updatedAt: now,
-          lastPushAt: null,
-        };
-        rows.set(name, record);
-        yield* Effect.promise(persist);
-        return record;
-      }),
+const makeRegistry = (
+  initial: ReadonlyMap<string, RepoRecord>,
+  persist: (rows: ReadonlyMap<string, RepoRecord>) => Effect.Effect<void, ArtifactsError>,
+) => {
+  let rows = initial;
+  const writers = Semaphore.makeUnsafe(1);
+  // Readers keep seeing the last durable snapshot. Once a replacement starts,
+  // finish both publication steps before allowing interruption or another edit.
+  const commit = Effect.fn("Artifacts.Registry.persist")(function* (
+    next: ReadonlyMap<string, RepoRecord>,
+  ) {
+    yield* persist(next);
+    rows = next;
+  }, Effect.uninterruptible);
+
+  return Registry.of({
+    create: Effect.fn("Artifacts.Registry.create")(function* (name: string, meta: RepoMeta) {
+      if (rows.has(name)) {
+        return yield* failure("ALREADY_EXISTS", `repo '${name}' exists`);
+      }
+      const now = new Date();
+      const record: RepoRecord = {
+        ...meta,
+        id: crypto.randomUUID(),
+        name,
+        createdAt: now,
+        updatedAt: now,
+        lastPushAt: null,
+      };
+      const next = new Map(rows);
+      next.set(name, record);
+      yield* commit(next);
+      return record;
+    }, Semaphore.withPermit(writers)),
     get: (name) => Effect.sync(() => rows.get(name) ?? null),
     list: (options) =>
       Effect.sync(() => {
-        const all = [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
+        // Repository names use portable ASCII. Match SQLite's binary ordering
+        // so the same cursor identifies the same page on every backend.
+        const all = [...rows.values()].sort((a, b) =>
+          a.name === b.name ? 0 : a.name < b.name ? -1 : 1,
+        );
         const start = options?.cursor === undefined ? 0 : Number.parseInt(options.cursor, 10);
         const limit = options?.limit ?? 100;
         const page = all.slice(start, start + limit);
@@ -143,30 +178,44 @@ const makeRegistry = (rows: Map<string, RepoRecord>, persist: () => Promise<void
           ? { repos: page, total: all.length, cursor: String(next) }
           : { repos: page, total: all.length };
       }),
-    delete: (name) =>
-      Effect.gen(function* () {
-        const existed = rows.delete(name);
-        if (existed) yield* Effect.promise(persist);
-        return existed;
-      }),
-    touch: (name, at) =>
-      Effect.gen(function* () {
-        const record = rows.get(name);
-        if (record === undefined) return;
-        rows.set(name, { ...record, updatedAt: at, lastPushAt: at });
-        yield* Effect.promise(persist);
-      }),
-    setDefaultBranch: (name, branch) =>
-      Effect.gen(function* () {
-        const record = rows.get(name);
-        if (record === undefined || record.defaultBranch === branch) return;
-        rows.set(name, { ...record, defaultBranch: branch });
-        yield* Effect.promise(persist);
-      }),
+    delete: Effect.fn("Artifacts.Registry.delete")(function* (name: string) {
+      if (!rows.has(name)) return false;
+      const next = new Map(rows);
+      next.delete(name);
+      yield* commit(next);
+      return true;
+    }, Semaphore.withPermit(writers)),
+    touch: Effect.fn("Artifacts.Registry.touch")(function* (name: string, at: Date) {
+      const record = rows.get(name);
+      if (record === undefined) return;
+      const next = new Map(rows);
+      next.set(name, { ...record, updatedAt: at, lastPushAt: at });
+      yield* commit(next);
+    }, Semaphore.withPermit(writers)),
+    setDefaultBranch: Effect.fn("Artifacts.Registry.setDefaultBranch")(function* (
+      name: string,
+      branch: string,
+    ) {
+      const record = rows.get(name);
+      if (record === undefined || record.defaultBranch === branch) return;
+      const next = new Map(rows);
+      next.set(name, { ...record, defaultBranch: branch });
+      yield* commit(next);
+    }, Semaphore.withPermit(writers)),
+    finish: Effect.fn("Artifacts.Registry.finish")(function* (name: string, id: string) {
+      const record = rows.get(name);
+      if (record === undefined || record.id !== id) {
+        return yield* failure("NOT_FOUND", `initializing repo '${name}' no longer exists`);
+      }
+      const next = new Map(rows);
+      next.set(name, { ...record, initializing: null });
+      yield* commit(next);
+    }, Semaphore.withPermit(writers)),
   });
+};
 
 export const registryMemory = Layer.sync(Registry)(() =>
-  makeRegistry(new Map(), () => Promise.resolve()),
+  makeRegistry(new Map(), () => Effect.void),
 );
 
 /** The documents this provider keeps on disk: registry rows, token rows, fork links. */
@@ -175,12 +224,22 @@ type PersistedDocument =
   | ReadonlyArray<TokenRow>
   | Record<string, string>;
 
-/** Atomic enough for one process: temp file plus rename, like every backend. */
-const saveJson = async (target: string, value: PersistedDocument) => {
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-  await fs.writeFile(temporary, JSON.stringify(value, null, 1));
-  await fs.rename(temporary, target);
+/** Ordered atomic replacements for one provider's metadata file. */
+const jsonWriter = (target: string) => {
+  let pending = Promise.resolve();
+  return async (value: PersistedDocument): Promise<void> => {
+    // Capture this mutation before another caller changes a shared row array.
+    const contents = JSON.stringify(value, null, 1);
+    const written = pending.then(async () => {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+      await fs.writeFile(temporary, contents);
+      await fs.rename(temporary, target);
+    });
+    // The caller sees its failure; later writes can still repair persistence.
+    pending = written.catch(() => undefined);
+    await written;
+  };
 };
 
 const Persisted = Schema.fromJsonString(Schema.Unknown);
@@ -189,7 +248,7 @@ const loadJson = async <A>(target: string): Promise<A | null> => {
   try {
     const parsed = Schema.decodeResult(Persisted)(await fs.readFile(target, "utf8"));
     if (Result.isFailure(parsed)) return null;
-    // SAFETY: these files are written only by `saveJson`, so a successful
+    // SAFETY: these files are written only by `jsonWriter`, so a successful
     // parse yields the caller's persisted shape; anything unreadable lands in
     // the catch and reads as an empty store.
     return parsed.success as A;
@@ -200,30 +259,7 @@ const loadJson = async <A>(target: string): Promise<A | null> => {
 
 /** The durable form: one JSON file, rows revived with their `Date`s. */
 export const registryNode = (root: string) =>
-  Layer.effect(
-    Registry,
-    Effect.promise(async () => {
-      const file = path.join(root, ".registry.json");
-      interface Stored extends Omit<RepoRecord, "createdAt" | "updatedAt" | "lastPushAt"> {
-        readonly createdAt: string;
-        readonly updatedAt: string;
-        readonly lastPushAt: string | null;
-      }
-      const stored = (await loadJson<Stored[]>(file)) ?? [];
-      const rows = new Map<string, RepoRecord>(
-        stored.map((row) => [
-          row.name,
-          {
-            ...row,
-            createdAt: new Date(row.createdAt),
-            updatedAt: new Date(row.updatedAt),
-            lastPushAt: row.lastPushAt === null ? null : new Date(row.lastPushAt),
-          },
-        ]),
-      );
-      return makeRegistry(rows, () => saveJson(file, [...rows.values()]));
-    }),
-  );
+  Layer.effect(Registry, registryFile(root, makeRegistry).pipe(Effect.map(Registry.of)));
 
 /**
  * Scoped, TTL'd, revocable per-repo tokens, plaintext returned exactly once.
@@ -328,7 +364,8 @@ export const tokensNode = (root: string) =>
     Effect.promise(async () => {
       const file = path.join(root, ".tokens.json");
       const rows = (await loadJson<TokenRow[]>(file)) ?? [];
-      return makeTokens(rows, () => saveJson(file, rows));
+      const persist = jsonWriter(file);
+      return makeTokens(rows, () => persist(rows));
     }),
   );
 
@@ -369,7 +406,15 @@ export const alternates = (
 export class RepoStores extends Context.Service<
   RepoStores,
   {
-    readonly open: (name: string) => Effect.Effect<StoreInstances>;
+    /** Hold names through the complete lifecycle operation, including cleanup. */
+    readonly reserve: <A, E>(
+      names: ReadonlyArray<string>,
+      code: string,
+      use: Effect.Effect<A, E>,
+    ) => Effect.Effect<A, E | ArtifactsError>;
+    readonly open: (name: string) => Effect.Effect<StoreInstances, ArtifactsError>;
+    /** Materialize an empty repository before exposing it to other Git clients. */
+    readonly initialize: (name: string, branch: string) => Effect.Effect<void, ArtifactsError>;
     /**
      * Open `child` with its object reads falling through to `parent`.
      *
@@ -388,7 +433,7 @@ export class RepoStores extends Context.Service<
      * registry row and remote URL all survive to advertise objects that are
      * no longer anywhere. Asking first is what makes that refusable.
      */
-    readonly dependents: (name: string) => Effect.Effect<ReadonlyArray<string>>;
+    readonly dependents: (name: string) => Effect.Effect<ReadonlyArray<string>, ArtifactsError>;
     /**
      * Fails, and has to: on the node store this unlinks a directory, which a
      * pack still open elsewhere can refuse. `delete` reads that failure to
@@ -417,6 +462,28 @@ export class RepoStores extends Context.Service<
     readonly forget: (name: string) => Effect.Effect<void, ArtifactsError>;
   }
 >()("artifacts/RepoStores") {}
+
+const reserveMemory = (): RepoStores["Service"]["reserve"] => {
+  const active = new Map<string, string>();
+  return Effect.fn("Artifacts.Lifecycle.reserveMemory")(
+    <A, E>(names: ReadonlyArray<string>, code: string, use: Effect.Effect<A, E>) =>
+      Effect.acquireUseRelease(
+        Effect.suspend(() => {
+          for (const name of names) {
+            const held = active.get(name);
+            if (held !== undefined) return failure(held, `repo '${name}' is busy`);
+          }
+          for (const name of names) active.set(name, code);
+          return Effect.void;
+        }),
+        () => use,
+        () =>
+          Effect.sync(() => {
+            for (const name of names) active.delete(name);
+          }),
+      ),
+  );
+};
 
 export const repoStoresMemory = Layer.sync(RepoStores)(() => {
   /**
@@ -488,7 +555,9 @@ export const repoStoresMemory = Layer.sync(RepoStores)(() => {
   };
 
   return RepoStores.of({
+    reserve: reserveMemory(),
     open,
+    initialize: Effect.fn("Artifacts.RepoStores.initialize")(() => Effect.void),
     fork: (child, parent) =>
       Effect.gen(function* () {
         // `ownOf` here would build the parent rather than find it, and hand
@@ -545,15 +614,41 @@ export const repoStoresMemory = Layer.sync(RepoStores)(() => {
 });
 
 /** The durable factory: node stores on disk, fork links in `.forks.json`. */
+const ForkLinks = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
+
 export const repoStoresNode = (root: string) =>
   Layer.effect(
     RepoStores,
-    Effect.promise(async () => {
+    Effect.sync(() => {
       const forksFile = path.join(root, ".forks.json");
-      const forks = new Map<string, string>(
-        Object.entries((await loadJson<Record<string, string>>(forksFile)) ?? {}),
-      );
+      const persistForks = jsonWriter(forksFile);
+      const forks = new Map<string, string>();
       const instances = new Map<string, StoreInstances>();
+      const metadata = Semaphore.makeUnsafe(1);
+
+      // Every operation observes the current document. Refresh and store
+      // composition share a permit with edits so an older read cannot replace
+      // the map while a newer edit prepares its next snapshot.
+      const refreshForks = async (): Promise<void> => {
+        let text: string;
+        try {
+          text = await fs.readFile(forksFile, "utf8");
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+          text = "{}";
+        }
+        const entries = Object.entries(Schema.decodeSync(ForkLinks)(text));
+        if (
+          entries.length === forks.size &&
+          entries.every(([child, parent]) => forks.get(child) === parent)
+        )
+          return;
+        forks.clear();
+        for (const [child, parent] of entries) forks.set(child, parent);
+        // These stores close over their ancestors. Dropping the whole local
+        // cache also invalidates descendants of a remotely changed fork.
+        instances.clear();
+      };
 
       /** Create a directory, but only where its own parent already exists. */
       const beside = async (target: string): Promise<void> => {
@@ -767,13 +862,18 @@ export const repoStoresNode = (root: string) =>
        * out from under it. The lock is the file's, and the work under it is
        * two small writes.
        */
-      let pending: Promise<unknown> = Promise.resolve();
-      const alone = <A>(work: () => Promise<A>): Promise<A> => {
-        // Both arms, so one caller's failure does not strand the queue behind
-        // a rejected promise.
-        const done = pending.then(work, work);
-        pending = done.catch(() => undefined);
-        return done;
+      const alone = async <A>(work: () => Promise<A>): Promise<A> => {
+        await fs.mkdir(root, { recursive: true });
+        const lock = `${forksFile}.lock`;
+        const handle = await fs.open(lock, "wx", 0o600);
+        try {
+          await handle.close();
+          await refreshForks();
+          return await work();
+        } finally {
+          await handle.close().catch(() => undefined);
+          await fs.rm(lock, { force: true }).catch(() => undefined);
+        }
       };
 
       /**
@@ -849,13 +949,10 @@ export const repoStoresNode = (root: string) =>
           await unlendAll(name, next);
         }
         if (previous === parent) return;
-        await saveJson(forksFile, Object.fromEntries(next));
+        await persistForks(Object.fromEntries(next));
         if (parent === undefined) forks.delete(name);
         else forks.set(name, parent);
       };
-
-      const relink = (name: string, parent: string | undefined) =>
-        bookkeeping(name, () => alone(() => relinkHeld(name, parent)));
 
       const buildAt = (name: string) =>
         Effect.gen(function* () {
@@ -954,127 +1051,151 @@ export const repoStoresNode = (root: string) =>
           return { stores: built, whole: base.whole };
         });
 
-      const open = (name: string): Effect.Effect<StoreInstances> =>
+      const openHeld = (name: string): Effect.Effect<StoreInstances> =>
         Effect.map(opened(name, new Set()), (it) => it.stores);
 
+      const open = Effect.fn("Artifacts.RepoStores.open")(
+        (name: string) => bookkeeping(name, refreshForks).pipe(Effect.andThen(openHeld(name))),
+        Effect.uninterruptible,
+        Semaphore.withPermit(metadata),
+      );
+
       return RepoStores.of({
+        reserve: reserveFiles(root),
         open,
-        fork: (child, parent) =>
-          Effect.gen(function* () {
-            // Asked before anything is written, because none of what follows
-            // can tell: the alternates file is written from the name rather
-            // than from the directory, and the parent's `borrowers` is the
-            // one thing here deliberately allowed to go nowhere — writing it
-            // would put a deleted repository back on disk. So a fork of a
-            // parent that is gone would otherwise succeed, and hand back an
-            // empty repository with a write token against it.
-            //
-            // Under the lock, together with the writes that follow from it: a
-            // `drop` of the parent asks the same question from inside the same
-            // lock, so the two orders are the only two there are — the parent
-            // is gone before this looks, or the link exists before the drop
-            // does. In between is where a link outlives the parent it names
-            // and is inherited by whatever takes that name next.
-            //
-            // Everything a fork writes is in here, in one order, and nothing
-            // is left outside: a `delete(child)` running alongside would
-            // otherwise take the directory away between two of these and see
-            // it made again by the `recursive` mkdir, with a `borrowers` line
-            // appended to a parent that no `collected` will ever release.
-            //
-            // The disk before the link, because the disk is what `gc` reads.
-            // `borrowersOf` knows a fork by the child's own `alternates` and
-            // by the parent's `borrowers`, and knows nothing of
-            // `.forks.json` — so a fork interrupted after the link and before
-            // those two is a fork this process composes and `gc` cannot see,
-            // and the parent's objects go while the child still reads them.
-            // The other way round is a fork the disk knows about and the
-            // links do not: `dependents` reads the disk too, so it refuses
-            // the parent's delete, and `fork` run again finishes the job.
-            //
-            // A name can be forked twice — dropped, created again, forked
-            // somewhere else — and the parent it used to read through is
-            // still telling its own `gc` that this name borrows from it.
-            // Nothing else ever revisits that file, so the old parent would
-            // be uncollectable for as long as it exists; `relinkHeld` is what
-            // goes back for it.
-            const forkable = yield* onDisk(child, () =>
-              alone(async () => {
-                if (missing(path.join(root, parent))) return false;
+        initialize: Effect.fn("Artifacts.RepoStores.initialize")((name, branch) =>
+          initializeBare(path.join(root, name), branch).pipe(
+            Effect.mapError((error) =>
+              failure("INTERNAL_ERROR", `could not initialize '${name}': ${error._tag}`),
+            ),
+          ),
+        ),
+        fork: Effect.fn("Artifacts.RepoStores.fork")(
+          (child, parent) =>
+            Effect.gen(function* () {
+              // Asked before anything is written, because none of what follows
+              // can tell: the alternates file is written from the name rather
+              // than from the directory, and the parent's `borrowers` is the
+              // one thing here deliberately allowed to go nowhere — writing it
+              // would put a deleted repository back on disk. So a fork of a
+              // parent that is gone would otherwise succeed, and hand back an
+              // empty repository with a write token against it.
+              //
+              // Under the lock, together with the writes that follow from it: a
+              // `drop` of the parent asks the same question from inside the same
+              // lock, so the two orders are the only two there are — the parent
+              // is gone before this looks, or the link exists before the drop
+              // does. In between is where a link outlives the parent it names
+              // and is inherited by whatever takes that name next.
+              //
+              // Everything a fork writes is in here, in one order, and nothing
+              // is left outside: a `delete(child)` running alongside would
+              // otherwise take the directory away between two of these and see
+              // it made again by the `recursive` mkdir, with a `borrowers` line
+              // appended to a parent that no `collected` will ever release.
+              //
+              // The disk before the link, because the disk is what `gc` reads.
+              // `borrowersOf` knows a fork by the child's own `alternates` and
+              // by the parent's `borrowers`, and knows nothing of
+              // `.forks.json` — so a fork interrupted after the link and before
+              // those two is a fork this process composes and `gc` cannot see,
+              // and the parent's objects go while the child still reads them.
+              // The other way round is a fork the disk knows about and the
+              // links do not: `dependents` reads the disk too, so it refuses
+              // the parent's delete, and `fork` run again finishes the job.
+              //
+              // A name can be forked twice — dropped, created again, forked
+              // somewhere else — and the parent it used to read through is
+              // still telling its own `gc` that this name borrows from it.
+              // Nothing else ever revisits that file, so the old parent would
+              // be uncollectable for as long as it exists; `relinkHeld` is what
+              // goes back for it.
+              const forkable = yield* onDisk(child, () =>
+                alone(async () => {
+                  if (missing(path.join(root, parent))) return false;
 
-                // git's own way of saying "my objects are over there too". The
-                // in-memory fall-through only exists inside this process, and
-                // the fork is served over HTTP by a host that opens the
-                // directory directly — and read by `git` itself, which has
-                // read this file since 2005.
-                const info = path.join(root, child, "objects", "info");
-                await fs.mkdir(info, { recursive: true });
-                await fs.writeFile(
-                  path.join(info, "alternates"),
-                  `${path.resolve(root, parent, "objects")}\n`,
-                );
+                  // git's own way of saying "my objects are over there too". The
+                  // in-memory fall-through only exists inside this process, and
+                  // the fork is served over HTTP by a host that opens the
+                  // directory directly — and read by `git` itself, which has
+                  // read this file since 2005.
+                  const info = path.join(root, child, "objects", "info");
+                  await fs.mkdir(info, { recursive: true });
+                  await fs.writeFile(
+                    path.join(info, "alternates"),
+                    `${path.resolve(root, parent, "objects")}\n`,
+                  );
 
-                // And the other direction, which git has no file for: the
-                // parent needs to know it is lent out, because its own `gc`
-                // cannot see the refs that keep these objects alive.
-                //
-                // Appended where the parent's own directory already is, never
-                // created. A `delete(parent)` that got in first would
-                // otherwise be undone by this — the parent's directory back
-                // on disk, holding one file, which is enough to block the
-                // `gc` of whatever is created under that name next.
-                const lent = path.join(root, parent, "objects", "info");
-                try {
-                  // One level at a time, never `recursive`: a recursive mkdir
-                  // would rebuild the parent's own directory on the way down,
-                  // which is the resurrection this is guarding against. Beside
-                  // a directory that is already there, each of these either
-                  // exists or is created; with the parent gone, the first
-                  // fails and nothing is written.
-                  await beside(path.join(root, parent, "objects"));
-                  await beside(lent);
-                  await fs.appendFile(path.join(lent, "borrowers"), `${child}\n`);
-                } catch (error) {
-                  if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-                    throw error;
+                  // And the other direction, which git has no file for: the
+                  // parent needs to know it is lent out, because its own `gc`
+                  // cannot see the refs that keep these objects alive.
+                  //
+                  // Appended where the parent's own directory already is, never
+                  // created. A `delete(parent)` that got in first would
+                  // otherwise be undone by this — the parent's directory back
+                  // on disk, holding one file, which is enough to block the
+                  // `gc` of whatever is created under that name next.
+                  const lent = path.join(root, parent, "objects", "info");
+                  try {
+                    // One level at a time, never `recursive`: a recursive mkdir
+                    // would rebuild the parent's own directory on the way down,
+                    // which is the resurrection this is guarding against. Beside
+                    // a directory that is already there, each of these either
+                    // exists or is created; with the parent gone, the first
+                    // fails and nothing is written.
+                    await beside(path.join(root, parent, "objects"));
+                    await beside(lent);
+                    await fs.appendFile(path.join(lent, "borrowers"), `${child}\n`);
+                  } catch (error) {
+                    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+                      throw error;
+                    }
                   }
-                }
 
-                await relinkHeld(child, parent);
-                return true;
+                  await relinkHeld(child, parent);
+                  return true;
+                }),
+              );
+              if (!forkable) {
+                return yield* failure("NOT_FOUND", `repo '${parent}' has no storage to fork from`);
+              }
+
+              // And what was built on top of it, which closed over the store
+              // this fork just replaced: a fork of this fork would go on
+              // reading through the parent it used to have, and would keep
+              // answering from it for as long as the process lives — while its
+              // own `alternates` on disk says otherwise.
+              instances.delete(child);
+              rebuilt(child);
+              return yield* openHeld(child);
+            }),
+          Effect.uninterruptible,
+          Semaphore.withPermit(metadata),
+        ),
+        forget: Effect.fn("Artifacts.RepoStores.forget")(
+          (name) =>
+            bookkeeping(name, () =>
+              alone(async () => {
+                instances.delete(name);
+                rebuilt(name);
+                // Both halves of the record, not just this one: the parent's
+                // `borrowers` file is what stops its `gc` collecting what this
+                // name used to read, and a line there for a fork that is gone
+                // stops it forever. `relink` is what makes both happen.
+                await relinkHeld(name, undefined);
+                // And git's own half of it, which no map holds: `alternates` is
+                // read off the disk by every reader of this repository, `git`
+                // included, so a directory that outlived its registry row would
+                // hand the repository created here next the old parent's objects
+                // — the one thing this call exists to prevent.
+                await fs.rm(path.join(root, name, "objects", "info", "alternates"), {
+                  force: true,
+                });
               }),
-            );
-            if (!forkable) {
-              return yield* failure("NOT_FOUND", `repo '${parent}' has no storage to fork from`);
-            }
-
-            // And what was built on top of it, which closed over the store
-            // this fork just replaced: a fork of this fork would go on
-            // reading through the parent it used to have, and would keep
-            // answering from it for as long as the process lives — while its
-            // own `alternates` on disk says otherwise.
-            instances.delete(child);
-            rebuilt(child);
-            return yield* open(child);
-          }),
-        forget: (name) =>
-          Effect.gen(function* () {
-            instances.delete(name);
-            rebuilt(name);
-            // Both halves of the record, not just this one: the parent's
-            // `borrowers` file is what stops its `gc` collecting what this
-            // name used to read, and a line there for a fork that is gone
-            // stops it forever. `relink` is what makes both happen.
-            yield* relink(name, undefined);
-            // And git's own half of it, which no map holds: `alternates` is
-            // read off the disk by every reader of this repository, `git`
-            // included, so a directory that outlived its registry row would
-            // hand the repository created here next the old parent's objects
-            // — the one thing this call exists to prevent.
-            yield* bookkeeping(name, () =>
-              fs.rm(path.join(root, name, "objects", "info", "alternates"), { force: true }),
-            );
-          }),
+            ),
+          Effect.uninterruptible,
+          Semaphore.withPermit(metadata),
+        ),
         // The links, and not what the disk makes of them. A fork whose
         // directory is gone looks like nothing to protect, but the link
         // outliving the directory is exactly what a `drop` that failed its
@@ -1094,71 +1215,105 @@ export const repoStoresNode = (root: string) =>
         //
         // `drop` asks this again while it holds the lock: this answer is a
         // snapshot, and the caller acts on it later.
-        dependents: (name) => Effect.sync(() => dependentsOf(name)),
-        drop: (name) =>
-          Effect.gen(function* () {
-            instances.delete(name);
+        dependents: Effect.fn("Artifacts.RepoStores.dependents")(
+          (name) => bookkeeping(name, refreshForks).pipe(Effect.map(() => dependentsOf(name))),
+          Effect.uninterruptible,
+          Semaphore.withPermit(metadata),
+        ),
+        drop: Effect.fn("Artifacts.RepoStores.drop")(
+          (name) =>
+            Effect.gen(function* () {
+              instances.delete(name);
 
-            // Storage first, bookkeeping second, because the removal can
-            // fail — a pack still open, Windows refusing the unlink — and the
-            // two orders fail differently. Recorded-but-gone makes
-            // `dependents` name a child that no longer exists, and the worst
-            // that costs is a refusal to delete its parent. Gone-but-still-
-            // there is the other way round: the fork link erased while the
-            // fork's directory survives, `dependents` answers empty, and the
-            // next `delete` of the parent collects the objects the fork is
-            // still reading through.
-            //
-            // Both under the lock, and the question asked again inside it:
-            // `delete` asks `dependents` before it calls this, but a `fork`
-            // can land between the two, and a link written after the check
-            // survives the parent it names — to be inherited by whatever
-            // takes that name next. The lock is the same one `relink` holds,
-            // so the fork is either wholly before this or wholly after.
-            //
-            // `tryPromise`, not `promise`: this is the failure `delete` reads
-            // before it frees the registry row. As a defect it would take the
-            // fiber with it instead.
-            const held = yield* Effect.tryPromise({
-              try: () =>
-                alone(async () => {
-                  const borrowers = dependentsOf(name);
-                  if (borrowers.length > 0) return borrowers;
-                  // Read while the repository is still there to read: this is
-                  // what says whose `borrowers` file names it, and it is the
-                  // first thing the removal below takes away.
-                  const repository = path.join(root, name);
-                  const existed = !missing(repository);
-                  const lenders = await lendersOf(name);
-                  await retirePacksAndRemove(repository, () =>
-                    fs.rm(repository, { recursive: true, force: true }),
-                  );
-                  // The lenders can collect again once nothing borrows from
-                  // them. Under the same lock, so a failure leaves the links
-                  // and the files agreeing and the same call finishes the job.
-                  await relinkHeld(name, undefined, { existed, lenders });
-                  return [];
-                }),
-              catch: (error) =>
-                failure("INTERNAL_ERROR", `could not remove repo '${name}': ${String(error)}`),
-            });
-            if (held.length > 0) {
-              // The same code and the same words as `delete`'s own check, so
-              // that a `fork` landing between the two does not change the
-              // answer a client reads — only which of them found it.
-              return yield* failure(
-                "PRECONDITION_FAILED",
-                `repo '${name}' is the source of ${held.join(", ")}; delete those first`,
-              );
-            }
-          }),
+              // Storage first, bookkeeping second, because the removal can
+              // fail — a pack still open, Windows refusing the unlink — and the
+              // two orders fail differently. Recorded-but-gone makes
+              // `dependents` name a child that no longer exists, and the worst
+              // that costs is a refusal to delete its parent. Gone-but-still-
+              // there is the other way round: the fork link erased while the
+              // fork's directory survives, `dependents` answers empty, and the
+              // next `delete` of the parent collects the objects the fork is
+              // still reading through.
+              //
+              // Both under the lock, and the question asked again inside it:
+              // `delete` asks `dependents` before it calls this, but a `fork`
+              // can land between the two, and a link written after the check
+              // survives the parent it names — to be inherited by whatever
+              // takes that name next. The lock is the same one `relink` holds,
+              // so the fork is either wholly before this or wholly after.
+              //
+              // `tryPromise`, not `promise`: this is the failure `delete` reads
+              // before it frees the registry row. As a defect it would take the
+              // fiber with it instead.
+              const held = yield* Effect.tryPromise({
+                try: () =>
+                  alone(async () => {
+                    const borrowers = dependentsOf(name);
+                    if (borrowers.length > 0) return borrowers;
+                    // Read while the repository is still there to read: this is
+                    // what says whose `borrowers` file names it, and it is the
+                    // first thing the removal below takes away.
+                    const repository = path.join(root, name);
+                    const existed = !missing(repository);
+                    const lenders = await lendersOf(name);
+                    await retirePacksAndRemove(repository, () =>
+                      fs.rm(repository, { recursive: true, force: true }),
+                    );
+                    // The lenders can collect again once nothing borrows from
+                    // them. Under the same lock, so a failure leaves the links
+                    // and the files agreeing and the same call finishes the job.
+                    await relinkHeld(name, undefined, { existed, lenders });
+                    return [];
+                  }),
+                catch: (error) =>
+                  failure("INTERNAL_ERROR", `could not remove repo '${name}': ${String(error)}`),
+              });
+              if (held.length > 0) {
+                // The same code and the same words as `delete`'s own check, so
+                // that a `fork` landing between the two does not change the
+                // answer a client reads — only which of them found it.
+                return yield* failure(
+                  "PRECONDITION_FAILED",
+                  `repo '${name}' is the source of ${held.join(", ")}; delete those first`,
+                );
+              }
+            }),
+          Effect.uninterruptible,
+          Semaphore.withPermit(metadata),
+        ),
       });
     }),
   );
 
 /** `import`, through the shared smart-HTTP client, errors mapped to Artifacts codes. */
-const clone = (source: string, branch: string | undefined, target: StoreInstances) =>
-  fetchRepository({ url: source, branch, stores: target }).pipe(
+const clone = (
+  source: string,
+  branch: string | undefined,
+  depth: number | undefined,
+  target: StoreInstances,
+) =>
+  fetchRepository({
+    url: source,
+    branch,
+    depth,
+    defaultBranchOnly: true,
+    stores: {
+      ...target,
+      objects: {
+        ...target.objects,
+        // A filesystem write cannot be cancelled once its Promise has started.
+        // Finish this object before import rollback removes/reuses its directory.
+        write: (object) => target.objects.write(object).pipe(Effect.uninterruptible),
+      },
+      refs: {
+        ...target.refs,
+        apply: (updates, options) =>
+          target.refs.apply(updates, options).pipe(Effect.uninterruptible),
+        setHead: (head) => target.refs.setHead(head).pipe(Effect.uninterruptible),
+        updateShallow: (update) => target.refs.updateShallow(update).pipe(Effect.uninterruptible),
+      },
+    },
+  }).pipe(
     Effect.mapError((error) =>
       error._tag === "Invalid"
         ? failure(error.field === "branch" ? "NOT_FOUND" : "UPSTREAM_UNAVAILABLE", error.reason)
@@ -1167,6 +1322,12 @@ const clone = (source: string, branch: string | undefined, target: StoreInstance
             `${error._tag}${"reason" in error ? ` — ${error.reason}` : ""}`,
           ),
     ),
+    Effect.tap((result) => {
+      const refused = result.rejected[0];
+      return refused === undefined
+        ? Effect.void
+        : failure("INTERNAL_ERROR", `could not import '${refused.name}': ref update refused`);
+    }),
   );
 
 export interface LocalOptions {
@@ -1189,7 +1350,86 @@ export const localNamespace = (
       const tokens = yield* Tokens;
       const repoStores = yield* RepoStores;
       const remoteBase = options?.remoteBase ?? "http://127.0.0.1:8080";
-      const remoteOf = (name: string) => `${remoteBase}/${name}`;
+      // The host strips one transport suffix. Preserve a `.git` that belongs
+      // to the stored name by giving that URL a separate transport suffix.
+      const remoteOf = (name: string) =>
+        `${remoteBase}/${name}${name.endsWith(".git") ? ".git" : ""}`;
+
+      // All bindings using these stores share reservations. A source remains
+      // reserved through a fork, and a target through initialization/rollback,
+      // so delete cannot free a name still being written by another operation.
+      const reserve = <A, E>(
+        names: ReadonlyArray<string>,
+        code: string,
+        use: Effect.Effect<A, E>,
+      ) =>
+        Effect.suspend(() => {
+          for (const name of names) {
+            if (!REPO_NAME.test(name)) return failure("INVALID_REPO_NAME", `'${name}'`);
+          }
+          return repoStores.reserve(names, code, use);
+        });
+
+      const ready = Effect.fn("Artifacts.Namespace.ready")(function* (name: string) {
+        const record = yield* registry.get(name);
+        if (record === null) return yield* failure("NOT_FOUND", `repo '${name}'`);
+        if (record.initializing != null) {
+          const code =
+            record.initializing === "import"
+              ? "IMPORT_IN_PROGRESS"
+              : record.initializing === "fork"
+                ? "FORK_IN_PROGRESS"
+                : "PRECONDITION_FAILED";
+          return yield* failure(code, `repo '${name}' is still initializing`);
+        }
+        return record;
+      });
+
+      const initialize = <A>(
+        name: string,
+        meta: RepoMeta,
+        use: (record: RepoRecord) => Effect.Effect<A, ArtifactsError>,
+      ) =>
+        Effect.acquireUseRelease(
+          registry.create(name, meta).pipe(Effect.map((record) => ({ record, finished: false }))),
+          (pending) =>
+            use(pending.record).pipe(
+              Effect.tap(() =>
+                registry.finish(name, pending.record.id).pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      pending.finished = true;
+                    }),
+                  ),
+                  Effect.uninterruptible,
+                ),
+              ),
+            ),
+          ({ record, finished }, exit) =>
+            // Once readiness is published, interruption of the response must
+            // not remove a repository that other readers can already obtain.
+            finished || Exit.isSuccess(exit)
+              ? Effect.void
+              : Effect.gen(function* () {
+                  // Cleanup covers the entire initialization, including metadata
+                  // publication after a clone. Keep the reservation until it finishes.
+                  yield* Effect.gen(function* () {
+                    for (const token of (yield* tokens.list(record.name)).tokens) {
+                      yield* tokens.revoke(record.name, token.id);
+                    }
+                  }).pipe(
+                    Effect.ignore,
+                    Effect.catchDefect(() => Effect.void),
+                  );
+                  // A failed drop deliberately leaves the row reserved on disk.
+                  // Explicit deletion can retry once the obstruction is removed.
+                  yield* repoStores.drop(record.name);
+                  yield* registry.delete(record.name);
+                }).pipe(
+                  Effect.ignore,
+                  Effect.catchDefect(() => Effect.void),
+                ),
+        );
 
       const make = (namespace: ArtifactsNamespace): ReadWriteNamespaceClient => {
         const created = (record: RepoRecord, token: ArtifactsCreateTokenResult) => ({
@@ -1206,6 +1446,13 @@ export const localNamespace = (
           name: string,
           opts?: { readOnly?: boolean; description?: string; setDefaultBranch?: string },
           source: string | null = null,
+          initializing: "create" | "import" = "create",
+          use: (prepared: {
+            record: RepoRecord;
+            stores: StoreInstances;
+            result: ReturnType<typeof created>;
+          }) => Effect.Effect<ReturnType<typeof created>, ArtifactsError> = ({ result }) =>
+            Effect.succeed(result),
         ) =>
           Effect.gen(function* () {
             if (!REPO_NAME.test(name)) {
@@ -1219,46 +1466,28 @@ export const localNamespace = (
             if (problem !== null) {
               return yield* failure("INVALID_REPO_NAME", `default branch '${branch}': ${problem}`);
             }
-            const record = yield* registry.create(name, {
-              description: opts?.description ?? null,
-              defaultBranch: opts?.setDefaultBranch ?? "main",
-              readOnly: opts?.readOnly ?? false,
-              source,
-            });
-            // Everything after the row is undone with it, the same way
-            // `fork`'s tail is: a name taken by a repository that was never
-            // made is a name nobody can retry with, and `setHead` writing to
-            // a full or read-only disk is a defect rather than an answer.
-            return yield* Effect.gen(function* () {
-              // Before the stores are opened, because opening is what would
-              // follow a fork link left behind by a drop that did not finish.
-              yield* repoStores.forget(name);
-              const stores = yield* repoStores.open(name);
-              yield* stores.refs.setHead(`refs/heads/${record.defaultBranch}`).pipe(Effect.orDie);
-              const token = yield* tokens.issue(name, "write", 86_400);
-              return { record, stores, result: created(record, token) };
-            }).pipe(
-              Effect.onError(() =>
+            return yield* initialize(
+              name,
+              {
+                description: opts?.description ?? null,
+                defaultBranch: opts?.setDefaultBranch ?? "main",
+                readOnly: opts?.readOnly ?? false,
+                source,
+                initializing,
+              },
+              (record) =>
                 Effect.gen(function* () {
-                  // Tokens first, while the name they are scoped to still
-                  // resolves, and as their own step so that a revocation that
-                  // fails does not take the storage cleanup with it. Then the
-                  // storage, then the row — `delete`'s order, and `fork`'s.
-                  yield* Effect.gen(function* () {
-                    for (const issued of (yield* tokens.list(name)).tokens) {
-                      yield* tokens.revoke(name, issued.id);
-                    }
-                  }).pipe(
-                    Effect.ignore,
-                    Effect.catchDefect(() => Effect.void),
-                  );
-                  yield* repoStores.drop(name);
-                  yield* registry.delete(name);
-                }).pipe(
-                  Effect.ignore,
-                  Effect.catchDefect(() => Effect.void),
-                ),
-              ),
+                  // Before the stores are opened, because opening is what would
+                  // follow a fork link left behind by a drop that did not finish.
+                  yield* repoStores.forget(name).pipe(Effect.uninterruptible);
+                  yield* repoStores.initialize(name, record.defaultBranch);
+                  const stores = yield* repoStores.open(name).pipe(Effect.uninterruptible);
+                  yield* stores.refs
+                    .setHead(`refs/heads/${record.defaultBranch}`)
+                    .pipe(Effect.orDie, Effect.uninterruptible);
+                  const token = yield* tokens.issue(name, "write", 86_400);
+                  return yield* use({ record, stores, result: created(record, token) });
+                }),
             );
           });
 
@@ -1272,83 +1501,69 @@ export const localNamespace = (
           createToken: (scope, ttl) => tokens.issue(record.name, scope ?? "read", ttl ?? 3600),
           listTokens: () => tokens.list(record.name),
           revokeToken: (tokenOrId) => tokens.revoke(record.name, tokenOrId),
-          fork: (name, opts) =>
-            Effect.gen(function* () {
-              if (!REPO_NAME.test(name)) {
-                return yield* failure("INVALID_REPO_NAME", `'${name}'`);
-              }
-              const child = yield* registry.create(name, {
-                description: opts?.description ?? null,
-                defaultBranch: record.defaultBranch,
-                readOnly: opts?.readOnly ?? false,
-                source: `artifacts:${namespace.namespace}/${record.name}`,
-              });
-              // The row is taken before any of this, and every step after it
-              // writes something: the child's directory, its alternates, the
-              // fork link, the parent's `borrowers`, the refs, a token. A fork
-              // that stops half way through leaves a name nobody can retry
-              // with and, worse, a link that refuses its parent's `delete`
-              // forever. So the whole tail is undone together, the same way an
-              // `import` that fails part-way is — including the `fork` itself,
-              // which writes two files before it can fail. Undoing a fork that
-              // refused before writing anything is safe because `drop` goes
-              // looking for stray `borrowers` lines only for a name it had a
-              // link for, which that one never had.
-              return yield* Effect.gen(function* () {
-                const stores = yield* repoStores.fork(name, record.name);
-                const parent = yield* repoStores.open(record.name);
-
-                const refs = yield* parent.refs.list("refs/").pipe(Effect.orDie);
-                const copied = refs.filter(
-                  ([refName]) =>
-                    opts?.defaultBranchOnly !== true ||
-                    refName === `refs/heads/${record.defaultBranch}`,
-                );
-                yield* stores.refs
-                  .apply(copied.map(([refName, oid]) => ({ name: refName, value: oid })))
-                  .pipe(Effect.orDie);
-                yield* stores.refs.setHead(`refs/heads/${child.defaultBranch}`).pipe(Effect.orDie);
-
-                const token = yield* tokens.issue(name, "write", 86_400);
-                return created(child, token);
-              }).pipe(
-                Effect.onError(() =>
-                  Effect.gen(function* () {
-                    // Tokens first, while the name they are scoped to still
-                    // resolves; then the storage, which takes the fork link
-                    // with it; then the row. `import`'s rollback and `delete`
-                    // itself use the same order, and for the same reasons.
-                    //
-                    // A `drop` that fails stops the rest on purpose, rather
-                    // than being stepped over: freeing the row while the
-                    // half-made fork is still on disk hands the next `create`
-                    // of this name a directory with an `alternates` file in
-                    // it. The name stays taken until an explicit `delete`
-                    // retries the removal, which is a name to reclaim rather
-                    // than a repository to explain.
-                    //
-                    // The tokens are their own step, though: a revocation
-                    // that fails must not take the storage cleanup with it,
-                    // or the fork stays on disk with an `alternates` file
-                    // that blocks its parent's `delete` and its `gc` — worse
-                    // than the token it was trying to withdraw.
-                    yield* Effect.gen(function* () {
-                      for (const issued of (yield* tokens.list(name)).tokens) {
-                        yield* tokens.revoke(name, issued.id);
+          fork: Effect.fn("Artifacts.Namespace.fork")((name, opts) =>
+            reserve(
+              [record.name, name],
+              "FORK_IN_PROGRESS",
+              Effect.gen(function* () {
+                if (!REPO_NAME.test(name)) {
+                  return yield* failure("INVALID_REPO_NAME", `'${name}'`);
+                }
+                const parentRecord = yield* ready(record.name);
+                if (parentRecord.id !== record.id) {
+                  return yield* failure("NOT_FOUND", `repo '${record.name}' was replaced`);
+                }
+                return yield* initialize(
+                  name,
+                  {
+                    description: opts?.description ?? null,
+                    defaultBranch: parentRecord.defaultBranch,
+                    readOnly: opts?.readOnly ?? false,
+                    source: `artifacts:${namespace.namespace}/${record.name}`,
+                    initializing: "fork",
+                  },
+                  (child) =>
+                    Effect.gen(function* () {
+                      const stores = yield* repoStores
+                        .fork(name, record.name)
+                        .pipe(Effect.uninterruptible);
+                      yield* repoStores.initialize(name, child.defaultBranch);
+                      const parent = yield* repoStores.open(record.name);
+                      const refs = yield* parent.refs.list("refs/").pipe(Effect.orDie);
+                      const copied = refs.filter(
+                        ([refName]) =>
+                          opts?.defaultBranchOnly === false ||
+                          refName === `refs/heads/${parentRecord.defaultBranch}`,
+                      );
+                      yield* stores.refs
+                        .updateShallow({
+                          add: [...(yield* parent.refs.shallow.pipe(Effect.orDie))],
+                          remove: [],
+                        })
+                        .pipe(Effect.orDie, Effect.uninterruptible);
+                      const applied = yield* stores.refs
+                        .apply(
+                          copied.map(([refName, oid]) => ({ name: refName, value: oid })),
+                          { atomic: true },
+                        )
+                        .pipe(Effect.orDie, Effect.uninterruptible);
+                      const refused = applied.find((result) => !result.applied);
+                      if (refused !== undefined) {
+                        return yield* failure(
+                          "INTERNAL_ERROR",
+                          `could not copy '${refused.name}': ${refused.reason ?? "ref update refused"}`,
+                        );
                       }
-                    }).pipe(
-                      Effect.ignore,
-                      Effect.catchDefect(() => Effect.void),
-                    );
-                    yield* repoStores.drop(name);
-                    yield* registry.delete(name);
-                  }).pipe(
-                    Effect.ignore,
-                    Effect.catchDefect(() => Effect.void),
-                  ),
-                ),
-              );
-            }),
+                      yield* stores.refs
+                        .setHead(`refs/heads/${child.defaultBranch}`)
+                        .pipe(Effect.orDie, Effect.uninterruptible);
+                      const token = yield* tokens.issue(name, "write", 86_400);
+                      return created(child, token);
+                    }),
+                );
+              }),
+            ),
+          ),
         });
 
         const info = (record: RepoRecord): ArtifactsRepoInfo => ({
@@ -1370,146 +1585,135 @@ export const localNamespace = (
           raw: Effect.die(
             failure("INTERNAL_ERROR", "the raw Artifacts binding does not exist off-platform"),
           ),
-          create: (name, opts) => create(name, opts).pipe(Effect.map(({ result }) => result)),
-          get: (name) =>
-            Effect.gen(function* () {
-              const record = yield* registry.get(name);
-              if (record === null) return yield* failure("NOT_FOUND", `repo '${name}'`);
-              return repoClient(record);
-            }),
-          list: (opts) =>
-            registry.list(opts).pipe(
-              Effect.map(({ cursor, repos, total }) => {
-                const listed = repos.map((record) => {
-                  const { remote: _remote, ...rest } = info(record);
-                  return rest;
+          create: Effect.fn("Artifacts.Namespace.create")((name, opts) =>
+            reserve([name], "PRECONDITION_FAILED", create(name, opts)),
+          ),
+          get: Effect.fn("Artifacts.Namespace.get")((name) =>
+            ready(name).pipe(Effect.map(repoClient)),
+          ),
+          list: Effect.fn("Artifacts.Namespace.list")(function* (opts?: ListOptions) {
+            if (
+              opts?.limit !== undefined &&
+              (!Number.isSafeInteger(opts.limit) || opts.limit < 1)
+            ) {
+              return yield* failure("INVALID_LIMIT", "limit must be a positive safe integer");
+            }
+            if (
+              opts?.cursor !== undefined &&
+              (!/^[0-9]+$/.test(opts.cursor) || !Number.isSafeInteger(Number(opts.cursor)))
+            ) {
+              return yield* failure(
+                "INVALID_CURSOR",
+                "cursor must be a non-negative safe integer offset",
+              );
+            }
+            const { cursor, repos, total } = yield* registry.list(opts);
+            const listed = repos.map((record) => {
+              const { remote: _remote, ...rest } = info(record);
+              return rest;
+            });
+            return cursor === undefined
+              ? { repos: listed, total }
+              : { repos: listed, total, cursor };
+          }),
+          delete: Effect.fn("Artifacts.Namespace.delete")((name) =>
+            reserve(
+              [name],
+              "PRECONDITION_FAILED",
+              Effect.gen(function* () {
+                // The same check `create` and `fork` apply, because this name
+                // reaches `fs.rm(join(root, name), { recursive: true })`: a
+                // caller passing `../../home/alice` would otherwise have an
+                // arbitrary directory removed and be told the repo did not exist.
+                if (!REPO_NAME.test(name)) {
+                  return yield* failure("INVALID_REPO_NAME", `'${name}'`);
+                }
+
+                // A fork keeps no copy of the history it inherited, so deleting
+                // what it reads through would take that history with it and
+                // leave a repository advertising objects nothing holds. The
+                // caller is told which forks stand in the way instead.
+                const dependents = yield* repoStores.dependents(name);
+                if (dependents.length > 0) {
+                  return yield* failure(
+                    "PRECONDITION_FAILED",
+                    `repo '${name}' is the source of ${dependents.join(", ")}; delete those first`,
+                  );
+                }
+
+                // Tokens first. They are keyed by repository *name* and the
+                // registries do not cascade, so one left live is a write into
+                // whatever stands at this name next — and a push landing in the
+                // window between the storage going and the row going would
+                // rebuild the repository under a name about to be freed, for
+                // the next caller to create over and clone.
+                //
+                // The cost of this order is the failure below: `drop` can refuse
+                // — a locked pack, a racing write from a host serving the same
+                // directory, or a `fork` landing between the check above and the
+                // one `drop` makes under its own lock — and the repository is
+                // then still listed with its tokens revoked. Nothing gives them
+                // back; what fixes it is `createToken`, which the repository is
+                // still there to answer. A retry of the delete only helps where
+                // the cause was transient, which the fork race is not: that one
+                // stands until the fork is deleted.
+                //
+                // Worth it against the other order. Revoking after the storage
+                // goes leaves a window where a live write token still resolves
+                // to a name whose row has not gone yet, and a push landing in it
+                // rebuilds the repository under a name about to be freed — for
+                // the next caller to create over, and clone somebody else's
+                // history out of.
+                for (const token of (yield* tokens.list(name)).tokens) {
+                  yield* tokens.revoke(name, token.id);
+                }
+                // Storage before the row, so the name is never free while the
+                // objects are still there.
+                yield* repoStores.drop(name);
+                return yield* registry.delete(name);
+              }).pipe(Effect.uninterruptible),
+            ),
+          ),
+          import: Effect.fn("Artifacts.Namespace.import")((opts) =>
+            reserve(
+              [opts.target.name],
+              "IMPORT_IN_PROGRESS",
+              Effect.gen(function* () {
+                yield* Effect.try({
+                  try: () => new URL(opts.source.url),
+                  catch: () => failure("INVALID_URL", opts.source.url),
                 });
-                return cursor === undefined
-                  ? { repos: listed, total }
-                  : { repos: listed, total, cursor };
+                return yield* create(
+                  opts.target.name,
+                  opts.target.opts,
+                  opts.source.url,
+                  "import",
+                  ({ record, stores, result }) =>
+                    Effect.gen(function* () {
+                      const cloned = yield* clone(
+                        opts.source.url,
+                        opts.source.branch,
+                        opts.source.depth,
+                        stores,
+                      );
+                      if (cloned.defaultBranch !== undefined) {
+                        const head = `refs/heads/${cloned.defaultBranch}`;
+                        if (checkRefName(head) === null) {
+                          yield* stores.refs.setHead(head).pipe(Effect.orDie);
+                          yield* registry.setDefaultBranch(record.name, cloned.defaultBranch);
+                        }
+                      }
+                      yield* registry.touch(record.name, new Date());
+                      const current = yield* registry.get(record.name);
+                      return {
+                        ...result,
+                        defaultBranch: current?.defaultBranch ?? result.defaultBranch,
+                      };
+                    }),
+                );
               }),
             ),
-          delete: (name) =>
-            Effect.gen(function* () {
-              // The same check `create` and `fork` apply, because this name
-              // reaches `fs.rm(join(root, name), { recursive: true })`: a
-              // caller passing `../../home/alice` would otherwise have an
-              // arbitrary directory removed and be told the repo did not exist.
-              if (!REPO_NAME.test(name)) {
-                return yield* failure("INVALID_REPO_NAME", `'${name}'`);
-              }
-
-              // A fork keeps no copy of the history it inherited, so deleting
-              // what it reads through would take that history with it and
-              // leave a repository advertising objects nothing holds. The
-              // caller is told which forks stand in the way instead.
-              const dependents = yield* repoStores.dependents(name);
-              if (dependents.length > 0) {
-                return yield* failure(
-                  "PRECONDITION_FAILED",
-                  `repo '${name}' is the source of ${dependents.join(", ")}; delete those first`,
-                );
-              }
-
-              // Tokens first. They are keyed by repository *name* and the
-              // registries do not cascade, so one left live is a write into
-              // whatever stands at this name next — and a push landing in the
-              // window between the storage going and the row going would
-              // rebuild the repository under a name about to be freed, for
-              // the next caller to create over and clone.
-              //
-              // The cost of this order is the failure below: `drop` can refuse
-              // — a locked pack, a racing write from a host serving the same
-              // directory, or a `fork` landing between the check above and the
-              // one `drop` makes under its own lock — and the repository is
-              // then still listed with its tokens revoked. Nothing gives them
-              // back; what fixes it is `createToken`, which the repository is
-              // still there to answer. A retry of the delete only helps where
-              // the cause was transient, which the fork race is not: that one
-              // stands until the fork is deleted.
-              //
-              // Worth it against the other order. Revoking after the storage
-              // goes leaves a window where a live write token still resolves
-              // to a name whose row has not gone yet, and a push landing in it
-              // rebuilds the repository under a name about to be freed — for
-              // the next caller to create over, and clone somebody else's
-              // history out of.
-              for (const token of (yield* tokens.list(name)).tokens) {
-                yield* tokens.revoke(name, token.id);
-              }
-              // Storage before the row, so the name is never free while the
-              // objects are still there.
-              yield* repoStores.drop(name);
-              return yield* registry.delete(name);
-            }),
-          import: (opts) =>
-            Effect.gen(function* () {
-              yield* Effect.try({
-                try: () => new URL(opts.source.url),
-                catch: () => failure("INVALID_URL", opts.source.url),
-              });
-
-              const { record, result, stores } = yield* create(
-                opts.target.name,
-                opts.target.opts,
-                opts.source.url,
-              );
-
-              // An import that fails part-way has already taken the name,
-              // issued a token and opened storage. Leaving that behind means a
-              // repository nothing cloned into and a name the caller cannot
-              // retry with, so the creation is undone with the clone.
-              const cloned = yield* clone(opts.source.url, opts.source.branch, stores).pipe(
-                Effect.onError(() =>
-                  Effect.gen(function* () {
-                    // The write token `create` issued outlives the row it was
-                    // issued against — the registries do not cascade — so it
-                    // would still authorise pushes to whatever is created
-                    // under this name next. It goes first, while the name it
-                    // is scoped to still resolves.
-                    // Its own step: a revocation that fails must not take the
-                    // storage cleanup with it and leave the half-cloned
-                    // objects on disk under a name still held.
-                    yield* Effect.gen(function* () {
-                      for (const token of (yield* tokens.list(record.name)).tokens) {
-                        yield* tokens.revoke(record.name, token.id);
-                      }
-                    }).pipe(
-                      Effect.ignore,
-                      Effect.catchDefect(() => Effect.void),
-                    );
-                    // Storage before the row, the same order `delete` uses: a
-                    // `drop` that fails must not leave the name free while the
-                    // half-cloned objects are still on disk under it.
-                    yield* repoStores.drop(record.name);
-                    yield* registry.delete(record.name);
-                  }).pipe(
-                    Effect.ignore,
-                    Effect.catchDefect(() => Effect.void),
-                  ),
-                ),
-              );
-              if (cloned.defaultBranch !== undefined) {
-                // The branch name comes from the remote's advertisement, so
-                // it is as untrusted as any other name off the network.
-                const head = `refs/heads/${cloned.defaultBranch}`;
-                if (checkRefName(head) === null) {
-                  yield* stores.refs.setHead(head).pipe(Effect.orDie);
-                  // And the row has to agree with HEAD: `create` could only
-                  // guess `main` before the remote had been asked.
-                  yield* registry.setDefaultBranch(record.name, cloned.defaultBranch);
-                }
-              }
-              yield* registry.touch(record.name, new Date());
-
-              // The row now says which branch the remote actually had, and the
-              // answer has to agree with it: `result` was built before the
-              // clone, when `main` was still a guess.
-              const current = yield* registry.get(record.name);
-              return current === null
-                ? result
-                : { ...result, defaultBranch: current.defaultBranch };
-            }),
+          ),
         };
       };
 

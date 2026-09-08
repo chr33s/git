@@ -50,6 +50,7 @@ import {
   type PullRequest as ProjectedPull,
 } from "../hub/Projection.ts";
 import * as HubTask from "../hub/Task.ts";
+import { hierarchy } from "../hub/TaskHierarchy.ts";
 import * as HubSession from "../hub/Session.ts";
 import { archive as archiveTree, type Format as ArchiveFormat } from "./Archive.ts";
 import {
@@ -349,8 +350,15 @@ const requireCapability = Effect.fn("Api.requireCapability")(function* (capabili
     });
   }
 
-  const requester = yield* Effect.serviceOption(Auth.Requester);
-  if (Option.isSome(requester) && permits(requester.value.capabilities, capability)) return;
+  if (
+    yield* Policy.permitsRequester(capability).pipe(
+      Effect.mapError(
+        () =>
+          new Invalid({ field: "capability", reason: "current membership could not be verified" }),
+      ),
+    )
+  )
+    return;
   return yield* new Invalid({ field: "capability", reason: `this needs ${capability}` });
 });
 
@@ -560,6 +568,7 @@ const treeFor = (
   payload: {
     readonly tree?: Oid | undefined;
     readonly files?: ReadonlyArray<FileWrite> | undefined;
+    readonly expected?: Oid | null | undefined;
   },
 ) =>
   Effect.gen(function* () {
@@ -568,6 +577,9 @@ const treeFor = (
 
     const ref = branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
     const tip = yield* repository.resolve(ref);
+    if (payload.expected !== undefined && payload.expected !== tip) {
+      return yield* new RefConflict({ ref, expected: payload.expected, actual: tip });
+    }
     const base = tip === null ? undefined : (yield* repository.readCommit(tip)).tree;
 
     const tree = yield* writeFilesOf(repository, base, payload.files);
@@ -1359,7 +1371,8 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
       Effect.gen(function* () {
         const repository = yield* Repository;
         const refs = yield* repository.refs.pipe(Effect.catchTag("StorageFailure", Effect.die));
-        return { refs: refs.map(([name, oid]) => ({ name, oid })) };
+        const head = yield* repository.head.pipe(Effect.catchTag("StorageFailure", Effect.die));
+        return { refs: refs.map(([name, oid]) => ({ name, oid })), head };
       }),
     )
     .handle("whoami", () =>
@@ -2507,63 +2520,46 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
     .handle("tasks", ({ query }) =>
       Effect.gen(function* () {
         const ids = yield* HubTask.tasks();
-        // Page the ids before projecting: each projection is a ref walk, and
-        // a listing should cost what its page shows, not what the namespace
-        // holds.
         const paged = page(ids, query);
-        const states = yield* Effect.forEach(paged.items, (id) => HubTask.project(id), {
-          concurrency: 4,
-        });
-        // A loop cannot be refused where the edges are written: they live on
-        // separate refs, `POST /hub/events` appends signed bytes without
-        // asking `hub/Task.ts`, and two members can close one concurrently
-        // without either ref being unsound. This listing is the first place
-        // that holds every edge at once, so it is where a loop stops being
-        // one: a task whose chain reaches itself reports no parent, which
-        // severs the cycle and leaves every chain finite. Readers are then
-        // owed no cycle guard of their own.
-        const above = new Map(states.map((state) => [state.task, state.parent]));
-        const circular = new Set<string>();
-        for (const state of states) {
-          const seen = new Set<string>([state.task]);
-          let at = state.parent;
-          while (at !== null && !seen.has(at)) {
-            seen.add(at);
-            at = above.get(at) ?? null;
-          }
-          // Reached itself: in the loop, rather than merely hanging below one.
-          if (at === state.task) circular.add(state.task);
-        }
-        const parentOf = (task: string, parent: string | null): string | null =>
-          circular.has(task) ? null : parent;
-
-        // Grouped from the children's own edges, which is the only place they
-        // are recorded. A parent this repository does not hold simply never
-        // gets read back out, so a dangling edge costs a lookup and nothing
-        // more — the child still reports the parent it named.
-        const children = new Map<string, Array<string>>();
-        for (const state of states) {
-          const parent = parentOf(state.task, state.parent);
-          if (parent === null) continue;
-          const held = children.get(parent);
-          if (held === undefined) children.set(parent, [state.task]);
-          else held.push(state.task);
-        }
+        if (paged.items.length === 0) return { ...paged, items: [] };
+        // Children and cycles can cross page boundaries. Read every edge, but
+        // retain full projections only for this page; other task descriptions
+        // and event histories need not accumulate in the response's memory.
+        const above = new Map<string, string | null>(ids.map((id) => [id, null]));
+        const wanted = new Set(paged.items);
+        const states = new Map<string, Effect.Success<ReturnType<typeof HubTask.project>>>();
+        yield* Effect.forEach(
+          ids,
+          (id) =>
+            Effect.gen(function* () {
+              const state = yield* HubTask.project(id);
+              above.set(id, state.parent);
+              if (wanted.has(id)) states.set(id, state);
+            }),
+          { concurrency: 4, discard: true },
+        );
+        const { parents, children } = hierarchy(above);
         return {
           ...paged,
-          items: states.map((state) => ({
-            task: state.task,
-            exists: state.exists,
-            title: state.title,
-            description: state.description,
-            refs: state.refs,
-            parent: parentOf(state.task, state.parent),
-            children: children.get(state.task) ?? [],
-            available: state.available,
-            claim: state.claim,
-            closed: state.closed,
-            sessions: state.sessions,
-          })),
+          items: paged.items.flatMap((id) => {
+            const state = states.get(id);
+            if (state === undefined) return [];
+            return [
+              {
+                task: state.task,
+                exists: state.exists,
+                title: state.title,
+                description: state.description,
+                refs: state.refs,
+                parent: parents.get(state.task) ?? null,
+                children: children.get(state.task) ?? [],
+                available: state.available,
+                claim: state.claim,
+                closed: state.closed,
+                sessions: state.sessions,
+              },
+            ];
+          }),
         };
       }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
     )

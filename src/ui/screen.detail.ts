@@ -60,6 +60,8 @@ export class GpDetail extends GitPlusElement {
 
   /** Why the last merge attempt refused, shown beside the review card. */
   @state() private accessor mergeNotice: string | null = null;
+  @state() private accessor moveNotice: string | null = null;
+  @state() private accessor taskNotice: string | null = null;
 
   /** A signed hub write is in flight; the action buttons disable meanwhile. */
   @state() private accessor acting = false;
@@ -89,6 +91,8 @@ export class GpDetail extends GitPlusElement {
       this.tab = "conversation";
       this.diffState = { tag: "idle" };
       this.mergeNotice = null;
+      this.moveNotice = null;
+      this.taskNotice = null;
       this.#renderers.clear();
       // A hub-sourced task carries only its listing row until someone looks
       // at it; the store fills the discussion and checks from the detail
@@ -120,13 +124,18 @@ export class GpDetail extends GitPlusElement {
    */
   async #merge(cr: ChangeRequest): Promise<void> {
     const api = this.api;
+    // The answer belongs to the Change Request it was asked about. A reader
+    // who opens another one while the hub is deciding must not be told that
+    // *this* one was refused — the thread, task and move handlers beside this
+    // already hold themselves to that.
+    const asked = cr.id;
     this.mergeNotice = null;
 
     if (cr.hub === true) {
       this.acting = true;
       try {
         const refused = await store.mergeRemote(cr.id);
-        if (refused !== null) this.mergeNotice = refused;
+        if (refused !== null && this.taskId === asked) this.mergeNotice = refused;
       } finally {
         this.acting = false;
       }
@@ -143,7 +152,9 @@ export class GpDetail extends GitPlusElement {
         });
         if (result.kind === "conflicted") {
           const paths = result.conflicts.map((conflict) => conflict.path).join(", ");
-          this.mergeNotice = `merge conflicted on ${paths} — resolve on the branch first`;
+          if (this.taskId === asked) {
+            this.mergeNotice = `merge conflicted on ${paths} — resolve on the branch first`;
+          }
           return;
         }
       } catch (error) {
@@ -158,7 +169,7 @@ export class GpDetail extends GitPlusElement {
           error.status === 404 ||
           error.tag === "ObjectNotFound";
         if (!absent) {
-          this.mergeNotice = describe(error);
+          if (this.taskId === asked) this.mergeNotice = describe(error);
           return;
         }
       }
@@ -167,33 +178,45 @@ export class GpDetail extends GitPlusElement {
   }
 
   async #submitReview(decision: "approve" | "reject"): Promise<void> {
+    const asked = this.taskId;
     this.acting = true;
     try {
-      const sent = await store.reviewRemote(this.taskId, decision);
-      if (!sent) this.mergeNotice = "the hub refused the review — is this key a member?";
+      const sent = await store.reviewRemote(asked, decision);
+      if (!sent && this.taskId === asked) {
+        this.mergeNotice = "the hub refused the review — is this key a member?";
+      }
     } finally {
       this.acting = false;
     }
   }
 
-  async #thread(thread: string, action: "resolve" | "reopen" | "reply", body = ""): Promise<void> {
+  async #thread(
+    thread: string,
+    action: "resolve" | "reopen" | "reply",
+    body = "",
+  ): Promise<boolean> {
+    const task = this.taskId;
+    this.mergeNotice = null;
     this.acting = true;
     try {
       const sent =
         action === "reply"
-          ? await store.replyRemote(this.taskId, thread, body)
-          : await store.resolveRemote(this.taskId, thread, action === "resolve");
-      if (!sent) this.mergeNotice = "the hub refused the thread update";
+          ? await store.replyRemote(task, thread, body)
+          : await store.resolveRemote(task, thread, action === "resolve");
+      if (!sent && this.taskId === task) this.mergeNotice = "the hub refused the thread update";
+      return sent && this.taskId === task;
     } finally {
       this.acting = false;
     }
   }
 
   async #taskAction(action: "claim" | "release" | "complete" | "abandon"): Promise<void> {
+    const task = this.taskId;
+    this.taskNotice = null;
     this.acting = true;
     try {
-      const sent = await store.taskActionRemote(this.taskId, action);
-      if (!sent) this.mergeNotice = "the hub refused the task update";
+      const sent = await store.taskActionRemote(task, action);
+      if (!sent && this.taskId === task) this.taskNotice = "the hub refused the task update";
     } finally {
       this.acting = false;
     }
@@ -215,20 +238,23 @@ export class GpDetail extends GitPlusElement {
     if (!(form instanceof HTMLFormElement)) return;
     const field = form.elements.namedItem("text");
     if (!(field instanceof HTMLTextAreaElement)) return;
-    const text = field.value.trim();
+    const draft = field.value;
+    const text = draft.trim();
     if (text === "") return;
     const task = this.#task;
+    this.mergeNotice = null;
     if (task.hub === true) {
       const sent = await store.commentRemote(task.id, text);
       if (!sent) {
-        this.mergeNotice = "the hub refused the comment — is this key a member?";
+        if (this.taskId === task.id)
+          this.mergeNotice = "the hub refused the comment — is this key a member?";
         return;
       }
     } else {
       const author = this.viewer ?? "anonymous";
       store.comment(task.id, { avatar: initials(author), author, when: "just now", text });
     }
-    form.reset();
+    if (this.taskId === task.id && field.value === draft) form.reset();
   };
 
   /**
@@ -583,7 +609,7 @@ export class GpDetail extends GitPlusElement {
       ${
         this.mergeNotice === null
           ? nothing
-          : html`<p class="gp-notice" data-error>${this.mergeNotice}</p>`
+          : html`<p class="gp-notice" role="alert" data-error>${this.mergeNotice}</p>`
       }
     `;
   }
@@ -656,9 +682,12 @@ export class GpDetail extends GitPlusElement {
             if (!(form instanceof HTMLFormElement)) return;
             const field = form.elements.namedItem("reply");
             if (!(field instanceof HTMLInputElement)) return;
-            const body = field.value.trim();
+            const draft = field.value;
+            const body = draft.trim();
             if (body === "") return;
-            void this.#thread(thread.id, "reply", body).then(() => form.reset());
+            void this.#thread(thread.id, "reply", body).then((sent) => {
+              if (sent && field.value === draft) form.reset();
+            });
           }}
         >
           <input
@@ -709,6 +738,7 @@ export class GpDetail extends GitPlusElement {
           Abandon
         </button>
       </div>
+      ${this.taskNotice === null ? nothing : html`<p class="gp-notice" role="alert">${this.taskNotice}</p>`}
     `;
   }
 
@@ -719,10 +749,23 @@ export class GpDetail extends GitPlusElement {
    * re-file work in the hub, so this is offered on every task rather than
    * only on the ones this browser opened.
    */
-  #move = (event: Event): void => {
+  #move = async (event: Event): Promise<void> => {
     const select = event.currentTarget;
     if (!(select instanceof HTMLSelectElement)) return;
-    void store.move(this.taskId, select.value);
+    if (this.acting) return;
+    const task = this.taskId;
+    const previous = this.#task.parent ?? "";
+    this.moveNotice = null;
+    this.acting = true;
+    try {
+      const moved = await store.move(task, select.value);
+      if (!moved && this.taskId === task) {
+        select.value = previous;
+        this.moveNotice = "The task could not be moved. Its parent was not changed.";
+      }
+    } finally {
+      this.acting = false;
+    }
   };
 
   #meta(task: Task): TemplateResult {
@@ -783,7 +826,12 @@ export class GpDetail extends GitPlusElement {
                   )}
                 </div>`
           }
-          <select class="gp-meta-select" aria-label="Move this task" @change=${this.#move}>
+          <select
+            class="gp-meta-select"
+            aria-label="Move this task"
+            ?disabled=${this.acting}
+            @change=${this.#move}
+          >
             <option value="" ?selected=${task.parent === undefined}>Belongs to nothing</option>
             ${store
               .list()
@@ -797,6 +845,7 @@ export class GpDetail extends GitPlusElement {
                 </option>`,
               )}
           </select>
+          ${this.moveNotice === null ? nothing : html`<p class="gp-notice" role="alert">${this.moveNotice}</p>`}
         </div>
       </aside>
     `;

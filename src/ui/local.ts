@@ -26,7 +26,7 @@ import * as Opfs from "../adapters/Opfs.ts";
 import * as Client from "../client/Client.ts";
 import { fetchRepository } from "../client/Fetch.ts";
 import { push as pushBranches, type PushResult } from "../client/Push.ts";
-import { unified } from "../git/Diff.ts";
+import { isBinary, unified } from "../git/Diff.ts";
 import { isGitlink, isTree, type Signature } from "../git/Format.ts";
 import { cherryPick as replayCommit, rebase as replayBranch } from "../git/Rebase.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
@@ -45,7 +45,7 @@ import {
   type GrepResponse,
   type Ref,
 } from "./api.ts";
-import type { BisectAnswer, ReplayResult } from "../server/ApiContract.ts";
+import type { BisectAnswer, ReplayResult, RefsResponse } from "../server/ApiContract.ts";
 
 import { authorizeSmartHttp } from "./identity.ts";
 import type { SyncState } from "./api.ts";
@@ -160,37 +160,41 @@ export class LocalGitApi {
       // refusal changes nothing about how the page behaves.
       void navigator.storage.persist?.().catch(() => false);
 
-      const cloned = (await local.refs()).some((ref) => ref.name.startsWith(HEADS));
-      if (!cloned) {
-        // First load: clone. An empty answer from an empty repository is
-        // fine — local commits can still be made and pushed — but a remote
-        // that cannot be reached leaves nothing to work on, so stay remote.
-        const fetched = await local.#run(
-          Effect.gen(function* () {
-            const target = { objects: yield* ObjectStore, refs: yield* RefStore };
-            return yield* fetchRepository({
-              url: options.cloneUrl,
-              stores: target,
-              authorize: authorizeSmartHttp,
-            });
-          }),
-        );
-        const head = fetched.defaultBranch ?? "main";
-        await local.#run(
-          Effect.gen(function* () {
-            const repository = yield* Repository;
-            yield* repository.setHead(`${HEADS}${head}`);
-          }),
-        );
-        // Only here, off the clone: the branches just written *are* origin's,
-        // from the very advertisement that produced them. On every later
-        // open the tracking refs are left exactly where the last clone,
-        // fetch or push observed origin — copying local heads over them on
-        // reload was how an unpushed commit read as "nothing to push" after
-        // every refresh, with Push disabled over exactly the work that
-        // needed it.
-        await local.#mirror();
-      }
+      // The existence check and tracking snapshot belong to the same lock as
+      // commits: another opener must not clone over work made by the first.
+      await local.#locked(async () => {
+        const cloned = (await local.refs()).some((ref) => ref.name.startsWith(HEADS));
+        if (!cloned) {
+          // First load: clone. An empty answer from an empty repository is
+          // fine — local commits can still be made and pushed — but a remote
+          // that cannot be reached leaves nothing to work on, so stay remote.
+          const fetched = await local.#run(
+            Effect.gen(function* () {
+              const target = { objects: yield* ObjectStore, refs: yield* RefStore };
+              return yield* fetchRepository({
+                url: options.cloneUrl,
+                stores: target,
+                authorize: authorizeSmartHttp,
+              });
+            }),
+          );
+          const head = fetched.defaultBranch ?? "main";
+          await local.#run(
+            Effect.gen(function* () {
+              const repository = yield* Repository;
+              yield* repository.setHead(`${HEADS}${head}`);
+            }),
+          );
+          // Only here, off the clone: the branches just written *are* origin's,
+          // from the very advertisement that produced them. On every later
+          // open the tracking refs are left exactly where the last clone,
+          // fetch or push observed origin — copying local heads over them on
+          // reload was how an unpushed commit read as "nothing to push" after
+          // every refresh, with Push disabled over exactly the work that
+          // needed it.
+          await local.#mirror();
+        }
+      });
       return local;
     } catch {
       return null;
@@ -252,13 +256,18 @@ export class LocalGitApi {
   // -- the surface the Code screen reads ------------------------------------
 
   async refs(): Promise<readonly Ref[]> {
+    return (await this.refState()).refs;
+  }
+
+  async refState(): Promise<RefsResponse> {
     return await this.#run(
       Effect.gen(function* () {
         const repository = yield* Repository;
         const pairs = yield* repository.refs;
-        return pairs
+        const refs = pairs
           .filter(([name]) => name.startsWith("refs/heads/") || name.startsWith("refs/tags/"))
           .map(([name, oid]) => ({ name, oid }));
+        return { refs, head: yield* repository.head };
       }),
     );
   }
@@ -366,9 +375,9 @@ export class LocalGitApi {
           // tree was layered onto — the same compare-and-swap the server
           // applies, because a lost race is the same lie locally.
           //
-          // SAFETY: `expected` came from this same store's ref answers, which
-          // only ever hand out oids; the store re-checks the swap either way.
-          expected: (options.expected as Oid | undefined) ?? base,
+          // SAFETY: a supplied expectation is the editor's captured oid or
+          // explicit absence; the store re-checks it at the final swap.
+          expected: options.expected === undefined ? base : (options.expected as Oid | null),
         });
         return { oid, tree };
       }),
@@ -442,8 +451,8 @@ export class LocalGitApi {
 
   /**
    * Where `branch` stands against origin, counted by walking the local
-   * graph. Bounded: a branch more than 250 commits apart reads as 250 — the
-   * badge's job is "there is something to push", not exact arithmetic.
+   * graph. Counts saturate at 250. Reachability still needs the whole graph:
+   * a recent-history window cannot tell an old shared commit from a unique one.
    */
   async sync(branch: string): Promise<SyncState> {
     return await this.#run(
@@ -453,39 +462,25 @@ export class LocalGitApi {
         const remote = yield* repository.resolve(`${REMOTE}${branch}`);
         if (local === null) return { branch, ahead: 0, behind: 0, remote };
 
-        /** The recent history of `from`, as a membership question. */
+        /** All parents participate, including the older side of a merge. */
         const reachable = (from: Oid | null) =>
-          from === null
-            ? Effect.succeed(new Set<Oid>())
-            : Stream.runCollect(repository.log(from, { limit: 250 })).pipe(
-                Effect.map((commits) => new Set(commits.map((commit) => commit.oid))),
-              );
+          from === null ? Effect.succeed(new Set<Oid>()) : repository.ancestry([from]);
 
-        /**
-         * Commits reachable from `from` before *any* commit of the other
-         * side appears. Counting until the other side's exact tip — the
-         * previous rule — miscounted both directions the moment either side
-         * moved: a branch one commit ahead read its origin as one commit
-         * "behind", because origin's tip is an ancestor, not the local tip.
-         */
-        const countUntil = (from: Oid, seen: ReadonlySet<Oid>) =>
-          Stream.runCollect(repository.log(from, { limit: 250 })).pipe(
-            Effect.map((commits) => {
-              let count = 0;
-              for (const commit of commits) {
-                if (seen.has(commit.oid)) return count;
-                count += 1;
-              }
-              return count;
-            }),
-          );
+        const countOnly = (from: ReadonlySet<Oid>, other: ReadonlySet<Oid>): number => {
+          let count = 0;
+          for (const commit of from) {
+            if (!other.has(commit)) count += 1;
+            if (count === 250) break;
+          }
+          return count;
+        };
 
         const localSeen = yield* reachable(local);
         const remoteSeen = yield* reachable(remote);
         return {
           branch,
-          ahead: yield* countUntil(local, remoteSeen),
-          behind: remote === null ? 0 : yield* countUntil(remote, localSeen),
+          ahead: countOnly(localSeen, remoteSeen),
+          behind: countOnly(remoteSeen, localSeen),
           remote,
         };
       }),
@@ -590,7 +585,16 @@ export class LocalGitApi {
    */
   async diff(from: string, to: string): Promise<readonly DiffFile[]> {
     const filesAt = (ref: string) => this.files(ref);
-    const readText = (ref: string, path: string) => this.file(ref, path);
+    const readBytes = async (file: FileEntry | undefined): Promise<Uint8Array> => {
+      if (file === undefined) return new Uint8Array(0);
+      return await this.#run(
+        Effect.flatMap(Repository, (repository) =>
+          // SAFETY: `files` creates these entries from this repository's tree
+          // objects. Read the captured oid so moving refs cannot mix snapshots.
+          repository.readBlob(file.oid as Oid),
+        ),
+      );
+    };
     const before = new Map((await filesAt(from)).map((entry) => [entry.path, entry]));
     const after = new Map((await filesAt(to)).map((entry) => [entry.path, entry]));
 
@@ -599,11 +603,22 @@ export class LocalGitApi {
     for (const path of [...paths].sort()) {
       const was = before.get(path);
       const is = after.get(path);
-      if (was !== undefined && is !== undefined && was.oid === is.oid) continue;
+      if (was?.oid === is?.oid && was?.mode === is?.mode) continue;
       const status = was === undefined ? "added" : is === undefined ? "removed" : "modified";
-      const oldText = was === undefined ? "" : await readText(from, path);
-      const newText = is === undefined ? "" : await readText(to, path);
-      out.push({ path, status, binary: false, patch: unified(oldText, newText) });
+      const oldBytes = await readBytes(was);
+      const newBytes = await readBytes(is);
+      const binary = isBinary(oldBytes) || isBinary(newBytes);
+      out.push({
+        path,
+        status,
+        binary,
+        patch: binary
+          ? ""
+          : unified(decoder.decode(oldBytes), decoder.decode(newBytes), {
+              beforeName: path,
+              afterName: path,
+            }),
+      });
     }
     return out;
   }

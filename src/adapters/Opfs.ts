@@ -9,7 +9,7 @@
  * `close()` — the async analogue of the node backend's `rename(2)`. Cross-tab
  * races are the host's problem, as cross-process races are on node.
  */
-import { Effect, Layer, Stream } from "effect";
+import { Effect, Layer, Semaphore, Stream } from "effect";
 
 import { ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import {
@@ -196,6 +196,7 @@ export const refStore = (
     RefStore,
     Effect.gen(function* () {
       const root = yield* Effect.promise(() => Promise.resolve(rootHandle));
+      const shallowWrites = yield* Semaphore.make(1);
 
       const readText = (target: string) =>
         Effect.tryPromise({
@@ -299,6 +300,32 @@ export const refStore = (
 
       return RefStore.of(
         tracedRefStore("OPFS", {
+          shallow: readText("shallow").pipe(
+            Effect.map((value) => new Set((value ?? "").split(/\s+/).filter(isOid))),
+          ),
+          updateShallow: ({ add, remove }) =>
+            Effect.gen(function* () {
+              if (add.length === 0 && remove.length === 0) return;
+              const current = new Set(
+                ((yield* readText("shallow")) ?? "").split(/\s+/).filter(isOid),
+              );
+              for (const oid of remove) current.delete(oid);
+              for (const oid of add) current.add(oid);
+              if (current.size === 0) {
+                yield* Effect.tryPromise({
+                  try: async () => {
+                    try {
+                      await root.removeEntry("shallow");
+                    } catch (cause) {
+                      if (!notFound(cause)) throw cause;
+                    }
+                  },
+                  catch: failure("write", "shallow"),
+                });
+              } else {
+                yield* writeText("shallow", `${[...current].sort().join("\n")}\n`);
+              }
+            }).pipe(Effect.uninterruptible, Semaphore.withPermit(shallowWrites)),
           read,
           resolve: (name) =>
             Effect.gen(function* () {

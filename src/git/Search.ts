@@ -8,6 +8,7 @@ import { Context, Layer, Result } from "effect";
 
 import { isBinary } from "./Diff.ts";
 import { Invalid } from "./Error.ts";
+import { linearRegex } from "./LinearRegex.ts";
 import type { Oid } from "./Store.ts";
 
 export const MAX_MATCHES = 2_000;
@@ -50,26 +51,7 @@ export const compileMatcher = (input: {
   }
 
   try {
-    const unescaped = input.pattern.replace(/\\./g, "");
-    // A bracket expression is one atom, and `*`, `+`, `?`, `(` inside it are
-    // literal members rather than repetitions or groups. Counting them refused
-    // `[*?]x+` — a pattern with exactly one repetition — so each class is
-    // collapsed to a placeholder that any following quantifier still applies to.
-    const atoms = unescaped.replace(/\[\^?\]?[^\]]*\]/g, "[]");
-    const quantifiers = atoms.match(/[*+?]|\{\d/g)?.length ?? 0;
-    const grouped = /\((?!\?:)/.test(atoms);
-    if (quantifiers > 1 || grouped || input.pattern.length > 200) {
-      return Result.fail(
-        new Invalid({
-          field: "pattern",
-          reason:
-            "this endpoint accepts at most one repetition and no groups, because more " +
-            "can take unbounded time to match; use `regex: false` for a literal search",
-        }),
-      );
-    }
-    const expression = new RegExp(input.pattern, input.ignoreCase === true ? "i" : "");
-    return Result.succeed((line) => expression.test(line));
+    return Result.succeed(linearRegex(input.pattern, input.ignoreCase === true));
   } catch (cause) {
     return Result.fail(
       new Invalid({ field: "pattern", reason: cause instanceof Error ? cause.message : "bad" }),

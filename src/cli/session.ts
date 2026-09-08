@@ -7,10 +7,12 @@
  * a person typing ceremonies. `open` prints the session id alone, so a hook
  * can capture it and put it in a commit trailer without parsing prose.
  */
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isSea } from "node:sea";
 
-import { Console, Effect } from "effect";
+import { Config, Console, Effect, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
@@ -50,6 +52,17 @@ const identityOf = Effect.fn("session.identityOf")(function* (repo: string) {
 const keyFlag = Flag.string("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
 );
+
+/** A typo must not create an append-only ref for a session nobody opened. */
+const existingSession = Effect.fn("session.existingSession")(function* (session: string) {
+  const repository = yield* Repository;
+  if ((yield* repository.resolve(Session.refOf(session))) === null) {
+    return yield* new Invalid({
+      field: "session",
+      reason: `this repository has no session '${session}'`,
+    });
+  }
+});
 
 const open = Command.make(
   "open",
@@ -132,6 +145,7 @@ const produce = Command.make(
         repo,
         Effect.gen(function* () {
           const identity = yield* identityOf(repo);
+          yield* existingSession(session);
           return yield* Session.produced({
             repo: identity,
             session,
@@ -191,13 +205,7 @@ const show = Command.make(
           // session, printed a projection with nothing in it and exited zero,
           // which reads as "this session did nothing" rather than "there is no
           // such session".
-          const repository = yield* Repository;
-          if ((yield* repository.resolve(Session.refOf(id))) === null) {
-            return yield* new Invalid({
-              field: "session",
-              reason: `this repository has no session '${id}'`,
-            });
-          }
+          yield* existingSession(id);
           return yield* Session.project(id);
         }),
       );
@@ -225,6 +233,7 @@ const ask = Command.make(
         root,
         repo,
         Effect.gen(function* () {
+          yield* existingSession(session);
           return yield* Session.ask({
             repo: yield* identityOf(repo),
             session,
@@ -257,6 +266,14 @@ const answer = Command.make(
         root,
         repo,
         Effect.gen(function* () {
+          yield* existingSession(session);
+          const state = yield* Session.project(session);
+          if (!state.decisions.some((asked) => asked.id === decision)) {
+            return yield* new Invalid({
+              field: "decision",
+              reason: `${session} has no decision '${decision}'`,
+            });
+          }
           yield* Session.answer({
             repo: yield* identityOf(repo),
             session,
@@ -271,90 +288,124 @@ const answer = Command.make(
     }),
 );
 
-/**
- * The script the harness actually runs.
- *
- * Written into the work tree rather than generated inline in a settings file,
- * for two reasons: a hook an operator can read is one they can correct, and
- * the prompt arrives as JSON on the hook's stdin, which is more than a shell
- * one-liner should be asked to parse.
- *
- * It records at most one opening per session and, when the session ends, what
- * the branch it worked on came to. Everything it passes to the CLI it got from
- * the harness or from git — never from a hub event, which is somebody else's
- * text (docs/agents.md §8).
- */
+/** The harness sends its event on stdin; installed scripts only select the CLI. */
+const hookFile = <A>(operation: () => A) =>
+  Effect.try({
+    try: operation,
+    catch: (cause) => new Invalid({ field: "work", reason: `session hook: ${String(cause)}` }),
+  });
+
+const hook = Command.make(
+  "hook",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    work: Flag.string("work"),
+    repo: repoArgument,
+    phase: Argument.choice("phase", ["start", "stop"]),
+  },
+  ({ key, phase, repo, root, work }) =>
+    Effect.gen(function* () {
+      const input = yield* hookFile(() => fs.readFileSync(0, "utf8"));
+      const event = yield* Schema.decodeEffect(
+        Schema.fromJsonString(
+          Schema.Struct({
+            prompt: Schema.optional(Schema.String),
+            session_id: Schema.optionalKey(Schema.String),
+          }),
+        ),
+      )(input || "{}").pipe(Effect.orElseSucceed(() => ({ prompt: "", session_id: "" })));
+      // Harnesses sharing a checkout must not consume each other's pending
+      // report. Keep the legacy filename for callers without a harness id.
+      const state = path.resolve(
+        work,
+        ".chr33s",
+        event.session_id
+          ? `session.${createHash("sha256").update(event.session_id).digest("hex")}.id`
+          : "session.id",
+      );
+      const exists = yield* hookFile(() => fs.existsSync(state));
+      if (phase === "start") {
+        if (exists) return;
+        const signer = yield* readPrivateKey(key);
+        const model = yield* Config.string("CLAUDE_MODEL").pipe(Config.withDefault(""));
+        const harness = yield* Config.string("CLAUDE_CODE_VERSION").pipe(Config.withDefault(""));
+        const opened = yield* withRepo(
+          root,
+          repo,
+          Effect.gen(function* () {
+            return yield* Session.open({
+              repo: yield* identityOf(repo),
+              agent: { kind: "claude-code", model, harness },
+              prompt: event.prompt ?? "",
+              role: "user",
+              key: signer,
+              instructions: null,
+            });
+          }),
+        );
+        yield* hookFile(() => fs.writeFileSync(state, opened.session));
+      } else if (exists) {
+        yield* Effect.gen(function* () {
+          const session = yield* hookFile(() => fs.readFileSync(state, "utf8").trim());
+          const signer = yield* readPrivateKey(key);
+          const branch = yield* Config.string("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
+          yield* withRepo(
+            root,
+            repo,
+            Effect.gen(function* () {
+              yield* existingSession(session);
+              yield* Session.produced({
+                repo: yield* identityOf(repo),
+                session,
+                key: signer,
+                commits: [],
+                refs: listOf(branch),
+                pulls: [],
+                note: null,
+                usage: null,
+              });
+            }),
+          );
+        }).pipe(
+          // A failed report must not attach the next prompt to this session.
+          Effect.ensuring(hookFile(() => fs.rmSync(state, { force: true })).pipe(Effect.orDie)),
+        );
+      }
+    }),
+);
+
+/** POSIX shell words, including paths containing quotes or shell metacharacters. */
+const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+
 const hookScript = (input: {
-  readonly cli: string;
   readonly root: string;
   readonly repo: string;
   readonly key: string;
-}) => `#!/usr/bin/env node
-// Written by \`git+ session enable\`. Safe to edit; safe to delete.
-import { execFileSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as path from "node:path";
-
-const CLI = ${JSON.stringify(input.cli)};
-const ROOT = ${JSON.stringify(input.root)};
-const REPO = ${JSON.stringify(input.repo)};
-const KEY = ${JSON.stringify(input.key)};
-const STATE = path.join(import.meta.dirname, "session.id");
-
-const run = (args) =>
-  execFileSync(process.execPath, [CLI, ...args], { encoding: "utf8" }).trim();
-
-const read = async () => {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  } catch {
-    return {};
-  }
-};
-
-const event = await read();
-
-if (process.argv[2] === "start") {
-  // One opening per session: the harness may call this more than once, and a
-  // second opening would be a second account of the same work.
-  if (!fs.existsSync(STATE)) {
-    const session = run([
-      "session", "open",
-      "--root", ROOT, "--key", KEY,
-      "--agent", "claude-code",
-      "--model", process.env.CLAUDE_MODEL ?? "",
-      "--harness", process.env.CLAUDE_CODE_VERSION ?? "",
-      "--prompt", event.prompt ?? "",
-      REPO,
-    ]);
-    fs.writeFileSync(STATE, session);
-  }
-} else if (fs.existsSync(STATE)) {
-  const session = fs.readFileSync(STATE, "utf8").trim();
-  const branch = process.env.CHR33S_GIT_BRANCH ?? "";
-  try {
-    run([
-      "session", "produce",
-      "--root", ROOT, "--key", KEY,
-      "--session", session,
-      ...(branch === "" ? [] : ["--ref", branch]),
-      REPO,
-    ]);
-  } finally {
-    // Cleared whether or not the report landed. Left behind on failure, the
-    // *next* session skipped its opening — the prompt was never recorded —
-    // and reported its work against this session's id, for every run
-    // afterwards, until somebody deleted the file by hand.
-    fs.rmSync(STATE, { force: true });
-  }
-}
+  readonly work: string;
+}) => {
+  const command = [
+    process.execPath,
+    ...(isSea() ? [] : [path.resolve(import.meta.dirname, "bin.ts")]),
+    "session",
+    "hook",
+    "--root",
+    input.root,
+    "--key",
+    input.key,
+    "--work",
+    input.work,
+    input.repo,
+  ];
+  return `#!/bin/sh
+# Written by git+ session enable. Safe to edit; safe to delete.
+exec ${command.map(shellQuote).join(" ")} "$1"
 `;
+};
 
 /** The hook entries this writes, which is also how it recognises its own. */
 const entryFor = (script: string, phase: "start" | "stop") => ({
-  hooks: [{ type: "command", command: `node ${JSON.stringify(script)} ${phase}` }],
+  hooks: [{ type: "command", command: `/bin/sh ${shellQuote(script)} ${phase}` }],
 });
 
 /**
@@ -411,7 +462,7 @@ const enable = Command.make(
   ({ key, repo, root, work }) =>
     Effect.gen(function* () {
       const directory = path.resolve(work, ".chr33s");
-      const script = path.join(directory, "session.mjs");
+      const script = path.join(directory, "session.sh");
       const settings = path.resolve(work, ".claude", "settings.json");
 
       yield* Effect.try({
@@ -420,7 +471,7 @@ const enable = Command.make(
           fs.writeFileSync(
             script,
             hookScript({
-              cli: path.resolve(import.meta.dirname, "bin.ts"),
+              work: path.resolve(work),
               root: path.resolve(root),
               repo,
               key: path.resolve(key),
@@ -441,8 +492,18 @@ const enable = Command.make(
             ["Stop", "stop"],
           ] as const) {
             const entry = entryFor(script, phase);
+            const legacy = {
+              hooks: [
+                {
+                  type: "command",
+                  command: `node ${JSON.stringify(path.join(directory, "session.mjs"))} ${phase}`,
+                },
+              ],
+            };
             const already = (hooks[event] ?? []).filter(
-              (value) => JSON.stringify(value) !== JSON.stringify(entry),
+              (value) =>
+                JSON.stringify(value) !== JSON.stringify(entry) &&
+                JSON.stringify(value) !== JSON.stringify(legacy),
             );
             hooks[event] = [...already, entry];
           }
@@ -490,7 +551,7 @@ const memoryShow = Command.make(
 );
 
 export const sessionCommand = Command.make("session", {}, () =>
-  Console.log("git+ session <open|produce|show|ask|answer|redact|enable|memory> — see --help"),
+  Console.log("git+ session <open|produce|show|ask|answer|redact|enable|hook|memory> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record who was instructed, and what they were asked")),
@@ -500,6 +561,7 @@ export const sessionCommand = Command.make("session", {}, () =>
     answer.pipe(Command.withDescription("Answer one, which unblocks the session that asked")),
     redact.pipe(Command.withDescription("Remove one record's content, needing hub.redact")),
     enable.pipe(Command.withDescription("Install the harness hooks that record sessions")),
+    hook.pipe(Command.withDescription("Run an installed harness hook")),
     memoryShow.pipe(
       Command.withDescription("What agents have learned here, distilled from their sessions"),
     ),

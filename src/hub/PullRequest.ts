@@ -15,7 +15,7 @@
  */
 import { DateTime, Effect } from "effect";
 
-import { fingerprint, type PrivateKey } from "../crypto/SshSignature.ts";
+import { fingerprint, NAMESPACE, sign, type PrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -25,6 +25,7 @@ import { permits } from "../trust/Certificate.ts";
 import { openWindow, project as projectTrust } from "../trust/Projection.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import * as Event from "./Event.ts";
+import * as Record from "../trust/Record.ts";
 import { project } from "./Projection.ts";
 
 /**
@@ -59,8 +60,7 @@ export interface OpenInput {
   readonly id?: string;
 }
 
-/** Open a pull request, and return the identifier the ref is named for. */
-export const open = Effect.fn("hub.PullRequest.open")(function* (input: OpenInput) {
+const opening = Effect.fn("hub.PullRequest.opening")(function* (input: OpenInput) {
   const pr = input.id ?? Event.newId();
   if (!Event.isPullRequestId(pr)) {
     return yield* new Invalid({
@@ -70,18 +70,35 @@ export const open = Effect.fn("hub.PullRequest.open")(function* (input: OpenInpu
   }
   const base = yield* context(input.repo, pr);
 
-  const commit = yield* Event.issue(
-    {
-      ...base,
-      type: "pr.opened",
-      title: input.title,
-      description: input.description ?? "",
-      base: input.base,
-      head: Event.qualify(input.head),
-    },
-    input.key,
-  );
-  return { pr, commit };
+  return {
+    ...base,
+    type: "pr.opened",
+    title: input.title,
+    description: input.description ?? "",
+    base: input.base,
+    head: Event.qualify(input.head),
+  } as const;
+});
+
+/** Open a pull request, and return the identifier the ref is named for. */
+export const open = Effect.fn("hub.PullRequest.open")(function* (input: OpenInput) {
+  const payload = yield* opening(input);
+  const commit = yield* Event.issue(payload, input.key);
+  return { pr: payload.pr, commit };
+});
+
+/** Build a new opening without publishing its ref, for an atomic multi-ref operation. */
+export const prepareOpen = Effect.fn("hub.PullRequest.prepareOpen")(function* (input: OpenInput) {
+  const payload = yield* opening(input);
+  const bytes = Event.encode(payload);
+  const commit = yield* Record.write({
+    name: Event.RECORD,
+    payload: bytes,
+    signatures: [yield* sign(input.key, bytes, NAMESPACE)],
+    parents: [],
+    message: `${payload.type} ${payload.id}\n`,
+  });
+  return { pr: payload.pr, commit };
 });
 
 export const update = Effect.fn("hub.PullRequest.update")(function* (input: {
@@ -129,6 +146,7 @@ export const merged = Effect.fn("hub.PullRequest.merged")(function* (input: {
   readonly head: Oid;
   readonly mergeCommit: Oid;
   readonly key: PrivateKey;
+  readonly expected?: Oid | null;
 }) {
   const base = yield* context(input.repo, input.pr);
   return yield* Event.issue(
@@ -139,6 +157,7 @@ export const merged = Effect.fn("hub.PullRequest.merged")(function* (input: {
       mergeCommit: Event.qualify(input.mergeCommit),
     },
     input.key,
+    input.expected,
   );
 });
 

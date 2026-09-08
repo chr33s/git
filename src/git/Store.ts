@@ -211,6 +211,13 @@ export class RefStore extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<RefUpdateResult>, StorageFailure | Invalid>;
     readonly head: Effect.Effect<string, StorageFailure>;
     readonly setHead: (target: string) => Effect.Effect<void, StorageFailure | Invalid>;
+    /** Commits whose stored parent headers do not extend this repository's history. */
+    readonly shallow: Effect.Effect<ReadonlySet<Oid>, StorageFailure>;
+    /** Merge boundary changes atomically; removing a boundary requires its history locally. */
+    readonly updateShallow: (update: {
+      readonly add: ReadonlyArray<Oid>;
+      readonly remove: ReadonlyArray<Oid>;
+    }) => Effect.Effect<void, StorageFailure>;
     readonly reflog: (name: string) => Effect.Effect<ReadonlyArray<ReflogEntry>, StorageFailure>;
     /**
      * Every ref that has a reflog, including refs `list` no longer returns.
@@ -268,6 +275,8 @@ export const tracedRefStore = (
   apply: Effect.fn(`${backend}.RefStore.apply`)(store.apply),
   head: store.head.pipe(Effect.withSpan(`${backend}.RefStore.head`)),
   setHead: Effect.fn(`${backend}.RefStore.setHead`)(store.setHead),
+  shallow: store.shallow.pipe(Effect.withSpan(`${backend}.RefStore.shallow`)),
+  updateShallow: Effect.fn(`${backend}.RefStore.updateShallow`)(store.updateShallow),
   reflog: Effect.fn(`${backend}.RefStore.reflog`)(store.reflog),
   logged: store.logged.pipe(Effect.withSpan(`${backend}.RefStore.logged`)),
 });

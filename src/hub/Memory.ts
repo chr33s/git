@@ -102,7 +102,10 @@ export const render = (entries: ReadonlyArray<Entry>, sessions: number): string 
  * is what falls off the end.
  */
 export const distill = Effect.fn("hub.Memory.distill")(function* () {
-  const found = new Map<string, { kind: string; text: string; cites: Array<string> }>();
+  const found = new Map<
+    string,
+    { kind: string; text: string; lastSeen: string; cites: Map<string, string> }
+  >();
   const all = yield* Session.sessions();
 
   for (const session of all) {
@@ -120,30 +123,44 @@ export const distill = Effect.fn("hub.Memory.distill")(function* () {
 
       const key = `${kind} ${text}`;
       const held = found.get(key);
-      if (held === undefined) found.set(key, { kind, text, cites: [session] });
-      else if (!held.cites.includes(session)) held.cites.push(session);
+      if (held === undefined) {
+        found.set(key, {
+          kind,
+          text,
+          lastSeen: payload.id,
+          cites: new Map([[session, payload.id]]),
+        });
+      } else {
+        if (payload.id > held.lastSeen) held.lastSeen = payload.id;
+        if (payload.id > (held.cites.get(session) ?? "")) held.cites.set(session, payload.id);
+      }
     }
   }
 
   const entries = [...found.values()]
+    .sort(
+      (left, right) =>
+        right.cites.size - left.cites.size || right.lastSeen.localeCompare(left.lastSeen),
+    )
     .map((entry) => ({
       kind: entry.kind,
       text: entry.text,
-      observations: entry.cites.length,
-      // Newest first, which UUIDv7 makes the greatest id.
-      cites: [...entry.cites].sort((left, right) => right.localeCompare(left)),
-    }))
-    .sort(
-      (left, right) =>
-        right.observations - left.observations ||
-        (right.cites[0] ?? "").localeCompare(left.cites[0] ?? ""),
-    );
+      observations: entry.cites.size,
+      // Recency belongs to the production event: an older session can resume.
+      cites: [...entry.cites]
+        .sort(
+          ([left, leftEvent], [right, rightEvent]) =>
+            rightEvent.localeCompare(leftEvent) || right.localeCompare(left),
+        )
+        .map(([session]) => session),
+    }));
 
-  // Filled to the cap and no further: what is left out is what was seen least
-  // and longest ago, which is the entry a reader would miss least.
+  // Prefer the ranked entries that fit. A note larger than the remaining
+  // budget must not hide every smaller lesson after it. The cap is in bytes,
+  // including the heading and citations, rather than UTF-16 code units.
   const kept: Array<Entry> = [];
   for (const entry of entries) {
-    if (render([...kept, entry], all.length).length > MAX_MEMORY) break;
+    if (encoder.encode(render([...kept, entry], all.length)).length > MAX_MEMORY) continue;
     kept.push(entry);
   }
 

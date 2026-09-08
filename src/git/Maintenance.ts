@@ -24,7 +24,7 @@ import {
   parseTree,
 } from "./Format.ts";
 import * as Pack from "./Pack.ts";
-import { bufferSource, readAt } from "./PackFile.ts";
+import { bufferSource, readAt, refDeltaBaseAt } from "./PackFile.ts";
 import { buildPackIndex, parsePackIndex } from "./PackIndex.ts";
 import type { PackStore } from "./Packed.ts";
 import * as Refspec from "./Refspec.ts";
@@ -363,8 +363,8 @@ export interface GcReport {
   /** Objects this call actually deleted. */
   readonly removed: ReadonlyArray<Oid>;
   /**
-   * Unreachable objects that survive because a pack holds them. Deleting from
-   * a pack means rewriting it, so `repack` is what collects these.
+   * Unreachable objects held by a retained pack or needed to decode its deltas.
+   * Repacking removes these storage dependencies before collecting them.
    */
   readonly retained: ReadonlyArray<Oid>;
   /** The pack a repack wrote, and how many objects went into it. */
@@ -399,6 +399,7 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   },
 ) {
   const { objects, packs, refs } = stores;
+  const boundary = yield* refs.shallow;
 
   // Asked once, before anything is deleted: a fork reads these objects
   // through git's `alternates` and keeps no copy of them, and its refs cannot
@@ -472,6 +473,7 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   const borrowing = (shared?.alternates.length ?? 0) > 0;
   const willRepack = options?.repack === true && options?.dryRun !== true && !borrowing;
   const walked = yield* reachable(objects, roots, {
+    boundary,
     ignoreMissing: true,
     classify: willRepack,
     skip: options?.exclude,
@@ -487,7 +489,11 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   const source =
     (options?.exclude?.size ?? 0) === 0
       ? null
-      : yield* reachable(objects, sourceRoots, { ignoreMissing: true, classify: willRepack });
+      : yield* reachable(objects, sourceRoots, {
+          ignoreMissing: true,
+          classify: willRepack,
+          boundary,
+        });
   const keep = source === null ? walked.seen : new Set([...walked.seen, ...source.seen]);
   const classified =
     source === null
@@ -501,8 +507,11 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   // object that is packed is only reported as removed when a repack — which
   // drops the packs it supersedes — is going to run.
   const packedOids = new Set<Oid>();
+  const deltaBases = new Set<Oid>();
   const handles = yield* packs.list;
-  for (const handle of handles) {
+  const owned = new Set(handles);
+  const borrowed = packs.borrowed === undefined ? [] : yield* packs.borrowed;
+  for (const handle of [...handles, ...borrowed]) {
     const parsed = parsePackIndex(handle.index);
     if (parsed._tag === "Failure") {
       return yield* new StorageFailure({
@@ -511,7 +520,15 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
         cause: parsed.failure,
       });
     }
-    for (const entry of parsed.success) packedOids.add(entry.oid);
+    for (const entry of parsed.success) {
+      if (owned.has(handle)) packedOids.add(entry.oid);
+      const base = yield* Effect.tryPromise({
+        try: () => refDeltaBaseAt(handle.source, entry.offset),
+        catch: (cause) =>
+          new StorageFailure({ operation: "packs.dependencies", path: handle.name, cause }),
+      });
+      if (base !== null) deltaBases.add(base);
+    }
   }
 
   /**
@@ -532,7 +549,7 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
     // The refs' *own* walk, not the one the reflog roots also fed: a single
     // readable reflog entry would otherwise disarm the guard for a store
     // whose every ref is unreadable, and gc would sweep what was salvageable.
-    const fromRefs = yield* reachable(objects, refRoots, { ignoreMissing: true });
+    const fromRefs = yield* reachable(objects, refRoots, { ignoreMissing: true, boundary });
     if (fromRefs.order.length === 0) {
       return yield* new StorageFailure({
         operation: "gc",
@@ -545,12 +562,10 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
   const unreachable: Oid[] = [];
   let scanned = 0;
   yield* Stream.runForEach(objects.list, (oid) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       scanned++;
       if (keep.has(oid) || oid === EMPTY_TREE_OID) return;
       unreachable.push(oid);
-      // Loose-only, by the port's contract; the pack copy goes with the pack.
-      if (options?.dryRun !== true) yield* objects.delete(oid);
     }),
   );
 
@@ -563,11 +578,21 @@ export const gc = Effect.fn("Maintenance.gc")(function* (
         handles.map((handle) => handle.name),
       );
 
+  // A retained ref-delta may need an otherwise unreachable loose object.
+  // Repack must finish reading those bases before any loose garbage is deleted;
+  // without a replacement pack, the bases remain storage dependencies.
+  const depends = (oid: Oid) => written === null && deltaBases.has(oid);
+  if (options?.dryRun !== true) {
+    for (const oid of unreachable) {
+      if (!depends(oid)) yield* objects.delete(oid);
+    }
+  }
+
   // What survives is decided by what actually happened, not by what was asked
   // for: an object inside a pack is gone only if that pack was superseded, and
   // a repack that wrote nothing superseded nothing. Reporting it either way
   // would tell a caller a secret was collected while it is still clonable.
-  const collected = (oid: Oid) => !packedOids.has(oid) || written !== null;
+  const collected = (oid: Oid) => !depends(oid) && (!packedOids.has(oid) || written !== null);
   const counted: GcReport = {
     scanned,
     reachable: keep.size,

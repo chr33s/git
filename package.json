@@ -1,6 +1,6 @@
 {
   "name": "@chr33s/git",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Universal Git smart-HTTP protocol server, browser client & nix cli",
   "license": "MIT",
@@ -34,11 +34,11 @@
     "test:integration": "vp test run --project integration",
     "test:interop": "vp test run --project interop",
     "test:unit": "vp test run --project unit",
-    "test:watch": "vp test --project unit",
     "verify:ui": "npm run build:ui && node src/ui/verify.ts"
   },
   "dependencies": {
-    "effect": "4.0.0-rc.112"
+    "effect": "4.0.0-rc.112",
+    "ignore": "7.0.8"
   },
   "devDependencies": {
     "@chr33s/base-wc": "github:chr33s/base-wc",

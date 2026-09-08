@@ -31,7 +31,7 @@ import { Repository } from "../git/Repository.ts";
 import { ObjectStore, type Oid, RefStore } from "../git/Store.ts";
 import { HUB_FETCH } from "../git/Refspec.ts";
 import { serve, type Server } from "../host/Node.ts";
-import { hasGit } from "../testing/Git.ts";
+import { fastImport, hasGit, importCommit } from "../testing/Git.ts";
 import { fetchRepository, type FetchResult } from "./Fetch.ts";
 
 const gitExecPath = hasGit ? execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim() : "";
@@ -570,6 +570,52 @@ describe.skipIf(!hasHttpBackend)("Fetch, negotiating with git-http-backend", () 
     await backend.close();
     await fs.rm(backendRoot, { recursive: true, force: true });
   });
+
+  it.live("deepens and unshallows against stock upload-pack", () =>
+    Effect.promise(async () => {
+      const bare = path.join(backendRoot, "shallow-origin.git");
+      const target = path.join(backendRoot, "shallow-target.git");
+      await git(backendRoot, "init", "--quiet", "--bare", bare);
+      await git(backendRoot, "init", "--quiet", "--bare", target);
+      fastImport(
+        bare,
+        [1, 2, 3]
+          .map((mark) =>
+            importCommit({
+              branch: "refs/heads/main",
+              mark,
+              message: `commit ${mark}`,
+              from: mark === 1 ? undefined : mark - 1,
+              files: [{ path: "file", content: String(mark) }],
+            }),
+          )
+          .join(""),
+      );
+      for (const depth of [1, 2, 2147483647]) {
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            yield* fetchRepository({
+              url: `${backend.url}/shallow-origin.git`,
+              depth,
+              stores: { objects: yield* ObjectStore, refs: yield* RefStore },
+            });
+          }).pipe(Effect.provide(stores(target))),
+        );
+        assert.equal(
+          (
+            await git(backendRoot, "--git-dir", target, "rev-list", "--count", "HEAD")
+          ).stdout.trim(),
+          String(Math.min(depth, 3)),
+        );
+        assert.equal(
+          (
+            await git(backendRoot, "--git-dir", target, "rev-parse", "--is-shallow-repository")
+          ).stdout.trim(),
+          depth === 2147483647 ? "false" : "true",
+        );
+      }
+    }),
+  );
 
   it.effect("fetches incrementally from stock upload-pack", () =>
     Effect.promise(async () => {

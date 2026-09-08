@@ -513,7 +513,7 @@ export const entries = Effect.fn("hub.Session.entries")(function* (session: stri
     payload: record.payload,
   }));
 
-  return { events, unreadable: walked.unreadable } as const;
+  return { events, parents: walked.parents, unreadable: walked.unreadable } as const;
 });
 
 /**
@@ -542,10 +542,11 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
     string,
     { readonly question: string; readonly options: ReadonlyArray<string>; chose: string | null }
   >();
+  const answers = new Map<string, Map<Oid, { readonly id: string; readonly chose: string }>>();
 
   const redacted: Array<string> = [];
 
-  for (const { payload } of walked.events) {
+  for (const { commit, payload } of walked.events) {
     if (payload.type === "event.redacted") {
       // Recorded, not applied: the record it names reads as unreadable here
       // either way, once its payload is gone. What this adds is the account of
@@ -561,8 +562,14 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
     if (payload.type === "decision.resolved") {
       // An answer to a question this session never asked is somebody else's
       // record, and recording it here would put words in this session's mouth.
-      const question = asked.get(payload.decision);
-      if (question !== undefined) question.chose = payload.chose;
+      if (asked.has(payload.decision)) {
+        let candidates = answers.get(payload.decision);
+        if (candidates === undefined) {
+          candidates = new Map();
+          answers.set(payload.decision, candidates);
+        }
+        candidates.set(commit, { id: payload.id, chose: payload.chose });
+      }
       continue;
     }
     if (payload.type === "session.opened") {
@@ -580,6 +587,18 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
       inputTokens += payload.usage.inputTokens;
       outputTokens += payload.usage.outputTokens;
     }
+  }
+
+  for (const [decision, candidates] of answers) {
+    let chosen: { readonly id: string; readonly chose: string } | undefined;
+    for (const commit of Dag.maximal(walked.parents, [...candidates.keys()])) {
+      const candidate = candidates.get(commit);
+      if (candidate !== undefined && (chosen === undefined || candidate.id > chosen.id)) {
+        chosen = candidate;
+      }
+    }
+    const question = asked.get(decision);
+    if (question !== undefined && chosen !== undefined) question.chose = chosen.chose;
   }
 
   return {
@@ -605,16 +624,30 @@ export const project = Effect.fn("hub.Session.project")(function* (session: stri
  * The question an agent actually has on checkout is "put me back in context
  * for this branch", not "for this id" — an id is what a caller has only if
  * they were the one who opened it. Answered by scanning the sessions that name
- * the ref and taking the newest, which UUIDv7 makes the greatest id.
+ * the ref and taking the newest production event, which UUIDv7 makes the greatest
+ * event id. An older session can resume after a newer one has finished.
  */
 export const latestFor = Effect.fn("hub.Session.latestFor")(function* (ref: string) {
+  const qualify = (name: string) => (name.startsWith("refs/") ? name : `refs/heads/${name}`);
+  const target = qualify(ref);
   let latest: string | null = null;
+  let production = "";
   for (const session of yield* sessions()) {
     const walked = yield* entries(session);
-    const names = walked.events.some(
-      ({ payload }) => payload.type === "session.produced" && payload.refs.includes(ref),
-    );
-    if (names && (latest === null || session > latest)) latest = session;
+    for (const { payload } of walked.events) {
+      if (
+        payload.type !== "session.produced" ||
+        !payload.refs.some((name) => qualify(name) === target)
+      )
+        continue;
+      if (
+        payload.id > production ||
+        (payload.id === production && (latest === null || session > latest))
+      ) {
+        production = payload.id;
+        latest = session;
+      }
+    }
   }
   return latest;
 });

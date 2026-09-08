@@ -16,7 +16,7 @@ import { describe, it } from "@effect/vitest";
 import type { Namespace as ArtifactsNamespace } from "alchemy/Cloudflare/Artifacts/Namespace";
 import { ReadWriteNamespace } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
 import { RuntimeContext } from "alchemy/RuntimeContext";
-import { Effect, Layer } from "effect";
+import { Effect, Exit, Layer } from "effect";
 
 import { noPacks } from "../git/Packed.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -27,6 +27,8 @@ import { serve } from "../host/Node.ts";
 import {
   localMemory,
   localNode,
+  Registry,
+  registryNode,
   RepoStores,
   repoStoresNode,
   type StoreInstances,
@@ -80,6 +82,101 @@ const repositoryFor = (instances: StoreInstances) =>
   );
 
 describe("Artifacts local provider", () => {
+  it.effect("rejects pagination inputs that cannot produce an advancing page", () =>
+    Effect.promise(() =>
+      run(
+        Effect.gen(function* () {
+          const client = yield* bound;
+          yield* client.create("alpha");
+          for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+            const outcome = yield* client.list({ limit }).pipe(Effect.result);
+            assert.equal(outcome._tag, "Failure");
+            if (outcome._tag === "Failure") assert.match(outcome.failure.message, /INVALID_LIMIT/);
+          }
+          for (const cursor of ["", "-1", "1.5", "1suffix", "9007199254740992"]) {
+            const outcome = yield* client.list({ cursor }).pipe(Effect.result);
+            assert.equal(outcome._tag, "Failure");
+            if (outcome._tag === "Failure") assert.match(outcome.failure.message, /INVALID_CURSOR/);
+          }
+          const page = yield* client.list({ limit: 1, cursor: "0" });
+          assert.deepEqual(
+            page.repos.map((repo) => repo.name),
+            ["alpha"],
+          );
+          assert.equal(page.cursor, undefined);
+        }),
+      ),
+    ),
+  );
+
+  it.effect("keeps failed registry mutations invisible and permits retry", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "artifacts-registry-retry-"));
+      try {
+        const registry = await Effect.runPromise(Registry.pipe(Effect.provide(registryNode(root))));
+        const lock = path.join(root, ".registry.json.lock");
+        await fs.writeFile(lock, "another writer");
+        const meta = { description: null, defaultBranch: "main", readOnly: false, source: null };
+        assert.ok(Exit.isFailure(await Effect.runPromiseExit(registry.create("blocked", meta))));
+        assert.equal(await Effect.runPromise(registry.get("blocked")), null);
+        assert.equal(await fs.readFile(lock, "utf8"), "another writer");
+        await fs.unlink(lock);
+        await Effect.runPromise(registry.create("blocked", meta));
+        const reopened = await Effect.runPromise(Registry.pipe(Effect.provide(registryNode(root))));
+        assert.equal((await Effect.runPromise(reopened.get("blocked")))?.name, "blocked");
+        await fs.writeFile(lock, "another writer");
+        assert.ok(Exit.isFailure(await Effect.runPromiseExit(registry.delete("blocked"))));
+        assert.equal((await Effect.runPromise(registry.get("blocked")))?.name, "blocked");
+        assert.equal(await fs.readFile(lock, "utf8"), "another writer");
+        await fs.unlink(lock);
+        assert.equal(await Effect.runPromise(registry.delete("blocked")), true);
+        const final = await Effect.runPromise(Registry.pipe(Effect.provide(registryNode(root))));
+        assert.equal((await Effect.runPromise(final.list())).total, 0);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("retains concurrent registry changes after reopening the provider", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "artifacts-registry-race-"));
+      const reopen = () => Effect.runPromise(Registry.pipe(Effect.provide(registryNode(root))));
+      try {
+        const registry = await reopen();
+        const names: string[] = [];
+        // Several overlapping batches exercise real asynchronous file writes,
+        // including snapshots that can finish in a different order on disk.
+        for (let batch = 0; batch < 4; batch++) {
+          const added = Array.from({ length: 64 }, (_, index) => `repo-${batch}-${index}`);
+          names.push(...added);
+          await Effect.runPromise(
+            Effect.forEach(
+              added,
+              (name) =>
+                registry.create(name, {
+                  description: "ordinary repository metadata",
+                  defaultBranch: "main",
+                  readOnly: false,
+                  source: null,
+                }),
+              { concurrency: "unbounded" },
+            ),
+          );
+          const restarted = await reopen();
+          const listed = await Effect.runPromise(restarted.list({ limit: 1000 }));
+          assert.deepEqual(listed.repos.map((repo) => repo.name).sort(), [...names].sort());
+        }
+        await Effect.runPromise(
+          Effect.forEach(names, (name) => registry.delete(name), { concurrency: "unbounded" }),
+        );
+        assert.equal((await Effect.runPromise((await reopen()).list())).total, 0);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.effect("creates, lists with a cursor, and deletes repositories", () =>
     Effect.promise(async () => {
       await run(
@@ -357,6 +454,91 @@ describe("Artifacts local provider", () => {
     }),
   );
 
+  it.effect("defaults forks to the recorded default branch and honors an explicit full fork", () =>
+    Effect.promise(() =>
+      run(
+        Effect.gen(function* () {
+          const client = yield* bound;
+          const repoStores = yield* RepoStores;
+          yield* client.create("parent", { setDefaultBranch: "trunk" });
+          const parentStores = yield* repoStores.open("parent");
+          yield* Effect.gen(function* () {
+            const repository = yield* Repository;
+            const tree = yield* repository.writeTree([]);
+            yield* repository.commit({ branch: "trunk", tree, message: "base", author });
+            yield* repository.branch({ name: "side", base: "refs/heads/trunk" });
+            yield* repository.tag({ name: "v1", target: "refs/heads/trunk" });
+          }).pipe(Effect.provide(repositoryFor(parentStores)));
+          const parent = yield* client.get("parent");
+          for (const [name, opts] of [
+            ["omitted", undefined],
+            ["empty", {}],
+            ["only", { defaultBranchOnly: true }],
+            ["full", { defaultBranchOnly: false }],
+          ] as const) {
+            const fork = yield* parent.fork(name, opts);
+            assert.equal(fork.defaultBranch, "trunk");
+            const copied = yield* repoStores.open(name);
+            assert.equal(yield* copied.refs.head, "refs/heads/trunk");
+            assert.deepEqual(
+              (yield* copied.refs.list("refs/")).map(([ref]) => ref).sort(),
+              name === "full"
+                ? ["refs/heads/side", "refs/heads/trunk", "refs/tags/v1"]
+                : ["refs/heads/trunk"],
+              name,
+            );
+          }
+        }),
+      ),
+    ),
+  );
+
+  it.effect("rolls back a fork when the filesystem refuses a copied ref", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "artifacts-fork-ref-"));
+      try {
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const client = yield* bound;
+            const repoStores = yield* RepoStores;
+            yield* client.create("parent");
+            const parentStores = yield* repoStores.open("parent");
+            const tip = yield* Effect.gen(function* () {
+              const repository = yield* Repository;
+              const tree = yield* repository.writeTree([]);
+              return yield* repository.commit({ branch: "main", tree, message: "parent", author });
+            }).pipe(Effect.provide(repositoryFor(parentStores)));
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(root, "child", "refs", "heads"), { recursive: true });
+              await fs.writeFile(path.join(root, "child", "refs", "heads", "main.lock"), "", {
+                flag: "wx",
+              });
+            });
+            const parent = yield* client.get("parent");
+            const failed = yield* parent.fork("child").pipe(Effect.result);
+            assert.equal(failed._tag, "Failure", "a fork with a refused ref must fail");
+            if (failed._tag === "Failure") assert.match(failed.failure.message, /INTERNAL_ERROR/);
+            assert.deepEqual(
+              (yield* client.list()).repos.map((repo) => repo.name),
+              ["parent"],
+            );
+            assert.deepEqual(yield* repoStores.dependents("parent"), []);
+            assert.deepEqual((yield* (yield* Tokens).list("child")).tokens, []);
+            yield* Effect.promise(() => assert.rejects(fs.access(path.join(root, "child"))));
+
+            yield* parent.fork("child");
+            assert.equal(
+              yield* (yield* repoStores.open("child")).refs.read("refs/heads/main"),
+              tip,
+            );
+          }).pipe(Effect.provide(Layer.merge(localNode({ root }), RuntimeContext.phantom))),
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.effect("survives a provider restart when backed by the node layers", () =>
     Effect.promise(async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "artifacts-durable-"));
@@ -537,6 +719,65 @@ describe("the node provider's fork links", () => {
         assert.deepEqual(await links(root), {}, "a refused fork still recorded a link");
       });
     }),
+  );
+
+  it.effect("observes a fork deleted through another live provider", () =>
+    Effect.promise(() =>
+      withRoot(async (root, first) => {
+        await seed(root, "parent");
+        await Effect.runPromise(first.fork("child", "parent"));
+        const second = await Effect.runPromise(
+          RepoStores.pipe(Effect.provide(repoStoresNode(root))),
+        );
+        await Effect.runPromise(second.drop("child"));
+        assert.deepEqual(await Effect.runPromise(first.dependents("parent")), []);
+        await Effect.runPromise(first.drop("parent"));
+      }),
+    ),
+  );
+
+  it.effect("preserves fork links written through independent providers", () =>
+    Effect.promise(() =>
+      withRoot(async (root, first) => {
+        const second = await Effect.runPromise(
+          RepoStores.pipe(Effect.provide(repoStoresNode(root))),
+        );
+        await seed(root, "parent");
+        await Effect.runPromise(first.fork("first", "parent"));
+        await Effect.runPromise(second.fork("second", "parent"));
+        assert.deepEqual(await links(root), { first: "parent", second: "parent" });
+      }),
+    ),
+  );
+
+  it.effect("rebuilds cached descendants after another provider changes a fork", () =>
+    Effect.promise(() =>
+      withRoot(async (root, first) => {
+        for (const name of ["a", "b"]) await seed(root, name);
+        const object = { type: "blob", data: new TextEncoder().encode("second parent") } as const;
+        const firstParent = await Effect.runPromise(first.open("a"));
+        const previousOid = await Effect.runPromise(
+          firstParent.objects.write({
+            type: "blob",
+            data: new TextEncoder().encode("first parent"),
+          }),
+        );
+        const secondParent = await Effect.runPromise(first.open("b"));
+        const oid = await Effect.runPromise(secondParent.objects.write(object));
+        await Effect.runPromise(first.fork("child", "a"));
+        await Effect.runPromise(first.fork("grandchild", "child"));
+        const previous = await Effect.runPromise(first.open("grandchild"));
+        assert.equal(await Effect.runPromise(previous.objects.has(previousOid)), true);
+        assert.equal(await Effect.runPromise(previous.objects.has(oid)), false);
+        const second = await Effect.runPromise(
+          RepoStores.pipe(Effect.provide(repoStoresNode(root))),
+        );
+        await Effect.runPromise(second.fork("child", "b"));
+        const reopened = await Effect.runPromise(first.open("grandchild"));
+        assert.equal(await Effect.runPromise(reopened.objects.has(oid)), true);
+        assert.equal(await Effect.runPromise(reopened.objects.has(previousOid)), false);
+      }),
+    ),
   );
 
   it.effect("writes what `gc` reads before the link only this process reads", () =>

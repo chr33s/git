@@ -429,8 +429,8 @@ const find = Command.make(
             }
           }
         }
-        const found = Introduce.repositories(graph).filter(
-          (entry) => wanted === null || entry.repo === wanted || entry.url.includes(query),
+        const found = Introduce.repositories(graph).filter((entry) =>
+          wanted === null ? entry.url.includes(query) : entry.repo === wanted,
         );
         for (const entry of found) {
           yield* Console.log(

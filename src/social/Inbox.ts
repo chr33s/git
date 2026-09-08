@@ -204,7 +204,7 @@ export const adopt = Effect.fn("social.Inbox.adopt")(function* (input: {
     return yield* new Invalid({ field: "authorization", reason: authorized.reason });
   }
 
-  const opened = yield* PullRequest.open({
+  const opened = yield* PullRequest.prepareOpen({
     repo: input.genesis.repoId,
     title: proposal.title,
     description: proposal.description,
@@ -213,7 +213,23 @@ export const adopt = Effect.fn("social.Inbox.adopt")(function* (input: {
     key: input.key,
   });
   const repository = yield* Repository;
-  yield* repository.setRef({ name: adoptedRefOf(proposal.id), to: opened.commit, expected: null });
-  yield* repository.deleteRef(refOf(proposal.id));
+  // No PR is visible until this exact pending proposal has been claimed.
+  // A losing adopter, failed write, or changed proposal leaves all three refs
+  // untouched; preparing an unreachable object is safe to retry or collect.
+  const results = yield* repository.receive(
+    [
+      { name: Event.refOf(opened.pr), value: opened.commit, expected: null },
+      { name: adoptedRefOf(proposal.id), value: opened.commit, expected: null },
+      { name: refOf(proposal.id), value: null, expected: proposal.commit },
+    ],
+    { atomic: true },
+  );
+  const rejected = results.find((result) => !result.ok);
+  if (rejected !== undefined) {
+    return yield* new Invalid({
+      field: "proposal",
+      reason: `could not adopt '${proposal.id}': ${rejected.reason ?? "proposal moved"}`,
+    });
+  }
   return opened;
 });

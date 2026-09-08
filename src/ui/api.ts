@@ -13,6 +13,7 @@
 import { Data, Option, Schema } from "effect";
 
 import * as Contract from "../server/ApiContract.ts";
+import { repositoryPath } from "../client/Url.ts";
 
 /** Thrown for any non-2xx answer, carrying the server's tagged error name. */
 export class ApiError extends Data.TaggedError("ApiError")<{
@@ -79,7 +80,7 @@ export interface CommitFilesRequest {
   branch: string;
   message: string;
   files: readonly FileWrite[];
-  expected?: string;
+  expected?: string | null;
 }
 
 /**
@@ -189,12 +190,12 @@ export class GitApi {
    */
   get cloneUrl(): string {
     const base = this.#base === "" ? globalThis.location.origin : this.#base;
-    return `${base}/${encodeURIComponent(this.repo)}`;
+    return `${base}${repositoryPath(this.repo)}`;
   }
 
   #url(path: string, query?: URLSearchParams): string {
     const search = query === undefined || query.size === 0 ? "" : `?${query.toString()}`;
-    return `${this.#base}/${encodeURIComponent(this.repo)}${path}${search}`;
+    return `${this.#base}${repositoryPath(this.repo)}${path}${search}`;
   }
 
   async #json<S extends Schema.ConstraintDecoder<unknown>>(
@@ -238,8 +239,12 @@ export class GitApi {
 
   /** Every ref, unpaged — the shape the smart-HTTP advertisement needs. */
   async refs(): Promise<readonly Ref[]> {
-    const body = await this.#json(this.#url("/refs"), Contract.RefsResponse);
-    return body.refs;
+    return (await this.refState()).refs;
+  }
+
+  /** Ref values and the explicit HEAD target; branch names alone cannot identify the default. */
+  async refState(): Promise<Contract.RefsResponse> {
+    return await this.#json(this.#url("/refs"), Contract.RefsResponse);
   }
 
   /** Branches, paged; one page is enough for a branch picker. */
@@ -567,6 +572,7 @@ export interface CodeApi {
   readonly repo: string;
   readonly cloneUrl: string;
   refs(): Promise<readonly Ref[]>;
+  refState(): Promise<Contract.RefsResponse>;
   files(ref: string): Promise<readonly FileEntry[]>;
   file(ref: string, path: string): Promise<string>;
   commitFiles(options: Readonly<CommitFilesRequest>): Promise<CommitCreated>;
@@ -582,7 +588,7 @@ export interface CodeApi {
 /** What the Search screen needs — the HTTP client and the local one both fit. */
 export interface SearchApi {
   readonly repo: string;
-  refs(): Promise<readonly Ref[]>;
+  refState(): Promise<Contract.RefsResponse>;
   grep(
     pattern: string,
     ref: string,

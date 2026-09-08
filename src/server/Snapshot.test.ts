@@ -46,6 +46,37 @@ const advertisement = (base: string): Request =>
   new Request(`${base}/info/refs?service=git-upload-pack`);
 
 describe("Snapshot", () => {
+  it.effect("publishes, reads and restores shallow boundaries", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* Effect.gen(function* () {
+        const repository = yield* Repository;
+        const tip = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "boundary",
+          author: alice,
+        });
+        yield* repository.updateShallow({ add: [tip], remove: [] });
+        return yield* Snapshot.capture();
+      }).pipe(Effect.provide(repositoryLayer));
+      assert.deepEqual(Snapshot.decode(Snapshot.encode(snapshot)), snapshot);
+      assert.equal(Snapshot.same(snapshot, { ...snapshot, shallow: [] }), false);
+      const observed = yield* Effect.gen(function* () {
+        const refs = yield* RefStore;
+        assert.equal(
+          (yield* Effect.flip(refs.updateShallow({ add: [], remove: [] })))._tag,
+          "StorageFailure",
+        );
+        return [...(yield* refs.shallow)];
+      }).pipe(Effect.provide(Snapshot.refStore(snapshot)));
+      assert.deepEqual(observed, snapshot.shallow);
+      const restored = yield* Effect.gen(function* () {
+        yield* Snapshot.restore(Snapshot.entryOf(1, snapshot, undefined));
+        return [...(yield* (yield* RefStore).shallow)];
+      }).pipe(Effect.provide(stores));
+      assert.deepEqual(restored, observed);
+    }),
+  );
   it.effect("captures the refs and answers them back as a read-only store", () =>
     Effect.promise(async () => {
       const outcome = await Effect.runPromise(

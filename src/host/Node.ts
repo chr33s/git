@@ -18,7 +18,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
 import { Context, Effect, Exit, Layer, Predicate, RcMap, Scope } from "effect";
-import { HttpRouter } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
 
 import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
@@ -49,6 +49,7 @@ import { collects, routeOf, settledWithin } from "../server/Route.ts";
 import { assetResponse } from "../server/Static.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import { resolve as resolveConfiguration, type ServeConfig } from "./ServeConfig.ts";
+import { stores as writableStores } from "./NodeStorage.ts";
 
 /**
  * A development asset server mounted before the Git routes.
@@ -115,7 +116,8 @@ export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname" | "h
 
 export interface Server {
   readonly url: string;
-  readonly close: () => Promise<void>;
+  /** Force closes active HTTP connections, for process-signal shutdown. */
+  readonly close: (options?: { readonly force?: boolean }) => Promise<void>;
 }
 
 /**
@@ -454,22 +456,23 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     // the repository and the CLI needs the same chain: a ref landed by
     // `git+ queue run` is a ref a mirror should hear about too.
     //
-    // Detaching, which is this side's answer and the CLI's opposite: delivery
-    // must outlive the response rather than hold a push open behind a slow
-    // receiver, and this process is not about to exit.
+    // Background work outlives the response, but belongs to this host. Its
+    // shutdown interrupts and awaits delivery and wake finalizers.
     const directory = path.join(options.root, repo);
-    const afterPush =
-      options.wake === true
-        ? AfterPush.chain({ root: options.root, repo, wake: true })
-        : AfterPush.chain({ root: options.root, repo });
+    const afterPush = AfterPush.chain({
+      root: options.root,
+      repo,
+      wake: options.wake === true,
+      background: (effect) => Effect.forkIn(effect, scope).pipe(Effect.asVoid),
+    });
 
     const layer = GitRepository.layer.pipe(
       // Real hooks, not `hooksNoop`: this is what makes a push deliver.
-      // `forkDetach` is the node stand-in for `waitUntil` — delivery outlives
-      // the response without the push waiting on a slow receiver.
+      // The host scope keeps delivery alive after its request releases the
+      // repository, without letting work escape server shutdown.
       Layer.provide(afterPush),
       // As `guardLayer` above: `provide` would swallow `Storage`.
-      Layer.provideMerge(stores(directory)),
+      Layer.provideMerge(writableStores(directory)),
     );
 
     // Built once while this repository has a request in flight, not once per
@@ -484,7 +487,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         Layer.provideMerge(subscribers),
         Layer.provideMerge(openWrites),
       ),
-      { disableLogger: true },
+      {
+        disableLogger: true,
+        middleware: (effect) =>
+          Effect.gen(function* () {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            // SAFETY: this router is invoked only with web Requests below.
+            // Layer construction may finish after that request was aborted,
+            // before the web handler registered its abort listener.
+            if ((request.source as Request).signal.aborted) return yield* Effect.interrupt;
+            return yield* effect;
+          }),
+      },
     );
 
     return {
@@ -567,6 +581,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       if (collects(request)) await settledWithin(state.delivering);
 
       const answer = async (): Promise<Response> => {
+        // A request may disconnect while another handler owns the gate.
+        request.signal.throwIfAborted();
         // And once more with the gate held, briefly: the wait above lets go of
         // the backlog without holding anyone up, but a body that started while
         // it was waiting would otherwise still be reading objects. Short,
@@ -578,6 +594,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         // that would read them.
         const lfs = await Effect.runPromise(
           Lfs.handle(request).pipe(Effect.provide(Layer.mergeAll(state.lfs, requester))),
+          { signal: request.signal },
         );
         if (lfs !== null) return lfs;
 
@@ -589,11 +606,13 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
               Layer.mergeAll(state.layer, requester, openWrites, federation, objectSize),
             ),
           ),
+          { signal: request.signal },
         );
         if (bulk !== null) return bulk;
 
         const exported = await Effect.runPromise(
           Archive.handle(request).pipe(Effect.provide(state.layer)),
+          { signal: request.signal },
         );
         if (exported !== null) return exported;
 
@@ -606,23 +625,24 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
               Layer.mergeAll(state.layer, requester, openWrites, federation, objectSize),
             ),
           ),
+          { signal: request.signal },
         );
-        return matched ?? (await state.api(request, asked));
+        if (matched !== null) return matched;
+        request.signal.throwIfAborted();
+        return await state.api(request, asked);
       };
 
-      const answered = state.gate.then(answer, answer);
+      const answered = state.gate.then(answer, answer).finally(() => {
+        // A write may have landed before failure or cancellation. Invalidate
+        // even then, before the next request enters this repository's gate.
+        if (request.method !== "GET" && request.method !== "HEAD") invalidateFederation();
+      });
       state.gate = answered.then(
         () => undefined,
         () => undefined,
       );
 
       const response = await answered;
-      // Git writes and JSON mutations are POST/PUT/PATCH/DELETE requests.
-      // Invalidating after any non-safe request is deliberately conservative:
-      // read-only POST endpoints merely refresh the index next time, while a
-      // ref update is visible to every following request immediately.
-      if (request.method !== "GET" && request.method !== "HEAD") invalidateFederation();
-
       const delivery = deliver(response);
       // Registered before it is awaited, so a `gc` that arrives mid-body sees it.
       state.delivering.add(delivery);
@@ -638,6 +658,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
   let development: DevelopmentMiddleware | undefined;
   const handleIncoming = (incoming: http.IncomingMessage, outgoing: http.ServerResponse): void => {
+    const controller = new AbortController();
+    const disconnected = () => {
+      if (!outgoing.writableFinished) controller.abort();
+    };
+    outgoing.once("close", disconnected);
     void (async () => {
       // The `Host` header, not the bind address: a handler that has to hand
       // a client an absolute URL back — the LFS batch API does — can only
@@ -697,7 +722,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         if (Predicate.isString(value)) headers.set(name, value);
       }
       const method = incoming.method ?? "GET";
-      const init: StreamingRequestInit = { method, headers };
+      const init: StreamingRequestInit = { method, headers, signal: controller.signal };
       if (method !== "GET" && method !== "HEAD") {
         // Streamed, not buffered: a push flows straight into the pack parser.
         // SAFETY: node's web stream and the fetch body type are the same
@@ -733,8 +758,13 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
             authenticated: Auth.anonymous,
           })),
         ),
+        { signal: request.signal },
       );
       const deliver = async (response: Response) => {
+        if (controller.signal.aborted) {
+          await response.body?.cancel();
+          return;
+        }
         outgoing.writeHead(response.status, nodeHeaders(response.headers));
         if (response.body === null) {
           outgoing.end();
@@ -746,10 +776,13 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       };
       if (denied.denied !== null) await deliver(denied.denied);
       else await dispatch(repo, request, deliver, denied.authenticated);
-    })().catch((cause: unknown) => {
-      if (!outgoing.headersSent) outgoing.writeHead(500);
-      outgoing.end(String(cause));
-    });
+    })()
+      .catch((cause: unknown) => {
+        if (outgoing.destroyed) return;
+        if (!outgoing.headersSent) outgoing.writeHead(500);
+        outgoing.end(String(cause));
+      })
+      .finally(() => outgoing.removeListener("close", disconnected));
   };
 
   const server = http.createServer((incoming, outgoing) => {
@@ -766,6 +799,31 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     }
     handleIncoming(incoming, outgoing);
   });
+  const close = async (closeOptions?: { readonly force?: boolean }) => {
+    const failures: unknown[] = [];
+    // Each owner must release its resources even if another finalizer fails.
+    // Middleware may hold watchers or sockets before the HTTP bind succeeds.
+    for (const release of [
+      () => development?.close(),
+      () =>
+        new Promise<void>((resolve, reject) => {
+          if (server.listening) server.close((error) => (error ? reject(error) : resolve()));
+          else resolve();
+          // Stop accepting first, then abort bodies that otherwise keep
+          // signal cleanup waiting indefinitely for an unresponsive client.
+          if (closeOptions?.force === true) server.closeAllConnections();
+        }),
+      () => Effect.runPromise(Scope.close(scope, Exit.void)),
+    ]) {
+      try {
+        await release();
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "server shutdown failed");
+  };
   try {
     development = options.development === undefined ? undefined : await options.development(server);
 
@@ -783,7 +841,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       });
     });
   } catch (cause: unknown) {
-    await Effect.runPromise(Scope.close(scope, Exit.void));
+    try {
+      await close();
+    } catch (cleanup) {
+      throw new AggregateError([cause, cleanup], "server startup and cleanup failed", { cause });
+    }
     throw cause;
   }
 
@@ -810,19 +872,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
 
   return {
     url: `http://${authorityOf(hostname, bound)}`,
-    close: async () => {
-      try {
-        await development?.close();
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()));
-        });
-      } finally {
-        // The routers' scopes live here, not on the HTTP server. Closing
-        // without this drops every still-held entry without running its
-        // finalizer: one file handle per repository this process opened.
-        await Effect.runPromise(Scope.close(scope, Exit.void));
-      }
-    },
+    close,
   };
 };
 

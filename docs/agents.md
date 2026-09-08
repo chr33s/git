@@ -1422,7 +1422,7 @@ how to push. One addition on top of Part I:
 
 ```sh
 git+ session enable --root . --key ~/.ssh/agent-claude project
-                               # writes .chr33s/session.mjs and the Claude
+                               # writes .chr33s/session.sh and the Claude
                                # Code hooks that call it
 ```
 

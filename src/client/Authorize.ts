@@ -57,14 +57,18 @@ export const fetchAuthorized = async (
   init: RequestInit,
   context: { readonly operation: string; readonly commands: ReadonlyArray<SignedCommand> },
   authorize: Authorize | undefined,
+  /** Recreate one-shot bodies for the signed retry without buffering them. */
+  body?: () => Promise<Pick<RequestInit, "body"> & { readonly duplex?: "half" }>,
 ): Promise<Response> => {
-  const first = await fetch(url, init);
+  const request = async () => ({ ...init, ...(await body?.()) });
+  const first = await fetch(url, await request());
   if (first.status !== 401 || authorize === undefined) return first;
   const header = await authorize({ response: first, ...context });
   if (header === null) return first;
-  const headers = new Headers(init.headers);
+  const retry = await request();
+  const headers = new Headers(retry.headers);
   headers.set("authorization", header);
-  return await fetch(url, { ...init, headers });
+  return await fetch(url, { ...retry, headers });
 };
 
 /** The operation a URL's request spells, matching the server's `operationOf`. */

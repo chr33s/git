@@ -69,12 +69,14 @@ interface Advertisement {
   readonly refs: ReadonlyArray<RemoteRef>;
   /** What the first ref line carried after its NUL — the server's offer. */
   readonly capabilities: ReadonlySet<string>;
+  readonly shallow: ReadonlyArray<Oid>;
 }
 
 const advertisedRefs = async (body: ReadableStream<Uint8Array> | null): Promise<Advertisement> => {
   const capabilities = new Set<string>();
   const refs: RemoteRef[] = [];
-  if (body === null) return { refs, capabilities };
+  const shallow: Oid[] = [];
+  if (body === null) return { refs, capabilities, shallow };
   const reader = new PktReader(chunks(body));
   for (;;) {
     const item = await reader.next();
@@ -84,6 +86,11 @@ const advertisedRefs = async (body: ReadableStream<Uint8Array> | null): Promise<
     if (item === "flush" || item === "delim" || item === "end") continue;
     const line = decoder.decode(item).replace(/\n$/, "");
     if (line.startsWith("# service=")) continue;
+    if (line.startsWith("shallow ")) {
+      const boundary = line.slice(8);
+      if (isOid(boundary)) shallow.push(boundary);
+      continue;
+    }
     const oid = line.slice(0, 40);
     const [name = "", caps] = line.slice(41).split("\0");
     // Capabilities ride the first ref line — or the `capabilities^{}`
@@ -91,7 +98,7 @@ const advertisedRefs = async (body: ReadableStream<Uint8Array> | null): Promise<
     if (caps !== undefined) for (const cap of caps.split(" ")) capabilities.add(cap);
     if (isOid(oid) && name.length > 0 && name !== "capabilities^{}") refs.push({ oid, name });
   }
-  return { refs, capabilities };
+  return { refs, capabilities, shallow };
 };
 
 /**
@@ -116,22 +123,37 @@ const symrefHead = (capabilities: ReadonlySet<string>): string | null => {
 const authorization = (token: string | undefined): Record<string, string> =>
   token === undefined ? {} : { authorization: `Bearer ${token}` };
 
-const advertisement = Effect.fn("Fetch.advertisement")(
+export const advertisement = Effect.fn("Fetch.advertisement")(
   (
     url: string,
     options?: { readonly token?: string | undefined; readonly authorize?: Authorize | undefined },
   ) =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const target = `${url}/info/refs?service=git-upload-pack`;
         const response = await fetchAuthorized(
           target,
-          { headers: authorization(options?.token) },
+          { headers: authorization(options?.token), signal },
           { operation: operationOf("GET", target), commands: [] },
           options?.authorize,
         );
         if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
-        return advertisedRefs(response.body);
+        const advertised = await advertisedRefs(response.body);
+        // Follow discovery's final repository URL for every later round, as
+        // Git does: an old repository location may redirect only discovery.
+        const resolved = new URL(response.url || target);
+        let base = url;
+        if (resolved.pathname.endsWith("/info/refs")) {
+          resolved.pathname = resolved.pathname.slice(0, -"/info/refs".length);
+          resolved.search = "";
+          resolved.hash = "";
+          base = resolved.href.replace(/\/$/, "");
+        }
+        return {
+          ...advertised,
+          url: base,
+          token: new URL(base).origin === new URL(url).origin ? options?.token : undefined,
+        };
       },
       catch: (cause) => unreachable(String(cause)),
     }),
@@ -156,7 +178,7 @@ const lsRefsV2 = Effect.fn("Fetch.lsRefsV2")(
     authorize?: Authorize,
   ) =>
     Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const lines = [
           pktLine("command=ls-refs\n"),
           "0001",
@@ -176,6 +198,7 @@ const lsRefsV2 = Effect.fn("Fetch.lsRefsV2")(
               ...authorization(token),
             },
             body: lines,
+            signal,
           },
           { operation: "git-upload-pack", commands: [] },
           authorize,
@@ -283,6 +306,7 @@ const negotiation = (input: {
   readonly haves: ReadonlyArray<Oid>;
   readonly done: boolean;
   readonly depth?: number | undefined;
+  readonly shallow?: ReadonlyArray<Oid> | undefined;
   /** Requested on the first `want`, space-separated after the oid. */
   readonly capabilities: ReadonlyArray<string>;
 }): Uint8Array<ArrayBuffer> =>
@@ -295,6 +319,7 @@ const negotiation = (input: {
           }\n`,
         ),
       ),
+      ...(input.shallow ?? []).map((oid) => pktLine(`shallow ${oid}\n`)),
       ...(input.depth === undefined ? [] : [pktLine(`deepen ${input.depth}\n`)]),
       "0000",
       ...input.haves.map((oid) => pktLine(`have ${oid}\n`)),
@@ -307,6 +332,7 @@ const uploadPack = async (
   url: string,
   token: string | undefined,
   body: Uint8Array<ArrayBuffer>,
+  signal: AbortSignal,
   authorize?: Authorize,
 ): Promise<AsyncIterable<Uint8Array>> => {
   const response = await fetchAuthorized(
@@ -318,6 +344,7 @@ const uploadPack = async (
         ...authorization(token),
       },
       body,
+      signal,
     },
     { operation: "git-upload-pack", commands: [] },
     authorize,
@@ -432,11 +459,15 @@ const prelude = async (
   return {
     lines,
     rest: (async function* () {
-      if (head.length > 0) yield head;
-      for (;;) {
-        const next = await iterator.next();
-        if (next.done === true) return;
-        yield next.value;
+      try {
+        if (head.length > 0) yield head;
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done === true) return;
+          yield next.value;
+        }
+      } finally {
+        await iterator.return?.();
       }
     })(),
   };
@@ -477,17 +508,27 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
   readonly haves: ReadonlyArray<Oid>;
   readonly capabilities: ReadonlyArray<string>;
   readonly authorize?: Authorize | undefined;
+  readonly shallow: ReadonlyArray<Oid>;
+  readonly depth: number | undefined;
 }) {
   const { authorize, capabilities, haves, token, url, wants } = input;
   let offered = 0;
   while (offered < haves.length) {
     const next = Math.min(offered + HAVES_PER_ROUND, haves.length);
     const stop = yield* Effect.tryPromise({
-      try: async () => {
+      try: async (signal) => {
         const body = await uploadPack(
           url,
           token,
-          negotiation({ wants, haves: haves.slice(0, next), done: false, capabilities }),
+          negotiation({
+            wants,
+            haves: haves.slice(0, next),
+            done: false,
+            capabilities,
+            shallow: input.shallow,
+            depth: input.depth,
+          }),
+          signal,
           authorize,
         );
         const { lines } = await prelude(body);
@@ -512,43 +553,72 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
  * line where a server that recognised several haves sends several, which
  * feeds the remaining acknowledgments to the pack parser as pack bytes.
  *
- * `depth` becomes a `deepen` line; the resulting `shallow` boundary lines
- * arrive in the prelude and are consumed with the acknowledgments, since the
- * callers keep no shallow list to record them in.
+ * Boundary changes accompany the body. Callers persist them only after the
+ * complete pack is unpacked, before publishing any refs that need them.
+ * The caller must consume the returned body within the owning Effect scope.
  */
-export const requestPack = Effect.fn("Fetch.requestPack")(
-  (input: {
-    readonly url: string;
-    readonly token?: string | undefined;
-    readonly wants: ReadonlyArray<Oid>;
-    readonly haves: ReadonlyArray<Oid>;
-    readonly depth?: number | undefined;
-    readonly capabilities?: ReadonlyArray<string> | undefined;
-    readonly authorize?: Authorize | undefined;
-  }) =>
-    Effect.tryPromise({
-      try: async () => {
-        const body = await uploadPack(
-          input.url,
-          input.token,
-          // The one place `undefined` becomes "request nothing": callers like
-          // `server/Sync.ts` fetch in a single done round and never negotiate
-          // capabilities at all.
-          negotiation({
-            wants: input.wants,
-            haves: input.haves,
-            done: true,
-            depth: input.depth,
-            capabilities: input.capabilities ?? [],
-          }),
-          input.authorize,
-        );
-        const { rest } = await prelude(body);
-        return rest;
-      },
-      catch: (cause) => unreachable(String(cause)),
-    }),
-);
+export const requestPack = Effect.fn("Fetch.requestPack")(function* (input: {
+  readonly url: string;
+  readonly token?: string | undefined;
+  readonly wants: ReadonlyArray<Oid>;
+  readonly haves: ReadonlyArray<Oid>;
+  readonly depth?: number | undefined;
+  readonly shallow?: ReadonlyArray<Oid> | undefined;
+  readonly capabilities?: ReadonlyArray<string> | undefined;
+  readonly authorize?: Authorize | undefined;
+}) {
+  const controller = yield* Effect.acquireRelease(
+    Effect.sync(() => new AbortController()),
+    (controller) => Effect.sync(() => controller.abort()),
+  );
+  const response = yield* Effect.tryPromise({
+    try: async () => {
+      const body = await uploadPack(
+        input.url,
+        input.token,
+        // The one place `undefined` becomes "request nothing": callers like
+        // `server/Sync.ts` fetch in a single done round and never negotiate
+        // capabilities at all.
+        negotiation({
+          wants: input.wants,
+          haves: input.haves,
+          done: true,
+          depth: input.depth,
+          shallow: input.shallow,
+          capabilities: input.capabilities ?? [],
+        }),
+        controller.signal,
+        input.authorize,
+      );
+      return await prelude(body);
+    },
+    catch: (cause) => unreachable(String(cause)),
+  });
+  return {
+    shallow: response.lines
+      .filter((line) => line.startsWith("shallow "))
+      .map((line) => line.slice(8))
+      .filter(isOid),
+    unshallow: response.lines
+      .filter((line) => line.startsWith("unshallow "))
+      .map((line) => line.slice(10))
+      .filter(isOid),
+    [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+      const iterator = response.rest[Symbol.asyncIterator]();
+      return {
+        next: () => iterator.next(),
+        return: async () => {
+          // Async generators queue `return` behind a pending `next`. Abort
+          // first so interruption cannot deadlock waiting for network data.
+          controller.abort();
+          return iterator.return === undefined
+            ? { done: true as const, value: undefined }
+            : iterator.return();
+        },
+      };
+    },
+  };
+});
 
 /**
  * Fetch everything reachable from the remote's branches (or one `branch`)
@@ -558,6 +628,9 @@ export const requestPack = Effect.fn("Fetch.requestPack")(
 export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (options: {
   readonly url: string;
   readonly branch?: string | undefined;
+  readonly depth?: number | undefined;
+  /** With no branch or refspecs, select the remote's advertised default branch. */
+  readonly defaultBranchOnly?: boolean | undefined;
   readonly token?: string | undefined;
   readonly stores: FetchStores;
   /**
@@ -572,9 +645,34 @@ export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (opt
   /** How to answer a `Hub-SSH-v1` challenge; absent, a 401 stays a 401. */
   readonly authorize?: Authorize | undefined;
 }): Effect.fn.Return<FetchResult, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> {
-  const { authorize, branch, stores, token, url } = options;
-  const advertised = yield* advertisement(url, { token, authorize });
+  const { authorize, stores } = options;
+  if (options.depth !== undefined && (!Number.isSafeInteger(options.depth) || options.depth < 1)) {
+    return yield* new Invalid({ field: "depth", reason: "depth must be a positive safe integer" });
+  }
+  const advertised = yield* advertisement(options.url, { token: options.token, authorize });
+  const { token, url } = advertised;
   const capabilities = requestedCapabilities(advertised.capabilities);
+  const head = advertised.refs.find((ref) => ref.name === "HEAD")?.oid;
+  const named = symrefHead(advertised.capabilities);
+  const stated = named !== null && named.startsWith("refs/heads/") ? named.slice(11) : null;
+  const chooseDefault =
+    options.defaultBranchOnly === true &&
+    options.branch === undefined &&
+    options.refspecs === undefined;
+  let branch = options.branch;
+  if (chooseDefault) {
+    branch =
+      stated ??
+      advertised.refs
+        .find((ref) => ref.name.startsWith("refs/heads/") && ref.oid === head)
+        ?.name.slice(11);
+    if (branch === undefined && advertised.refs.length > 0) {
+      return yield* new Invalid({
+        field: "branch",
+        reason: "remote does not advertise a default branch",
+      });
+    }
+  }
 
   const specs =
     options.refspecs ??
@@ -587,8 +685,6 @@ export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (opt
             destination: `refs/heads/${branch}`,
           },
         ]);
-
-  const head = advertised.refs.find((ref) => ref.name === "HEAD")?.oid;
 
   // Refspecs that reach into a namespace the v0 advertisement withholds
   // need a second, explicit ask. Anything already advertised wins, so a ref
@@ -615,28 +711,31 @@ export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (opt
     // ref name, so writing it is a name no store will accept and no client
     // asked for.
     if (ref.name === "HEAD" || ref.name.endsWith("^{}")) continue;
-    const resolved = Refspec.resolve(specs, ref.name);
-    if (resolved === null) continue;
-    // One update per *destination*, not per source. Two refspecs can name
-    // the same local ref from different remote ones, and both updates then
-    // go into a single `apply` batch judged against the value the ref held
-    // before either — so the store takes both, the second silently wins,
-    // and nothing is reported as rejected. Whichever the caller listed
-    // first is the one that lands, which is the rule a refspec list already
-    // implies.
-    if (picked.some((held) => held.destination === resolved.destination)) continue;
-    picked.push({
-      name: ref.name,
-      oid: ref.oid,
-      destination: resolved.destination,
-      force: resolved.spec.force,
-    });
+    for (const spec of specs) {
+      const resolved = Refspec.resolve([spec], ref.name);
+      if (resolved === null) continue;
+      // One update per *destination*, not per source. Two refspecs can name
+      // the same local ref from different remote ones, and both updates then
+      // go into a single `apply` batch judged against the value the ref held
+      // before either — so the store takes both, the second silently wins,
+      // and nothing is reported as rejected. Whichever the caller listed
+      // first is the one that lands, which is the rule a refspec list already
+      // implies.
+      if (picked.some((held) => held.destination === resolved.destination)) continue;
+      picked.push({
+        name: ref.name,
+        oid: ref.oid,
+        destination: resolved.destination,
+        force: resolved.spec.force,
+      });
+    }
   }
   if (picked.length === 0) {
-    if (branch !== undefined) {
+    if (options.branch !== undefined) {
       return yield* new Invalid({ field: "branch", reason: `remote has no branch '${branch}'` });
     }
-    return { refs: [], rejected: [], defaultBranch: undefined };
+    // An unborn HEAD still names the branch for the clone's first commit.
+    return { refs: [], rejected: [], defaultBranch: stated ?? undefined };
   }
 
   const wants = [...new Set(picked.map((ref) => ref.oid))];
@@ -644,20 +743,39 @@ export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (opt
   // Empty target, empty offer: the clone case sends `done` straight away
   // rather than a round that could only say "I have nothing".
   const haves = yield* localHaves(stores);
-  const offered = yield* negotiate({ url, token, wants, haves, capabilities, authorize });
-
-  const packBody = yield* requestPack({
+  const shallow = [...(yield* stores.refs.shallow)];
+  const offered = yield* negotiate({
     url,
     token,
     wants,
-    haves: haves.slice(0, offered),
+    haves,
     capabilities,
     authorize,
+    shallow,
+    depth: options.depth,
   });
 
-  yield* Pack.unpack(
-    Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),
-  ).pipe(Effect.provideService(ObjectStoreTag, stores.objects));
+  yield* Effect.scoped(
+    Effect.gen(function* () {
+      const packBody = yield* requestPack({
+        url,
+        token,
+        wants,
+        haves: haves.slice(0, offered),
+        capabilities,
+        authorize,
+        shallow,
+        depth: options.depth,
+      });
+      yield* Pack.unpack(
+        Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),
+      ).pipe(Effect.provideService(ObjectStoreTag, stores.objects));
+      yield* stores.refs.updateShallow({
+        add: [...advertised.shallow, ...packBody.shallow],
+        remove: packBody.unshallow,
+      });
+    }),
+  );
 
   // A branch this repository already has is only moved when the move keeps
   // its commits: `git fetch` refuses a non-fast-forward without `--force`,
@@ -689,17 +807,24 @@ export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (opt
         continue;
       }
     }
-    updates.push({ name: ref.destination, value: ref.oid, reason: "fetch" });
+    updates.push({ name: ref.destination, value: ref.oid, expected: current, reason: "fetch" });
   }
-  yield* stores.refs.apply(updates);
+  const applied = yield* stores.refs.apply(updates);
+  const accepted = new Set(applied.filter((result) => result.applied).map((result) => result.name));
+  for (const update of updates) {
+    if (!accepted.has(update.name) && update.value !== null)
+      rejected.push({ name: update.name, oid: update.value });
+  }
 
   // What the remote said, and only then what its oids suggest: a server too
   // old to advertise the symref, or one this client reached through a proxy
   // that dropped the capability line, still gets an answer.
-  const named = symrefHead(advertised.capabilities);
-  const stated = named !== null && named.startsWith("refs/heads/") ? named.slice(11) : null;
   const guessed = picked
     .find((ref) => ref.name.startsWith("refs/heads/") && ref.oid === head)
     ?.name.slice("refs/heads/".length);
-  return { refs: updates, rejected, defaultBranch: branch ?? stated ?? guessed };
+  return {
+    refs: updates.filter((update) => accepted.has(update.name)),
+    rejected,
+    defaultBranch: branch ?? stated ?? guessed,
+  };
 });

@@ -15,7 +15,7 @@ export interface InvocationInput {
 
 export type ParsedInvocation =
   | { readonly _tag: "Invocation"; readonly invocation: GitInvocationState }
-  | { readonly _tag: "InvalidInvocation"; readonly message: string };
+  | { readonly _tag: "InvalidInvocation"; readonly message: string; readonly exitCode?: 128 };
 
 type OptionValue =
   | { readonly _tag: "Value"; readonly value: string; readonly next: number }
@@ -33,13 +33,26 @@ const fromEnvironment = (environment: InvocationInput["environment"], name: stri
   return value === undefined || value === "" ? undefined : value;
 };
 
+const absolutePath = (cwd: string, value: string): string =>
+  path.isAbsolute(value) ? value : `${cwd}${path.sep}${value}`;
+
+/** Existing selectors follow symlinks; missing paths remain intact for `init` or diagnostics. */
+const selectorPath = (cwd: string, value: string): string => {
+  const absolute = absolutePath(cwd, value);
+  try {
+    return fs.realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
+};
+
 /**
  * Consume the Git global options that precede a command.
  *
  * The returned `argv` starts with the command, which lets Effect CLI continue
- * to own command-local parsing. Paths are resolved at the point Git would see
- * them, so repeated `-C` options compose rather than all resolving from the
- * original process directory.
+ * to own command-local parsing. Repeated `-C` options compose. Explicit
+ * repository/work-tree paths resolve after all directory changes; `--bare`
+ * supplies the directory at that option only when no Git directory is set.
  */
 export const parseInvocation = (input: InvocationInput): ParsedInvocation => {
   let bare = false;
@@ -58,26 +71,47 @@ export const parseInvocation = (input: InvocationInput): ParsedInvocation => {
     if (argument === "-C") {
       const value = optionValue(input.argv, index, "-C");
       if (value._tag === "InvalidInvocation") return value;
-      cwd = path.resolve(cwd, value.value);
+      if (value.value !== "") {
+        try {
+          // Keep the components intact for the OS: resolving `link/..`
+          // lexically selects the link's parent instead of its target's.
+          const candidate = absolutePath(cwd, value.value);
+          const resolved = fs.realpathSync.native(candidate);
+          if (!fs.statSync(resolved).isDirectory()) {
+            return {
+              _tag: "InvalidInvocation",
+              message: `cannot change to '${value.value}': Not a directory`,
+              exitCode: 128,
+            };
+          }
+          cwd = resolved;
+        } catch (cause) {
+          return {
+            _tag: "InvalidInvocation",
+            message: `cannot change to '${value.value}': ${cause instanceof Error ? cause.message : String(cause)}`,
+            exitCode: 128,
+          };
+        }
+      }
       index = value.next;
       continue;
     }
     if (argument === "--git-dir" || argument === "--work-tree" || argument === "-c") {
       const value = optionValue(input.argv, index, argument);
       if (value._tag === "InvalidInvocation") return value;
-      if (argument === "--git-dir") gitDir = path.resolve(cwd, value.value);
-      else if (argument === "--work-tree") workTree = path.resolve(cwd, value.value);
+      if (argument === "--git-dir") gitDir = value.value;
+      else if (argument === "--work-tree") workTree = value.value;
       else config = [...config, value.value];
       index = value.next;
       continue;
     }
     if (argument.startsWith("--git-dir=")) {
-      gitDir = path.resolve(cwd, argument.slice("--git-dir=".length));
+      gitDir = argument.slice("--git-dir=".length);
       index++;
       continue;
     }
     if (argument.startsWith("--work-tree=")) {
-      workTree = path.resolve(cwd, argument.slice("--work-tree=".length));
+      workTree = argument.slice("--work-tree=".length);
       index++;
       continue;
     }
@@ -88,6 +122,7 @@ export const parseInvocation = (input: InvocationInput): ParsedInvocation => {
     }
     if (argument === "--bare") {
       bare = true;
+      gitDir ??= fromEnvironment(input.environment, "GIT_DIR") ?? cwd;
       index++;
       continue;
     }
@@ -99,19 +134,15 @@ export const parseInvocation = (input: InvocationInput): ParsedInvocation => {
     break;
   }
 
-  const environmentGitDir = fromEnvironment(input.environment, "GIT_DIR");
-  const environmentWorkTree = fromEnvironment(input.environment, "GIT_WORK_TREE");
+  gitDir ??= fromEnvironment(input.environment, "GIT_DIR");
+  workTree ??= fromEnvironment(input.environment, "GIT_WORK_TREE");
   return {
     _tag: "Invocation",
     invocation: {
       argv: input.argv.slice(index),
       cwd,
-      gitDir:
-        gitDir ??
-        (environmentGitDir === undefined ? undefined : path.resolve(cwd, environmentGitDir)),
-      workTree:
-        workTree ??
-        (environmentWorkTree === undefined ? undefined : path.resolve(cwd, environmentWorkTree)),
+      gitDir: gitDir === undefined ? undefined : selectorPath(cwd, gitDir),
+      workTree: workTree === undefined ? undefined : selectorPath(cwd, workTree),
       config,
       bare,
       noPager,
@@ -270,22 +301,36 @@ export const discoverRepository = Effect.fn("cli.GitCompat.discoverRepository")(
   (invocation: GitInvocationState) =>
     Effect.sync(() => {
       if (invocation.gitDir !== undefined) {
+        const selected = absolutePath(invocation.cwd, invocation.gitDir);
+        if (!directory(selected)) return null;
         return {
-          gitDir: path.resolve(invocation.cwd, invocation.gitDir),
+          gitDir: selectorPath(invocation.cwd, invocation.gitDir),
           workTree: invocation.bare ? null : (invocation.workTree ?? invocation.cwd),
         } satisfies RepositoryLocation;
       }
 
-      let current = invocation.workTree ?? invocation.cwd;
+      // A work-tree override selects files, not the repository that owns the
+      // index. Git still discovers metadata from the invocation directory.
+      let current = invocation.cwd;
       for (;;) {
         const dotGit = path.join(current, ".git");
         if (directory(dotGit))
-          return { gitDir: dotGit, workTree: invocation.bare ? null : current };
+          return {
+            gitDir: dotGit,
+            workTree: invocation.bare ? null : (invocation.workTree ?? current),
+          };
         const redirected = gitDirFromFile(dotGit);
         if (redirected !== null) {
-          return { gitDir: redirected, workTree: invocation.bare ? null : current };
+          return {
+            gitDir: redirected,
+            workTree: invocation.bare ? null : (invocation.workTree ?? current),
+          };
         }
-        if (bareRepository(current)) return { gitDir: current, workTree: null };
+        if (bareRepository(current))
+          return {
+            gitDir: current,
+            workTree: invocation.bare ? null : (invocation.workTree ?? null),
+          };
 
         const parent = path.dirname(current);
         if (parent === current) return null;

@@ -21,6 +21,22 @@ import type { Oid } from "./Store.ts";
 /** Each commit in the walked set, mapped to the parents it named. */
 export type Parents = ReadonlyMap<Oid, ReadonlyArray<Oid>>;
 
+/** Candidates with no other candidate descending from them, in input order. */
+export const maximal = (parents: Parents, candidates: ReadonlyArray<Oid>): ReadonlyArray<Oid> => {
+  // Walk the union once, including joins and noncandidate records. Keeping
+  // only a running winner can revive an older answer after its successor
+  // loses a concurrent tie: causality must eliminate candidates first.
+  const ancestors = new Set<Oid>();
+  const pending = candidates.flatMap((commit) => parents.get(commit) ?? []);
+  while (pending.length > 0) {
+    const commit = pending.pop()!;
+    if (ancestors.has(commit)) continue;
+    ancestors.add(commit);
+    for (const parent of parents.get(commit) ?? []) pending.push(parent);
+  }
+  return candidates.filter((commit) => !ancestors.has(commit));
+};
+
 /**
  * Every commit reachable from `head`, stopping before `boundary`.
  *
@@ -79,7 +95,7 @@ export const reachable = Effect.fn("Dag.reachable")(function* (
       continue;
     }
 
-    const commit = yield* repository.readCommit(oid);
+    const commit = yield* repository.readHistoryCommit(oid);
     parents.set(oid, commit.parents);
     for (const parent of commit.parents) {
       if (parent !== boundary && !parents.has(parent)) pending.push(parent);

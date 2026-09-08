@@ -19,12 +19,12 @@
  *
  * The first rule is what collapses a merge-heavy history down to the commits
  * a reader is looking for, and it is why this walks the graph itself rather
- * than reusing `Repository.log`, which follows first parents only.
+ * than simply filtering `Repository.log`.
  */
 import { Effect, Stream } from "effect";
 
 import type { ObjectNotFound, StorageFailure } from "./Error.ts";
-import { Repository } from "./Repository.ts";
+import { commitAt, Repository } from "./Repository.ts";
 import type { Oid } from "./Store.ts";
 
 export interface PathChange {
@@ -45,58 +45,70 @@ export const forPath = (
   path: string,
   options?: { readonly limit?: number },
 ): Stream.Stream<PathChange, ObjectNotFound | StorageFailure, Repository> =>
-  Stream.unfold(
-    { pending: [from], seen: new Set<Oid>() },
-    Effect.fn("History.step")(function* (state: {
-      readonly pending: ReadonlyArray<Oid>;
-      readonly seen: Set<Oid>;
-    }) {
+  Stream.unwrap(
+    Effect.gen(function* () {
       const repository = yield* Repository;
+      const start = yield* commitAt(repository, from);
+      return Stream.unfold(
+        { pending: [start], seen: new Set<Oid>() },
+        Effect.fn("History.step")(function* (state: {
+          readonly pending: ReadonlyArray<Oid>;
+          readonly seen: Set<Oid>;
+        }) {
+          /** The blob a commit has at `path`, or `null` if it has none. */
+          const blobAt = Effect.fn("History.blobAt")(function* (oid: Oid) {
+            const commit = yield* repository.readHistoryCommit(oid);
+            const found = yield* repository.findPath(commit.tree, path);
+            return {
+              commit,
+              blob: found?.oid ?? null,
+              mode: found == null ? null : Number.parseInt(found.mode, 8),
+            };
+          });
 
-      /** The blob a commit has at `path`, or `null` if it has none. */
-      const blobAt = Effect.fn("History.blobAt")(function* (oid: Oid) {
-        const commit = yield* repository.readCommit(oid);
-        const found = yield* repository.findPath(commit.tree, path);
-        return { commit, blob: found?.oid ?? null };
-      });
+          let pending = [...state.pending];
 
-      let pending = [...state.pending];
+          while (pending.length > 0) {
+            const oid = pending.shift()!;
+            if (state.seen.has(oid)) continue;
+            state.seen.add(oid);
 
-      while (pending.length > 0) {
-        const oid = pending.shift()!;
-        if (state.seen.has(oid)) continue;
-        state.seen.add(oid);
+            const here = yield* blobAt(oid);
 
-        const here = yield* blobAt(oid);
+            // A root commit has no parent to be treesame to, so it is reported
+            // exactly when the path exists in it.
+            if (here.commit.parents.length === 0) {
+              if (here.blob === null) continue;
+              return [
+                { oid, message: here.commit.message, blob: here.blob },
+                { pending, seen: state.seen },
+              ] as const;
+            }
 
-        // A root commit has no parent to be treesame to, so it is reported
-        // exactly when the path exists in it.
-        if (here.commit.parents.length === 0) {
-          if (here.blob === null) continue;
-          return [
-            { oid, message: here.commit.message, blob: here.blob },
-            { pending, seen: state.seen },
-          ] as const;
-        }
+            const parents = yield* Effect.forEach(here.commit.parents, (parent) =>
+              blobAt(parent).pipe(
+                Effect.map((read) => ({ oid: parent, blob: read.blob, mode: read.mode })),
+              ),
+            );
 
-        const parents = yield* Effect.forEach(here.commit.parents, (parent) =>
-          blobAt(parent).pipe(Effect.map((read) => ({ oid: parent, blob: read.blob }))),
-        );
+            const treesame = parents.find(
+              (parent) => parent.blob === here.blob && parent.mode === here.mode,
+            );
+            if (treesame !== undefined) {
+              pending = [...pending, treesame.oid];
+              continue;
+            }
 
-        const treesame = parents.find((parent) => parent.blob === here.blob);
-        if (treesame !== undefined) {
-          pending = [...pending, treesame.oid];
-          continue;
-        }
+            pending = [...pending, ...parents.map((parent) => parent.oid)];
+            return [
+              { oid, message: here.commit.message, blob: here.blob },
+              { pending, seen: state.seen },
+            ] as const;
+          }
 
-        pending = [...pending, ...parents.map((parent) => parent.oid)];
-        return [
-          { oid, message: here.commit.message, blob: here.blob },
-          { pending, seen: state.seen },
-        ] as const;
-      }
-
-      return undefined;
+          return undefined;
+        }),
+      );
     }),
   ).pipe(
     options?.limit === undefined

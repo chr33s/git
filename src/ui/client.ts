@@ -23,6 +23,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { AtomHttpApi } from "effect/unstable/reactivity";
 
 import { api } from "../server/Api.ts";
+import { repositoryClient } from "../client/Url.ts";
 
 /**
  * Where the API lives, read from the page exactly as `api.ts` reads it:
@@ -66,4 +67,5 @@ export class GitPlusApi extends AtomHttpApi.Service<GitPlusApi>()("GitPlusApi", 
     Layer.provide(Layer.succeed(FetchHttpClient.Fetch)(challengedFetch)),
   ),
   baseUrl: apiBase(),
+  transformClient: repositoryClient,
 }) {}

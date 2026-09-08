@@ -23,7 +23,7 @@ import {
 } from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
-import { type GitError, statusOf, StorageFailure } from "../git/Error.ts";
+import { type GitError, statusOf } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
@@ -36,6 +36,7 @@ import * as LfsCore from "../server/Lfs.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Protocol from "../server/Protocol.ts";
 import * as Snapshot from "../server/Snapshot.ts";
+import * as SnapshotPublisher from "../server/SnapshotPublisher.ts";
 import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
 import * as Sending from "../server/Sending.ts";
@@ -250,81 +251,9 @@ export default Repo.make(
        * written, it is removed instead: readers then fall back to this
        * Durable Object, which is always right. Degraded, but never wrong.
        */
-      const snapshots = new Map<string, Snapshot.Published>();
-      const republish = (repo: string): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          // After an eviction the in-memory cache is empty but the published
-          // snapshot is not: re-reading it keeps the next entry's delta
-          // honest and carries the readability verdict across restarts
-          // instead of re-projecting the trust log on the first write.
-          let previous = snapshots.get(repo);
-          if (previous === undefined) {
-            const held = yield* Effect.promise(() =>
-              r2
-                .get(Snapshot.keyOf(repo))
-                .then(async (object) =>
-                  object === null ? null : new Uint8Array(await object.arrayBuffer()),
-                )
-                .catch((): Uint8Array | null => null),
-            );
-            if (held !== null) previous = Snapshot.decode(held) ?? undefined;
-          }
-          const captured = yield* Snapshot.capture(previous);
-          if (previous !== undefined && Snapshot.same(previous, captured)) return;
-
-          // The journal entry first, the `latest` pointer second — the same
-          // pack-before-index ordering the pack store keeps: what a reader
-          // can find is never ahead of what the record explains. The
-          // sequence counter lives in this Durable Object's storage, which
-          // is exactly the single-writer state a monotonic counter wants.
-          const seqKey = `snapshot-seq:${repo}`;
-          const seq =
-            ((yield* Effect.tryPromise({
-              try: () => state.raw.storage.get<number>(seqKey),
-              catch: (cause) => new StorageFailure({ operation: "snapshot", path: seqKey, cause }),
-            })) ?? 0) + 1;
-          const entry = Snapshot.entryOf(seq, captured, previous);
-          yield* Effect.tryPromise({
-            try: async () => {
-              await r2.put(Snapshot.journalKeyOf(repo, seq), Snapshot.encodeJournal(entry));
-              await state.raw.storage.put(seqKey, seq);
-            },
-            catch: (cause) =>
-              new StorageFailure({
-                operation: "snapshot",
-                path: Snapshot.journalKeyOf(repo, seq),
-                cause,
-              }),
-          });
-          // Retention is one keyed delete — the entry that just left the
-          // window — never a listing; a missing key is already gone.
-          if (seq > Snapshot.RETAIN) {
-            yield* Effect.tryPromise({
-              try: () => r2.delete(Snapshot.journalKeyOf(repo, seq - Snapshot.RETAIN)),
-              catch: (cause) => new StorageFailure({ operation: "snapshot", path: seqKey, cause }),
-            }).pipe(Effect.ignore);
-          }
-
-          yield* Effect.tryPromise({
-            try: () => r2.put(Snapshot.keyOf(repo), Snapshot.encode(captured)),
-            catch: (cause) =>
-              new StorageFailure({ operation: "snapshot", path: Snapshot.keyOf(repo), cause }),
-          });
-          snapshots.set(repo, captured);
-        }).pipe(
-          Effect.provide(live(repo)),
-          Effect.catch(() =>
-            Effect.gen(function* () {
-              snapshots.delete(repo);
-              yield* Effect.tryPromise({
-                try: () => r2.delete(Snapshot.keyOf(repo)),
-                catch: (cause) =>
-                  new StorageFailure({ operation: "snapshot", path: Snapshot.keyOf(repo), cause }),
-              }).pipe(Effect.ignore);
-            }),
-          ),
-          Effect.ignoreCause,
-        );
+      const republish = yield* SnapshotPublisher.make((repo, previous) =>
+        Snapshot.capture(previous).pipe(Effect.provide(live(repo))),
+      ).pipe(Effect.provide(SnapshotPublisher.cloudflare(r2, state.raw.storage)));
 
       /**
        * Whether writes to repositories with no genesis are served.

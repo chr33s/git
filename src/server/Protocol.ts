@@ -28,6 +28,7 @@ import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
 import * as Auth from "./Auth.ts";
 import * as Policy from "./Policy.ts";
+import * as Shallow from "./Shallow.ts";
 import * as Redaction from "../hub/Redaction.ts";
 import { checkRefAddress, checkRefName, isOid, type Oid, type RefUpdate } from "../git/Store.ts";
 
@@ -278,6 +279,7 @@ export const advertise = Effect.fn("Protocol.advertise")(function* (
       parts.push(pkt(index === 0 ? `${line}\0${caps}\n` : `${line}\n`));
     });
   }
+  for (const oid of yield* repository.shallow) parts.push(pkt(`shallow ${oid}\n`));
   parts.push(FLUSH);
 
   return new Response(concat(parts), {
@@ -676,7 +678,7 @@ const fetchV2 = (request: V2Request): Effect.Effect<Response, GitError, Reposito
     const plan = yield* planFor({ wants, haves, clientShallow, depth, since, notRefs });
 
     const prelude: Uint8Array[] = [...acks];
-    if (deepening) {
+    if (deepening || plan.shallow.length > 0 || plan.unshallow.length > 0) {
       prelude.push(pkt("shallow-info\n"));
       for (const oid of plan.shallow) prelude.push(pkt(`shallow ${oid}\n`));
       for (const oid of plan.unshallow) prelude.push(pkt(`unshallow ${oid}\n`));
@@ -715,6 +717,7 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
   const reader = new PktReader(body(request));
 
   const updates: RefUpdate[] = [];
+  const clientShallow: Oid[] = [];
   /** Commands refused by name, reported per-ref rather than as a failure. */
   const refused: ReceiveResult[] = [];
   let atomic = false;
@@ -727,6 +730,15 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
       if (item === "eof" || item === "flush" || item === "delim" || item === "end") return;
       const line = text(item);
 
+      // Shallow declarations precede the first command and do not consume
+      // its capability slot. They describe the sender, not new receiver roots.
+      if (first && line.startsWith("shallow ")) {
+        const oid = line.slice(8);
+        if (!isOid(oid))
+          throw new Invalid({ field: "receive-pack", reason: "invalid shallow boundary" });
+        clientShallow.push(oid);
+        continue;
+      }
       let command = line;
       if (first) {
         const nul = line.indexOf("\0");
@@ -912,9 +924,14 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
       });
     }
   }
-  const allowed = (refusal === null ? updates : updates.filter((u) => u.value === null)).filter(
+  let allowed = (refusal === null ? updates : updates.filter((u) => u.value === null)).filter(
     (update) => !uncovered.has(update.name),
   );
+
+  const shallowRefusals =
+    clientShallow.length === 0 || writes.length === 0 || refusal !== null
+      ? null
+      : yield* Shallow.prepare(clientShallow);
 
   // The object phase. A pack arrives whenever any command creates or moves
   // a ref; a delete-only push sends none, and a push whose creates were all
@@ -960,6 +977,24 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
         return respond(allFailed(updates, "missing necessary objects"), "ok");
       }
     }
+  }
+
+  if (shallowRefusals !== null) {
+    const needsBoundary = yield* shallowRefusals(allowed);
+    if (atomic && needsBoundary.size > 0) {
+      return respond(allFailed(updates, "shallow update not allowed"), "ok");
+    }
+    for (const update of allowed) {
+      if (needsBoundary.has(update.name))
+        refused.push({
+          ref: update.name,
+          from: update.expected ?? null,
+          to: null,
+          ok: false,
+          reason: "shallow update not allowed",
+        });
+    }
+    allowed = allowed.filter((update) => !needsBoundary.has(update.name));
   }
 
   // Every mutable ref update converges here. The guard has already said who

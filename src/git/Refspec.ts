@@ -23,6 +23,7 @@
 import { Result } from "effect";
 
 import { Invalid } from "./Error.ts";
+import { checkRefName } from "./Store.ts";
 
 export interface Refspec {
   /**
@@ -84,12 +85,14 @@ export const map = (spec: Refspec, ref: string): string | null => {
   const prefix = spec.source.slice(0, star);
   const suffix = spec.source.slice(star + 1);
   if (!ref.startsWith(prefix) || !ref.endsWith(suffix)) return null;
-  // A ref that is exactly the prefix and suffix matched an empty `*`, which
-  // would produce a destination with an empty path component.
+  // The literal prefix and suffix must not overlap.
   if (ref.length < prefix.length + suffix.length) return null;
 
   const middle = ref.slice(prefix.length, ref.length - suffix.length);
-  if (middle === "") return null;
+  // Git permits an empty wildcard in a partial component (main* matches
+  // main). Reject only a source whose empty match leaves an invalid ref,
+  // such as refs/heads/ for refs/heads/*.
+  if (middle === "" && checkRefName(ref) !== null) return null;
   // A replacer function, not a replacement string: `String.replace` expands
   // `$&`, `` $` ``, `$'` and `$$` inside the second argument, and the second
   // argument here is part of a ref name the remote chose. `refs/heads/x$`y`

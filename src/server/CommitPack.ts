@@ -34,7 +34,12 @@
  */
 import { Effect, Predicate, Schema, Stream } from "effect";
 
-import type { Invalid, ObjectNotFound, RefConflict, StorageFailure } from "../git/Error.ts";
+import {
+  type Invalid,
+  type ObjectNotFound,
+  RefConflict,
+  type StorageFailure,
+} from "../git/Error.ts";
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
@@ -259,6 +264,12 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
           if (refusal !== null) return yield* bad(refusal);
 
           const tip = yield* rejected(repository.resolve(ref));
+          // The expectation must describe the tree we build from as well as
+          // the final ref swap. Otherwise a later ref change can make an
+          // initially mismatched expectation pass with the wrong base tree.
+          if (expected !== undefined && expected !== tip) {
+            return yield* rejected(Effect.fail(new RefConflict({ ref, expected, actual: tip })));
+          }
           state.tree =
             tip === null ? EMPTY_TREE_OID : (yield* rejected(repository.readCommit(tip))).tree;
 

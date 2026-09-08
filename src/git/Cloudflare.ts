@@ -315,6 +315,9 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
         Effect.try({ try: () => readSync(name), catch: failure("read", name) });
 
       const headKey = `HEAD:${repo}`;
+      sql.exec(
+        `CREATE TABLE IF NOT EXISTS shallow (repo TEXT NOT NULL, oid TEXT NOT NULL, PRIMARY KEY (repo, oid))`,
+      );
       const head = Effect.tryPromise({
         try: () => storage.get<string>(headKey),
         catch: failure("read", headKey),
@@ -322,6 +325,28 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
 
       return RefStore.of(
         tracedRefStore("Cloudflare", {
+          shallow: Effect.try({
+            try: () =>
+              new Set(
+                sql
+                  .exec<{ oid: string }>("SELECT oid FROM shallow WHERE repo = ?", repo)
+                  .toArray()
+                  .map((row) => row.oid)
+                  .filter(isOid),
+              ),
+            catch: failure("read", `shallow:${repo}`),
+          }),
+          updateShallow: ({ add, remove }) =>
+            Effect.try({
+              try: () =>
+                storage.transactionSync(() => {
+                  for (const oid of remove)
+                    sql.exec("DELETE FROM shallow WHERE repo = ? AND oid = ?", repo, oid);
+                  for (const oid of add)
+                    sql.exec("INSERT OR IGNORE INTO shallow (repo, oid) VALUES (?, ?)", repo, oid);
+                }),
+              catch: failure("write", `shallow:${repo}`),
+            }),
           read,
           resolve: (name) =>
             Effect.gen(function* () {

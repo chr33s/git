@@ -103,6 +103,37 @@ describe("cli identity and social graph", () => {
       const found = await cli(["social", "find", "--root", root, alice, "alice"]);
       assert.match(found, /https:\/\/code\.example\/alice/);
       assert.match(found, /1 path\(s\)/);
+
+      await cli([
+        "social",
+        "attest",
+        "--root",
+        root,
+        "--key",
+        bobKey,
+        "--url",
+        `https://code.example/bob/${alice}`,
+        bob,
+        "bob",
+      ]);
+      const searched = await cli(["social", "find", "--root", root, "code.example/alice", "alice"]);
+      assert.equal(searched, found, "a URL query must exclude unrelated repositories");
+      assert.equal(await cli(["social", "find", "--root", root, "does-not-exist", "alice"]), "");
+      assert.equal(await cli(["social", "find", "--root", root, alice, "alice"]), found);
+
+      await cli([
+        "social",
+        "follow",
+        "--root",
+        root,
+        "--key",
+        aliceKey,
+        "--name",
+        "self-alias",
+        alice,
+        "alice",
+      ]);
+      assert.equal(await cli(["social", "find", "--root", root, "self-alias", "alice"]), found);
     }),
   );
 

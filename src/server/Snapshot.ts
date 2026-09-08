@@ -57,6 +57,8 @@ export const Published = Schema.Struct({
   anonymousRead: Schema.Boolean,
   /** Every ref, oid-valued; the protocol's own hiding rules apply at serve time. */
   refs: Schema.Array(SnapshotRef),
+  /** Absent in older snapshots, which describe complete histories. */
+  shallow: Schema.optional(Schema.Array(Schema.String)),
 });
 export type Published = (typeof Published)["Type"];
 
@@ -81,6 +83,7 @@ export const decode = (bytes: Uint8Array): Published | null => {
 export const same = (left: Published, right: Published): boolean =>
   left.head === right.head &&
   left.anonymousRead === right.anonymousRead &&
+  (left.shallow ?? []).join("\n") === (right.shallow ?? []).join("\n") &&
   left.refs.length === right.refs.length &&
   left.refs.every(
     (ref, index) => right.refs[index]?.name === ref.name && right.refs[index]?.oid === ref.oid,
@@ -129,6 +132,7 @@ export const capture = Effect.fn("Snapshot.capture")(function* (previous?: Publi
     head,
     anonymousRead,
     refs,
+    shallow: [...(yield* repository.shallow)].sort(),
   };
 });
 
@@ -153,6 +157,8 @@ export const refStore = (snapshot: Published): Layer.Layer<RefStore> => {
     if (isOid(ref.oid)) byName.set(ref.name, ref.oid);
   }
   return Layer.succeed(RefStore)({
+    shallow: Effect.sync(() => new Set((snapshot.shallow ?? []).filter(isOid))),
+    updateShallow: () => readOnly("updateShallow"),
     read: (name) => Effect.succeed(byName.get(name) ?? null),
     resolve: (name) => Effect.succeed(byName.get(name === "HEAD" ? snapshot.head : name) ?? null),
     list: (prefix) =>
@@ -294,6 +300,18 @@ export const restore = Effect.fn("Snapshot.restore")(function* (
   const updates = entry.refs.flatMap((ref) =>
     isOid(ref.oid) ? [{ name: ref.name, value: ref.oid, reason: "journal restore" }] : [],
   );
-  yield* refs.apply(updates);
+  const results = yield* refs.apply(updates, { atomic: true });
+  const refused = results.find((result) => !result.applied);
+  if (refused !== undefined) {
+    return yield* new StorageFailure({
+      operation: "snapshot.restore",
+      path: refused.name,
+      cause: refused.reason ?? "ref update was refused",
+    });
+  }
+  yield* refs.updateShallow({
+    add: (entry.shallow ?? []).filter(isOid),
+    remove: [...(yield* refs.shallow)],
+  });
   yield* refs.setHead(entry.head);
 });

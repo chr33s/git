@@ -1228,7 +1228,7 @@ const operationOf = (request: Request): string => {
     : `${request.method} ${new URL(request.url).pathname}`;
 };
 
-const permitsCapability = (member: Member, capability: string): boolean =>
+const permitsCapability = (member: Pick<Member, "capabilities">, capability: string): boolean =>
   permits(member.capabilities, capability);
 
 /**
@@ -1252,6 +1252,12 @@ export const anonymousReadAllowed = (projection: Projection): boolean => {
     if (permitsCapability(member, "repo.read")) return false;
   }
   for (const member of projection.former.values()) {
+    if (permitsCapability(member, "repo.read")) return false;
+  }
+  for (const member of projection.principals.values()) {
+    if (permitsCapability(member, "repo.read")) return false;
+  }
+  for (const member of projection.formerPrincipals.values()) {
     if (permitsCapability(member, "repo.read")) return false;
   }
   return true;

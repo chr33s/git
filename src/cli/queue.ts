@@ -731,15 +731,13 @@ const pass = Effect.fn("queue.pass")(function* (input: {
     );
   }
 
-  const from = yield* repository.resolve(target);
-  // Two readings of "what the branch is now", and they differ for a symbolic
-  // ref. Merging wants the commit it resolves to; the compare-and-swap wants
-  // exactly what the store compares against, which is the ref's own value. The
-  // same split `Policy.evaluate` and `Event.appendTo` both make, and for the
-  // same reason: handing over the resolved oid names a value nobody wrote, so
-  // the swap can never match and every pass records another `queue.reset` on a
-  // ref that only grows.
+  // A direct ref's value is both the build base and the write expectation.
+  // Reading the base first and its expectation later can attach a concurrent
+  // writer's newer value to a candidate that was built from the older one.
+  // A symbolic ref has no raw oid, so only that case needs resolution; its
+  // expectation remains the raw null the store compares against.
   const held = yield* repository.readRef(target);
+  const from = held ?? (yield* repository.resolve(target));
 
   const trust = yield* projectTrust(genesis);
   const print = yield* fingerprint(input.key.publicKey);
@@ -788,18 +786,55 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   const unbuilt: Array<{ readonly pr: string; readonly reason: string }> = [];
   const refused: Array<{ readonly pr: string; readonly reason: string }> = [];
   const built: Array<{ readonly pr: string; readonly commit: Oid }> = [];
+  const settledEntries = new Set<string>();
+  const observedEntries = new Map(state.entries.map((entry) => [entry.pr, entry]));
   const record = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     input.dryRun ? Effect.void : Effect.asVoid(effect);
+
+  const leaveObserved = Effect.fn("queue.leaveObserved")(function* (
+    pr: string,
+    reason: Queue.QueueLeft["reason"],
+  ) {
+    const entry = observedEntries.get(pr);
+    if (entry === undefined) return false;
+    const commit = yield* Queue.leave({
+      repo: genesis.repoId,
+      queue: state.queue,
+      pr,
+      reason,
+      key: input.key,
+      entered: entry.entered,
+    });
+    if (commit === null) return false;
+    settledEntries.add(pr);
+    return true;
+  });
+
+  const mergeObserved = Effect.fn("queue.mergeObserved")(
+    function* (pr: string, head: Oid, mergeCommit: Oid) {
+      const expected = yield* repository.readRef(Event.refOf(pr));
+      const current = yield* HubProjection.project(genesis, trust, pr);
+      if (current.head !== head || current.state !== "open") return false;
+      yield* PullRequest.merged({
+        repo: genesis.repoId,
+        pr,
+        head,
+        mergeCommit,
+        key: input.key,
+        expected,
+      });
+      return true;
+    },
+    Effect.retry({ times: 3, while: (error) => error._tag === "RefConflict" }),
+  );
 
   // A dry run records nothing, so nothing was dropped — said separately for the
   // reason `wouldLand` is said separately from `landed`: a caller gating on
   // `dropped` would otherwise read a rehearsal as an eviction that happened.
   const drop = (pr: string, reason: Queue.QueueLeft["reason"]) =>
     Effect.gen(function* () {
-      (input.dryRun ? wouldDrop : dropped).push({ pr, reason });
-      yield* record(
-        Queue.leave({ repo: genesis.repoId, queue: state.queue, pr, reason, key: input.key }),
-      );
+      if (input.dryRun) wouldDrop.push({ pr, reason });
+      else if (yield* leaveObserved(pr, reason)) dropped.push({ pr, reason });
     });
 
   // A queue with nothing under it is a queue with nothing to do, and a branch
@@ -869,6 +904,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   ];
   const hubBefore = new Map<string, Oid | null>();
   for (const ref of hubRefs) hubBefore.set(ref, yield* repository.resolve(ref));
+  const candidateTips = new Map(hubBefore);
 
   const recorded = state.entries.flatMap((entry) =>
     entry.candidate === null ? [] : [entry.candidate],
@@ -995,15 +1031,15 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       // `queue.left` beside it, and the second attempt must finish the job
       // rather than say the same thing twice.
       if (pullRequest.state === "open") {
-        yield* record(
-          PullRequest.merged({
-            repo: genesis.repoId,
-            pr: entry.pr,
-            head: entry.head,
-            mergeCommit: yield* carriedBy(entry.head, from, rules.queueDepth),
-            key: input.key,
-          }),
-        );
+        if (
+          !input.dryRun &&
+          !(yield* mergeObserved(
+            entry.pr,
+            entry.head,
+            yield* carriedBy(entry.head, from, rules.queueDepth),
+          ))
+        )
+          continue;
       }
       yield* drop(entry.pr, "landed");
       continue;
@@ -1177,6 +1213,7 @@ const pass = Effect.fn("queue.pass")(function* (input: {
       entry.candidate.branch === branch;
     if (!input.dryRun) {
       yield* repository.setRef({ name: branch, to: candidate });
+      candidateTips.set(branch, candidate);
       if (!unchanged) {
         yield* Queue.candidate({
           repo: genesis.repoId,
@@ -1274,20 +1311,9 @@ const pass = Effect.fn("queue.pass")(function* (input: {
         // Naming the revision the pull request actually proposed, which is what
         // hub.md §10 requires of a merge event; the branch holds the candidate,
         // whose second parent *is* that revision, so ancestry says the rest.
-        yield* PullRequest.merged({
-          repo: genesis.repoId,
-          pr: step.pr,
-          head: step.head,
-          mergeCommit: step.commit,
-          key: input.key,
-        });
-        yield* Queue.leave({
-          repo: genesis.repoId,
-          queue: state.queue,
-          pr: step.pr,
-          reason: "landed",
-          key: input.key,
-        });
+        if (yield* mergeObserved(step.pr, step.head, step.commit)) {
+          yield* leaveObserved(step.pr, "landed");
+        }
         landed.push(step.pr);
       }
     } else {
@@ -1420,8 +1446,11 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   // happened to keep under the same prefix. A pull request this pass landed or
   // dropped is the one thing it knows is finished.
   if (!input.dryRun) {
-    for (const pr of [...landed, ...dropped.map((entry) => entry.pr)]) {
-      yield* repository.deleteRef(branchOf(pr));
+    for (const pr of settledEntries) {
+      const branch = branchOf(pr);
+      const expected = candidateTips.get(branch) ?? null;
+      // Cleanup owns the observed candidate, never a replacement published by another writer.
+      if (expected !== null) yield* repository.deleteRef(branch, expected);
     }
   }
 

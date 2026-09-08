@@ -322,6 +322,30 @@ describe("Archive.handle", () => {
       }).pipe(Effect.provide(repository)),
     );
 
+  for (const revision of ["branch", "commit"] as const) {
+    it.effect(
+      `accepts a ${revision === "branch" ? "short branch name" : "literal commit ID"}`,
+      () =>
+        Effect.gen(function* () {
+          yield* seed;
+          const git = yield* GitRepository.Repository;
+          const head = yield* git.resolve("HEAD");
+          assert.ok(head !== null);
+          const ref = revision === "branch" ? "main" : head;
+          const response = yield* Archive.handle(
+            new Request(`http://host/repo/archive/source.zip?ref=${ref}`),
+          );
+          assert.equal(response?.status, 200);
+          assert.ok(response !== null);
+          const zip = readZip(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())));
+          assert.equal(
+            decoder.decode(zip.entries.find((entry) => entry.name === "source/readme.md")?.content),
+            "hello\n",
+          );
+        }).pipe(Effect.provide(repository)),
+    );
+  }
+
   it.effect("declines anything that is not an archive request", () =>
     Effect.promise(async () => {
       assert.equal(await answer("http://host/repo/info/refs"), null);

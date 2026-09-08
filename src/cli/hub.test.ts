@@ -644,6 +644,22 @@ describe("cli hub", () => {
           "enable brought trust refs in",
         );
 
+        const beforeDisable = await refsOf();
+        const heldLock = path.join(root, "clone", "refs", "meta", "policy.lock");
+        await fs.writeFile(heldLock, "", { flag: "wx" });
+        try {
+          await assert.rejects(
+            cli(["hub", "disable", "--root", root, "--as", "clone", url]),
+            "a refused deletion must fail the command",
+          );
+          assert.deepEqual(
+            await refsOf(),
+            beforeDisable,
+            "a refused disable must preserve the ref batch",
+          );
+        } finally {
+          await fs.unlink(heldLock);
+        }
         const disabled = await cli(["hub", "disable", "--root", root, "--as", "clone", url]);
         assert.match(disabled, /hub\/trust ref\(s\) removed/);
 

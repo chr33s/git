@@ -139,7 +139,7 @@ export const packed = (
         const context = yield* Effect.context<never>();
 
         return yield* Effect.tryPromise({
-          try: () =>
+          try: (signal) =>
             readAt(
               located.handle.source,
               located.entry.offset,
@@ -161,9 +161,11 @@ export const packed = (
                     Effect.map((object): RawObject | null => object),
                     Effect.catchTag("ObjectNotFound", () => fromPack(base, at)),
                   ),
+                  { signal },
                 ),
               depth,
               packs.inflate,
+              signal,
             ),
           catch: failed("packs.read", located.handle.name),
         });

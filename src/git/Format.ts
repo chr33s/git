@@ -105,6 +105,15 @@ export const isTree = (mode: string): boolean => Number.parseInt(mode, 8) === 0o
 /** A gitlink names a commit in another repository — content this one lacks. */
 export const isGitlink = (mode: string): boolean => Number.parseInt(mode, 8) === 0o160000;
 
+/**
+ * A symlink entry's blob holds a path, not content.
+ *
+ * git's grep skips these when searching a tree — a link's target is a name the
+ * repository resolves, and reporting a hit inside it reports a match in a file
+ * that does not contain the text.
+ */
+export const isSymlink = (mode: string): boolean => Number.parseInt(mode, 8) === 0o120000;
+
 /** The modes a non-directory entry may carry, spelled as git spells them. */
 const FILE_MODES = new Set<number>([0o100644, 0o100755, 0o120000, 0o160000]);
 

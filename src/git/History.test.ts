@@ -73,6 +73,39 @@ describe.skipIf(!hasGit)("path history", () => {
       .split("\n")
       .filter((line) => line !== "");
 
+  it.effect("includes mode changes and isolates repeated stream executions", () =>
+    Effect.promise(async () => {
+      write("a", "base");
+      commit("base");
+      git("update-index", "--chmod=+x", "a");
+      git("commit", "-qm", "executable");
+      const head = git("rev-parse", "HEAD").trim();
+      assert.deepEqual(await ours(head, "a"), theirs(head, "a"));
+      // SAFETY: head is the full object id printed by git rev-parse.
+      const stream = forPath(head as Oid, "a");
+      const results = await Effect.runPromise(
+        Effect.gen(function* () {
+          const first = yield* Stream.runCollect(stream);
+          const second = yield* Stream.runCollect(stream);
+          const concurrent = yield* Effect.all(
+            [Stream.runCollect(stream), Stream.runCollect(stream)],
+            { concurrency: "unbounded" },
+          );
+          return { first, second, concurrent };
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provideMerge(nodeStores(path.join(root, ".git"))),
+            ),
+          ),
+        ),
+      );
+      assert.deepEqual(results.first, results.second);
+      assert.deepEqual(results.concurrent, [results.first, results.first]);
+    }),
+  );
+
   it.effect("reports only the commits that changed the path", () =>
     Effect.promise(async () => {
       write("a.txt", "1");

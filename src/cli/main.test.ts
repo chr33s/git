@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { describe, it } from "@effect/vitest";
 import { promisify } from "node:util";
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Schema } from "effect";
 
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -77,11 +77,18 @@ const seed = (directory: string, message: string) =>
 
 describe("cli", () => {
   it.effect("exposes identity and social-web command groups", () =>
-    Effect.promise(async () => {
-      const help = await cli(["--help"]);
+    Effect.gen(function* () {
+      const help = yield* Effect.promise(() => cli(["--help"]));
       assert.match(help, /\bid\b.*Stable principal identity/s);
       assert.match(help, /\bsocial\b.*Social graph/s);
-      assert.match(await cli(["--version"]), /git\+ v0\.1\.0/);
+      const manifest = yield* Schema.decodeEffect(
+        Schema.fromJsonString(Schema.Struct({ version: Schema.String })),
+      )(
+        yield* Effect.promise(() =>
+          fs.readFile(new URL("../../package.json", import.meta.url), "utf8"),
+        ),
+      );
+      assert.equal(yield* Effect.promise(() => cli(["--version"])), `git+ v${manifest.version}\n`);
     }),
   );
 
@@ -135,6 +142,13 @@ describe("cli", () => {
       try {
         const initOut = await cli(["init", "--root", root, "basic"]);
         assert.match(initOut, /Initialized empty repository/);
+        const empty = await execFileAsync("git", [
+          "-C",
+          path.join(root, "basic"),
+          "rev-parse",
+          "--is-bare-repository",
+        ]);
+        assert.equal(empty.stdout.trim(), "true");
 
         const first = await seed(path.join(root, "basic"), "first");
         const second = await seed(path.join(root, "basic"), "second");
@@ -264,6 +278,85 @@ describe("cli", () => {
         assert.ok(failed !== null, "a missing key must fail rather than mint something");
         assert.match(`${failed.stderr ?? ""}${failed.stdout ?? ""}`, /cannot read/);
       } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("creates a Git-readable bare clone when the remote is empty", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-empty-clone-"));
+      const serverRoot = path.join(root, "server");
+      const origin = path.join(serverRoot, "origin");
+      await execFileAsync("git", ["init", "--bare", "-q", "-b", "trunk", origin]);
+      const server = await serve({ root: serverRoot });
+      try {
+        const output = await cli(["clone", "--root", root, `${server.url}/origin`, "empty"]);
+        assert.match(output, /Cloned 0 ref\(s\)/);
+        const directory = path.join(root, "empty");
+        const bare = await execFileAsync("git", [
+          "-C",
+          directory,
+          "rev-parse",
+          "--is-bare-repository",
+        ]);
+        assert.equal(bare.stdout.trim(), "true");
+        const head = await execFileAsync("git", ["-C", directory, "symbolic-ref", "HEAD"]);
+        assert.equal(head.stdout.trim(), "refs/heads/trunk");
+        const refs = await execFileAsync("git", [
+          "-C",
+          directory,
+          "for-each-ref",
+          "--format=%(refname)",
+        ]);
+        assert.equal(refs.stdout.trim(), "");
+      } finally {
+        await server.close();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("says whether an administrative removal removed anything", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-admin-"));
+      const serverRoot = path.join(root, "server");
+      const server = await serve({ root: serverRoot, allowAnonymousWrites: true });
+      try {
+        await seed(path.join(serverRoot, "origin"), "published");
+
+        const added = await cli([
+          "webhook",
+          "add",
+          "--server",
+          server.url,
+          "--secret",
+          "0123456789abcdef",
+          "origin",
+          "https://example.com/hook",
+        ]);
+        // SAFETY: the endpoint's success schema names `id`, and the value is
+        // read back only to address the removal below.
+        const { id } = JSON.parse(added) as { readonly id: string };
+
+        const removed = await cli(["webhook", "rm", "--server", server.url, "origin", id]);
+        assert.match(removed, /^Removed webhook /m);
+        // The same call again removes nothing, and must not read as success.
+        const again = await cli(["webhook", "rm", "--server", server.url, "origin", id]);
+        assert.match(again, /^No such webhook: /m);
+
+        const absent = await cli([
+          "server",
+          "remote",
+          "rm",
+          "--server",
+          server.url,
+          "origin",
+          "never-registered",
+        ]);
+        assert.match(absent, /^No such remote: never-registered$/m);
+      } finally {
+        await server.close();
         await fs.rm(root, { recursive: true, force: true });
       }
     }),
@@ -480,6 +573,91 @@ describe("cli", () => {
     }),
   );
 
+  it.effect("reports failures on stderr, with no internal dump", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-errors-"));
+      try {
+        const run = (args: ReadonlyArray<string>) =>
+          new Promise<{ code: number | null; out: string; err: string }>((resolve, reject) => {
+            const child = spawn("node", [entry, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+            let out = "";
+            let err = "";
+            child.stdout.setEncoding("utf8");
+            child.stderr.setEncoding("utf8");
+            child.stdout.on("data", (chunk: string) => {
+              out += chunk;
+            });
+            child.stderr.on("data", (chunk: string) => {
+              err += chunk;
+            });
+            child.on("error", reject);
+            child.on("close", (code) => resolve({ code, out, err }));
+          });
+
+        // A domain failure: stdout is where several verbs print JSON somebody
+        // parses, so nothing about the failure may land there.
+        const failed = await run(["show", "--root", root, "missing", "HEAD"]);
+        assert.equal(failed.code, 1);
+        assert.equal(failed.out, "");
+        assert.match(failed.err, /^git\+: /m);
+        assert.doesNotMatch(failed.err, /\bat \S+ \(/);
+
+        // A usage mistake: the help, the one-line reason, and nothing else —
+        // the CLI's own `ShowHelp` must not be re-raised as an ordinary error.
+        const misused = await run(["tag", "--root", root]);
+        assert.equal(misused.code, 1);
+        assert.match(misused.out, /USAGE/);
+        assert.doesNotMatch(misused.out + misused.err, /ShowHelp/);
+        assert.doesNotMatch(misused.out + misused.err, /~effect\//);
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("greps content lines only, the way git counts them", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-grep-"));
+      try {
+        const directory = path.join(root, "repo");
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const text = yield* repository.writeBlob(new TextEncoder().encode("one\ntwo\n"));
+            const empty = yield* repository.writeBlob(new Uint8Array(0));
+            const link = yield* repository.writeBlob(new TextEncoder().encode("f.txt"));
+            const tree = yield* repository.writeTree([
+              { mode: "100644", name: "f.txt", oid: text },
+              { mode: "100644", name: "empty.txt", oid: empty },
+              { mode: "120000", name: "link.txt", oid: link },
+            ]);
+            return yield* repository.commit({ branch: "main", tree, message: "seed", author });
+          }).pipe(
+            Effect.provide(
+              GitRepository.layer.pipe(
+                Layer.provide(GitRepository.hooksNoop),
+                Layer.provide(stores(directory)),
+              ),
+            ),
+          ),
+        );
+
+        // `^` accepts the empty string: a blob's final newline must not open a
+        // line past the last, an empty blob has no lines at all, and a symlink
+        // holds a path rather than content — all three as `git grep` reports.
+        const all = await cli(["grep", "--root", root, "repo", "^"]);
+        assert.deepEqual(
+          all.split("\n").filter((line) => line !== ""),
+          ["f.txt:1:one", "f.txt:2:two"],
+        );
+        const target = await cli(["grep", "--root", root, "repo", "f\\.txt"]);
+        assert.equal(target.trim(), "");
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.effect("merges, and exits non-zero when the merge conflicts", () =>
     Effect.promise(async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-merge-"));
@@ -552,6 +730,36 @@ describe("cli", () => {
           "refs/heads/side",
         ]);
         assert.match(resolved, /^merged [0-9a-f]{40}$/m);
+
+        // The same revisions by the names a reader would type: a short branch,
+        // an annotated tag, and a destination that is not spelled out. Every
+        // other verb here resolves those through the shared helpers.
+        await cli(["tag", "--root", root, "--name", "v1", "-m", "release", "repo"]);
+        // From the tag, so the merge below is a real one rather than a
+        // fast-forward: both sides have to be resolved for it to happen.
+        await cli(["branch", "--root", root, "-c", "later", "--base", "refs/heads/side", "repo"]);
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const tree = yield* repository.writeFiles({
+              base: (yield* repository.readCommit((yield* repository.resolve("refs/heads/later"))!))
+                .tree,
+              changes: [{ path: "g.txt", content: new TextEncoder().encode("later\n") }],
+            });
+            yield* repository.commit({ branch: "later", tree, message: "later", author });
+          }).pipe(
+            Effect.provide(
+              GitRepository.layer.pipe(
+                Layer.provide(GitRepository.hooksNoop),
+                Layer.provide(stores(directory)),
+              ),
+            ),
+          ),
+        );
+        const named = await cli(["merge", "--root", root, "--into", "main", "repo", "v1", "later"]);
+        assert.match(named, /^merged [0-9a-f]{40}$/m);
+        const shown = await cli(["show", "--root", root, "repo", "refs/heads/main"]);
+        assert.match(shown, /^Merge later into refs\/heads\/main$/m);
       } finally {
         await fs.rm(root, { recursive: true, force: true });
       }

@@ -7,8 +7,9 @@ import { createHmac } from "node:crypto";
 import * as http from "node:http";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect, Layer, Predicate } from "effect";
-import { FetchHttpClient } from "effect/unstable/http";
+import { Deferred, Effect, Fiber, Layer, Predicate } from "effect";
+import { TestClock } from "effect/testing";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import type { ReceiveResult } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -70,6 +71,48 @@ const results: ReadonlyArray<ReceiveResult> = [
 ];
 
 describe("Webhooks", () => {
+  it.effect("retries a timed-out attempt and gives the next attempt its own timeout", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      let attempts = 0;
+      let interrupted = false;
+      let delivered = false;
+      const client = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          attempts++;
+          if (attempts === 1) {
+            yield* Deferred.succeed(started, undefined);
+            return yield* Effect.never.pipe(
+              Effect.onInterrupt(() =>
+                Effect.sync(() => {
+                  interrupted = true;
+                }),
+              ),
+            );
+          }
+          yield* Effect.sleep("5 seconds");
+          delivered = true;
+          return HttpClientResponse.fromWeb(request, new Response());
+        }),
+      );
+      const delivery = yield* deliver(results, {
+        timeout: "10000 millis",
+        baseDelay: "0 millis",
+        retries: 1,
+      }).pipe(
+        Effect.provideService(HttpClient.HttpClient, client),
+        Effect.provide(subscribersOf([{ id: "1", url: "https://fixture/hook", secret: "secret" }])),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust("15 seconds");
+      yield* Fiber.join(delivery);
+      assert.equal(interrupted, true, "the timed-out attempt is canceled");
+      assert.equal(attempts, 2, "a timeout spends one attempt, not the entire delivery");
+      assert.equal(delivered, true, "the second attempt gets a fresh timeout");
+    }),
+  );
+
   let hook: Awaited<ReturnType<typeof receiver>>;
 
   beforeAll(async () => {

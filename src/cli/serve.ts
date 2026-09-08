@@ -74,10 +74,13 @@ export const serveCommand = Command.make(
           reason: `${assets} holds no built UI; run \`npm run build:ui\` first, or point --ui-dir at one`,
         });
       }
-      const server = yield* Effect.promise(() =>
-        import("../host/Node.ts").then(({ serve }) =>
-          serve({ ...options, allowAnonymousWrites: open, wake, ui: assets }),
+      const server = yield* Effect.acquireRelease(
+        Effect.promise(() =>
+          import("../host/Node.ts").then(({ serve }) =>
+            serve({ ...options, allowAnonymousWrites: open, wake, ui: assets }),
+          ),
         ),
+        (server) => Effect.promise(() => server.close({ force: true })),
       );
       yield* Console.log(
         `git smart-HTTP server on ${server.url}, repositories under ${options.root}/`,
@@ -102,5 +105,5 @@ export const serveCommand = Command.make(
           "membership restricts, so restricting nothing restricts nobody",
       );
       return yield* Effect.never;
-    }),
+    }).pipe(Effect.scoped),
 );

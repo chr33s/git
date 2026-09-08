@@ -66,7 +66,14 @@ export const resolveRev = Effect.fn("cli.resolveRev")(function* (
   rev: string,
 ) {
   if (isOid(rev)) return rev;
-  for (const candidate of [rev, `refs/heads/${rev}`, `refs/tags/${rev}`]) {
+  for (const candidate of [
+    rev,
+    `refs/${rev}`,
+    `refs/tags/${rev}`,
+    `refs/heads/${rev}`,
+    `refs/remotes/${rev}`,
+    `refs/remotes/${rev}/HEAD`,
+  ]) {
     const found = yield* repository.resolve(candidate);
     if (found !== null) return found;
   }

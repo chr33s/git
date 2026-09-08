@@ -26,7 +26,7 @@
 import { Effect } from "effect";
 
 import { Invalid } from "./Error.ts";
-import { Repository } from "./Repository.ts";
+import { commitAt, Repository } from "./Repository.ts";
 import type { Oid } from "./Store.ts";
 
 export interface BisectStep {
@@ -64,7 +64,7 @@ const reachableFrom = Effect.fn("Bisect.reachableFrom")(function* (roots: Readon
   while (pending.length > 0) {
     const oid = pending.pop()!;
     if (parentsOf.has(oid)) continue;
-    const parents = (yield* repository.readCommit(oid)).parents;
+    const parents = (yield* repository.readHistoryCommit(oid)).parents;
     parentsOf.set(oid, parents);
     for (const parent of parents) {
       if (!parentsOf.has(parent)) pending.push(parent);
@@ -85,16 +85,19 @@ export const next = Effect.fn("Bisect.next")(function* (input: {
   readonly bad: Oid;
   readonly good: ReadonlyArray<Oid>;
 }) {
-  const known = new Set((yield* reachableFrom(input.good)).keys());
+  const repository = yield* Repository;
+  const bad = yield* commitAt(repository, input.bad);
+  const good = yield* Effect.forEach(input.good, (oid) => commitAt(repository, oid));
+  const known = new Set((yield* reachableFrom(good)).keys());
 
-  if (known.has(input.bad)) {
+  if (known.has(bad)) {
     return yield* new Invalid({
       field: "bad",
       reason: "the bad commit is reachable from a good one, so one of them is mislabelled",
     });
   }
 
-  const graph = yield* reachableFrom([input.bad]);
+  const graph = yield* reachableFrom([bad]);
   const inRange = (oid: Oid) => graph.has(oid) && !known.has(oid);
 
   const suspects = [...graph.keys()].filter(inRange);
@@ -112,7 +115,7 @@ export const next = Effect.fn("Bisect.next")(function* (input: {
   const ordered: Array<Oid> = [];
   const started = new Set<Oid>();
   const finished = new Set<Oid>();
-  const stack: Array<Oid> = [input.bad];
+  const stack: Array<Oid> = [bad];
 
   while (stack.length > 0) {
     const oid = stack[stack.length - 1]!;
@@ -133,44 +136,41 @@ export const next = Effect.fn("Bisect.next")(function* (input: {
   }
 
   /**
-   * How many suspects each one can reach, itself included.
-   *
-   * Counted with one reusable bitmap rather than a `Set` per suspect: keeping
-   * every set alive is memory quadratic in the range, so bisecting two
-   * releases twenty thousand commits apart allocated gigabytes and aborted.
-   * A bitmap per commit is one bit instead of one entry, and the whole table
-   * is `n²/8` bytes — 50 MB at that size, walked once.
+   * Linear chains inherit their parent's count. Only merges need a union
+   * walk, deduplicated with one reusable visitation array. A bitmap for every
+   * commit cost n²/8 bytes even on a straight line: 200 MB for 40,000 suspects,
+   * more than a Worker's entire memory budget before counting the graph.
    */
   const index = new Map<Oid, number>(ordered.map((oid, at) => [oid, at]));
-  const words = Math.ceil(ordered.length / 32);
-  const reach = new Uint32Array(ordered.length * words);
+  const parents = ordered.map((oid) =>
+    (graph.get(oid) ?? []).flatMap((parent) => {
+      const at = index.get(parent);
+      return at === undefined ? [] : [at];
+    }),
+  );
+  const counts = new Uint32Array(ordered.length);
+  const visited = new Uint32Array(ordered.length);
+  const pending: number[] = [];
 
   for (let at = 0; at < ordered.length; at++) {
-    const oid = ordered[at]!;
-    const row = at * words;
-    reach[row + (at >> 5)]! |= 1 << (at & 31);
-    for (const parent of graph.get(oid) ?? []) {
-      const from = index.get(parent);
-      if (from === undefined) continue;
-      const source = from * words;
-      for (let word = 0; word < words; word++) reach[row + word]! |= reach[source + word]!;
+    const preceding = parents[at]!;
+    if (preceding.length <= 1) {
+      counts[at] = 1 + (preceding[0] === undefined ? 0 : counts[preceding[0]]!);
+      continue;
     }
-  }
 
-  const reachCount = (oid: Oid): number => {
-    const at = index.get(oid);
-    if (at === undefined) return 0;
-    const row = at * words;
-    let total = 0;
-    for (let word = 0; word < words; word++) {
-      let bits = reach[row + word]!;
-      while (bits !== 0) {
-        bits &= bits - 1;
-        total++;
-      }
+    let count = 0;
+    const generation = at + 1;
+    pending.push(at);
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (visited[current] === generation) continue;
+      visited[current] = generation;
+      count++;
+      for (const parent of parents[current]!) pending.push(parent);
     }
-    return total;
-  };
+    counts[at] = count;
+  }
 
   // Testing a commit resolves it and everything on one side of it: bad means
   // the fault is at or below it, good means it is above. The best candidate
@@ -179,7 +179,7 @@ export const next = Effect.fn("Bisect.next")(function* (input: {
   let best = suspects[0]!;
   let bestScore = -1;
   for (const oid of suspects) {
-    const below = reachCount(oid) || 1;
+    const below = counts[index.get(oid)!]!;
     const score = Math.min(below, suspects.length - below);
     if (score > bestScore) {
       bestScore = score;

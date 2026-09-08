@@ -10,9 +10,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as net from "node:net";
 import { describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer, Predicate } from "effect";
 
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
@@ -32,6 +33,174 @@ const author = {
 };
 
 describe("Wake", () => {
+  it.live("does not replay cursor ancestors reached through a newly merged branch", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "wake-join-"));
+      try {
+        const fixture = await enableHub(root, ["hub.create-pr", "hub.comment"]);
+        const layer = GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provide(stores(root)),
+        );
+        await fs.writeFile(
+          path.join(root, "wake.json"),
+          JSON.stringify({
+            rules: [
+              {
+                ref: "refs/hub/pr/*",
+                on: ["*"],
+                run: [process.execPath, "-e", ""],
+              },
+            ],
+          }),
+        );
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* GitRepository.Repository;
+            const head = yield* repository.commit({
+              branch: "main",
+              tree: EMPTY_TREE_OID,
+              message: "base",
+              author,
+            });
+            const opened = yield* PullRequest.open({
+              repo: fixture.repoId,
+              title: "wake",
+              base: "refs/heads/main",
+              head,
+              key: fixture.member,
+            });
+            const ref = Event.refOf(opened.pr);
+            const initial = yield* repository.resolve(ref);
+            assert.ok(initial !== null);
+            const comment = (body: string) =>
+              PullRequest.comment({
+                repo: fixture.repoId,
+                pr: opened.pr,
+                body,
+                key: fixture.member,
+              });
+            yield* comment("first side");
+            const left = yield* repository.resolve(ref);
+            assert.ok(left !== null);
+            // Build the second replica's side from the same opening, then
+            // restore the local side before its initial wake pass.
+            yield* repository.setRef({ name: ref, to: initial });
+            yield* comment("second side");
+            const right = yield* repository.resolve(ref);
+            assert.ok(right !== null);
+            yield* repository.setRef({ name: ref, to: left });
+            assert.equal((yield* Wake.dispatch({ directory: root, repo: "fixture" })).fired, 2);
+            yield* Event.join(opened.pr, [left, right]);
+            const joined = yield* Wake.dispatch({ directory: root, repo: "fixture" });
+            assert.deepEqual(
+              joined,
+              { fired: 1, failed: 0 },
+              "only the newly arrived comment wakes",
+            );
+            assert.equal((yield* Wake.dispatch({ directory: root, repo: "fixture" })).fired, 0);
+          }).pipe(Effect.provide(layer)),
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  for (const wrapped of [false, true]) {
+    it.live(
+      `stops ${wrapped ? "a rule's subprocess" : "a running rule"} when dispatch is interrupted`,
+      () =>
+        Effect.promise(async () => {
+          const root = await fs.mkdtemp(path.join(os.tmpdir(), "wake-interrupt-"));
+          const started = Promise.withResolvers<ReadonlyArray<number>>();
+          const sockets = new Set<net.Socket>();
+          const disconnected = Promise.withResolvers<void>();
+          const server = net.createServer((socket) => {
+            sockets.add(socket);
+            socket.once("data", (bytes) =>
+              started.resolve(bytes.toString().split(",").map(Number)),
+            );
+            socket.once("close", () => disconnected.resolve());
+            socket.on("close", () => sockets.delete(socket));
+          });
+          await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+          const address = server.address();
+          assert.ok(address !== null && !Predicate.isString(address));
+          let pids: ReadonlyArray<number> = [];
+          try {
+            const fixture = await enableHub(root, ["hub.task"]);
+            const layer = GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provide(stores(root)),
+            );
+            await Effect.runPromise(
+              Task.open({ repo: fixture.repoId, title: "wake", key: fixture.member }).pipe(
+                Effect.provide(layer),
+              ),
+            );
+            const worker =
+              "const socket = require('node:net').connect({ host: '127.0.0.1', port: Number(process.argv[1]) }, () => socket.write([process.pid, process.ppid].join(','))); setInterval(() => {}, 1000);";
+            const command = wrapped
+              ? `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(worker)}, process.argv[1]], { stdio: 'inherit' }); setInterval(() => {}, 1000);`
+              : worker;
+            await fs.writeFile(
+              path.join(root, "wake.json"),
+              JSON.stringify({
+                rules: [
+                  {
+                    ref: "refs/hub/task/*",
+                    on: ["task.opened"],
+                    run: [process.execPath, "-e", command, String(address.port)],
+                  },
+                ],
+              }),
+            );
+            const dispatch = Effect.runFork(
+              Wake.dispatch({ directory: root, repo: "fixture" }).pipe(Effect.provide(layer)),
+            );
+            const [workerPid, parentPid] = await started.promise;
+            assert.ok(workerPid !== undefined && workerPid > 0);
+            assert.ok(parentPid !== undefined && parentPid > 0);
+            pids = wrapped ? [workerPid, parentPid] : [workerPid];
+            await Effect.runPromise(Fiber.interrupt(dispatch));
+            await assert.rejects(fs.stat(path.join(root, "wake.cursor.json.lock")), {
+              code: "ENOENT",
+            });
+            assert.throws(
+              () => process.kill(wrapped ? parentPid : workerPid, 0),
+              { code: "ESRCH" },
+              "the rule has exited before interruption finishes",
+            );
+            // The socket belongs to the worker, so a wrapper exiting cannot make
+            // this pass while its child continues doing work. Orphaned children
+            // may briefly remain zombies on Linux, making kill(pid, 0) misleading.
+            await Effect.runPromise(
+              Effect.promise(() => disconnected.promise).pipe(Effect.timeout("2 seconds")),
+            );
+            assert.equal(
+              await fs.stat(path.join(root, "wake.cursor.json")).then(
+                () => true,
+                () => false,
+              ),
+              false,
+            );
+          } finally {
+            for (const pid of pids) {
+              try {
+                process.kill(pid, "SIGKILL");
+              } catch {
+                /* already stopped */
+              }
+            }
+            for (const socket of sockets) socket.destroy();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await fs.rm(root, { recursive: true, force: true });
+          }
+        }),
+    );
+  }
+
   it.effect("keeps the bookmarks a pass earned when another ref cannot be walked", () =>
     Effect.promise(async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "wake-node-"));

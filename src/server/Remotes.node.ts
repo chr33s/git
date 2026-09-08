@@ -15,7 +15,7 @@
 import { Effect, Layer, Option, Schema } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
-import { readRows, writeRows } from "./JsonRows.node.ts";
+import { editRows, readRows, writeRows } from "./JsonRows.node.ts";
 import { decodeSync, duplicate, type Remote, Remotes, type Sync, validate } from "./Remotes.ts";
 
 interface Stored {
@@ -58,42 +58,42 @@ export const file = (location: string): Layer.Layer<Remotes> =>
           try: () => read(location).find((row) => row.name === name) ?? null,
           catch: failed("remotes.get"),
         }),
-      add: (input) =>
+      add: Effect.fn("Remotes.add")((input) =>
         validate(input).pipe(
           Effect.flatMap(() =>
-            // Read and write inside one `try`, so the duplicate check cannot
-            // be separated from the write it guards by anything but this
-            // process's own scheduling — which the hosts serialize per
-            // repository anyway.
             Effect.try({
-              try: () => {
-                const rows = read(location);
-                if (rows.some((row) => row.name === input.name)) throw duplicate(input.name);
-                const remote: Remote = {
-                  name: input.name,
-                  url: input.url,
-                  credential: input.credential ?? null,
-                  key: input.key ?? null,
-                  sync: input.sync ?? null,
-                  createdAt: new Date(),
-                };
-                write(location, [...rows, remote]);
-                return remote;
-              },
+              try: () =>
+                editRows(location, () => {
+                  const rows = read(location);
+                  if (rows.some((row) => row.name === input.name)) throw duplicate(input.name);
+                  const remote: Remote = {
+                    name: input.name,
+                    url: input.url,
+                    credential: input.credential ?? null,
+                    key: input.key ?? null,
+                    sync: input.sync ?? null,
+                    createdAt: new Date(),
+                  };
+                  write(location, [...rows, remote]);
+                  return remote;
+                }),
               catch: (cause) => (Schema.is(Invalid)(cause) ? cause : failed("remotes.add")(cause)),
             }),
           ),
         ),
-      remove: (name) =>
+      ),
+      remove: Effect.fn("Remotes.remove")((name) =>
         Effect.try({
-          try: () => {
-            const rows = read(location);
-            const kept = rows.filter((row) => row.name !== name);
-            if (kept.length === rows.length) return false;
-            write(location, kept);
-            return true;
-          },
+          try: () =>
+            editRows(location, () => {
+              const rows = read(location);
+              const kept = rows.filter((row) => row.name !== name);
+              if (kept.length === rows.length) return false;
+              write(location, kept);
+              return true;
+            }),
           catch: failed("remotes.remove"),
         }),
+      ),
     });
   });
