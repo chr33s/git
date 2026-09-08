@@ -146,7 +146,17 @@ describe.skipIf(!existsSync(chromium.executablePath()))("browser upload bodies",
           assert.ok(writing.length > 0);
           assert.deepEqual(await other.evaluate("UploadReview.fresh()"), writing);
           await live.close();
-          assert.deepEqual(await other.evaluate("UploadReview.fresh()"), []);
+          // The closed tab's Web Lock and pending OPFS writable are torn down
+          // by the browser process after `close` resolves, so the first
+          // upload that follows may still find the file held. Poll: the
+          // contract is that a later upload reclaims it, not the next one.
+          const deadline = Date.now() + 10_000;
+          let remaining = await other.evaluate<string[]>("UploadReview.fresh()");
+          while (remaining.length > 0 && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            remaining = await other.evaluate<string[]>("UploadReview.fresh()");
+          }
+          assert.deepEqual(remaining, []);
         } finally {
           await browser.close();
         }

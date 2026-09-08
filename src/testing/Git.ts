@@ -35,6 +35,15 @@ export const gitEnv: NodeJS.ProcessEnv = {
   GIT_CONFIG_SYSTEM: "/dev/null",
   // Not merely absent: set, so nothing falls back to $HOME/.gitconfig.
   GIT_CONFIG_NOSYSTEM: "1",
+  // The same throwaway identity `gitIn` passes as `-c` flags, for the suites
+  // that spawn `git merge` themselves with only this env. With every config
+  // file pointed at nothing, git falls back to the account's gecos name — set
+  // on a laptop, empty for the CI runner user, where `merge` then dies with
+  // "empty ident name" before it reaches the conflict under test.
+  GIT_AUTHOR_NAME: "T",
+  GIT_AUTHOR_EMAIL: "t@e.com",
+  GIT_COMMITTER_NAME: "T",
+  GIT_COMMITTER_EMAIL: "t@e.com",
 };
 
 /** Whether a `git` binary is on the PATH; suites `describe.skipIf(!hasGit)`. */
