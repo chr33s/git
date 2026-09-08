@@ -8,6 +8,10 @@
  * The interesting part is the durability, which is worth having in one place:
  * `rename(2)` is atomic within a filesystem, so a reader sees the old list or
  * the new one and never a half-written file.
+ * An exclusive `.lock` file spans each read-modify-write operation so that
+ * separate hosts or CLI processes cannot overwrite an acknowledged edit.
+ * Contention fails before reading; the caller can retry. A lock left by a
+ * killed process requires manual removal after confirming its writer exited.
  *
  * Its own `.node` module because it reaches for `node:fs`, and both callers
  * are imported by code that also builds for Workers.
@@ -18,6 +22,21 @@ import * as path from "node:path";
 import { Result, Schema } from "effect";
 
 const Rows = Schema.fromJsonString(Schema.Array(Schema.Unknown));
+
+/** Reserve the file before reading the snapshot an edit will replace. */
+export const editRows = <A>(file: string, edit: () => A): A => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lock = `${file}.lock`;
+  const descriptor = fs.openSync(lock, "wx", 0o600);
+  try {
+    fs.closeSync(descriptor);
+    return edit();
+  } finally {
+    // An existing lock fails at open, outside this finalizer. It belongs to
+    // another writer and must survive the competing operation's failure.
+    fs.unlinkSync(lock);
+  }
+};
 
 /** Rows as they are stored, revived into the shape the caller works in. */
 export const readRows = <Row, Stored>(
@@ -35,7 +54,7 @@ export const readRows = <Row, Stored>(
   return parsed.success.map((row) => revive(row as Stored));
 };
 
-/** Temp-and-rename, so a reader never sees a half-written list. */
+/** Publish inside `editRows`, so readers see a complete old or new list. */
 export const writeRows = <Row, Stored>(
   file: string,
   rows: ReadonlyArray<Row>,
@@ -43,6 +62,10 @@ export const writeRows = <Row, Stored>(
 ): void => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(rows.map(store), null, 2));
-  fs.renameSync(temporary, file);
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(rows.map(store), null, 2));
+    fs.renameSync(temporary, file);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 };

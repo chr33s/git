@@ -28,6 +28,12 @@ const cli = async (args: ReadonlyArray<string>): Promise<string> => {
   return `${result.stdout}${result.stderr}`;
 };
 
+const failing = (args: ReadonlyArray<string>): Promise<string> =>
+  cli(args).then(
+    () => "",
+    (error: { stdout?: string; stderr?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
+  );
+
 const author = {
   name: "Alice",
   email: "alice@example.com",
@@ -120,6 +126,53 @@ describe("cli pr", () => {
       ])
     ).trim();
 
+  it.live("refuses absent pull requests before appending records", () =>
+    Effect.promise(async () => {
+      for (const [verb, flags] of [
+        ["update", ["--head", "topic"]],
+        ["close", []],
+        ["reopen", []],
+        ["review", ["--head", "topic", "--decision", "approve"]],
+        ["dismiss", ["--review", "missing"]],
+        ["comment", ["--body", "A comment"]],
+        ["reply", ["--thread", "missing", "--body", "A reply"]],
+        ["resolve", ["--thread", "missing"]],
+        ["reopen-thread", ["--thread", "missing"]],
+        ["check", ["--head", "topic", "--name", "test", "--status", "success"]],
+        ["merge", []],
+      ] as const) {
+        const pr = `missing-${verb}`;
+        assert.match(
+          await failing(["pr", verb, "--root", root, "--key", key, ...flags, "project", pr]),
+          /no pull request/,
+        );
+        await assert.rejects(fs.readFile(path.join(root, "project", "refs", "hub", "pr", pr)), {
+          code: "ENOENT",
+        });
+      }
+    }),
+  );
+
+  it.live("refuses replies and dismissals naming absent discussions", () =>
+    Effect.promise(async () => {
+      const pr = await openPr();
+      const ref = path.join(root, "project", "refs", "hub", "pr", pr);
+      const before = await fs.readFile(ref, "utf8");
+      for (const [verb, flags] of [
+        ["reply", ["--thread", "missing", "--body", "A reply"]],
+        ["resolve", ["--thread", "missing"]],
+        ["reopen-thread", ["--thread", "missing"]],
+        ["dismiss", ["--review", "missing"]],
+      ] as const) {
+        assert.match(
+          await failing(["pr", verb, "--root", root, "--key", key, ...flags, "project", pr]),
+          /no (thread|review)/,
+        );
+        assert.equal(await fs.readFile(ref, "utf8"), before);
+      }
+    }),
+  );
+
   it.effect("opens, discusses, checks and shows a pull request", () =>
     Effect.promise(async () => {
       const pr = await openPr();
@@ -184,6 +237,51 @@ describe("cli pr", () => {
       await cli(["pr", "resolve", "--root", root, "--key", key, "--thread", thread, "project", pr]);
       const resolved = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
       assert.equal(resolved.threads[0].resolved, true);
+      await cli([
+        "pr",
+        "reply",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--thread",
+        thread,
+        "--body",
+        "Follow-up",
+        "project",
+        pr,
+      ]);
+      await cli([
+        "pr",
+        "reopen-thread",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--thread",
+        thread,
+        "project",
+        pr,
+      ]);
+      await cli([
+        "pr",
+        "review",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--decision",
+        "approve",
+        "project",
+        pr,
+      ]);
+      const reviewed = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
+      assert.equal(reviewed.threads[0].comments.at(-1).body, "Follow-up");
+      assert.equal(reviewed.threads[0].resolved, false);
+      const review = reviewed.reviews[0].id;
+      await cli(["pr", "dismiss", "--root", root, "--key", key, "--review", review, "project", pr]);
+      const dismissed = JSON.parse(await cli(["pr", "show", "--root", root, "project", pr]));
+      assert.equal(dismissed.reviews[0].dismissed, true);
     }),
   );
 

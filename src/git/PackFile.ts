@@ -79,16 +79,23 @@ const corrupt = (reason: string, offset: number) => new PackCorrupt({ reason, of
  * those bytes would work but would double the reads for every small object,
  * which is most of them.
  */
-const windowed = (source: PackSource, start: number, primed: Uint8Array): ByteSource => {
+const windowed = (
+  source: PackSource,
+  start: number,
+  primed: Uint8Array,
+  signal?: AbortSignal,
+): ByteSource => {
   let position = start;
   const pending: Uint8Array[] = primed.length > 0 ? [primed] : [];
 
   return {
     next: async () => {
+      signal?.throwIfAborted();
       const held = pending.shift();
       if (held !== undefined) return held;
       if (position >= source.size) return null;
       const chunk = await source.read(position, Math.min(WINDOW, source.size - position));
+      signal?.throwIfAborted();
       if (chunk.length === 0) return null;
       position += chunk.length;
       return chunk;
@@ -164,6 +171,14 @@ const parseHeader = (bytes: Uint8Array, at: number): Header => {
   return { code, size, length: position };
 };
 
+/** A ref-delta's storage dependency, without inflating either object. */
+export const refDeltaBaseAt = async (source: PackSource, offset: number): Promise<Oid | null> => {
+  if (offset < 0 || offset >= source.size) throw corrupt("offset outside the pack", offset);
+  // A bounded size header plus the twenty-byte base id fits within 64 bytes.
+  const bytes = await source.read(offset, Math.min(64, source.size - offset));
+  return parseHeader(bytes, offset).baseOid ?? null;
+};
+
 /**
  * The object at `offset`, deltas resolved.
  *
@@ -178,13 +193,18 @@ export const readAt = async (
   resolveBase: (oid: Oid, depth: number) => Promise<RawObject | null>,
   depth = 0,
   decode: PackInflate = inflate,
+  // Backends may not cancel an in-flight range, but no later read, inflate,
+  // or delta application should continue after its caller is interrupted.
+  signal?: AbortSignal,
 ): Promise<RawObject> => {
+  signal?.throwIfAborted();
   // A delta chain is bounded in every pack git produces; an unbounded one is
   // a cycle, and following it would hang rather than fail.
   if (depth > 64) throw corrupt("delta chain deeper than 64", offset);
   if (offset < 0 || offset >= source.size) throw corrupt("offset outside the pack", offset);
 
   const window = await source.read(offset, Math.min(WINDOW, source.size - offset));
+  signal?.throwIfAborted();
   const header = parseHeader(window, offset);
 
   let data: Uint8Array;
@@ -194,12 +214,13 @@ export const readAt = async (
     // never was, so a stream that expands past every available byte had
     // nothing to stop it here.
     data = await decode(
-      windowed(source, offset + window.length, window.subarray(header.length)),
+      windowed(source, offset + window.length, window.subarray(header.length), signal),
       header.size + 1,
     );
   } catch (error) {
     throw error instanceof InflateError ? corrupt(error.reason, offset) : error;
   }
+  signal?.throwIfAborted();
 
   if (header.code === OFS_DELTA || header.code === REF_DELTA) {
     // The depth travels with the ref-delta too: resolving one through the
@@ -208,8 +229,9 @@ export const readAt = async (
     // out instead of failing as a corrupt pack.
     const base =
       header.baseOffset !== undefined
-        ? await readAt(source, header.baseOffset, resolveBase, depth + 1, decode)
+        ? await readAt(source, header.baseOffset, resolveBase, depth + 1, decode, signal)
         : await resolveBase(header.baseOid!, depth + 1);
+    signal?.throwIfAborted();
     if (base === null) throw corrupt(`delta base ${header.baseOid} is nowhere`, offset);
 
     const applied = applyDelta(base.data, data);

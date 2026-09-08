@@ -59,6 +59,68 @@ const opened = Effect.fn("test.opened")(function* (target = "refs/heads/main") {
 });
 
 describe("hub Queue", () => {
+  for (const concurrent of ["none", "another entry", "same-head re-entry"]) {
+    it.effect(`settles the observed occurrence with ${concurrent} during append`, () =>
+      Effect.promise(async () => {
+        await scenario(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const { key, queue } = yield* opened();
+            const pr = Event.newId();
+            const head = yield* commitOf("proposal");
+            const entered = yield* Queue.enter({ repo: REPO, queue, pr, head, key });
+            let injected = false;
+            const racing = Repository.of({
+              ...repository,
+              setRef: Effect.fn("test.queue.setRef")(function* (input) {
+                if (!injected && input.name === Queue.refOf(queue)) {
+                  injected = true;
+                  if (concurrent === "same-head re-entry") {
+                    yield* Queue.leave({ repo: REPO, queue, pr, key, reason: "withdrawn" }).pipe(
+                      Effect.provideService(Repository, repository),
+                    );
+                    yield* Queue.enter({ repo: REPO, queue, pr, head, key }).pipe(
+                      Effect.provideService(Repository, repository),
+                    );
+                  } else if (concurrent === "another entry") {
+                    yield* Queue.enter({ repo: REPO, queue, pr: Event.newId(), head, key }).pipe(
+                      Effect.provideService(Repository, repository),
+                    );
+                  }
+                }
+                return yield* repository.setRef(input);
+              }),
+            });
+            const result = yield* Queue.leave({
+              repo: REPO,
+              queue,
+              pr,
+              key,
+              entered,
+              reason: "failed",
+            }).pipe(Effect.provideService(Repository, racing));
+            const current = yield* Queue.project(queue);
+            assert.equal(injected, true);
+            if (concurrent === "same-head re-entry") {
+              assert.equal(result, null);
+              assert.equal(current.entries[0]?.pr, pr);
+              assert.equal(current.entries[0]?.head, head);
+              assert.notEqual(current.entries[0]?.entered, entered);
+              assert.deepEqual(current.left, [{ pr, reason: "withdrawn" }]);
+            } else {
+              assert.notEqual(result, null);
+              assert.equal(
+                current.entries.some((entry) => entry.pr === pr),
+                false,
+              );
+              assert.equal(current.entries.length, concurrent === "another entry" ? 1 : 0);
+            }
+          }),
+        );
+      }),
+    );
+  }
+
   it.effect("records what a queue is for", () =>
     Effect.promise(async () => {
       const state = await scenario(

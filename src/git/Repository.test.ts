@@ -33,6 +33,164 @@ const scenario = <A, E>(effect: Effect.Effect<A, E, Repository | RefStore | Obje
   );
 
 describe("Repository", () => {
+  for (const deleted of [false, true]) {
+    it.live(`commits on the expected parent after a racing ref change (deleted=${deleted})`, () => {
+      let arrival: Oid | null | undefined;
+      const racingRefs = Layer.effect(
+        RefStore,
+        Effect.gen(function* () {
+          const refs = yield* RefStore;
+          return RefStore.of({
+            ...refs,
+            read: Effect.fn("test.moveAfterParentRead")(function* (name) {
+              const parent = yield* refs.read(name);
+              if (name === "refs/heads/main" && arrival !== undefined) {
+                const value = arrival;
+                arrival = undefined;
+                yield* refs.apply([{ name, value }]).pipe(Effect.orDie);
+              }
+              return parent;
+            }),
+          });
+        }),
+      ).pipe(Layer.provideMerge(stores));
+      return Effect.gen(function* () {
+        const repository = yield* Repository;
+        const root = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "root",
+          author: alice,
+        });
+        const pushed = yield* repository.commitTree({
+          tree: EMPTY_TREE_OID,
+          parents: [root],
+          message: "arriving commit",
+          author: alice,
+        });
+        const expected = deleted ? null : pushed;
+        arrival = expected;
+        const head = yield* repository.commit({
+          branch: "main",
+          tree: EMPTY_TREE_OID,
+          message: "after arrival",
+          author: alice,
+          expected,
+        });
+        assert.deepEqual((yield* repository.readCommit(head)).parents, deleted ? [] : [pushed]);
+        assert.equal(yield* repository.resolve("refs/heads/main"), head);
+      }).pipe(
+        Effect.provide(
+          GitRepository.layer.pipe(
+            Layer.provide(GitRepository.hooksNoop),
+            Layer.provide(racingRefs),
+          ),
+        ),
+      );
+    });
+  }
+
+  for (const noFastForward of [false, true]) {
+    it.effect(
+      `preserves a ref update arriving during merge (noFastForward=${noFastForward})`,
+      () => {
+        let arrival: Oid | null = null;
+        const racingRefs = Layer.effect(
+          RefStore,
+          Effect.gen(function* () {
+            const refs = yield* RefStore;
+            return RefStore.of({
+              ...refs,
+              resolve: (name) =>
+                Effect.gen(function* () {
+                  const before = yield* refs.resolve(name);
+                  if (name === "refs/heads/main" && arrival !== null) {
+                    const value = arrival;
+                    arrival = null;
+                    yield* refs.apply([{ name, value }]).pipe(Effect.orDie);
+                  }
+                  return before;
+                }),
+            });
+          }),
+        ).pipe(Layer.provideMerge(stores));
+        return Effect.gen(function* () {
+          const repository = yield* Repository;
+          const root = yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "root",
+            author: alice,
+          });
+          const side = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [root],
+            message: "side",
+            author: alice,
+          });
+          const pushed = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [root],
+            message: "concurrent push",
+            author: alice,
+          });
+          arrival = pushed;
+          const result = yield* repository
+            .merge({
+              ours: "refs/heads/main",
+              theirs: side,
+              into: "refs/heads/main",
+              author: alice,
+              noFastForward,
+            })
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") assert.equal(result.failure._tag, "RefConflict");
+          assert.equal(yield* repository.resolve("refs/heads/main"), pushed);
+        }).pipe(
+          Effect.provide(
+            GitRepository.layer.pipe(
+              Layer.provide(GitRepository.hooksNoop),
+              Layer.provide(racingRefs),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  it.effect("reuses a log stream after complete, partial, and concurrent reads", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "base",
+            author: alice,
+          });
+          const head = yield* repository.commit({
+            branch: "main",
+            tree: EMPTY_TREE_OID,
+            message: "tip",
+            author: alice,
+          });
+          const history = repository.log(head);
+          const expected = yield* Stream.runCollect(history);
+          assert.equal(expected.length, 2);
+          assert.deepEqual(yield* Stream.runCollect(history), expected);
+          assert.equal((yield* Stream.runCollect(history.pipe(Stream.take(1)))).length, 1);
+          const repeated = yield* Effect.all(
+            [Stream.runCollect(history), Stream.runCollect(history)],
+            { concurrency: "unbounded" },
+          );
+          assert.deepEqual(repeated, [expected, expected]);
+        }),
+      ),
+    ),
+  );
+
   it.effect("commits onto an empty branch and reads it back", () =>
     Effect.promise(async () => {
       const commit = await scenario(
@@ -119,6 +277,34 @@ describe("Repository", () => {
         found.matches.map((match) => [match.path, match.line, match.text]),
         [["a.txt", 1, "hello world"]],
       );
+    }),
+  );
+
+  it.effect("does not search a symlink's target path as if it were content", () =>
+    Effect.promise(async () => {
+      // A symlink's blob holds the path it points at. git's grep skips those
+      // entries in a tree, and reporting a hit inside one reports a match in a
+      // file whose content does not contain the text.
+      const found = await scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const target = yield* repository.writeBlob(new TextEncoder().encode("secret.txt"));
+          const content = yield* repository.writeBlob(new TextEncoder().encode("ordinary\n"));
+          const tree = yield* repository.writeTree([
+            { mode: "100644", name: "a.txt", oid: content },
+            { mode: "120000", name: "link", oid: target },
+          ]);
+          yield* repository.commit({ branch: "main", tree, message: "link", author: alice });
+          return yield* repository.search({
+            ref: "refs/heads/main",
+            pattern: "secret",
+            fixed: true,
+            ignoreCase: true,
+          });
+        }),
+      );
+
+      assert.deepEqual(found.matches, []);
     }),
   );
 

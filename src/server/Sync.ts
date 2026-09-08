@@ -11,7 +11,7 @@
  */
 import { Effect, Stream } from "effect";
 
-import { lsRemote, requestPack } from "../client/Fetch.ts";
+import { advertisement, requestPack } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -106,12 +106,9 @@ const trackingOf = (remote: string, name: string): string =>
  * ingest, and the reason this can report how many objects arrived rather than
  * only which refs moved.
  *
- * `depth` is passed through as `deepen` and nothing more: the boundary
- * commits' parents stay on the remote and there is no shallow list in these
- * stores to record that in, so a depth-limited fetch leaves commits whose
- * parents are absent — which `fsck` will report. It is here so a caller after
- * the last few commits of a large history need not take all of it; it is not
- * an equivalent of `git clone --depth`.
+ * Depth-limited fetches persist shallow boundaries after unpacking, before
+ * publishing tracking refs. Later rounds declare those boundaries so the
+ * remote knows which parent histories this repository actually has.
  */
 export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
   readonly remote: string;
@@ -139,7 +136,8 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
     });
   }
 
-  const advertised = yield* lsRemote(input.url, { token });
+  const remote = yield* advertisement(input.url, { token });
+  const advertised = remote.refs;
   const local = new Map(yield* repository.refs);
 
   const wanted = advertised
@@ -155,39 +153,47 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
     .map((ref) => ({ name: trackingOf(input.remote, ref.name), oid: ref.oid }))
     .filter(
       (ref) =>
-        local.get(ref.name) !== ref.oid &&
+        (input.depth !== undefined || local.get(ref.name) !== ref.oid) &&
         // A tag is a name that does not move: re-pointing one on a fetch
         // would rewrite what this repository has already published under it.
         !(ref.name.startsWith("refs/tags/") && local.has(ref.name)),
     );
 
-  if (wanted.length === 0) return { refs: [], objects: 0 };
+  if (wanted.length === 0) return { refs: [], objects: 0, advertised };
 
   const wants: Array<Oid> = [];
   for (const oid of new Set(wanted.map((ref) => ref.oid))) {
-    if (!(yield* repository.contains(oid))) wants.push(oid);
+    if (input.depth !== undefined || !(yield* repository.contains(oid))) wants.push(oid);
   }
 
   /** One negotiation round, unpacked. */
   const round = (haves: ReadonlyArray<Oid>) =>
-    Effect.gen(function* () {
-      const pack = yield* requestPack({
-        // The shared client transport, not a local copy: its prelude reader is
-        // the one that survives a server acknowledging more than one have
-        // before the pack.
-        url: input.url,
-        token,
-        wants,
-        haves,
-        depth: input.depth,
-      });
-      return yield* repository.unpack(
-        Stream.fromAsyncIterable(
-          pack,
-          (cause) => new Invalid({ field: "remote", reason: String(cause) }),
-        ),
-      );
-    });
+    Effect.scoped(
+      Effect.gen(function* () {
+        const pack = yield* requestPack({
+          // The shared client transport, not a local copy: its prelude reader is
+          // the one that survives a server acknowledging more than one have
+          // before the pack.
+          url: remote.url,
+          token: remote.token,
+          wants,
+          haves,
+          depth: input.depth,
+          shallow: [...(yield* repository.shallow)],
+        });
+        const unpacked = yield* repository.unpack(
+          Stream.fromAsyncIterable(
+            pack,
+            (cause) => new Invalid({ field: "remote", reason: String(cause) }),
+          ),
+        );
+        yield* repository.updateShallow({
+          add: [...remote.shallow, ...pack.shallow],
+          remove: pack.unshallow,
+        });
+        return unpacked;
+      }),
+    );
 
   // Every wanted object is already here — a branch that was fetched under
   // another name, or a ref moved back to where it was. There is nothing to
@@ -196,25 +202,21 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
   if (wants.length > 0) {
     arrived.push(...(yield* round([...new Set(local.values())])));
 
-    // A `have` claims that commit *and everything behind it*, which is what
-    // lets the remote leave that history out of the pack. After a depth-limited
-    // fetch this repository holds tips whose parents are absent, and there is
-    // no shallow list in these stores to declare that with — so the offer can
-    // be a lie, and the symptom is a pack that does not contain what was
-    // asked for. Cheaper to notice that than to prove the offer honest: the
-    // check is one `has` per want, and only the rare bad round pays for a
-    // second, which claims nothing and therefore cannot lie.
+    // Retry a remote's incomplete response without negotiation. Boundaries
+    // are still declared in that round; this only drops the offered haves.
     const held = yield* Effect.forEach(wants, (oid) => repository.contains(oid));
     if (held.includes(false)) arrived.push(...(yield* round([])));
   }
 
   const refs = yield* Effect.forEach(wanted, (ref) =>
     repository
-      .setRef({ name: ref.name, to: ref.oid })
+      // Selection and the existing-tag check used this snapshot. A writer
+      // arriving during the download must not be overwritten by its stale view.
+      .setRef({ name: ref.name, to: ref.oid, expected: local.get(ref.name) ?? null })
       .pipe(Effect.map((moved) => ({ name: moved.ref, oid: moved.oid, from: moved.previous }))),
   );
 
-  return { refs, objects: arrived.length };
+  return { refs, objects: arrived.length, advertised };
 });
 
 /**
@@ -265,10 +267,10 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
     tags: false,
   });
 
-  // Absent from the fetch's own report means the tracking ref was
-  // already where the remote is, not that the remote has no such branch.
-  const moved = fetched.refs.find((ref) => ref.name === tracking);
-  const to = moved?.oid ?? (yield* repository.resolve(tracking));
+  // An unchanged branch and a deleted upstream both produce no ref update.
+  // Use this fetch's advertisement: a surviving tracking ref cannot tell
+  // whether the branch still exists on the remote.
+  const to = fetched.advertised.find((ref) => ref.name === branch)?.oid ?? null;
   if (to === null) {
     return yield* new Invalid({
       field: "branch",

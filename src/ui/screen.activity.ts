@@ -20,7 +20,7 @@
  * around and its cards are placed — and clipped — by date like real commits.
  */
 import { html, nothing, type TemplateResult } from "lit";
-import { customElement, state } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 
 import { UIToggleGroup } from "@chr33s/base-wc/src/toggle";
 
@@ -30,6 +30,7 @@ import { GitPlusElement, navigate } from "./base.ts";
 import { byId, timeline } from "./fixtures.ts";
 import { statusToken, type Task } from "./model.ts";
 import { ago, daysBetween, initials, startOfDay } from "./time.ts";
+import { isOid } from "../git/Oid.ts";
 
 /** How many days each zoom level shows. "Week" is the design's fortnight. */
 type Zoom = "day" | "week" | "month";
@@ -71,8 +72,12 @@ export class GpActivity extends GitPlusElement {
    * OPFS repository once its clone lands, which turns this screen's
    * hundred-commit read into local object reads instead of an N+1 of
    * requests.
+   *
+   * Reactive, because that swap can land while this screen is already on
+   * screen: a first load against an unreachable server leaves the fallback
+   * timeline, and the local repository that arrives afterwards can answer.
    */
-  api: CodeApi | null = null;
+  @property({ attribute: false }) accessor api: CodeApi | null = null;
 
   @state() private accessor commits: readonly CommitDetail[] | null = null;
   @state() private accessor offline = false;
@@ -84,11 +89,22 @@ export class GpActivity extends GitPlusElement {
   @state() private accessor offset = 0;
 
   #unsubscribe: (() => void) | null = null;
+  /** Which read owns the screen — a replaced client abandons the earlier one. */
+  #generation = 0;
 
   override connectedCallback(): void {
     super.connectedCallback();
     this.#unsubscribe = store.subscribe(() => this.requestUpdate());
     void this.#load();
+  }
+
+  override willUpdate(changed: Map<string, unknown>): void {
+    // The shell swapped clients — the OPFS clone came ready. The old value is
+    // `undefined` only on the first update, which `connectedCallback` loads.
+    if (changed.has("api") && changed.get("api") !== undefined) {
+      this.loading = true;
+      void this.#load();
+    }
   }
 
   override disconnectedCallback(): void {
@@ -98,6 +114,7 @@ export class GpActivity extends GitPlusElement {
   }
 
   async #load(): Promise<void> {
+    const generation = ++this.#generation;
     const api = this.api;
     if (api === null) {
       this.offline = true;
@@ -106,10 +123,12 @@ export class GpActivity extends GitPlusElement {
       return;
     }
     try {
-      const refs = await api.refs();
-      const heads = refs.filter((ref) => ref.name.startsWith("refs/heads/"));
-      const main = heads.find((ref) => ref.name === "refs/heads/main") ?? heads[0];
-      if (main === undefined) {
+      const state = await api.refState();
+      if (generation !== this.#generation) return;
+      const tip = isOid(state.head)
+        ? state.head
+        : state.refs.find((ref) => ref.name === state.head)?.oid;
+      if (tip === undefined) {
         this.commits = [];
         this.offline = false;
         return;
@@ -117,14 +136,17 @@ export class GpActivity extends GitPlusElement {
       // One fetch covers paging too: ‹ walks back through what is already
       // loaded rather than repeating the N+1 header reads per window. 100
       // commits of history is the bound, and a window past it reads as empty.
-      this.commits = await api.recentCommits(main.oid, 100);
+      const commits = await api.recentCommits(tip, 100);
+      if (generation !== this.#generation) return;
+      this.commits = commits;
       this.offline = false;
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
+      if (generation !== this.#generation) return;
       this.offline = true;
       this.reason = describe(error);
     } finally {
-      this.loading = false;
+      if (generation === this.#generation) this.loading = false;
     }
   }
 

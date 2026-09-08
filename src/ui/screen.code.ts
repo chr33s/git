@@ -51,6 +51,7 @@ import { diffs } from "./highlight.ts";
 import * as icons from "./icons.ts";
 import { current as currentTheme, type Theme } from "./theme.ts";
 import { ago, initials } from "./time.ts";
+import { isOid } from "../git/Oid.ts";
 
 /**
  * Which explorer folders are open, remembered per repository.
@@ -173,6 +174,7 @@ interface HeadCommit {
 /** One coherent repository view, committed only after every request succeeds. */
 interface CodeSnapshot {
   readonly ref: string;
+  readonly defaultBranch: string | null;
   readonly branches: readonly string[];
   readonly paths: readonly string[];
   readonly selected: string | null;
@@ -203,6 +205,7 @@ export class GpCode extends GitPlusElement {
   @property({ type: String }) accessor wanted: string | null = null;
 
   @state() private accessor ref = "main";
+  @state() private accessor defaultBranch: string | null = "main";
   @state() private accessor branches: readonly string[] = ["main"];
   @state() private accessor selected: string | null = null;
   @state() private accessor content: string | null = null;
@@ -329,10 +332,11 @@ export class GpCode extends GitPlusElement {
       return;
     }
     try {
-      const refs = await api.refs();
-      const branches = this.#branchNames(refs);
-      const ref = branches.includes("main") ? "main" : (branches[0] ?? "main");
-      const snapshot = await this.#snapshot(api, ref, refs, this.wanted ?? undefined);
+      const state = await api.refState();
+      const ref = state.head.startsWith("refs/heads/")
+        ? state.head.slice("refs/heads/".length)
+        : state.head;
+      const snapshot = await this.#snapshot(api, ref, state, this.wanted ?? undefined);
       if (generation === this.#loadGeneration) this.#commit(snapshot);
     } catch (error) {
       if (!(error instanceof ApiError) && !(error instanceof TypeError)) throw error;
@@ -360,20 +364,25 @@ export class GpCode extends GitPlusElement {
   async #snapshot(
     api: CodeApi,
     ref: string,
-    knownRefs?: Awaited<ReturnType<CodeApi["refs"]>>,
+    knownRefs?: Awaited<ReturnType<CodeApi["refState"]>>,
     keep?: string,
   ): Promise<CodeSnapshot> {
-    const [refs, files] = await Promise.all([
-      knownRefs === undefined ? api.refs() : Promise.resolve(knownRefs),
-      api.files(ref),
-    ]);
+    const state = knownRefs ?? (await api.refState());
+    const refs = state.refs;
+    const tip = isOid(ref)
+      ? ref
+      : refs.find(
+          (candidate) => candidate.name === (ref.startsWith("refs/") ? ref : `refs/heads/${ref}`),
+        )?.oid;
+    // An unborn default branch has no tree yet; it is an editable empty
+    // repository, not an API outage to replace with sample files.
+    const files = tip === undefined ? [] : await api.files(tip);
     const paths = files.map((file) => file.path);
     const readme = paths.find((path) => /^readme(\.md|\.txt)?$/i.test(path)) ?? null;
     const selected = keep !== undefined && paths.includes(keep) ? keep : readme;
-    const tip = refs.find((candidate) => candidate.name === `refs/heads/${ref}`);
     const [commit, content] = await Promise.all([
-      tip === undefined ? Promise.resolve(null) : api.commitDetail(tip.oid),
-      selected === null ? Promise.resolve(null) : api.file(ref, selected),
+      tip === undefined ? Promise.resolve(null) : api.commitDetail(tip),
+      selected === null || tip === undefined ? Promise.resolve(null) : api.file(tip, selected),
     ]);
     const head =
       commit === null
@@ -387,12 +396,15 @@ export class GpCode extends GitPlusElement {
           };
     return {
       ref,
+      defaultBranch: state.head.startsWith("refs/heads/")
+        ? state.head.slice("refs/heads/".length)
+        : null,
       branches: this.#branchNames(refs),
       paths,
       selected,
       content,
       head,
-      tip: tip?.oid ?? null,
+      tip: tip ?? null,
       offline: false,
       reason: "",
     };
@@ -427,6 +439,7 @@ export class GpCode extends GitPlusElement {
   #fallback(error?: Unavailable): CodeSnapshot {
     return {
       ref: "main",
+      defaultBranch: "main",
       branches: ["main"],
       paths: FALLBACK_PATHS,
       selected: "README.md",
@@ -446,6 +459,7 @@ export class GpCode extends GitPlusElement {
 
   #commit(snapshot: CodeSnapshot): void {
     this.ref = snapshot.ref;
+    this.defaultBranch = snapshot.defaultBranch;
     this.branches = snapshot.branches;
     this.#paths = snapshot.paths;
     this.selected = snapshot.selected;
@@ -529,8 +543,13 @@ export class GpCode extends GitPlusElement {
     }
   }
 
-  get #defaultBranch(): string {
-    return this.branches.includes("main") ? "main" : (this.branches[0] ?? "main");
+  get #defaultBranch(): string | null {
+    return this.defaultBranch;
+  }
+
+  /** A detached HEAD can be read or branched from, but commits need a branch. */
+  get #writableBranch(): boolean {
+    return this.ref === this.defaultBranch || this.branches.includes(this.ref);
   }
 
   /**
@@ -550,14 +569,21 @@ export class GpCode extends GitPlusElement {
     if (!(descField instanceof HTMLTextAreaElement)) return;
     const title = titleField.value.trim();
     if (title === "" || this.#tip === null) return;
+    // Navigation and form edits may continue while synchronization awaits.
+    // The submitted proposal keeps the revision and text the user chose.
+    const branch = this.ref;
+    const head = this.#tip;
+    const base = this.#defaultBranch;
+    if (base === null) return;
+    const description = descField.value.trim();
     const api = syncCapable(this.api);
     this.syncing = true;
     this.syncNotice = null;
     try {
       if (api !== null) {
-        const state = await api.sync(this.ref);
+        const state = await api.sync(branch);
         if (state.ahead > 0) {
-          const results = await api.push(this.ref);
+          const results = await api.push(branch);
           const refused = results.find((result) => !result.ok);
           if (refused !== undefined) {
             this.syncNotice = `push refused: ${refused.reason ?? refused.ref}`;
@@ -567,17 +593,17 @@ export class GpCode extends GitPlusElement {
       }
       const pr = await store.openPullRemote({
         title,
-        description: descField.value.trim(),
-        base: this.#defaultBranch,
-        head: this.#tip,
+        description,
+        base,
+        head,
       });
-      form.reset();
-      const dialog = this.querySelector("ui-dialog.gp-propose");
-      if (dialog instanceof UIDialog) dialog.hide();
       if (pr === null) {
         this.syncNotice = "the hub refused the Change Request — is this key a member?";
         return;
       }
+      form.reset();
+      const dialog = this.querySelector("ui-dialog.gp-propose");
+      if (dialog instanceof UIDialog) dialog.hide();
       navigate(this, { screen: "detail", id: pr });
     } finally {
       this.syncing = false;
@@ -587,7 +613,7 @@ export class GpCode extends GitPlusElement {
 
   async #cherryPick(commit: string): Promise<void> {
     const api = this.api;
-    if (api === null || this.syncing) return;
+    if (api === null || this.syncing || !this.#writableBranch) return;
     this.syncing = true;
     this.syncNotice = null;
     try {
@@ -610,7 +636,7 @@ export class GpCode extends GitPlusElement {
   async #rebaseOntoDefault(): Promise<void> {
     const api = this.api;
     const onto = this.#defaultBranch;
-    if (api === null || this.syncing || this.ref === onto) return;
+    if (api === null || onto === null || this.syncing || this.ref === onto) return;
     this.syncing = true;
     this.syncNotice = null;
     try {
@@ -660,7 +686,7 @@ export class GpCode extends GitPlusElement {
    */
   #syncControls(): TemplateResult | typeof nothing {
     const state = this.syncState;
-    if (state === null || syncCapable(this.api) === null) return nothing;
+    if (state === null || syncCapable(this.api) === null || !this.#writableBranch) return nothing;
     return html`
       <span class="gp-sync" title="This branch lives in this browser (OPFS); origin is the server.">
         <button
@@ -685,7 +711,7 @@ export class GpCode extends GitPlusElement {
         >
           Fetch${state.behind > 0 ? ` ↓${state.behind}` : ""}
         </button>
-        ${this.ref === this.#defaultBranch ? nothing : this.#proposeDialog()}
+        ${this.#defaultBranch === null || this.ref === this.#defaultBranch ? nothing : this.#proposeDialog()}
       </span>
     `;
   }
@@ -732,6 +758,7 @@ export class GpCode extends GitPlusElement {
               rows="3"
               placeholder="Why, and anything a reviewer should know…"
             ></textarea>
+            ${this.syncNotice === null ? nothing : html`<p class="gp-notice" role="alert">${this.syncNotice}</p>`}
             <div class="gp-dialog-actions">
               <button class="gp-btn-primary" type="submit" ?disabled=${this.syncing}>
                 Open Change Request
@@ -811,6 +838,7 @@ export class GpCode extends GitPlusElement {
     if (!this.#paths.includes(path)) return;
     const generation = ++this.#fileGeneration;
     const ref = this.ref;
+    const tip = this.#tip;
     this.selected = path;
     this.content = null;
     // Walking the tree abandons an open editor rather than carrying a draft
@@ -831,8 +859,9 @@ export class GpCode extends GitPlusElement {
       this.content = path === "README.md" ? FALLBACK_README : `// ${path}`;
       return;
     }
+    if (tip === null) return;
     try {
-      const content = await api.file(ref, path);
+      const content = await api.file(tip, path);
       if (generation === this.#fileGeneration && ref === this.ref && path === this.selected) {
         this.content = content;
       }
@@ -846,7 +875,14 @@ export class GpCode extends GitPlusElement {
 
   /** Open the current blob in the editor. */
   #edit(): void {
-    if (this.offline || this.loading || this.selected === null || this.content === null) return;
+    if (
+      this.offline ||
+      !this.#writableBranch ||
+      this.loading ||
+      this.selected === null ||
+      this.content === null
+    )
+      return;
     this.diffing = false;
     this.editingNew = false;
     this.editError = null;
@@ -855,7 +891,7 @@ export class GpCode extends GitPlusElement {
 
   /** The explorer's "+": the same editor, over a path that does not exist. */
   #newFile(): void {
-    if (this.offline || this.loading || this.api === null) return;
+    if (this.offline || !this.#writableBranch || this.loading || this.api === null) return;
     this.diffing = false;
     this.editingNew = true;
     this.editError = null;
@@ -924,15 +960,15 @@ export class GpCode extends GitPlusElement {
    */
   async #write(file: FileWrite, message: string, keep: string | undefined): Promise<void> {
     const api = this.api;
-    if (api === null) return;
+    if (api === null || !this.#writableBranch) return;
     this.saving = true;
     this.editError = null;
     const options: CommitFilesRequest = {
       branch: this.ref,
       message,
       files: [file],
+      expected: this.#tip,
     };
-    if (this.#tip !== null) options.expected = this.#tip;
     try {
       await api.commitFiles(options);
       await this.#reload(keep);
@@ -1280,9 +1316,9 @@ export class GpCode extends GitPlusElement {
             <button
               class="gp-icon-btn"
               type="button"
-              title=${this.offline ? "Read-only — the git+ API is not reachable" : "New file"}
+              title=${this.offline ? "Read-only — the git+ API is not reachable" : !this.#writableBranch ? "Select or create a branch to edit" : "New file"}
               aria-label="New file"
-              ?disabled=${this.offline || this.loading}
+              ?disabled=${this.offline || !this.#writableBranch || this.loading}
               @click=${() => this.#newFile()}
             >
               ${icons.plus()}
@@ -1395,13 +1431,19 @@ export class GpCode extends GitPlusElement {
                       title=${
                         this.offline
                           ? "Read-only — the git+ API is not reachable"
-                          : this.at !== null
-                            ? "Read-only — viewing an old commit"
-                            : "Edit file"
+                          : !this.#writableBranch
+                            ? "Select or create a branch to edit"
+                            : this.at !== null
+                              ? "Read-only — viewing an old commit"
+                              : "Edit file"
                       }
                       aria-label="Edit file"
                       ?disabled=${
-                        this.offline || this.loading || this.selected === null || this.at !== null
+                        this.offline ||
+                        !this.#writableBranch ||
+                        this.loading ||
+                        this.selected === null ||
+                        this.at !== null
                       }
                       @click=${() => this.#edit()}
                     >
@@ -1541,7 +1583,7 @@ export class GpCode extends GitPlusElement {
             ${icons.plus(12)} New branch…
           </ui-menu-item>
           ${
-            this.ref === this.#defaultBranch
+            this.#defaultBranch === null || this.ref === this.#defaultBranch
               ? nothing
               : html`
                   <ui-menu-item class="gp-menu-item" data-action value="__rebase">
@@ -1640,7 +1682,7 @@ export class GpCode extends GitPlusElement {
                             class="gp-link-btn"
                             type="button"
                             title="Replay this commit onto ${this.ref}"
-                            ?disabled=${this.syncing || this.offline}
+                            ?disabled=${this.syncing || this.offline || !this.#writableBranch}
                             @click=${() => void this.#cherryPick(commit.oid)}
                           >
                             pick

@@ -18,6 +18,7 @@ import * as Checkout from "../git/Checkout.ts";
 import { type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
 import { qualify } from "../git/Oid.ts";
+import * as MergeState from "../git/MergeState.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { indexMemory, IndexStore, workTreeMemory, WorkTree } from "../git/Work.ts";
@@ -45,10 +46,11 @@ const world = GitRepository.layer.pipe(
   Layer.provideMerge(stores),
   Layer.provideMerge(indexMemory),
   Layer.provideMerge(workTreeMemory),
+  Layer.provideMerge(MergeState.none),
 );
 
 const scenario = <A, E>(
-  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore>,
+  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore | MergeState.MergeState>,
 ): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(world)));
 
 /** A checkout, and a key to sign its trace with. */
@@ -405,7 +407,7 @@ describe("Invocation projection", () => {
           const { base, key } = yield* opened();
           const exposed = yield* expose(key, base);
           const packed = yield* Exposure.packOf(exposed.commit);
-          const pack = yield* Pack.decode(packed.bytes);
+          const pack = yield* Pack.decode(packed.bytes ?? new Uint8Array());
 
           yield* Records.record(
             {

@@ -16,12 +16,13 @@
  * on past a conflict would replay the rest against a tree the author never
  * wrote.
  */
-import { Effect, Stream } from "effect";
+import { Effect } from "effect";
 
+import { topological } from "./Dag.ts";
 import { Invalid } from "./Error.ts";
 import type { CommitInfo, Signature } from "./Format.ts";
 import { mergeTrees } from "./Merge.ts";
-import { type MergeConflict, Repository, type TreeFile } from "./Repository.ts";
+import { commitAt, type MergeConflict, Repository, type TreeFile } from "./Repository.ts";
 import { isOid, type Oid } from "./Store.ts";
 
 /** Everything replaying a commit can go wrong with, ref move included. */
@@ -49,7 +50,7 @@ const resolveCommit = Effect.fn("Rebase.resolveCommit")(function* (name: string)
   const repository = yield* Repository;
   const oid = isOid(name) ? name : yield* repository.resolve(name);
   if (oid === null) return yield* new Invalid({ field: "ref", reason: `unknown ref '${name}'` });
-  return oid;
+  return yield* commitAt(repository, oid);
 });
 
 const filesOf = Effect.fn("Rebase.filesOf")(function* (tree: Oid) {
@@ -115,7 +116,7 @@ const replayOne = Effect.fn("Rebase.replayOne")(function* (input: {
     return { original: input.commit, replayed: null, conflicts: [] } satisfies Replayed;
   }
 
-  const commit = yield* repository.readCommit(input.commit);
+  const commit = yield* repository.readHistoryCommit(input.commit);
   const onto = yield* repository.readCommit(input.onto);
   const { conflicts, tree } = yield* replayTree({ commit, onto });
   if (tree === null)
@@ -173,15 +174,8 @@ const settle = Effect.fn("Rebase.settle")(function* (input: {
     return outcome;
   }
 
-  if (head === input.onto) {
-    // Nothing was replayed, so no ref moves: the caller asked to replay
-    // commits, not to fast-forward a branch that is merely behind. That is
-    // `Repository.merge`'s job and it already spells it.
-    const outcome: ReplayOutcome = { kind: "up-to-date", head, commits: input.commits };
-    return outcome;
-  }
-
-  if (input.into !== undefined) {
+  const moves = input.into !== undefined && head !== input.expected;
+  if (moves && input.into !== undefined) {
     // Compare-and-swap, as `Repository.merge` does: a replay that raced
     // another push loses cleanly instead of overwriting it. `expected` is
     // where the ref stood when the replay began — reading it here instead
@@ -192,7 +186,13 @@ const settle = Effect.fn("Rebase.settle")(function* (input: {
     );
   }
 
-  const outcome: ReplayOutcome = { kind: "replayed", head, commits: input.commits };
+  // An empty replay can still advance a branch to `onto`, including when all
+  // its changes already arrived upstream under different commit ids.
+  const outcome: ReplayOutcome = {
+    kind: head === input.onto && !moves ? "up-to-date" : "replayed",
+    head,
+    commits: input.commits,
+  };
   return outcome;
 });
 
@@ -218,8 +218,8 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
   readonly expected?: Oid | null;
 }) {
   const repository = yield* Repository;
-  const commit = yield* resolveCommit(input.commit);
-  const onto = yield* resolveCommit(input.onto);
+  // Capture the destination before resolving inputs: it may itself be one
+  // of those refs, and a newer destination cannot authorize replaying an old tip.
   // Read before the replay, as `rebase` does: a pick reads trees, merges them
   // and writes objects, and a push landing in that window is a real race. With
   // no `expected` the swap below is an unconditional write, so the pick would
@@ -231,6 +231,8 @@ export const cherryPick = Effect.fn("Rebase.cherryPick")(function* (input: {
         ? null
         : yield* repository.resolve(input.into);
 
+  const commit = yield* resolveCommit(input.commit);
+  const onto = yield* resolveCommit(input.onto);
   const replayed = yield* replayOne({ commit, onto, author: input.author });
 
   return yield* settle(
@@ -249,7 +251,7 @@ const ancestryOf = Effect.fn("Rebase.ancestry")(function* (onto: Oid) {
     const oid = stack.pop()!;
     if (seen.has(oid)) continue;
     seen.add(oid);
-    const commit = yield* repository.readCommit(oid).pipe(
+    const commit = yield* repository.readHistoryCommit(oid).pipe(
       Effect.map((value): { readonly parents: ReadonlyArray<Oid> } | null => value),
       Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
     );
@@ -269,10 +271,8 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
   readonly expected?: Oid | null;
 }) {
   const repository = yield* Repository;
-  const branch = yield* resolveCommit(input.branch);
-  const onto = yield* resolveCommit(input.onto);
-  // Read before the replay, which takes as long as the history is deep: this
-  // is what the ref move at the end compares against.
+  // Capture the destination before resolving the branch and onto refs, so
+  // movement during those reads also fails the final compare-and-swap.
   const intoWas =
     input.expected !== undefined
       ? input.expected
@@ -280,31 +280,27 @@ export const rebase = Effect.fn("Rebase.rebase")(function* (input: {
         ? null
         : yield* repository.resolve(input.into);
 
-  // `onto..branch`, oldest first — the merge base is where the two histories
-  // parted, so everything after it on `branch` is what `onto` lacks. A branch
-  // already contained in `onto` yields nothing here and settles as up-to-date.
-  //
-  // `firstParent` is asked for rather than inherited: a merge commit's side
-  // branch is not replayed on its own, which is how `git rebase` flattens
-  // unless asked to preserve merges. `log` walks every parent by default, and
-  // that walk would replay the side branch's commits individually here.
-  const base = yield* repository.mergeBase(branch, onto);
-  // Everything `onto` already contains, so the walk stops at the merge base
-  // wherever it lies. `takeWhile(oid !== base)` alone would only stop if the
-  // base sat on this first-parent chain — and it does not on any branch that
-  // has merged its upstream, so the walk ran to the root commit and replayed
-  // the entire history.
-  const contained = base === null ? new Set<Oid>() : yield* ancestryOf(onto);
-  const history = yield* Stream.runCollect(
-    repository
-      .log(branch, { firstParent: true })
-      .pipe(Stream.takeWhile((commit) => !contained.has(commit.oid))),
-  );
+  const branch = yield* resolveCommit(input.branch);
+  const onto = yield* resolveCommit(input.onto);
+  // Default rebase flattens merges by replaying their individual non-merge
+  // ancestors. Keep only parent ids while finding the range; topological order
+  // preserves dependencies even when a child's timestamp predates its parent.
+  const contained = yield* ancestryOf(onto);
+  const parents = new Map<Oid, ReadonlyArray<Oid>>();
+  const pending = [branch];
+  while (pending.length > 0) {
+    const oid = pending.pop()!;
+    if (contained.has(oid) || parents.has(oid)) continue;
+    const commit = yield* repository.readHistoryCommit(oid);
+    parents.set(oid, commit.parents);
+    for (const parent of commit.parents) pending.push(parent);
+  }
 
   const commits: Replayed[] = [];
   let head = onto;
-  for (const commit of history.toReversed()) {
-    const replayed = yield* replayOne({ commit: commit.oid, onto: head });
+  for (const oid of topological(parents)) {
+    if ((parents.get(oid)?.length ?? 0) > 1) continue;
+    const replayed = yield* replayOne({ commit: oid, onto: head });
     commits.push(replayed);
     // Stop at the first conflict: the commits after it were written against
     // this one's result, and replaying them onto anything else is a guess.

@@ -21,7 +21,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { Console, Effect, Layer, Schema } from "effect";
+import { Console, Effect, Layer, Predicate, Schema } from "effect";
 
 import * as Dag from "../git/Dag.ts";
 import { Invalid } from "../git/Error.ts";
@@ -184,39 +184,58 @@ const run = (
   rule: Rule,
   environment: Record<string, string>,
 ): Effect.Effect<{ readonly ok: boolean; readonly code: number }> =>
-  Effect.promise(
-    () =>
-      new Promise((resolve) => {
-        const child = spawn(rule.run[0]!, rule.run.slice(1), {
-          env: { ...process.env, ...environment },
-          // Output is inherited so an operator sees what a rule said, but
-          // *input* is not: a woken command inheriting a server's stdin can
-          // read from it and block there for good, and a pass that never
-          // finishes leaves this repository's wake switched off for as long as
-          // the process lives.
-          stdio: ["ignore", "inherit", "inherit"],
-          shell: false,
-        });
+  Effect.callback((resume) => {
+    const closed = Promise.withResolvers<void>();
+    const grouped = process.platform !== "win32";
+    const child = spawn(rule.run[0]!, rule.run.slice(1), {
+      env: { ...process.env, ...environment },
+      // Output is inherited so an operator sees what a rule said, but
+      // *input* is not: a woken command inheriting a server's stdin can
+      // read from it and block there for good, and a pass that never
+      // finishes leaves this repository's wake switched off for as long as
+      // the process lives.
+      stdio: ["ignore", "inherit", "inherit"],
+      shell: false,
+      // A rule commonly launches a shell script or agent wrapper. Give it a
+      // Unix process group so stopping the wrapper also stops its workers.
+      detached: grouped,
+    });
+    const stop = () => {
+      if (child.pid === undefined) return;
+      try {
+        if (grouped) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch (cause) {
+        if (!Predicate.hasProperty(cause, "code") || cause.code !== "ESRCH") throw cause;
+      }
+    };
 
-        // The same hazard from the other side. A rule that hangs on a socket
-        // or a prompt is indistinguishable from one still working, so it is
-        // given a bound rather than trusted: killed, reported as a failure,
-        // and — because a failure holds the bookmark — tried again next pass.
-        const bound = setTimeout(() => {
-          child.kill("SIGKILL");
-        }, TIMEOUT);
-        const settle = (outcome: { readonly ok: boolean; readonly code: number }) => {
-          clearTimeout(bound);
-          resolve(outcome);
-        };
+    // The same hazard from the other side. A rule that hangs on a socket
+    // or a prompt is indistinguishable from one still working, so it is
+    // given a bound rather than trusted: killed, reported as a failure,
+    // and — because a failure holds the bookmark — tried again next pass.
+    const bound = setTimeout(stop, TIMEOUT);
+    const settle = (outcome: { readonly ok: boolean; readonly code: number }) => {
+      clearTimeout(bound);
+      resume(Effect.succeed(outcome));
+    };
 
-        // A command that cannot start is a rule that did not fire, which is
-        // the same outcome as one that failed: reported, and the bookmark
-        // stays where it was so the next run tries again.
-        child.on("error", () => settle({ ok: false, code: -1 }));
-        child.on("close", (code) => settle({ ok: code === 0, code: code ?? -1 }));
-      }),
-  );
+    // A command that cannot start is a rule that did not fire, which is
+    // the same outcome as one that failed: reported, and the bookmark
+    // stays where it was so the next run tries again.
+    child.on("error", () => settle({ ok: false, code: -1 }));
+    child.on("close", (code) => {
+      closed.resolve();
+      settle({ ok: code === 0, code: code ?? -1 });
+    });
+    // Interruption must stop the process, not just abandon its promise.
+    // Wait for exit before a new dispatch can start another copy.
+    return Effect.promise(async () => {
+      clearTimeout(bound);
+      stop();
+      await closed.promise;
+    });
+  });
 
 /** Every hub event between a ref's cursor and its tip, oldest first. */
 const since = Effect.fn("wake.since")(function* (ref: string, tip: Oid, cursor: Oid | null) {
@@ -230,7 +249,18 @@ const since = Effect.fn("wake.since")(function* (ref: string, tip: Oid, cursor: 
   // walk, leave its cursor unmoved, and never fire its rules again — the same
   // defect `hub/Redaction.tombstonesOn` had, one file over.
   const ceiling = yield* Trace.ceilingFor(ref);
-  const parents = yield* Dag.reachable(tip, cursor, Event.isHubCommit, ceiling);
+  // A merge can reach an already-processed ancestor through a parent that
+  // bypasses the cursor. Exclude the cursor's history, not just that one oid.
+  const completed =
+    cursor === null
+      ? new Set<Oid>()
+      : new Set((yield* Dag.reachable(cursor, null, Event.isHubCommit, ceiling)).keys());
+  const parents = yield* Dag.reachable(
+    tip,
+    cursor,
+    (commit) => (completed.has(commit) ? Effect.succeed(false) : Event.isHubCommit(commit)),
+    ceiling,
+  );
   const found: Array<{ readonly commit: Oid; readonly type: string }> = [];
   const unreadable: Array<Oid> = [];
 
@@ -280,6 +310,44 @@ export interface Summary {
 
 export const RULES = RULES_FILE;
 
+interface DispatchInput {
+  readonly directory: string;
+  readonly repo: string;
+  readonly dryRun?: boolean;
+}
+
+/**
+ * Reserve the local cursor through the whole pass, including its commands.
+ * CLI calls and other hosts do not share the post-receive wrapper's in-memory
+ * queue. Contention is reported before reading cursors or starting work.
+ * After an unclean process exit, an operator must confirm the owner is gone
+ * before removing the leftover lock.
+ */
+export const dispatch = Effect.fn("Wake.dispatch")(function* (input: DispatchInput) {
+  if (input.dryRun === true) return yield* dispatchPass(input);
+  const lock = path.join(input.directory, `${CURSOR_FILE}.lock`);
+  return yield* Effect.acquireUseRelease(
+    Effect.try({
+      try: () => {
+        const descriptor = fs.openSync(lock, "wx", 0o600);
+        try {
+          fs.closeSync(descriptor);
+        } catch (cause) {
+          fs.unlinkSync(lock);
+          throw cause;
+        }
+      },
+      catch: (cause) =>
+        new Invalid({
+          field: "wake",
+          reason: `cannot acquire wake lock ${lock}: ${String(cause)}`,
+        }),
+    }),
+    () => dispatchPass(input),
+    () => Effect.sync(() => fs.unlinkSync(lock)),
+  );
+});
+
 /**
  * One pass: from each watched ref's bookmark to its tip, and no further.
  *
@@ -288,11 +356,7 @@ export const RULES = RULES_FILE;
  * run again — and a woken command re-reads the refs anyway, so arriving twice
  * costs a wasted start, while never arriving costs the work.
  */
-export const dispatch = Effect.fn("Wake.dispatch")(function* (input: {
-  readonly directory: string;
-  readonly repo: string;
-  readonly dryRun?: boolean;
-}) {
+const dispatchPass = Effect.fn("Wake.dispatchPass")(function* (input: DispatchInput) {
   const dry = input.dryRun === true;
   const rules = yield* rulesOf(path.join(input.directory, RULES_FILE));
   if (rules.length === 0) return { fired: 0, failed: 0 } satisfies Summary;
@@ -443,9 +507,19 @@ const once = (directory: string, repo: string): Effect.Effect<void> =>
  * must not wait on whatever a rule decides to start. It is also why this needs
  * no payload — the walk reads the refs the push just wrote.
  */
-export const service = (directory: string, repo: string): Hooks["Service"] =>
-  Hooks.of({
+export const service = (
+  directory: string,
+  repo: string,
+  options?: {
+    readonly background: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<void>;
+  },
+): Hooks["Service"] => {
+  const background =
+    options?.background ??
+    (<A, E>(effect: Effect.Effect<A, E>) => Effect.forkDetach(effect).pipe(Effect.asVoid));
+  return Hooks.of({
     preReceive: () => Effect.void,
     update: () => Effect.void,
-    postReceive: () => Effect.forkDetach(once(directory, repo)).pipe(Effect.asVoid),
+    postReceive: () => background(once(directory, repo)),
   });
+};

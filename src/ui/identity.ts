@@ -42,10 +42,12 @@ import { Schema } from "effect";
 import { type Authorize, nonceOf, repoOf, type SignedCommand } from "../client/Authorize.ts";
 import { ApiError } from "./api.ts";
 import { apiBase, repoFromDocument } from "./client.ts";
+import { repositoryPath } from "../client/Url.ts";
+import { normalize, routeOf } from "../server/Route.ts";
 
 const repo = repoFromDocument();
 
-const urlOf = (path: string): string => `${apiBase() ?? ""}/${encodeURIComponent(repo)}${path}`;
+const urlOf = (path: string): string => `${apiBase() ?? ""}${repositoryPath(repo)}${path}`;
 
 // -- the key --------------------------------------------------------------
 
@@ -67,7 +69,7 @@ const StoredIdentity = Schema.Struct({
   /** The OpenSSH public line — what `hub grant` accepts. */
   publicKey: Schema.String,
 });
-const decodeStored = Schema.decodeUnknownResult(StoredIdentity);
+const decodeStored = Schema.decodeResult(Schema.fromJsonString(StoredIdentity));
 
 const store = async (create: boolean): Promise<FileSystemDirectoryHandle | null> => {
   if (globalThis.navigator?.storage?.getDirectory === undefined) return null;
@@ -75,8 +77,9 @@ const store = async (create: boolean): Promise<FileSystemDirectoryHandle | null>
     const origin = await navigator.storage.getDirectory();
     const scope = await origin.getDirectoryHandle("git-plus", { create });
     return await scope.getDirectoryHandle("identity", { create });
-  } catch {
-    return null;
+  } catch (error) {
+    if (!create && error instanceof DOMException && error.name === "NotFoundError") return null;
+    throw error;
   }
 };
 
@@ -128,16 +131,30 @@ const keyOfSeed = async (seed: Uint8Array, storedLine: string): Promise<PrivateK
   return derived;
 };
 
+/** Only a missing directory entry is absence; failed reads must not replace a key. */
+const storedFile = async (
+  directory: FileSystemDirectoryHandle,
+  name: string,
+): Promise<File | null> => {
+  let handle: FileSystemFileHandle;
+  try {
+    handle = await directory.getFileHandle(name);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "NotFoundError") return null;
+    throw error;
+  }
+  return await handle.getFile();
+};
+
 const load = async (): Promise<PrivateKey | null> => {
   const directory = await store(false);
   if (directory === null) return null;
 
   // The atomic record, when one exists.
-  try {
-    const raw: unknown = JSON.parse(
-      await (await (await directory.getFileHandle(RECORD)).getFile()).text(),
-    );
-    const decoded = decodeStored(raw);
+  const record = await storedFile(directory, RECORD);
+  if (record !== null) {
+    const contents = await record.text();
+    const decoded = decodeStored(contents);
     if (Result.isSuccess(decoded)) {
       const seed = seedFromBase64(decoded.success.seed);
       if (seed !== null) {
@@ -152,28 +169,29 @@ const load = async (): Promise<PrivateKey | null> => {
     // to a fresh key silently would strand every grant made to the old one.
     identityNote =
       "the stored identity could not be read; a fresh key was generated and needs granting";
-    return null;
-  } catch {
-    // No record: fall through to the legacy two-file layout, if any.
+    // A failed legacy migration may have created this entry before its writer
+    // opened. Recover from the old files before replacing an unusable record.
   }
 
   // One-time migration from the two independently written files. When the
   // halves agree the fingerprint is preserved exactly; when they disagree
   // the seed wins, visibly.
-  try {
-    const seed = new Uint8Array(
-      await (await (await directory.getFileHandle("seed")).getFile()).arrayBuffer(),
-    );
-    const line = (await (await (await directory.getFileHandle("public")).getFile()).text()).trim();
-    const key = await keyOfSeed(seed, line);
-    if (key === null) return null;
-    await persist(key);
-    await directory.removeEntry("seed").catch(() => {});
-    await directory.removeEntry("public").catch(() => {});
-    return key;
-  } catch {
+  const seedFile = await storedFile(directory, "seed");
+  const publicFile = await storedFile(directory, "public");
+  if (seedFile === null || publicFile === null) return null;
+  const seed = new Uint8Array(await seedFile.arrayBuffer());
+  const line = (await publicFile.text()).trim();
+  const recordNote = identityNote;
+  identityNote = null;
+  const key = await keyOfSeed(seed, line);
+  if (key === null) {
+    identityNote = recordNote;
     return null;
   }
+  await persist(key);
+  await directory.removeEntry("seed").catch(() => {});
+  await directory.removeEntry("public").catch(() => {});
+  return key;
 };
 
 const persist = async (key: PrivateKey): Promise<void> => {
@@ -205,13 +223,26 @@ let held: Promise<PrivateKey> | null = null;
  * next — which is the honest ceiling of what such a browser can hold.
  */
 export const identity = (): Promise<PrivateKey> => {
-  held ??= (async () => {
+  const initialize = async (): Promise<PrivateKey> => {
     const stored = await load();
     if (stored !== null) return stored;
     const fresh = await Effect.runPromise(generate(`git-plus browser @ ${location.hostname}`));
     await persist(fresh);
     return fresh;
-  })();
+  };
+  // The key belongs to the origin, while `held` belongs to just this tab.
+  // Lock the complete read/migrate/generate/write sequence so another tab
+  // loads the saved key instead of replacing it with its own first-use key.
+  held ??= (
+    globalThis.navigator?.locks === undefined
+      ? initialize()
+      : navigator.locks.request("git-plus:identity:init", initialize)
+  ).catch((error) => {
+    // Keep a successful key for this tab, but let a transient storage failure
+    // be retried on the next action after the origin lock has been released.
+    held = null;
+    throw error;
+  });
   return held;
 };
 
@@ -344,7 +375,12 @@ export const retryAuthorized = async (
   denied: Response,
 ): Promise<Response | null> => {
   const absolute = new URL(url, location.origin);
-  const header = await envelopeFor(denied, `${init.method ?? "GET"} ${absolute.pathname}`, []);
+  const route = routeOf(absolute.pathname);
+  const pathname =
+    route === null
+      ? absolute.pathname
+      : new URL(normalize(new Request(absolute), route).url).pathname;
+  const header = await envelopeFor(denied, `${init.method ?? "GET"} ${pathname}`, []);
   if (header === null) return null;
   const headers = new Headers(init.headers);
   headers.set("authorization", header);

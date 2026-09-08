@@ -6,6 +6,7 @@ import { deflateSync } from "node:zlib";
 import { Effect, Layer, Result, Stream } from "effect";
 
 import { encodeCommit, encodeTree } from "./Format.ts";
+import { StorageFailure } from "./Error.ts";
 import { stores } from "./Memory.ts";
 import {
   applyDelta,
@@ -19,7 +20,8 @@ import {
   unpack,
 } from "./Pack.ts";
 import { PackStore } from "./Packed.ts";
-import { ObjectStore, type Oid, type RawObject } from "./Store.ts";
+import { ObjectStore, type Oid, type RawObject, RefStore } from "./Store.ts";
+import { gc } from "./Maintenance.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -509,7 +511,7 @@ describe("deltified writer", () => {
 });
 
 describe("ingest", () => {
-  const runIngest = <A, E>(effect: Effect.Effect<A, E, ObjectStore | PackStore>) =>
+  const runIngest = <A, E>(effect: Effect.Effect<A, E, ObjectStore | PackStore | RefStore>) =>
     Effect.runPromise(effect.pipe(Effect.provide(stores)));
 
   const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
@@ -589,6 +591,73 @@ describe("ingest", () => {
       assert.equal(decoder.decode(outcome.resolved.data), targetText);
     }),
   );
+
+  for (const [repack, failWrite] of [
+    [false, false],
+    [true, false],
+    [true, true],
+  ] as const) {
+    it.effect(
+      `keeps a retained thin-pack target readable through gc (repack=${repack}, failure=${failWrite})`,
+      () =>
+        Effect.promise(() =>
+          runIngest(
+            Effect.gen(function* () {
+              const objects = yield* ObjectStore;
+              const refs = yield* RefStore;
+              const packs = yield* PackStore;
+              const base = encoder.encode("an external base\n");
+              const target = encoder.encode("an external base\nchanged\n");
+              const baseOid = yield* objects.write({ type: "blob", data: base });
+              const delta = Uint8Array.from([
+                ...sizeVarint(base.length),
+                ...sizeVarint(target.length),
+                ...copy(0, base.length),
+                ...insert("changed\n"),
+              ]);
+              const bytes = buildPack([
+                ...Array.from({ length: 7 }, (_, index) => blobEntry(`filler ${index}\n`)),
+                concat([
+                  Uint8Array.from(objectHeader(7, delta.length)),
+                  Uint8Array.from(hexBytes(baseOid)),
+                  new Uint8Array(deflateSync(delta)),
+                ]),
+              ]);
+              const targetOid = oidOf({ type: "blob", data: target });
+              yield* ingest(Stream.make(bytes));
+              assert.equal((yield* packs.list).length, 1);
+              yield* refs.apply([{ name: "refs/tags/target", value: targetOid }]);
+              assert.deepEqual((yield* objects.read(targetOid)).data, target);
+              if (failWrite) {
+                const failedPacks = PackStore.of({
+                  ...packs,
+                  write: () =>
+                    Effect.fail(
+                      new StorageFailure({
+                        operation: "packs.write",
+                        path: "fixture",
+                        cause: "disk full",
+                      }),
+                    ),
+                });
+                const result = yield* gc(
+                  { objects, refs, packs: failedPacks },
+                  { repack: true, reflogGrace: 0 },
+                ).pipe(Effect.result);
+                assert.equal(result._tag, "Failure");
+                assert.deepEqual((yield* objects.read(targetOid)).data, target);
+                assert.equal(yield* objects.has(baseOid), true);
+                return;
+              }
+              const report = yield* gc({ objects, refs, packs }, { repack, reflogGrace: 0 });
+              assert.deepEqual((yield* objects.read(targetOid)).data, target);
+              assert.equal(yield* objects.has(baseOid), !repack);
+              assert.equal(report.retained.includes(baseOid), !repack);
+            }),
+          ),
+        ),
+    );
+  }
 
   it.effect("explodes a small push loose, exactly as before", () =>
     Effect.promise(async () => {

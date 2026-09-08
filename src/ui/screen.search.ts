@@ -19,6 +19,7 @@ import { GitPlusElement, navigate } from "./base.ts";
 import { statusToken, type Task } from "./model.ts";
 import { kindChip } from "./screen.tasks.ts";
 import { store } from "./store.ts";
+import { isOid } from "../git/Oid.ts";
 
 type CodeResults =
   | { readonly tag: "idle" }
@@ -32,8 +33,13 @@ type CodeResults =
 
 @customElement("gp-search")
 export class GpSearch extends GitPlusElement {
-  /** Injected by the shell so every screen shares one client. */
-  api: SearchApi | null = null;
+  /**
+   * Injected by the shell so every screen shares one client — and replaced
+   * when the local OPFS repository comes ready, which is reactive here so a
+   * query answered by an unreachable server is asked again of the client that
+   * can answer it.
+   */
+  @property({ attribute: false }) accessor api: SearchApi | null = null;
 
   /** The rail's query, already debounced by `ui-search-field`. */
   @property({ type: String }) accessor query = "";
@@ -50,6 +56,9 @@ export class GpSearch extends GitPlusElement {
 
   override willUpdate(changed: Map<string, unknown>): void {
     if (changed.has("query")) void this.#grep();
+    // The old value is `undefined` only on the first update, which
+    // `connectedCallback` already greps for.
+    else if (changed.has("api") && changed.get("api") !== undefined) void this.#grep();
   }
 
   override disconnectedCallback(): void {
@@ -75,16 +84,17 @@ export class GpSearch extends GitPlusElement {
     }
     this.code = { tag: "loading" };
     try {
-      const refs = await api.refs();
-      const heads = refs.filter((ref) => ref.name.startsWith("refs/heads/"));
-      const main = heads.find((ref) => ref.name === "refs/heads/main") ?? heads[0];
-      if (main === undefined) {
+      const state = await api.refState();
+      const tip = isOid(state.head)
+        ? state.head
+        : state.refs.find((ref) => ref.name === state.head)?.oid;
+      if (tip === undefined) {
         if (generation === this.#generation) {
           this.code = { tag: "loaded", matches: [], truncated: false };
         }
         return;
       }
-      const found = await api.grep(pattern, main.name, undefined, abort.signal);
+      const found = await api.grep(pattern, tip, undefined, abort.signal);
       if (generation === this.#generation) {
         this.code = { tag: "loaded", matches: found.matches, truncated: found.truncated };
       }

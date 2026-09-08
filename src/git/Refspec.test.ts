@@ -36,6 +36,23 @@ describe("Refspec", () => {
     }),
   );
 
+  it.effect("allows an empty wildcard inside a valid ref component", () =>
+    Effect.sync(() => {
+      for (const [source, destination] of [
+        ["refs/heads/main*", "refs/remotes/origin/main*"],
+        ["refs/heads/m*ain", "refs/remotes/origin/m*ain"],
+        ["refs/heads/*main", "refs/remotes/origin/*main"],
+      ]) {
+        const spec = parsed(`${source}:${destination}`);
+        assert.equal(Refspec.map(spec, "refs/heads/main"), "refs/remotes/origin/main");
+      }
+      assert.equal(
+        Refspec.map(parsed("refs/heads/main*main:refs/remotes/origin/*"), "refs/heads/main"),
+        null,
+      );
+    }),
+  );
+
   it.effect("does not expand `$` patterns out of a ref name the remote chose", () =>
     Effect.sync(() => {
       // `String.replace` expands `$&`, "$`", `$'` and `$$` inside its second

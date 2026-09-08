@@ -20,9 +20,9 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect, Fiber, Layer, Schema } from "effect";
+import { Effect, Fiber, Layer, Schema, Stream } from "effect";
 
-import { Invalid } from "../git/Error.ts";
+import { Invalid, StorageFailure } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -139,9 +139,13 @@ const capturingPacks = async <A>(
 ): Promise<{ readonly result: A; readonly packs: ReadonlyArray<number | null> }> => {
   const original = globalThis.fetch;
   const packs: Array<number | null> = [];
-  const patched: typeof globalThis.fetch = (input, init) => {
+  const patched: typeof globalThis.fetch = async (input, init) => {
     const body = init?.body;
-    if (body instanceof Uint8Array) packs.push(packObjectCount(body));
+    if (body != null) {
+      const bytes = new Uint8Array(await new Response(body).arrayBuffer());
+      packs.push(packObjectCount(bytes));
+      return original(input, { ...init, body: bytes });
+    }
     return original(input, init);
   };
   globalThis.fetch = patched;
@@ -255,6 +259,90 @@ describe.skipIf(!hasGit)("Push, read back by the git binary", () => {
 });
 
 describe("Push", () => {
+  it.effect("preserves an object-read failure during streamed pack generation", () =>
+    Effect.promise(async () => {
+      await commitFile("upload-read-failure", "a", "content", "base");
+      const problem = new StorageFailure({
+        operation: "read",
+        path: "fixture",
+        cause: "unavailable",
+      });
+      const result = await inLocal(
+        "upload-read-failure",
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          return yield* push({
+            url: `${server.url}/upload-read-failure`,
+            refs: [{ local: "refs/heads/main", remote: "refs/heads/main" }],
+          }).pipe(
+            Effect.provideService(
+              Repository,
+              Repository.of({ ...repository, packOids: () => Stream.fail(problem) }),
+            ),
+            Effect.flip,
+          );
+        }),
+      );
+      assert.equal(result, problem);
+    }),
+  );
+
+  it.effect("reports an early HTTP refusal and closes stalled pack generation", () =>
+    Effect.promise(async () => {
+      await commitFile("upload-refused", "a", "content", "base");
+      let stopped = false;
+      const refusal = http.createServer(async (request, response) => {
+        if (request.method === "GET") {
+          const advertisement = await fetch(
+            `${server.url}/upload-refused/info/refs?service=git-receive-pack`,
+          );
+          response.end(new Uint8Array(await advertisement.arrayBuffer()));
+        } else {
+          request.resume();
+          response.writeHead(503);
+          response.end("temporarily unavailable");
+        }
+      });
+      await new Promise<void>((resolve) => refusal.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = refusal.address();
+        assert.ok(address !== null && !Schema.is(Schema.String)(address));
+        const result = await inLocal(
+          "upload-refused",
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            return yield* push({
+              url: `http://127.0.0.1:${address.port}`,
+              refs: [{ local: "refs/heads/main", remote: "refs/heads/main" }],
+            }).pipe(
+              Effect.provideService(
+                Repository,
+                Repository.of({
+                  ...repository,
+                  packOids: () =>
+                    Stream.never.pipe(
+                      Stream.ensuring(
+                        Effect.sync(() => {
+                          stopped = true;
+                        }),
+                      ),
+                    ),
+                }),
+              ),
+              Effect.flip,
+            );
+          }).pipe(Effect.timeout("10 seconds")),
+        );
+        assert.ok(Schema.is(Invalid)(result));
+        assert.match(result.reason, /503/);
+        assert.equal(stopped, true);
+      } finally {
+        refusal.closeAllConnections();
+        await new Promise<void>((resolve) => refusal.close(() => resolve()));
+      }
+    }),
+  );
+
   it.effect("lets go of a peer that accepts and never answers", () =>
     Effect.promise(async () => {
       // The advertisement is a `fetch`, and a `fetch` given no signal survives

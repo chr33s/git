@@ -100,6 +100,7 @@ export const refStore = Layer.effect(
   Effect.sync(() => {
     const refs = new Map<string, Oid>();
     const reflogs = new Map<string, ReflogEntry[]>();
+    const shallow = new Set<Oid>();
     let head = "refs/heads/main";
 
     const read = (name: string) => refs.get(name) ?? null;
@@ -130,6 +131,12 @@ export const refStore = Layer.effect(
 
     return RefStore.of(
       tracedRefStore("Memory", {
+        shallow: Effect.sync(() => new Set(shallow)),
+        updateShallow: ({ add, remove }) =>
+          Effect.sync(() => {
+            for (const oid of remove) shallow.delete(oid);
+            for (const oid of add) shallow.add(oid);
+          }),
         read: (name) => Effect.sync(() => read(name)),
         resolve: (name) => Effect.sync(() => resolve(name)),
         list: (prefix) =>

@@ -25,6 +25,7 @@ import { create, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Log from "../trust/Log.ts";
 import { fetchRepository } from "./Fetch.ts";
 import { local, remote } from "./Client.ts";
+import { GitApi } from "../ui/api.ts";
 
 const author = {
   name: "Alice",
@@ -108,6 +109,48 @@ describe("Client", () => {
     }),
   );
 
+  it.effect("keeps literal .git repository names distinct in both JSON clients", () =>
+    Effect.promise(async () => {
+      for (const name of ["origin.git", "origin.git.git"]) {
+        const expected = await Effect.runPromise(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const tree = yield* repository.writeTree([]);
+            return yield* repository.commit({ branch: "main", tree, message: name, author });
+          }).pipe(
+            Effect.provide(
+              GitRepository.layer.pipe(
+                Layer.provide(GitRepository.hooksNoop),
+                Layer.provide(nodeStores(path.join(root, name))),
+              ),
+            ),
+          ),
+        );
+        const derived = await Effect.runPromise(
+          Effect.gen(function* () {
+            const client = yield* remote(`${server.url}/`);
+            return yield* client.repo.refs({ params: { repo: name } });
+          }).pipe(Effect.scoped),
+        );
+        assert.equal(derived.refs.find((ref) => ref.name === "refs/heads/main")?.oid, expected);
+        const browser = new GitApi({ repo: name, base: server.url });
+        assert.equal(
+          (await browser.refs()).find((ref) => ref.name === "refs/heads/main")?.oid,
+          expected,
+        );
+        const cloned = await Effect.runPromise(
+          Effect.gen(function* () {
+            return yield* fetchRepository({
+              url: browser.cloneUrl,
+              stores: { objects: yield* ObjectStore, refs: yield* RefStore },
+            });
+          }).pipe(Effect.provide(Opfs.stores(fakeRoot()))),
+        );
+        assert.equal(cloned.refs.find((ref) => ref.name === "refs/heads/main")?.value, expected);
+      }
+    }),
+  );
+
   it.effect("sends its credential on every derived-client request", () =>
     Effect.promise(async () => {
       const authRoot = await fs.mkdtemp(path.join(os.tmpdir(), "client-auth-"));
@@ -149,7 +192,7 @@ describe("Client", () => {
             Effect.provide(
               GitRepository.layer.pipe(
                 Layer.provide(GitRepository.hooksNoop),
-                Layer.provide(nodeStores(path.join(authRoot, "vault"))),
+                Layer.provide(nodeStores(path.join(authRoot, "vault.git"))),
               ),
             ),
           ),
@@ -158,7 +201,7 @@ describe("Client", () => {
         const denied = await Effect.runPromise(
           Effect.gen(function* () {
             const client = yield* remote(authed.url);
-            return yield* client.repo.refs({ params: { repo: "vault" } }).pipe(Effect.flip);
+            return yield* client.repo.refs({ params: { repo: "vault.git" } }).pipe(Effect.flip);
           }).pipe(Effect.scoped),
         );
         assert.ok(denied, "an anonymous derived client must be refused");
@@ -166,7 +209,7 @@ describe("Client", () => {
         const allowed = await Effect.runPromise(
           Effect.gen(function* () {
             const client = yield* remote(authed.url, { token });
-            return yield* client.repo.refs({ params: { repo: "vault" } });
+            return yield* client.repo.refs({ params: { repo: "vault.git" } });
           }).pipe(Effect.scoped),
         );
         // The trust refs are refs too, so the branch is named rather than counted.

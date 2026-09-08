@@ -12,6 +12,9 @@
  * cannot leave a user with a truncated set of trusted repositories — the one
  * failure mode that would silently turn "identity changed" warnings into
  * "first use" prompts.
+ * Writers claim `known_repos.lock` before reading. A competing writer gets
+ * EEXIST and can retry; a lock left by a killed process needs manual removal
+ * after confirming that no writer is still running.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -63,13 +66,31 @@ const contentsOf = (location: string): string => {
 
 const read = (location: string): ReadonlyArray<KnownRepo> => parseFile(contentsOf(location));
 
-const write = (location: string, contents: string): void => {
+/** Hold a Git-style lock across the read, edit, and atomic publication. */
+const edit = <A>(
+  location: string,
+  modify: (contents: string) => { readonly contents?: string; readonly result: A },
+): A => {
   fs.mkdirSync(path.dirname(location), { recursive: true, mode: 0o700 });
-  const temporary = `${location}.${process.pid}.tmp`;
-  // `0600`: this file decides which repositories a user's tooling trusts, so
-  // it is written with the permissions ssh gives its own trust stores.
-  fs.writeFileSync(temporary, contents, { mode: 0o600 });
-  fs.renameSync(temporary, location);
+  const lock = `${location}.lock`;
+  // A competing CLI must fail before reading a snapshot it could overwrite.
+  // Never remove an existing lock: it belongs to another writer.
+  let descriptor: number | undefined = fs.openSync(lock, "wx", 0o600);
+  let published = false;
+  try {
+    const next = modify(contentsOf(location));
+    if (next.contents !== undefined) fs.writeFileSync(descriptor, next.contents);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    if (next.contents !== undefined) {
+      fs.renameSync(lock, location);
+      published = true;
+    }
+    return next.result;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    if (!published) fs.unlinkSync(lock);
+  }
 };
 
 /** The store at an explicit path. */
@@ -87,27 +108,27 @@ export const file = (location: string): Layer.Layer<KnownRepos> =>
           catch: failed("knownRepos.lookup"),
         }),
 
-      remember: (entry) =>
+      remember: Effect.fn("KnownRepos.remember")((entry: KnownRepo) =>
         Effect.try({
-          // Read and write inside one `try`: the CLI is the only writer and it
-          // is one process, so this is as atomic as the file needs to be. The
-          // edit is by line rather than by reformatting; see `withEntry`.
-          try: () => {
-            write(location, withEntry(contentsOf(location), entry));
-          },
+          try: () =>
+            edit(location, (contents) => ({
+              contents: withEntry(contents, entry),
+              result: undefined,
+            })),
           catch: failed("knownRepos.remember"),
         }),
+      ),
 
-      forget: (url) =>
+      forget: Effect.fn("KnownRepos.forget")((url: string) =>
         Effect.try({
-          try: () => {
-            const next = withoutUrl(contentsOf(location), url);
-            if (!next.removed) return false;
-            write(location, next.contents);
-            return true;
-          },
+          try: () =>
+            edit(location, (contents) => {
+              const next = withoutUrl(contents, url);
+              return next.removed ? { contents: next.contents, result: true } : { result: false };
+            }),
           catch: failed("knownRepos.forget"),
         }),
+      ),
     });
   });
 

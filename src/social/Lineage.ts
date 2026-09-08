@@ -2,7 +2,7 @@
 import { Effect } from "effect";
 
 import { Invalid } from "../git/Error.ts";
-import { Repository } from "../git/Repository.ts";
+import { commitAt, Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 
 export type Lineage = `sha1:${Oid}`;
@@ -14,7 +14,7 @@ const MAX_COMMITS = 1_000_000;
 const history = Effect.fn("social.Lineage.history")(function* (head: Oid, ceiling: number) {
   const repository = yield* Repository;
   const parents = new Map<Oid, ReadonlyArray<Oid>>();
-  const pending = [head];
+  const pending = [yield* commitAt(repository, head)];
   while (pending.length > 0) {
     const commit = pending.pop();
     if (commit === undefined || parents.has(commit)) continue;
@@ -24,7 +24,7 @@ const history = Effect.fn("social.Lineage.history")(function* (head: Oid, ceilin
         reason: `lineage history exceeds the ${ceiling}-commit ceiling`,
       });
     }
-    const record = yield* repository.readCommit(commit);
+    const record = yield* repository.readHistoryCommit(commit);
     parents.set(commit, record.parents);
     for (const parent of record.parents) pending.push(parent);
   }

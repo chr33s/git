@@ -85,9 +85,11 @@ const forward = Effect.fn("Sending.forward")(function* (
   // ref in the batch on account of one. An oid cannot go stale that way: what
   // is forwarded is exactly what was accepted, and a later push forwards the
   // later value.
+  // A delayed deletion must still name the value that was removed locally.
+  // Otherwise it can delete a branch the mirror has since recreated or moved.
   const refs: PushRef[] = carried.map((result) =>
     result.to === null
-      ? { local: result.ref, remote: result.ref, delete: true }
+      ? { local: result.ref, remote: result.ref, delete: true, expected: result.from }
       : { local: result.to, remote: result.ref },
   );
 

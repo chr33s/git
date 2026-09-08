@@ -33,11 +33,12 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import * as Client from "../client/Client.ts";
 import { fetchRepository } from "../client/Fetch.ts";
 import { push } from "../client/Push.ts";
-import { isBinary, unified } from "../git/Diff.ts";
+import { isBinary, quotePath, unified } from "../git/Diff.ts";
+import { verify as verifyLines } from "../git/Search.ts";
 import { forPath as pathHistory } from "../git/History.ts";
 import { Invalid } from "../git/Error.ts";
-import { isGitlink } from "../git/Format.ts";
-import { stores } from "../git/Node.ts";
+import { isGitlink, isSymlink } from "../git/Format.ts";
+import { initializeBare, stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, ObjectStore, type Oid, RefStore } from "../git/Store.ts";
@@ -95,8 +96,7 @@ const init = Command.make(
   ({ branch, repo, root }) =>
     Effect.gen(function* () {
       const directory = path.join(root, repo);
-      const { refs } = yield* openStores(directory);
-      yield* refs.setHead(`refs/heads/${branch}`);
+      yield* initializeBare(directory, branch);
       yield* Console.log(`Initialized empty repository in ${directory}`);
     }),
 );
@@ -166,6 +166,7 @@ const clone = Command.make(
         token: accessToken === "" ? undefined : accessToken,
         stores: target,
       });
+      yield* initializeBare(directory, result.defaultBranch);
       if (result.defaultBranch !== undefined) {
         yield* target.refs.setHead(`refs/heads/${result.defaultBranch}`);
       }
@@ -522,6 +523,41 @@ const files = Command.make(
     ),
 );
 
+const printFileDiff = Effect.fn("cli.printFileDiff")(function* (
+  path: string,
+  old: GitRepository.TreeFile | undefined,
+  now: GitRepository.TreeFile | undefined,
+) {
+  const repository = yield* Repository;
+  yield* Console.log(`diff --git ${quotePath(`a/${path}`)} ${quotePath(`b/${path}`)}`);
+  if (old === undefined && now !== undefined) {
+    yield* Console.log(`new file mode ${now.mode}`);
+  } else if (now === undefined && old !== undefined) {
+    yield* Console.log(`deleted file mode ${old.mode}`);
+  } else if (old !== undefined && now !== undefined && old.mode !== now.mode) {
+    yield* Console.log(`old mode ${old.mode}\nnew mode ${now.mode}`);
+  }
+  if (old?.oid === now?.oid) return;
+
+  const read = (oid: Oid | undefined) =>
+    oid === undefined ? Effect.succeed(new Uint8Array(0)) : repository.readBlob(oid);
+  const oldBytes = yield* read(old?.oid);
+  const newBytes = yield* read(now?.oid);
+
+  if (isBinary(oldBytes) || isBinary(newBytes)) {
+    yield* Console.log(`Binary files a/${path} and b/${path} differ`);
+    return;
+  }
+  const decoder = new TextDecoder();
+  const patch = unified(decoder.decode(oldBytes), decoder.decode(newBytes), {
+    beforeName: old === undefined ? null : path,
+    afterName: now === undefined ? null : path,
+  });
+  // Nonempty unified output ends in one LF, which Console.log supplies.
+  // Other trailing whitespace belongs to the patch's final content line.
+  if (patch !== "") yield* Console.log(patch.slice(0, -1));
+});
+
 const diff = Command.make(
   "diff",
   {
@@ -552,7 +588,7 @@ const diff = Command.make(
         for (const path of [...new Set([...before.keys(), ...after.keys()])].sort()) {
           const old = before.get(path);
           const now = after.get(path);
-          if (old?.oid === now?.oid) continue;
+          if (old?.oid === now?.oid && old?.mode === now?.mode) continue;
           // A gitlink names a commit in another repository: nothing to read,
           // and nothing a text diff could say about it.
           if (isGitlink(old?.mode ?? "") || isGitlink(now?.mode ?? "")) {
@@ -560,22 +596,17 @@ const diff = Command.make(
             continue;
           }
 
-          const read = (oid: Oid | undefined) =>
-            oid === undefined ? Effect.succeed(new Uint8Array(0)) : repository.readBlob(oid);
-          const oldBytes = yield* read(old?.oid);
-          const newBytes = yield* read(now?.oid);
-
-          if (isBinary(oldBytes) || isBinary(newBytes)) {
-            yield* Console.log(`Binary files a/${path} and b/${path} differ`);
-            continue;
+          if (
+            old !== undefined &&
+            now !== undefined &&
+            (Number.parseInt(old.mode, 8) & 0o170000) !== (Number.parseInt(now.mode, 8) & 0o170000)
+          ) {
+            // Git applies a file-type change as deletion followed by creation.
+            yield* printFileDiff(path, old, undefined);
+            yield* printFileDiff(path, undefined, now);
+          } else {
+            yield* printFileDiff(path, old, now);
           }
-          const decoder = new TextDecoder();
-          yield* Console.log(
-            unified(decoder.decode(oldBytes), decoder.decode(newBytes), {
-              beforeName: path,
-              afterName: path,
-            }).trimEnd(),
-          );
         }
       }),
     ),
@@ -603,10 +634,22 @@ const merge = Command.make(
       repo,
       Effect.gen(function* () {
         const repository = yield* Repository;
-        const input = { ours, theirs, author: yield* cliSignature(), strategy };
+        // The same two shared helpers every other verb here uses: a revision
+        // resolves through tags and branches, and a ref this writes is
+        // qualified. Passed raw, `merge` was the one command that took a
+        // branch or tag by name and answered "unknown ref".
+        const input = {
+          ours: yield* mustResolve(repository, ours),
+          theirs: yield* mustResolve(repository, theirs),
+          author: yield* cliSignature(),
+          strategy,
+          // Resolving first would otherwise put two object ids in the default
+          // message; what the caller typed is what the message should name.
+          message: `Merge ${theirs} into ${into === "" ? ours : refNameOf(into)}\n`,
+        };
         const outcome = yield* into === ""
           ? repository.merge(input)
-          : repository.merge({ ...input, into });
+          : repository.merge({ ...input, into: refNameOf(into) });
 
         yield* Console.log(`${outcome.kind}${outcome.commit === null ? "" : ` ${outcome.commit}`}`);
         for (const conflict of outcome.conflicts) {
@@ -642,13 +685,22 @@ const grep = Command.make(
         const expression = new RegExp(pattern, ignoreCase ? "i" : "");
 
         for (const file of yield* repository.listFiles(yield* treeOf(repository, ref))) {
-          if (isGitlink(file.mode)) continue;
+          // What git greps in a tree: file content. A gitlink names a commit
+          // this repository does not hold, and a symlink's blob is a path.
+          if (isGitlink(file.mode) || isSymlink(file.mode)) continue;
           const data = yield* repository.readBlob(file.oid);
           if (isBinary(data)) continue;
-          const lines = new TextDecoder().decode(data).split("\n");
-          for (let index = 0; index < lines.length; index++) {
-            const text = lines[index]!;
-            if (expression.test(text)) yield* Console.log(`${file.path}:${index + 1}:${text}`);
+          // The same line splitting the repository search uses, and for the
+          // reason recorded there: splitting on every newline invents a line
+          // past the last one for any blob that ends with a terminator, and a
+          // first line for an empty blob — both visible to a pattern that
+          // accepts the empty string.
+          for (const match of verifyLines(
+            data,
+            (text) => expression.test(text),
+            Number.MAX_SAFE_INTEGER,
+          )) {
+            yield* Console.log(`${file.path}:${match.line}:${match.text}`);
           }
         }
       }),
@@ -709,7 +761,7 @@ const gc = Command.make(
         );
         if (report.retained.length > 0) {
           yield* Console.log(
-            `${report.retained.length} unreachable object(s) are inside a pack; run with --repack to collect them`,
+            `${report.retained.length} unreachable object(s) are retained by packs; run with --repack to collect them`,
           );
         }
         if (report.packed !== undefined) {
@@ -954,7 +1006,11 @@ const remoteRemove = Command.make(
   ({ name, repo, server, token }) =>
     Effect.gen(function* () {
       const client = yield* clientFor(server, token);
-      yield* client.remotes.remoteRemove({ params: { repo, name } });
+      // The answer says whether anything went; discarding it made removing a
+      // name that was never registered look exactly like removing one that
+      // was, which is the reporting `branch --delete` gets right beside it.
+      const { deleted } = yield* client.remotes.remoteRemove({ params: { repo, name } });
+      yield* Console.log(deleted ? `Removed remote ${name}` : `No such remote: ${name}`);
     }).pipe(Effect.scoped),
 );
 
@@ -1011,7 +1067,9 @@ const webhookRemove = Command.make(
   ({ id, repo, server, token }) =>
     Effect.gen(function* () {
       const client = yield* clientFor(server, token);
-      yield* client.repo.webhookRemove({ params: { repo, id } });
+      // As in `server remote rm`: what the server did is worth saying.
+      const { deleted } = yield* client.repo.webhookRemove({ params: { repo, id } });
+      yield* Console.log(deleted ? `Removed webhook ${id}` : `No such webhook: ${id}`);
     }).pipe(Effect.scoped),
 );
 
@@ -1098,12 +1156,22 @@ const git = Command.make("git+").pipe(
 
 const main = Command.runWith(git, { version });
 
+/** The marker `effect/cli` puts on the errors it raises for its own flow. */
+const CLI_ERROR = "~effect/cli/CliError";
+
 /**
  * Domain failures leave as one readable line — `Schema.TaggedError` carries
  * its detail in fields, not `message`, and a stack trace helps nobody at a
  * shell prompt.
  */
 const rendered = <E>(error: E): E | Error => {
+  // Not the CLI's own control errors. `ShowHelp` — which is what a missing
+  // flag, an unknown subcommand or a bad choice becomes — has already printed
+  // the help by the time it arrives here, and carries the runtime annotations
+  // that say it was reported and which status to exit with. Rebuilding it as a
+  // plain `Error` dropped both, so every usage mistake printed its help and
+  // then a raw `ShowHelp: {…}` dump with a stack trace under it.
+  if (Predicate.hasProperty(error, CLI_ERROR)) return error;
   if (Predicate.hasProperty(error, "_tag")) {
     const { _tag, ...fields } = error;
     const detail =
@@ -1130,7 +1198,7 @@ const run = (argv: ReadonlyArray<string> = process.argv.slice(2)) => {
   });
   if (parsed._tag === "InvalidInvocation") {
     process.stderr.write(`git+: ${parsed.message}\n`);
-    process.exitCode = 129;
+    process.exitCode = parsed.exitCode ?? 129;
     return;
   }
   try {
@@ -1144,6 +1212,22 @@ const run = (argv: ReadonlyArray<string> = process.argv.slice(2)) => {
   NodeRuntime.runMain(
     main(parsed.invocation.argv).pipe(
       Effect.mapError(rendered),
+      // A failed verb says why on stderr and exits non-zero. Left to the
+      // runtime's own reporting, the line went to *stdout* — in front of the
+      // JSON several verbs print there, which is the very thing the logger
+      // service below is set to prevent — and carried three frames of this
+      // file's stack under it, which is what `rendered` exists to avoid.
+      // The CLI's own control errors keep their path: they have printed
+      // their help already and carry the status to exit with.
+      Effect.catchIf(
+        (error) => !Predicate.hasProperty(error, CLI_ERROR),
+        (error) =>
+          Effect.sync(() => {
+            const message = error instanceof Error ? error.message : String(error);
+            process.stderr.write(`git+: ${message}\n`);
+            process.exitCode = 1;
+          }),
+      ),
       Effect.provideService(GitInvocation, parsed.invocation),
       // Diagnostics on stderr, because stdout is a result. Several verbs print
       // JSON there and are read by something that parses it, and the default

@@ -333,6 +333,9 @@ const forCommand = Command.make(
           });
           return { pack, exposure: exposed } as const;
         }),
+        // A signed exposure names one checkout; two selectors that disagree
+        // are refused, not resolved by precedence.
+        { oneCheckout: true },
       );
 
       // A removal a later exposure partly undoes is the counterpart of a
@@ -443,6 +446,14 @@ const packBytes = Effect.fn("context.packBytes")(function* (reference: string) {
             reason: `${reference} was removed by a signed redaction`,
           });
         }
+      }
+      // Collected, and no counted tombstone says so: the tree names bytes
+      // this repository does not hold, which is all that can be said.
+      if (retained.bytes === null) {
+        return yield* new Invalid({
+          field: "pack",
+          reason: `${reference} retains no ${Exposure.PACK}`,
+        });
       }
       return retained.bytes;
     }

@@ -242,6 +242,11 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
     ["main", OID_MAIN],
     [BRANCH, OID_BRANCH],
   ]);
+  // Oid reads retain the tree from that revision, even after a branch moves.
+  const versions = new Map<string, ReadonlyMap<string, string>>(
+    HISTORY.map((commit) => [commit.oid, entries(AT_MAIN)]),
+  );
+  versions.set(OID_BRANCH, entries(AT_BRANCH));
   /** Commits written during the run, served back by `/commit/:oid` and `/object/:oid`. */
   const written = new Map<string, Stubbed>();
   const NEXT_TIPS = ["5", "6", "7", "8", "9", "ab", "cd", "ef"] as const;
@@ -318,14 +323,16 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             : name !== null && name.startsWith("refs/heads/")
               ? name.slice("refs/heads/".length)
               : "main";
-        const tree = trees.get(branchOf(ref)) ?? new Map<string, string>();
+        const tree =
+          (ref !== null && refIsOid.test(ref) ? versions.get(ref) : trees.get(branchOf(ref))) ??
+          new Map<string, string>();
         const refsNow = [...tips.entries()].map(([name, tip]) => ({
           name: `refs/heads/${name}`,
           oid: tip,
         }));
 
         if (path === "/core/refs") {
-          return json(Contract.RefsResponse, { refs: refsNow });
+          return json(Contract.RefsResponse, { refs: refsNow, head: "refs/heads/main" });
         }
         if (path === "/core/files") {
           return json(Contract.FilesResponse, {
@@ -349,8 +356,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             size: content.length,
           });
         }
-        // Settings reads the paged `/branches`, which is the endpoint built for
-        // a branch list; Code reads `/refs` because it wants the tip oid too.
+        // The paged branch endpoint remains available to other clients.
         if (path === "/core/branches") {
           return json(Contract.RefPage, { items: refsNow, next_cursor: null, has_more: false });
         }
@@ -478,7 +484,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           const base = tipOf(payload.base);
           if (base === undefined) return notFound();
           tips.set(payload.name, base);
-          trees.set(payload.name, new Map(trees.get(branchOf(payload.base)) ?? trees.get("main")));
+          trees.set(payload.name, new Map(versions.get(base)));
           return json(Contract.Ref, { name: `refs/heads/${payload.name}`, oid: base });
         }
         if (path === "/core/tags" && request.method === "GET") {
@@ -509,6 +515,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           const to = tipOf(payload.to);
           if (to === undefined) return notFound();
           tips.set(bare, to);
+          trees.set(bare, new Map(versions.get(to)));
           return json(Contract.ResetResult, { ref: `refs/heads/${bare}`, oid: to, previous });
         }
         if (path === "/core/merge" && request.method === "POST") {
@@ -517,6 +524,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
           const theirs = tipOf(payload.theirs);
           if (ours === undefined || theirs === undefined) return notFound();
           const commit = nextOid();
+          versions.set(commit, new Map(versions.get(ours)));
           written.set(commit, {
             oid: commit,
             subject: (payload.message ?? "merge").split("\n", 1)[0] ?? "merge",
@@ -534,7 +542,10 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
         }
         if (path === "/core/grep" && request.method === "POST") {
           const payload = await body(GrepPayload);
-          const target = trees.get(branchOf(payload.ref ?? null)) ?? new Map<string, string>();
+          const target =
+            (payload.ref !== undefined && refIsOid.test(payload.ref)
+              ? versions.get(payload.ref)
+              : trees.get(branchOf(payload.ref ?? null))) ?? new Map<string, string>();
           const needle = payload.pattern.toLowerCase();
           const matches: { path: string; line: number; text: string }[] = [];
           for (const [entryPath, content] of target) {
@@ -690,6 +701,7 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
             }
             const next = nextOid();
             tips.set(branch, next);
+            versions.set(next, new Map(target));
             written.set(next, {
               oid: next,
               subject: (payload.message ?? "").split("\n", 1)[0] ?? "",
@@ -1518,7 +1530,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   // branch again. Only the second request is allowed to commit its snapshot.
   await page.route("**/core/files?*", async (route) => {
     const ref = new URL(route.request().url()).searchParams.get("ref");
-    await new Promise((resolve) => setTimeout(resolve, ref === "refs/heads/main" ? 450 : 20));
+    await new Promise((resolve) => setTimeout(resolve, ref === OID_BRANCH ? 20 : 450));
     await route.continue();
   });
   await page.locator("ui-menu.gp-branch-menu").evaluate((menu, branch) => {
@@ -1657,7 +1669,10 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await page.waitForTimeout(1500);
   const fields = await page.locator(".gp-field-value").allTextContents();
   check("settings names the repository the client is pointed at", fields[0]?.trim() === "core");
-  check("settings resolves the default branch from /branches", fields[1]?.trim() === "main");
+  check(
+    "settings resolves the default branch from the explicit HEAD target",
+    fields[1]?.trim() === "main",
+  );
   check(
     "the identity card reports what /whoami answered",
     ((await page.textContent('[data-card="identity"]')) ?? "").includes("no genesis"),

@@ -248,6 +248,7 @@ export const handle = (
         part === "objects" && segments[index - 1] === "lfs" && segments[index - 2] === "info",
     );
     if (objectsAt === -1) return Effect.succeed(null);
+    if (segments.length !== objectsAt + 2) return Effect.succeed(failure(404, "unknown LFS route"));
 
     const last = segments[objectsAt + 1];
     if (last === undefined) return Effect.succeed(null);

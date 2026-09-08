@@ -82,27 +82,34 @@ export class DeliveryFailed extends Schema.TaggedError<DeliveryFailed>()(
   { httpApiStatus: 502 },
 ) {}
 
-/** One POST, signed and bounded — the unit the retry schedule repeats. */
+/** One subscriber's signed request, with a timeout for each attempt. */
 export const post = Effect.fn("Webhooks.post")(function* (
   subscriber: Subscriber,
   body: string,
-  timeout: `${number} millis`,
+  options?: DeliveryOptions,
 ) {
-  const client = yield* HttpClient.HttpClient;
+  const client = (yield* HttpClient.HttpClient).pipe(
+    // The timeout must be inside retryTransient. Outside it, a slow first
+    // response exhausts the whole delivery without ever spending a retry.
+    HttpClient.transformResponse(Effect.timeout(options?.timeout ?? "10000 millis")),
+    HttpClient.filterStatusOk,
+    HttpClient.retryTransient({
+      schedule: Schedule.exponential(options?.baseDelay ?? "200 millis", 2).pipe(Schedule.jittered),
+      times: options?.retries ?? 3,
+    }),
+  );
   const signature = yield* sign(body, subscriber.secret);
 
-  yield* client
-    .execute(
-      HttpClientRequest.post(subscriber.url).pipe(
-        HttpClientRequest.setHeaders({
-          "content-type": "application/json",
-          "x-signature-256": signature,
-          "x-event": "push",
-        }),
-        HttpClientRequest.bodyText(body, "application/json"),
-      ),
-    )
-    .pipe(Effect.timeout(timeout));
+  yield* client.execute(
+    HttpClientRequest.post(subscriber.url).pipe(
+      HttpClientRequest.setHeaders({
+        "content-type": "application/json",
+        "x-signature-256": signature,
+        "x-event": "push",
+      }),
+      HttpClientRequest.bodyText(body, "application/json"),
+    ),
+  );
 });
 
 /**
@@ -123,21 +130,10 @@ export const deliver = Effect.fn("Webhooks.deliver")(function* (
 
   const body = JSON.stringify({ event: "push", refs: events });
 
-  // Non-2xx becomes a failure, and only the transient subset is retried —
-  // both are properties of the client, so `post` stays a plain request.
-  const client = (yield* HttpClient.HttpClient).pipe(
-    HttpClient.filterStatusOk,
-    HttpClient.retryTransient({
-      schedule: Schedule.exponential(options?.baseDelay ?? "200 millis", 2).pipe(Schedule.jittered),
-      times: options?.retries ?? 3,
-    }),
-  );
-
   yield* Effect.forEach(
     targets,
     (target) =>
-      post(target, body, options?.timeout ?? "10000 millis").pipe(
-        Effect.provideService(HttpClient.HttpClient, client),
+      post(target, body, options).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning(`webhook delivery to ${target.url} failed`, cause),
         ),

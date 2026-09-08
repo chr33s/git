@@ -52,7 +52,7 @@ const detach = (task: Task, id: string): Task => ({
 const attach = (task: Task, id: string): Task =>
   (task.children ?? []).includes(id) ? task : { ...task, children: [...(task.children ?? []), id] };
 
-class TaskStore extends EventTarget {
+export class TaskStore extends EventTarget {
   #tasks: Task[] = [...seed];
   #sessions: readonly SessionRow[] = [];
   #liveNotice: string | null = null;
@@ -156,14 +156,17 @@ class TaskStore extends EventTarget {
 
     const under = (task: Task): Row[] => {
       const out: Row[] = [];
-      for (const childId of task.children ?? []) {
-        const child = this.get(childId);
+      const seen = new Set([task.id]);
+      const pending = (task.children ?? []).map((id) => ({ id, depth: 0 })).reverse();
+      while (pending.length > 0) {
+        const next = pending.pop();
+        if (next === undefined || seen.has(next.id)) continue;
+        seen.add(next.id);
+        const child = this.get(next.id);
         if (child === undefined) continue;
-        out.push({ task: child, depth: 0 });
-        for (const grandchildId of child.children ?? []) {
-          const grandchild = this.get(grandchildId);
-          if (grandchild !== undefined) out.push({ task: grandchild, depth: 1 });
-        }
+        out.push({ task: child, depth: Math.min(next.depth, 1) });
+        for (const id of [...(child.children ?? [])].reverse())
+          pending.push({ id, depth: next.depth + 1 });
       }
       return out;
     };
@@ -212,8 +215,15 @@ class TaskStore extends EventTarget {
    * follows `T-20` rather than starting a second numbering.
    */
   create(input: { readonly title: string; readonly desc: string; readonly author: Person }): Task {
-    const next =
-      Math.max(...this.#tasks.map((task) => Number(task.id.split("-")[1] ?? "0") || 0)) + 1;
+    const ids = new Set(this.#tasks.map((task) => task.id));
+    let next = 1;
+    for (const id of ids) {
+      const number = /^T-(\d+)$/.exec(id)?.[1];
+      const value = number === undefined ? 0 : Number(number);
+      if (Number.isSafeInteger(value) && value < Number.MAX_SAFE_INTEGER)
+        next = Math.max(next, value + 1);
+    }
+    while (ids.has(`T-${next}`)) next++;
     const task: Task = {
       id: `T-${String(next)}`,
       kind: "Task",
@@ -319,13 +329,17 @@ class TaskStore extends EventTarget {
    * Move a task under another, or out from under one.
    *
    * Tried in the hub first; a fixture task has no ref to append to, so it
-   * moves in this tab only — the same split every other write here makes.
+   * moves in this tab only. A live task stays unchanged on failure; false
+   * lets the caller report that the requested move was not saved.
    */
-  async move(id: string, parent: string): Promise<void> {
+  async move(id: string, parent: string): Promise<boolean> {
+    const task = this.get(id);
+    if (task === undefined) return false;
     const landed = await import("./hub.ts")
       .then((hub) => hub.moveTask(id, parent))
       .catch(() => false);
-    if (landed) return;
+    if (landed) return true;
+    if (task.hub === true || this.get(id)?.hub === true) return false;
     const was = this.get(id)?.parent;
     if (was !== undefined) this.#replace(was, (task) => detach(task, id));
     if (parent !== "") this.#replace(parent, (task) => attach(task, id));
@@ -333,6 +347,7 @@ class TaskStore extends EventTarget {
       const { parent: _, ...rest } = task;
       return parent === "" ? rest : { ...rest, parent };
     });
+    return true;
   }
 
   /** Comment on a hub pull request; `false` falls back to `comment`. */

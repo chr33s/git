@@ -147,13 +147,54 @@ export const diff3 = (
  * that arrived without a final newline gets one — git's own merge drivers do
  * the same rather than let the marker lines run into content.
  */
+/**
+ * Whether a text's first line ends `\r\n`.
+ *
+ * git's own rule for which line ending its conflict markers carry, and it
+ * looks at the *first* line rather than the last: a file whose last line was
+ * the one somebody's editor rewrote is still a CRLF file. See `markerEol`.
+ */
+const firstLineCrlf = (text: string): boolean => {
+  const at = text.indexOf("\n");
+  return at > 0 && text[at - 1] === "\r";
+};
+
+/**
+ * The line ending git terminates conflict markers with.
+ *
+ * CRLF only when all three inputs are CRLF, which is what `xdiff/xmerge.c`
+ * asks: a marker line is inserted into somebody's file, and a `\n` marker in
+ * a `\r\n` file is a mixed-ending file that shows up as whole-line churn in
+ * the next diff. Markers matching the file they land in is what git does, so
+ * it is what a merge claiming to be git-compatible has to do.
+ */
+const markerEol = (input: MergeInput): string =>
+  firstLineCrlf(input.base) && firstLineCrlf(input.ours) && firstLineCrlf(input.theirs) ? "\r" : "";
+
 export const mergeText = (input: MergeInput): TextMerge => {
   const strategy = input.strategy ?? "recursive";
   const oursLabel = input.labels?.ours ?? "ours";
   const baseLabel = input.labels?.base ?? "base";
   const theirsLabel = input.labels?.theirs ?? "theirs";
+  // Carried on the marker lines themselves, so the single `join("\n")` below
+  // still produces one terminator per line.
+  const eol = markerEol(input);
 
-  const regions = diff3(splitLines(input.base), splitLines(input.ours), splitLines(input.theirs));
+  // A CRLF file whose last line has no terminator gets a CRLF one when
+  // something has to follow it — a marker, or the other side's lines. git
+  // tracks that as `needs_cr` per file and this is the same rule: the added
+  // terminator matches the file it is added to, rather than being the bare
+  // `\n` the join supplies. Stripped again below when nothing follows.
+  const linesOf = (text: string): ReadonlyArray<string> => {
+    const lines = splitLines(text);
+    const last = lines.at(-1);
+    if (eol !== "\r" || last === undefined || text.endsWith("\n") || last.endsWith("\r")) {
+      return lines;
+    }
+    return [...lines.slice(0, -1), `${last}\r`];
+  };
+
+  const regions = diff3(linesOf(input.base), linesOf(input.ours), linesOf(input.theirs));
 
   const out: Array<string> = [];
   let conflicted = false;
@@ -169,13 +210,13 @@ export const mergeText = (input: MergeInput): TextMerge => {
     }
 
     conflicted = true;
-    out.push(`<<<<<<< ${oursLabel}`);
+    out.push(`<<<<<<< ${oursLabel}${eol}`);
     for (const line of region.ours) out.push(line);
-    out.push(`||||||| ${baseLabel}`);
+    out.push(`||||||| ${baseLabel}${eol}`);
     for (const line of region.base) out.push(line);
-    out.push("=======");
+    out.push(`=======${eol}`);
     for (const line of region.theirs) out.push(line);
-    out.push(`>>>>>>> ${theirsLabel}`);
+    out.push(`>>>>>>> ${theirsLabel}${eol}`);
   }
 
   // A file that ended without a newline still does: `splitLines` drops the
@@ -198,8 +239,12 @@ export const mergeText = (input: MergeInput): TextMerge => {
     (conflicted && lastRegion?.ok === false) ||
     (ourEnd === theirEnd ? ourEnd : ourEnd === baseEnd ? theirEnd : ourEnd);
   const joined = out.join("\n");
+  // Unterminated output ends with the line `linesOf` may have completed; with
+  // nothing following it there is no terminator to match, so that `\r` goes
+  // back off the end.
+  const bare = eol === "\r" && joined.endsWith("\r") ? joined.slice(0, -1) : joined;
   return {
-    content: out.length === 0 ? "" : terminated ? `${joined}\n` : joined,
+    content: out.length === 0 ? "" : terminated ? `${joined}\n` : bare,
     conflicted,
   };
 };
@@ -327,24 +372,15 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
       continue;
     }
 
-    // Decided before the reads, not after: a strategy that picks a side
-    // already knows the answer, and reading both blobs to throw both away is
-    // two object reads per changed path across the whole tree.
-    if (strategy === "ours") continue;
-    if (strategy === "theirs") {
-      changes.push(yield* taking(yours));
+    // A symlink target is one value. Conflict preferences choose the target
+    // whole; regular files below keep clean edits from both sides.
+    if ((mine.mode === "120000" || yours.mode === "120000") && strategy !== "recursive") {
+      if (strategy === "theirs") changes.push(yield* taking(yours));
       continue;
     }
 
     const ourBytes = yield* input.read(mine.oid);
     const theirBytes = yield* input.read(yours.oid);
-
-    // Conflict markers only make sense in text; a binary file has to be
-    // chosen by a human, so it is reported and ours is left in place.
-    if (isBinary(ourBytes) || isBinary(theirBytes)) {
-      conflicts.push({ path, reason: "binary" });
-      continue;
-    }
 
     // And "text" here means text this can round-trip. A Latin-1 `.po` or
     // `.properties` file has no NUL, so it passes the binary check, but
@@ -362,8 +398,17 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
       }
       return true;
     };
-    if (!decodable(ourBytes) || !decodable(theirBytes)) {
-      conflicts.push({ path, reason: "binary" });
+    // Nontext conflicts are resolved as whole files. A preference must not
+    // bypass this classification and discard clean hunks in a text file.
+    if (
+      isBinary(ourBytes) ||
+      isBinary(theirBytes) ||
+      !decodable(ourBytes) ||
+      !decodable(theirBytes)
+    ) {
+      if (strategy === "theirs") {
+        changes.push({ path, content: theirBytes, mode: yours.mode });
+      } else if (strategy !== "ours") conflicts.push({ path, reason: "binary" });
       continue;
     }
 
@@ -372,27 +417,30 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
       base: treeDecoder.decode(baseBytes),
       ours: treeDecoder.decode(ourBytes),
       theirs: treeDecoder.decode(theirBytes),
+      strategy,
     });
 
     // The mode merges the same way the content does. Always taking ours drops
     // a `chmod +x` made only on the incoming side — the merge reports success
     // and the result is a script that will not run — and hides a genuine
     // mode/mode disagreement by resolving it silently.
-    const mode = sameMode(yours.mode, mine.mode)
-      ? mine.mode
-      : inBase !== undefined && sameMode(mine.mode, inBase.mode)
-        ? yours.mode
-        : mine.mode;
     const modeClash =
       !sameMode(yours.mode, mine.mode) &&
       (inBase === undefined ||
         (!sameMode(mine.mode, inBase.mode) && !sameMode(yours.mode, inBase.mode)));
+    const mode = modeClash
+      ? strategy === "theirs"
+        ? yours.mode
+        : mine.mode
+      : sameMode(mine.mode, inBase?.mode)
+        ? yours.mode
+        : mine.mode;
 
     // One entry per path, whatever went wrong with it. A file whose content
     // *and* mode both disagreed was listed twice, so a caller counting
     // conflicts counted one file as two and a caller resolving them by path
     // met the same path a second time with nothing left to do.
-    if (merged.conflicted || modeClash) {
+    if (merged.conflicted || (modeClash && strategy === "recursive")) {
       conflicts.push({
         path,
         reason: merged.conflicted && inBase === undefined ? "add/add" : "content",

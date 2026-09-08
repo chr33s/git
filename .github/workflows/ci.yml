@@ -21,6 +21,7 @@ jobs:
       - run: npm run codegen
       - run: npm run check
       - run: npm run docs:cli:check
+      - run: npx playwright install --with-deps chromium
       - run: npm run test:unit
 
   integration:
@@ -47,4 +48,5 @@ jobs:
       - run: git --version | grep --fixed-strings "git version 2.55.0"
       - run: npm ci
       - run: npm run build:sea
+      - run: npx playwright install --with-deps chromium
       - run: npm run test:interop

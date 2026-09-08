@@ -96,3 +96,29 @@ describe("BlobIndex.candidates", () => {
     assert.equal(index.candidates("a", true), null, "shorter than one bigram");
   });
 });
+
+describe("linear regex matching", () => {
+  it("matches repetition and anchors without retrying whole suffixes", () => {
+    for (const pattern of [
+      "a+$",
+      "^a*$",
+      "[*?]x+",
+      "a{2,4}$",
+      "ab?c",
+      "a|b",
+      "[a-z]+$",
+      "^$",
+      "a\\b",
+    ]) {
+      const compiled = Search.compileMatcher({ pattern });
+      assert.ok(Result.isSuccess(compiled), pattern);
+      const reference = new RegExp(pattern);
+      for (const line of ["", "a", "aa", "aaaaa", "aaaa!", "abc", "ac", "*xxx", "xyz", "b", "a "]) {
+        assert.equal(compiled.success(line), reference.test(line), `${pattern}: ${line}`);
+      }
+    }
+    const compiled = Search.compileMatcher({ pattern: "a+$" });
+    assert.ok(Result.isSuccess(compiled));
+    assert.equal(compiled.success("a".repeat(100_000) + "!"), false);
+  });
+});

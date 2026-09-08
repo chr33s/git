@@ -18,12 +18,13 @@ import { Effect, Layer } from "effect";
 import { gitIn, hasGit } from "../testing/Git.ts";
 import * as Checkout from "./Checkout.ts";
 import { stores as memoryStores } from "./Memory.ts";
+import * as MergeState from "./MergeState.ts";
 import { stores as nodeStores } from "./Node.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
 import { encodeTree } from "./Format.ts";
 import { ObjectStore, RefStore } from "./Store.ts";
-import { indexMemory, workTreeMemory, WorkTree } from "./Work.ts";
+import { IndexStore, indexMemory, workTreeMemory, WorkTree } from "./Work.ts";
 import { workspace } from "./Work.node.ts";
 
 const author = {
@@ -40,6 +41,7 @@ const inMemory = GitRepository.layer.pipe(
   Layer.provide(GitRepository.hooksNoop),
   Layer.provideMerge(memoryStores),
   Layer.provideMerge(indexMemory),
+  Layer.provideMerge(MergeState.none),
   Layer.provideMerge(workTreeMemory),
 );
 
@@ -563,5 +565,103 @@ describe.skipIf(!hasGit)("working tree, against git", () => {
       assert.equal(git(checkout, "status", "--porcelain").trim(), "");
       git(checkout, "fsck", "--strict");
     }),
+  );
+});
+
+describe("working-tree review regressions", () => {
+  it.effect("unstaging and moving dirty bytes preserve the unstaged difference", () =>
+    Effect.gen(function* () {
+      const work = yield* WorkTree;
+      yield* work.write("a", encode("base"), 0o100644);
+      yield* Checkout.add(["a"]);
+      yield* Checkout.commit({ message: "base", author });
+      yield* work.write("a", encode("changed"), 0o100644);
+      yield* Checkout.add(["a"]);
+      yield* Checkout.restore(["a"], { staged: true });
+      assert.deepEqual((yield* Checkout.status()).unstaged, [{ path: "a", change: "modified" }]);
+      assert.equal((yield* Effect.result(Checkout.checkout("main")))._tag, "Failure");
+      yield* Checkout.move("a", "b");
+      assert.deepEqual((yield* Checkout.status()).unstaged, [{ path: "b", change: "modified" }]);
+      assert.equal(new TextDecoder().decode(yield* work.read("b")), "changed");
+    }).pipe(Effect.provide(inMemory)),
+  );
+
+  it.effect("refuses a dirty removal batch before deleting clean members", () =>
+    Effect.gen(function* () {
+      const work = yield* WorkTree;
+      for (const file of ["a", "b"]) yield* work.write(file, encode("base"), 0o100644);
+      yield* Checkout.add(["."]);
+      yield* Checkout.commit({ message: "base", author });
+      yield* work.write("b", encode("changed"), 0o100644);
+      assert.equal((yield* Effect.result(Checkout.remove(["a", "b"])))._tag, "Failure");
+      assert.deepEqual(yield* work.list([]), ["a", "b"]);
+      yield* Checkout.remove(["b"], { force: true });
+      assert.deepEqual(yield* work.list([]), ["a"]);
+    }).pipe(Effect.provide(inMemory)),
+  );
+
+  it.effect("refuses overwriting untracked destinations", () =>
+    Effect.gen(function* () {
+      const work = yield* WorkTree;
+      yield* work.write("a", encode("base"), 0o100644);
+      yield* Checkout.add(["a"]);
+      yield* work.write("b", encode("untracked"), 0o100644);
+      assert.equal((yield* Effect.result(Checkout.move("a", "b")))._tag, "Failure");
+      assert.equal(new TextDecoder().decode(yield* work.read("b")), "untracked");
+      assert.deepEqual(yield* work.list([]), ["a", "b"]);
+    }).pipe(Effect.provide(inMemory)),
+  );
+
+  it.effect("stages directory deletions and commits the final deletion", () =>
+    Effect.gen(function* () {
+      const work = yield* WorkTree;
+      yield* work.write("dir/a", encode("base"), 0o100644);
+      yield* Checkout.add(["."]);
+      yield* Checkout.commit({ message: "base", author });
+      yield* work.remove("dir/a");
+      assert.deepEqual(yield* Checkout.add(["dir"]), ["dir/a"]);
+      const committed = yield* Checkout.commit({ message: "delete", author });
+      assert.equal(committed.files, 0);
+      assert.deepEqual(yield* (yield* Repository).listFiles(committed.tree), []);
+      assert.equal(
+        (yield* Effect.result(Checkout.commit({ message: "unchanged", author })))._tag,
+        "Failure",
+      );
+    }).pipe(Effect.provide(inMemory)),
+  );
+
+  it.effect("refuses unresolved commits and replaces all conflict stages on add", () =>
+    Effect.gen(function* () {
+      const work = yield* WorkTree;
+      const index = yield* IndexStore;
+      yield* work.write("a", encode("base"), 0o100644);
+      yield* Checkout.add(["a"]);
+      const initial = yield* Checkout.commit({ message: "base", author });
+      const entry = (yield* index.load)[0];
+      assert.ok(entry);
+      yield* index.save([
+        { ...entry, stage: 1 },
+        { ...entry, stage: 2 },
+        { ...entry, stage: 3 },
+      ]);
+      assert.equal(
+        (yield* Effect.result(Checkout.commit({ message: "unresolved", author })))._tag,
+        "Failure",
+      );
+      assert.equal(yield* (yield* Repository).resolve("HEAD"), initial.oid);
+      yield* work.write("a", encode("resolved"), 0o100644);
+      yield* Checkout.add(["a"]);
+      assert.deepEqual(
+        (yield* index.load).map((found) => found.stage),
+        [0],
+      );
+      const resolved = yield* Checkout.commit({ message: "resolved", author });
+      const file = yield* (yield* Repository).findPath(resolved.tree, "a");
+      assert.ok(file);
+      assert.equal(
+        new TextDecoder().decode(yield* (yield* Repository).readBlob(file.oid)),
+        "resolved",
+      );
+    }).pipe(Effect.provide(inMemory)),
   );
 });

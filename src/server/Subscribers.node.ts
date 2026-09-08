@@ -12,7 +12,7 @@
 import { Effect, Layer } from "effect";
 
 import { StorageFailure } from "../git/Error.ts";
-import { readRows, writeRows } from "./JsonRows.node.ts";
+import { editRows, readRows, writeRows } from "./JsonRows.node.ts";
 import { type Subscriber, Subscribers, validate } from "./Subscribers.ts";
 
 interface Stored {
@@ -43,34 +43,38 @@ export const file = (location: string): Layer.Layer<Subscribers> =>
     return Subscribers.of({
       forEvent: () => all.pipe(Effect.orElseSucceed(() => [])),
       list: all,
-      add: (input) =>
+      add: Effect.fn("Subscribers.add")((input) =>
         validate(input).pipe(
           Effect.flatMap(() =>
             Effect.try({
-              try: () => {
-                const subscriber: Subscriber = {
-                  id: crypto.randomUUID(),
-                  url: input.url,
-                  secret: input.secret,
-                  createdAt: new Date(),
-                };
-                write(location, [...read(location), subscriber]);
-                return subscriber;
-              },
+              try: () =>
+                editRows(location, () => {
+                  const subscriber: Subscriber = {
+                    id: crypto.randomUUID(),
+                    url: input.url,
+                    secret: input.secret,
+                    createdAt: new Date(),
+                  };
+                  write(location, [...read(location), subscriber]);
+                  return subscriber;
+                }),
               catch: failed("subscribers.add"),
             }),
           ),
         ),
-      remove: (id) =>
+      ),
+      remove: Effect.fn("Subscribers.remove")((id) =>
         Effect.try({
-          try: () => {
-            const rows = read(location);
-            const kept = rows.filter((row) => row.id !== id);
-            if (kept.length === rows.length) return false;
-            write(location, kept);
-            return true;
-          },
+          try: () =>
+            editRows(location, () => {
+              const rows = read(location);
+              const kept = rows.filter((row) => row.id !== id);
+              if (kept.length === rows.length) return false;
+              write(location, kept);
+              return true;
+            }),
           catch: failed("subscribers.remove"),
         }),
+      ),
     });
   });

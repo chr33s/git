@@ -21,7 +21,12 @@ export const Page = <A extends Schema.Top>(item: A) =>
     has_more: Schema.Boolean,
   });
 
-export const RefsResponse = Schema.Struct({ refs: Schema.Array(Ref) });
+export const RefsResponse = Schema.Struct({
+  refs: Schema.Array(Ref),
+  /** HEAD's symbolic target, or its oid when detached; meaningful even before the first commit. */
+  head: Schema.String,
+});
+export type RefsResponse = typeof RefsResponse.Type;
 export const RefPage = Page(Ref);
 
 export const FileEntry = Schema.Struct({
@@ -254,7 +259,7 @@ export const GcReport = Schema.Struct({
   scanned: Schema.Finite,
   reachable: Schema.Finite,
   removed: Schema.Array(OidString),
-  /** Unreachable, but inside a pack: `repack` is what collects these. */
+  /** Unreachable, but held by packs or needed to decode them; collected by repack. */
   retained: Schema.Array(OidString),
   packed: Schema.NullOr(Schema.Struct({ name: Schema.String, objects: Schema.Finite })),
   repack_skipped: Schema.NullOr(Schema.String),

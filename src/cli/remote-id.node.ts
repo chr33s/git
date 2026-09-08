@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Verify a typed repository identity, pin it, then delegate to stock Git. */
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,44 +32,82 @@ const cleanGitEnvironment = (): NodeJS.ProcessEnv => {
   return environment;
 };
 
-const git = (directory: string, arguments_: ReadonlyArray<string>): Promise<Uint8Array> =>
+const git = (
+  directory: string,
+  arguments_: ReadonlyArray<string>,
+  signal?: AbortSignal,
+): Promise<Uint8Array> =>
   new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      [...arguments_],
-      {
-        cwd: directory,
-        encoding: null,
-        env: cleanGitEnvironment(),
-        maxBuffer: 4 * 1024 * 1024,
-      },
-      (error, stdout, stderr) => {
-        if (error !== null) {
-          const detail = new TextDecoder().decode(stderr).trim();
-          reject(new Error(detail === "" ? error.message : detail));
-          return;
-        }
-        resolve(new Uint8Array(stdout));
-      },
-    );
+    signal?.throwIfAborted();
+    const grouped = process.platform !== "win32";
+    const child = spawn("git", [...arguments_], {
+      cwd: directory,
+      env: cleanGitEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+      // Git starts transport helpers. A separate Unix process group lets
+      // interruption stop their sockets as well as the parent process.
+      detached: grouped,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let size = 0;
+    let failure: Error | undefined;
+    const abort = () => {
+      if (child.pid === undefined) return;
+      try {
+        if (grouped) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch (cause) {
+        if (!Predicate.hasProperty(cause, "code") || cause.code !== "ESRCH") reject(cause);
+      }
+    };
+    const capture = (chunks: Buffer[], chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) {
+        failure ??= new Error("identity preflight output exceeded 4 MiB");
+        abort();
+      } else chunks.push(chunk);
+    };
+    child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk));
+    child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk));
+    child.once("error", (error) => {
+      failure = error;
+    });
+    // Settle after close, so identityAt's finally cannot remove the scratch
+    // repository while a terminating Git or its transport still uses it.
+    child.once("close", (code, endedBy) => {
+      signal?.removeEventListener("abort", abort);
+      if (failure !== undefined) reject(failure);
+      else if (signal?.aborted === true) reject(signal.reason);
+      else if (code !== 0) {
+        const detail = Buffer.concat(stderr).toString("utf8").trim();
+        reject(new Error(detail || `git preflight exited with ${endedBy ?? code}`));
+      } else resolve(new Uint8Array(Buffer.concat(stdout)));
+    });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted === true) abort();
   });
 
 /** Fetch only the advertised genesis record and compute its identity. */
-export const identityAt = async (url: string): Promise<RepoId> => {
+export const identityAt = async (url: string, signal?: AbortSignal): Promise<RepoId> => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "git-id-"));
   try {
-    await git(directory, ["init", "--bare", "--quiet", "."]);
-    await git(directory, [
-      "-c",
-      "protocol.version=2",
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--depth=1",
-      url,
-      "refs/meta/trust/genesis",
-    ]);
-    const bytes = await git(directory, ["show", "FETCH_HEAD:genesis.json"]);
+    await git(directory, ["init", "--bare", "--quiet", "."], signal);
+    await git(
+      directory,
+      [
+        "-c",
+        "protocol.version=2",
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--depth=1",
+        url,
+        "refs/meta/trust/genesis",
+      ],
+      signal,
+    );
+    const bytes = await git(directory, ["show", "FETCH_HEAD:genesis.json"], signal);
     return (await Effect.runPromise(loadGenesis(bytes))).repoId;
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
@@ -97,7 +135,7 @@ const locateAndPin = (source: string) =>
     if (Result.isFailure(resolved)) return yield* resolved.failure;
 
     const presented = yield* Effect.tryPromise({
-      try: () => identityAt(resolved.success),
+      try: (signal) => identityAt(resolved.success, signal),
       catch: (cause) =>
         new Invalid({
           field: "identifier",
@@ -123,11 +161,38 @@ const locateAndPin = (source: string) =>
     return resolved.success;
   }).pipe(Effect.provide(knownRepos));
 
-const delegate = (name: string, url: string): Promise<number> =>
+const delegate = (name: string, url: string, signal: AbortSignal): Promise<number> =>
   new Promise((resolve, reject) => {
-    const child = spawn("git", ["remote-http", name, url], { stdio: "inherit" });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve(signal === null ? (code ?? 1) : 128));
+    signal.throwIfAborted();
+    const grouped = process.platform !== "win32";
+    const child = spawn("git", ["remote-http", name, url], { stdio: "inherit", detached: grouped });
+    let failure: Error | undefined;
+    let force: ReturnType<typeof setTimeout> | undefined;
+    const stop = (termination: NodeJS.Signals) => {
+      if (child.pid === undefined) return;
+      try {
+        if (grouped) process.kill(-child.pid, termination);
+        else child.kill(termination);
+      } catch (cause) {
+        if (!Predicate.hasProperty(cause, "code") || cause.code !== "ESRCH") reject(cause);
+      }
+    };
+    const abort = () => {
+      stop("SIGTERM");
+      force = setTimeout(() => stop("SIGKILL"), 1_000);
+    };
+    child.once("error", (error) => {
+      failure = error;
+    });
+    child.once("close", (code, endedBy) => {
+      clearTimeout(force);
+      signal.removeEventListener("abort", abort);
+      if (failure !== undefined) reject(failure);
+      else if (signal.aborted) reject(signal.reason);
+      else resolve(endedBy === null ? (code ?? 1) : 128);
+    });
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
   });
 
 export const run = async (): Promise<void> => {
@@ -139,10 +204,24 @@ export const run = async (): Promise<void> => {
     return;
   }
 
+  const controller = new AbortController();
+  let terminated: number | undefined;
+  const handlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => {
+    const handler = () => {
+      terminated ??= 128 + os.constants.signals[signal];
+      controller.abort();
+    };
+    process.on(signal, handler);
+    return [signal, handler] as const;
+  });
   try {
-    const location = await Effect.runPromise(locateAndPin(source));
-    process.exitCode = await delegate(name, location);
+    const location = await Effect.runPromise(locateAndPin(source), { signal: controller.signal });
+    process.exitCode = await delegate(name, location, controller.signal);
   } catch (error) {
+    if (terminated !== undefined) {
+      process.exitCode = terminated;
+      return;
+    }
     const reason =
       Predicate.hasProperty(error, "reason") && Predicate.isString(error.reason)
         ? error.reason
@@ -151,6 +230,8 @@ export const run = async (): Promise<void> => {
           : String(error);
     process.stderr.write(`git+id: ${reason}\n`);
     process.exitCode = 1;
+  } finally {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
   }
 };
 

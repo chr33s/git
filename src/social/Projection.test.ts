@@ -65,6 +65,71 @@ const context = (author: PrincipalId, index: number) => ({
 });
 
 describe("social projection", () => {
+  it.effect("retains deeper vouches on the same route without counting extra confidence", () =>
+    Effect.sync(() => {
+      for (const depths of [
+        [0, 2],
+        [2, 0],
+      ]) {
+        for (const intermediate of [false, true]) {
+          const author = intermediate ? bob : alice;
+          const subject = intermediate ? carol : bob;
+          const repeated = depths.map((depth, index) =>
+            vouch({
+              ...context(author, index + 1),
+              subject,
+              scope: ["review", "vouch"],
+              depth,
+            }),
+          );
+          const graph = project({
+            roots: [alice],
+            at: now,
+            logs: [
+              log(
+                alice,
+                intermediate
+                  ? [
+                      vouch({
+                        ...context(alice, 1),
+                        subject: bob,
+                        scope: ["review", "vouch"],
+                        depth: 2,
+                      }),
+                    ]
+                  : repeated,
+              ),
+              log(
+                bob,
+                intermediate
+                  ? repeated
+                  : [
+                      vouch({
+                        ...context(bob, 1),
+                        subject: carol,
+                        scope: ["review", "vouch"],
+                        depth: 1,
+                      }),
+                    ],
+              ),
+              log(carol, [
+                vouch({
+                  ...context(carol, 1),
+                  subject: dave,
+                  scope: ["review"],
+                  depth: 0,
+                }),
+              ]),
+            ],
+          });
+          assert.equal(confidence(graph, subject, "review"), 1);
+          assert.equal(confidence(graph, dave, "review"), 1, "the deeper vouch must extend");
+          assert.equal(confidence(graph, dave, "introduce.repo"), 0);
+        }
+      }
+    }),
+  );
+
   it.effect("attenuates scope and stops when an intermediate vouch cannot extend", () =>
     Effect.sync(() => {
       const projection = project({

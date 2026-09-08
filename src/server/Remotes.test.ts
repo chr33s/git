@@ -622,6 +622,43 @@ describe("Remotes, over HTTP", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("refuses a deleted upstream branch even when a tracking ref remains", () =>
+    Effect.gen(function* () {
+      const api = yield* remote(server.url);
+      const upstream = "deleted-upstream";
+      const downstream = "deleted-downstream";
+      yield* commit(upstream, "a", "one", "one");
+      yield* api.remotes.remoteAdd({
+        params: { repo: downstream },
+        payload: { name: "origin", url: `${server.url}/${upstream}` },
+      });
+      const request = { params: { repo: downstream }, payload: { name: "origin", branch: "main" } };
+      yield* api.remotes.pull(request);
+      const before = yield* api.repo.refs({ params: { repo: downstream } });
+      const native = path.join(root, "deleted-native");
+      if (hasGit)
+        yield* Effect.promise(() =>
+          git(root, "clone", "--quiet", `${server.url}/${upstream}`, native),
+        );
+      yield* api.repo.branchRemove({ params: { repo: upstream, name: "main" } });
+      if (hasGit)
+        yield* Effect.promise(() =>
+          assert.rejects(
+            git(native, "pull", "--ff-only", "origin", "main"),
+            /couldn't find remote ref main/,
+          ),
+        );
+      const result = yield* api.remotes.pull(request).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "Invalid");
+        if (result.failure._tag === "Invalid")
+          assert.match(result.failure.reason, /remote has no branch/);
+      }
+      assert.deepEqual(yield* api.repo.refs({ params: { repo: downstream } }), before);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("refuses a branch that is not one, rather than nesting it under heads", () =>
     Effect.gen(function* () {
       // The gate judged what `refNameOf` made of the name and the write used

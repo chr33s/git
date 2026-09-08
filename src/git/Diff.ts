@@ -21,8 +21,9 @@ export interface Hunk {
 
 export interface UnifiedOptions {
   readonly context?: number;
-  readonly beforeName?: string;
-  readonly afterName?: string;
+  /** `null` names /dev/null for file creation or deletion. */
+  readonly beforeName?: string | null;
+  readonly afterName?: string | null;
 }
 
 /**
@@ -207,6 +208,56 @@ const range = (start: number, count: number): string => {
 
 const NO_NEWLINE = "\\ No newline at end of file";
 
+const pathEscapes = new Map([
+  [7, "\\a"],
+  [8, "\\b"],
+  [9, "\\t"],
+  [10, "\\n"],
+  [11, "\\v"],
+  [12, "\\f"],
+  [13, "\\r"],
+  [34, '\\"'],
+  [92, "\\\\"],
+]);
+
+/** Git's default C quoting uses UTF-8 bytes, including three-digit octal escapes. */
+export const quotePath = (path: string): string => {
+  const bytes = new TextEncoder().encode(path);
+  if (!bytes.some((byte) => byte < 32 || byte >= 127 || byte === 34 || byte === 92)) {
+    return path;
+  }
+  const escaped = Array.from(
+    bytes,
+    (byte) =>
+      pathEscapes.get(byte) ??
+      (byte < 32 || byte >= 127
+        ? `\\${byte.toString(8).padStart(3, "0")}`
+        : String.fromCharCode(byte)),
+  ).join("");
+  return `"${escaped}"`;
+};
+
+/**
+ * A path in a space-delimited listing, quoted the way `git status` quotes it.
+ *
+ * `quotePath` is git's `quote_c_style`, which leaves a space alone because a
+ * diff header separates its two paths with a tab instead. A porcelain status
+ * line has no such escape hatch — the path runs to the end of the line, and
+ * the line before it ends at a newline the name may contain — so git's
+ * `quote_path` quotes a name holding a space as well, and a reader that
+ * splits on whitespace or on lines needs the same treatment here.
+ */
+export const quoteListPath = (path: string): string => {
+  const quoted = quotePath(path);
+  if (quoted !== path) return quoted;
+  return path.includes(" ") ? `"${path}"` : path;
+};
+
+const headerPath = (path: string): string => {
+  const quoted = quotePath(path);
+  return quoted === path && path.includes(" ") ? `${path}\t` : quoted;
+};
+
 /**
  * Put the terminators back before matching, so a file ending without a newline
  * genuinely differs from one ending with it — the distinction `splitLines`
@@ -227,9 +278,12 @@ export const unified = (before: string, after: string, options?: UnifiedOptions)
   );
   if (hunks.length === 0) return "";
 
-  const beforeName = options?.beforeName ?? "file";
-  const afterName = options?.afterName ?? beforeName;
-  const out = [`--- a/${beforeName}`, `+++ b/${afterName}`];
+  const beforeName = options?.beforeName === undefined ? "file" : options.beforeName;
+  const afterName = options?.afterName === undefined ? beforeName : options.afterName;
+  const out = [
+    `--- ${beforeName === null ? "/dev/null" : headerPath(`a/${beforeName}`)}`,
+    `+++ ${afterName === null ? "/dev/null" : headerPath(`b/${afterName}`)}`,
+  ];
 
   // Two changes closer than twice the context share a hunk, because their
   // context runs would otherwise overlap and print lines twice.

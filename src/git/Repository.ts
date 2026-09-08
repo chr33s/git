@@ -32,6 +32,7 @@ import {
   encodeTree,
   isFileMode,
   isGitlink,
+  isSymlink,
   isTree,
   parseCommit,
   parseTag,
@@ -145,24 +146,41 @@ export interface FetchPlan {
 }
 
 /**
- * The tree an object names: a tree outright, a commit's tree, or a tag peeled
- * to one.
- *
- * A module-level helper rather than a 36th service method: the revision half
- * stays with the caller — the CLI disambiguates short names, the API resolves
- * refs — but what an oid *means* as a tree is one question, and both edges
- * were answering it with their own copy.
+ * Resolve tag revisions while leaving raw object readers unchanged. Consumers
+ * then require the terminal object to be a commit or a tree as appropriate.
  */
-export const treeAt = Effect.fn("Repository.treeAt")(function* (
-  repository: Repository["Service"],
+const peelTags = Effect.fn("Repository.peelTags")(function* (
+  repository: Pick<Repository["Service"], "readObject" | "readTag">,
   oid: Oid,
 ) {
-  const object = yield* repository.readObject(oid);
-  if (object.type === "tree") return oid;
-  if (object.type === "tag") {
-    return (yield* repository.readCommit((yield* repository.readTag(oid)).object)).tree;
+  let current = oid;
+  for (;;) {
+    const object = yield* repository.readObject(current);
+    if (object.type === "tag") {
+      current = (yield* repository.readTag(current)).object;
+      continue;
+    }
+    return { oid: current, object };
   }
-  return (yield* repository.readCommit(oid)).tree;
+});
+
+/** The tree a revision names, shared by CLI, HTTP, archive, and search. */
+export const treeAt = Effect.fn("Repository.treeAt")(function* (
+  repository: Pick<Repository["Service"], "readObject" | "readCommit" | "readTag">,
+  oid: Oid,
+) {
+  const target = yield* peelTags(repository, oid);
+  if (target.object.type === "tree") return target.oid;
+  return (yield* repository.readCommit(target.oid)).tree;
+});
+
+export const commitAt = Effect.fn("Repository.commitAt")(function* (
+  repository: Pick<Repository["Service"], "readObject" | "readTag">,
+  oid: Oid,
+) {
+  const target = yield* peelTags(repository, oid);
+  if (target.object.type !== "commit") return yield* new ObjectNotFound({ oid: target.oid });
+  return target.oid;
 });
 
 export class Repository extends Context.Service<
@@ -184,6 +202,12 @@ export class Repository extends Context.Service<
     readonly setHead: (ref: string) => Effect.Effect<void, StorageFailure | Invalid>;
 
     readonly readCommit: (oid: Oid) => Effect.Effect<CommitInfo, ObjectNotFound | StorageFailure>;
+    /** A history view: shallow boundaries have no parents. Raw reads stay unchanged. */
+    readonly readHistoryCommit: (
+      oid: Oid,
+    ) => Effect.Effect<CommitInfo, ObjectNotFound | StorageFailure>;
+    readonly shallow: RefStore["Service"]["shallow"];
+    readonly updateShallow: RefStore["Service"]["updateShallow"];
     readonly readTree: (
       oid: Oid,
     ) => Effect.Effect<ReadonlyArray<TreeEntry>, ObjectNotFound | StorageFailure>;
@@ -231,6 +255,8 @@ export class Repository extends Context.Service<
       readonly message: string;
       readonly author: Signature;
       readonly committer?: Signature;
+      /** Other merge heads, recorded after the branch's current commit. */
+      readonly mergeParents?: ReadonlyArray<Oid>;
       /** `undefined` = whatever the branch is now; `null` = must not exist. */
       readonly expected?: Oid | null;
     }) => Effect.Effect<Oid, RefConflict | ObjectNotFound | StorageFailure | Invalid>;
@@ -330,7 +356,10 @@ export class Repository extends Context.Service<
     readonly deleteTag: (name: string) => Effect.Effect<boolean, StorageFailure | Invalid>;
 
     /** `false` when the ref was not there to begin with. */
-    readonly deleteRef: (name: string) => Effect.Effect<boolean, StorageFailure | Invalid>;
+    readonly deleteRef: (
+      name: string,
+      expected?: Oid | null,
+    ) => Effect.Effect<boolean, StorageFailure | Invalid>;
 
     /**
      * Point a ref at a commit. `expected` turns it into a compare-and-swap,
@@ -617,6 +646,15 @@ export const layer = Layer.effect(
       );
 
     const readCommit = (oid: Oid) => readTyped(oid, "commit", parseCommit);
+    const revisionReader = {
+      readObject: objects.read,
+      readCommit,
+      readTag: (oid: Oid) => readTyped(oid, "tag", parseTag),
+    };
+    const readHistoryCommit = Effect.fn("Repository.readHistoryCommit")(function* (oid: Oid) {
+      const commit = yield* readCommit(oid);
+      return (yield* refs.shallow).has(oid) ? { ...commit, parents: [] } : commit;
+    });
 
     /** An annotated tag's target: the `object <oid>` header line. */
     const readTreeEntries = (oid: Oid) =>
@@ -892,14 +930,7 @@ export const layer = Layer.effect(
     const searchIndex = indexed.index;
 
     /** The tree a search revision names, without making routes read stores. */
-    const searchTree = (oid: Oid) =>
-      Effect.gen(function* () {
-        const object = yield* objects.read(oid);
-        if (object.type === "tree") return oid;
-        if (object.type === "tag")
-          return (yield* readCommit((yield* readTyped(oid, "tag", parseTag)).object)).tree;
-        return (yield* readCommit(oid)).tree;
-      });
+    const searchTree = (oid: Oid) => treeAt(revisionReader, oid);
 
     const listFilesOf = Effect.fn("Repository.listFiles")(function* (
       tree: Oid,
@@ -939,7 +970,7 @@ export const layer = Layer.effect(
           const oid = stack.pop()!;
           if (seen.has(oid)) continue;
           seen.add(oid);
-          const commit = yield* readCommit(oid).pipe(
+          const commit = yield* readHistoryCommit(oid).pipe(
             Effect.map((value): CommitInfo | null => value),
             // A history that runs into a missing commit is a shallow clone's
             // normal shape, not a failure to walk.
@@ -960,7 +991,12 @@ export const layer = Layer.effect(
      * reach — without that filter every shared commit back to the root
      * qualifies, and the "base" of a three-way merge would be the wrong one.
      */
-    const mergeBase = Effect.fn("Repository.mergeBase")(function* (left: Oid, right: Oid) {
+    const mergeBase = Effect.fn("Repository.mergeBase")(function* (
+      leftRevision: Oid,
+      rightRevision: Oid,
+    ) {
+      const left = yield* commitAt(revisionReader, leftRevision);
+      const right = yield* commitAt(revisionReader, rightRevision);
       if (left === right) return left;
 
       const leftSide = yield* ancestry([left]);
@@ -987,7 +1023,7 @@ export const layer = Layer.effect(
       const sharedSet = new Set(shared);
       const behind = new Set<Oid>();
       for (const oid of shared) {
-        const commit = yield* readCommit(oid).pipe(
+        const commit = yield* readHistoryCommit(oid).pipe(
           Effect.map((value): CommitInfo | null => value),
           Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
         );
@@ -1021,16 +1057,18 @@ export const layer = Layer.effect(
       readonly theirs: Oid;
       readonly strategy?: MergeStrategy;
     }) {
-      const base = yield* mergeBase(input.ours, input.theirs);
+      const ours = yield* commitAt(revisionReader, input.ours);
+      const theirs = yield* commitAt(revisionReader, input.theirs);
+      const base = yield* mergeBase(ours, theirs);
       const empty: ReadonlyArray<MergeConflict> = [];
 
       // Already contained: there is nothing of theirs we do not have.
-      if (base === input.theirs) {
-        return { base, tree: (yield* readCommit(input.ours)).tree, conflicts: empty };
+      if (base === theirs) {
+        return { base, tree: (yield* readCommit(ours)).tree, conflicts: empty };
       }
       // Ours is an ancestor of theirs, so their tree stands whole.
-      if (base === input.ours) {
-        return { base, tree: (yield* readCommit(input.theirs)).tree, conflicts: empty };
+      if (base === ours) {
+        return { base, tree: (yield* readCommit(theirs)).tree, conflicts: empty };
       }
 
       const flatten = (tree: Oid) =>
@@ -1044,9 +1082,9 @@ export const layer = Layer.effect(
         base === null
           ? new Map<string, TreeFile>()
           : yield* flatten((yield* readCommit(base)).tree);
-      const ourTree = (yield* readCommit(input.ours)).tree;
+      const ourTree = (yield* readCommit(ours)).tree;
       const ourFiles = yield* flatten(ourTree);
-      const theirFiles = yield* flatten((yield* readCommit(input.theirs)).tree);
+      const theirFiles = yield* flatten((yield* readCommit(theirs)).tree);
 
       // The walk itself is `Merge.mergeTrees`, shared with `Rebase` — the
       // treesame rules and the conflict taxonomy exist exactly once.
@@ -1089,7 +1127,7 @@ export const layer = Layer.effect(
         Effect.forEach(
           frontier,
           (oid) =>
-            readCommit(oid).pipe(
+            readHistoryCommit(oid).pipe(
               Effect.map((value): CommitInfo | null => value),
               Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
               Effect.map((commit) => [oid, commit] as const),
@@ -1235,21 +1273,23 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         // What the client has is walked tolerantly: a `have` can reference
         // history this repository never saw, and that is not an error.
+        const boundary = yield* refs.shallow;
         const excluded = new Set(
-          (yield* reachable(
-            objects,
-            haves,
-            clientShallow === undefined
-              ? { ignoreMissing: true }
-              : { ignoreMissing: true, boundary: clientShallow },
-          )).seen,
+          (yield* reachable(objects, haves, {
+            ignoreMissing: true,
+            boundary: new Set([...boundary, ...(clientShallow ?? [])]),
+          })).seen,
         );
         // Redacted payloads join the set the walk steps over. Still strict
         // about everything else: a missing object nobody accounted for is
         // corruption, and answering a fetch as though it were not would hand
         // the client a pack it cannot check.
         for (const oid of exclude ?? []) excluded.add(oid);
-        return (yield* reachable(objects, wants, { ignoreMissing: false, skip: excluded })).order;
+        return (yield* reachable(objects, wants, {
+          ignoreMissing: false,
+          skip: excluded,
+          boundary,
+        })).order;
       });
 
     /**
@@ -1301,12 +1341,18 @@ export const layer = Layer.effect(
      */
     const fetchPlan = Effect.fn("Repository.fetch")(function* (input: FetchRequest) {
       const clientShallow = new Set(input.clientShallow ?? []);
+      const serverShallow = yield* refs.shallow;
       const deepening =
         input.depth !== undefined || input.since !== undefined || (input.notRefs?.length ?? 0) > 0;
 
       if (!deepening) {
         const order = yield* closure(input.wants, input.haves, clientShallow, input.exclude);
-        return { shallow: [], unshallow: [], oids: order };
+        const included = new Set(order);
+        return {
+          shallow: [...serverShallow].filter((oid) => included.has(oid) && !clientShallow.has(oid)),
+          unshallow: [],
+          oids: order,
+        };
       }
 
       // `deepen-not <ref>`: everything reachable from those refs stays put.
@@ -1314,7 +1360,10 @@ export const layer = Layer.effect(
       for (const name of input.notRefs ?? []) {
         const oid = yield* refs.resolve(name);
         if (oid === null) continue;
-        for (const seen of (yield* reachable(objects, [oid], { ignoreMissing: true })).seen)
+        for (const seen of (yield* reachable(objects, [oid], {
+          ignoreMissing: true,
+          boundary: serverShallow,
+        })).seen)
           blocked.add(seen);
       }
 
@@ -1329,9 +1378,9 @@ export const layer = Layer.effect(
       for (const want of input.wants) {
         let current = want;
         let object = yield* objects.read(current);
-        // Tags can point at tags; a chain that does not end is a corrupt
-        // repository, not a reason to walk forever.
-        for (let hop = 0; hop < 8 && object.type === "tag"; hop++) {
+        // Peel every tag before choosing whether depth applies. Stopping at
+        // an intermediate tag would send its entire history as unwalkable.
+        while (object.type === "tag") {
           tagged.push(current);
           const tag = yield* Effect.fromResult(parseTag(object.data)).pipe(
             Effect.mapError(() => new ObjectNotFound({ oid: current })),
@@ -1368,9 +1417,9 @@ export const layer = Layer.effect(
         const commit = yield* readCommit(oid);
         const atLimit = input.depth !== undefined && depth >= input.depth;
 
-        let cut = false;
+        let cut = serverShallow.has(oid);
         for (const parent of commit.parents) {
-          if (atLimit || blocked.has(parent)) {
+          if (serverShallow.has(oid) || atLimit || blocked.has(parent)) {
             cut = true;
             continue;
           }
@@ -1391,7 +1440,7 @@ export const layer = Layer.effect(
       const excluded = new Set(
         (yield* reachable(objects, input.haves, {
           ignoreMissing: true,
-          boundary: clientShallow,
+          boundary: new Set([...serverShallow, ...clientShallow]),
         })).seen,
       );
       // The same absences the shallow path steps over. Dropping `exclude`
@@ -1423,8 +1472,11 @@ export const layer = Layer.effect(
       readRef: refs.read,
       head: refs.head,
       setHead: refs.setHead,
+      shallow: refs.shallow,
+      updateShallow: refs.updateShallow,
 
       readCommit,
+      readHistoryCommit,
       readTree: readTreeEntries,
       readObject: objects.read,
       readBlob: (oid) =>
@@ -1444,7 +1496,7 @@ export const layer = Layer.effect(
       writeFiles,
 
       commit: Effect.fn("Repository.commit")(
-        function* ({ author, branch, committer, expected, message, tree }) {
+        function* ({ author, branch, committer, expected, mergeParents = [], message, tree }) {
           // A tree this repository does not hold makes a commit no clone can
           // read: the API takes `tree` from a caller, and `setRef` checks its
           // target for exactly this reason while `commit` did not.
@@ -1454,12 +1506,25 @@ export const layer = Layer.effect(
 
           const ref = branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
           const parent = yield* refs.read(ref);
+          // The parent encoded below and the value tested by the swap must
+          // agree. A ref moving to a previously mismatched expectation during
+          // the object write must not publish a commit that skips that parent.
+          if (expected !== undefined && parent !== expected) {
+            return yield* new RefConflict({ ref, expected, actual: parent });
+          }
 
+          if (mergeParents.length > 0 && parent === null) {
+            return yield* new Invalid({
+              field: "merge",
+              reason: "a merge requires an existing branch commit",
+            });
+          }
+          for (const mergeParent of mergeParents) yield* readCommit(mergeParent);
           const oid = yield* objects.write({
             type: "commit",
             data: encodeCommit({
               tree,
-              parents: parent === null ? [] : [parent],
+              parents: [...new Set(parent === null ? [] : [parent, ...mergeParents])],
               author,
               committer: committer ?? author,
               message,
@@ -1485,9 +1550,8 @@ export const layer = Layer.effect(
 
           return oid;
         },
-        // Optimistic concurrency: a caller that did not pin `expected` is
-        // saying "append to the branch", so a lost race is retried rather than
-        // surfaced. A caller that did pin one gets the conflict.
+        // Retry a lost race from a fresh parent read. A pinned expectation is
+        // retained on every attempt; an unpinned call follows the current tip.
         Effect.retry({
           while: (error) => error._tag === "RefConflict",
           times: 3,
@@ -1495,119 +1559,122 @@ export const layer = Layer.effect(
         }),
       ),
 
-      log: (from, options) => {
-        if (options?.firstParent === true) {
-          return Stream.paginate(from, (oid) =>
-            readCommit(oid).pipe(
-              Effect.map(
-                (commit) =>
-                  [[{ ...commit, oid }], Option.fromNullishOr(commit.parents[0])] as const,
+      log: (from, options) =>
+        Stream.flatMap(Stream.fromEffect(commitAt(revisionReader, from)), (start) => {
+          if (options?.firstParent === true) {
+            return Stream.paginate(start, (oid) =>
+              readHistoryCommit(oid).pipe(
+                Effect.map(
+                  (commit) =>
+                    [[{ ...commit, oid }], Option.fromNullishOr(commit.parents[0])] as const,
+                ),
               ),
-            ),
-          ).pipe(options.limit === undefined ? (self) => self : Stream.take(options.limit));
-        }
+            ).pipe(options.limit === undefined ? (self) => self : Stream.take(options.limit));
+          }
 
-        /**
-         * A frontier ordered by committer date, not a queue.
-         *
-         * Following every parent means the walk reaches the same commit by
-         * several routes and reaches old commits on one side before newer
-         * ones on the other. Emitting in arrival order would interleave the
-         * two sides by shape of the graph rather than by time, which is not
-         * what `git log` shows; taking the newest pending commit each step
-         * is. `seen` is what keeps a commit reachable twice from being
-         * reported twice.
-         */
-        return Stream.paginate({ frontier: [from], seen: new Set<Oid>() }, (state) =>
-          Effect.gen(function* () {
-            let frontier = state.frontier.filter((oid) => !state.seen.has(oid));
-            if (frontier.length === 0) {
-              return [[], Option.none<typeof state>()] as const;
-            }
-
-            const commits = yield* Effect.forEach(frontier, (oid) =>
-              readCommit(oid).pipe(Effect.map((commit) => ({ ...commit, oid }))),
-            );
-
-            /**
-             * When a commit says it was made, with an unparseable date read
-             * as the epoch.
-             *
-             * A commit object can carry anything a client wrote, and a
-             * timestamp that will not parse is a `NaN` — which compares equal
-             * to nothing, itself included. So `latest` became `NaN`, `tied`
-             * came out empty, and the reduce below threw `Reduce of empty
-             * array` on a repository whose only fault was one odd commit:
-             * `git log` stopped working and nothing said which commit did it.
-             * Oldest is the honest reading of a date nobody can read.
-             */
-            const when = (commit: { readonly committer: Signature }): number => {
-              const at = commit.committer.at.getTime();
-              return Number.isNaN(at) ? 0 : at;
-            };
-
-            // Folded rather than spread, for the reason `ancestry` appends
-            // its parents one at a time: the frontier is as wide as the widest
-            // commit in it, and `Math.max` handed a hundred thousand arguments
-            // is a `RangeError` rather than a maximum.
-            let latest = Number.NEGATIVE_INFINITY;
-            for (const commit of commits) latest = Math.max(latest, when(commit));
-            const tied = commits.filter((commit) => when(commit) === latest);
-
-            /**
-             * Date order alone would sometimes print a parent above its
-             * child, which `git log` never does. It only can when the two
-             * share a timestamp — a parent is otherwise older — and then
-             * every commit between them shares it too, so the disagreement
-             * can be resolved by walking just the commits at this instant.
-             */
-            const reachesWithinTie = Effect.fn("Repository.log.reaches")(function* (
-              start: Oid,
-              target: Oid,
-            ) {
-              const pending = [start];
-              const visited = new Set<Oid>();
-              while (pending.length > 0) {
-                const oid = pending.pop()!;
-                if (oid === target) return true;
-                if (visited.has(oid) || state.seen.has(oid)) continue;
-                visited.add(oid);
-                const commit = yield* readCommit(oid);
-                if (when(commit) !== latest) continue;
-                for (const parent of commit.parents) pending.push(parent);
-              }
-              return false;
-            });
-
-            const eligible: Array<Commit> = [];
-            for (const candidate of tied) {
-              let shadowed = false;
-              for (const other of tied) {
-                if (other.oid === candidate.oid) continue;
-                if (yield* reachesWithinTie(other.oid, candidate.oid)) {
-                  shadowed = true;
-                  break;
+          /**
+           * A frontier ordered by committer date, not a queue.
+           *
+           * Following every parent means the walk reaches the same commit by
+           * several routes and reaches old commits on one side before newer
+           * ones on the other. Emitting in arrival order would interleave the
+           * two sides by shape of the graph rather than by time, which is not
+           * what `git log` shows; taking the newest pending commit each step
+           * is. `seen` is what keeps a commit reachable twice from being
+           * reported twice.
+           */
+          return Stream.suspend(() =>
+            Stream.paginate({ frontier: [start], seen: new Set<Oid>() }, (state) =>
+              Effect.gen(function* () {
+                let frontier = state.frontier.filter((oid) => !state.seen.has(oid));
+                if (frontier.length === 0) {
+                  return [[], Option.none<typeof state>()] as const;
                 }
-              }
-              if (!shadowed) eligible.push(candidate);
-            }
 
-            // Oid decides only between commits that are genuinely unordered,
-            // so the output is stable run to run rather than merely valid.
-            const newest = (eligible.length > 0 ? eligible : tied).reduce((best, candidate) =>
-              candidate.oid > best.oid ? candidate : best,
-            );
+                const commits = yield* Effect.forEach(frontier, (oid) =>
+                  readHistoryCommit(oid).pipe(Effect.map((commit) => ({ ...commit, oid }))),
+                );
 
-            state.seen.add(newest.oid);
-            frontier = [
-              ...frontier.filter((oid) => oid !== newest.oid),
-              ...newest.parents.filter((oid) => !state.seen.has(oid)),
-            ];
+                /**
+                 * When a commit says it was made, with an unparseable date read
+                 * as the epoch.
+                 *
+                 * A commit object can carry anything a client wrote, and a
+                 * timestamp that will not parse is a `NaN` — which compares equal
+                 * to nothing, itself included. So `latest` became `NaN`, `tied`
+                 * came out empty, and the reduce below threw `Reduce of empty
+                 * array` on a repository whose only fault was one odd commit:
+                 * `git log` stopped working and nothing said which commit did it.
+                 * Oldest is the honest reading of a date nobody can read.
+                 */
+                const when = (commit: { readonly committer: Signature }): number => {
+                  const at = commit.committer.at.getTime();
+                  return Number.isNaN(at) ? 0 : at;
+                };
 
-            return [[newest], Option.some({ frontier, seen: state.seen })] as const;
-          }),
-        ).pipe(options?.limit === undefined ? (self) => self : Stream.take(options.limit));
-      },
+                // Folded rather than spread, for the reason `ancestry` appends
+                // its parents one at a time: the frontier is as wide as the widest
+                // commit in it, and `Math.max` handed a hundred thousand arguments
+                // is a `RangeError` rather than a maximum.
+                let latest = Number.NEGATIVE_INFINITY;
+                for (const commit of commits) latest = Math.max(latest, when(commit));
+                const tied = commits.filter((commit) => when(commit) === latest);
+
+                /**
+                 * Date order alone would sometimes print a parent above its
+                 * child, which `git log` never does. It only can when the two
+                 * share a timestamp — a parent is otherwise older — and then
+                 * every commit between them shares it too, so the disagreement
+                 * can be resolved by walking just the commits at this instant.
+                 */
+                const reachesWithinTie = Effect.fn("Repository.log.reaches")(function* (
+                  start: Oid,
+                  target: Oid,
+                ) {
+                  const pending = [start];
+                  const visited = new Set<Oid>();
+                  while (pending.length > 0) {
+                    const oid = pending.pop()!;
+                    if (oid === target) return true;
+                    if (visited.has(oid) || state.seen.has(oid)) continue;
+                    visited.add(oid);
+                    const commit = yield* readHistoryCommit(oid);
+                    if (when(commit) !== latest) continue;
+                    for (const parent of commit.parents) pending.push(parent);
+                  }
+                  return false;
+                });
+
+                const eligible: Array<Commit> = [];
+                for (const candidate of tied) {
+                  let shadowed = false;
+                  for (const other of tied) {
+                    if (other.oid === candidate.oid) continue;
+                    if (yield* reachesWithinTie(other.oid, candidate.oid)) {
+                      shadowed = true;
+                      break;
+                    }
+                  }
+                  if (!shadowed) eligible.push(candidate);
+                }
+
+                // Oid decides only between commits that are genuinely unordered,
+                // so the output is stable run to run rather than merely valid.
+                const newest = (eligible.length > 0 ? eligible : tied).reduce((best, candidate) =>
+                  candidate.oid > best.oid ? candidate : best,
+                );
+
+                state.seen.add(newest.oid);
+                frontier = [
+                  ...frontier.filter((oid) => oid !== newest.oid),
+                  ...newest.parents.filter((oid) => !state.seen.has(oid)),
+                ];
+
+                return [[newest], Option.some({ frontier, seen: state.seen })] as const;
+              }),
+            ),
+          ).pipe(options?.limit === undefined ? (self) => self : Stream.take(options.limit));
+        }),
 
       branch: Effect.fn("Repository.branch")(function* ({ base, name }) {
         // A commit is as good a base as a ref name, and every other verb here
@@ -1616,14 +1683,20 @@ export const layer = Layer.effect(
         // the ref store looked for a ref literally named `<40 hex>`, found
         // none, and every `checkout -b` failed — after rewriting the work
         // tree, which is the half that made it look like something else.
-        const from = isOid(base)
-          ? (yield* objects.has(base))
-            ? base
-            : null
-          : yield* refs.resolve(base);
-        if (from === null) {
+        const resolved = isOid(base) ? base : yield* refs.resolve(base);
+        if (resolved === null) {
           return yield* new Invalid({ field: "base", reason: `unknown ref '${base}'` });
         }
+        const from = yield* commitAt(revisionReader, resolved).pipe(
+          Effect.catchTag("ObjectNotFound", () =>
+            Effect.fail(
+              new Invalid({
+                field: "base",
+                reason: `'${base}' does not name a commit`,
+              }),
+            ),
+          ),
+        );
 
         const ref = `refs/heads/${name}`;
         const [result] = yield* refs
@@ -1742,10 +1815,11 @@ export const layer = Layer.effect(
           .apply([{ name: `refs/tags/${name}`, value: null, reason: "tag: delete" }])
           .pipe(Effect.map(([result]) => result?.applied === true)),
 
-      deleteRef: (name) =>
-        refs
-          .apply([{ name, value: null, reason: "delete" }])
-          .pipe(Effect.map(([result]) => result?.applied === true)),
+      deleteRef: Effect.fn("Repository.deleteRef")((name: string, expected?: Oid | null) => {
+        const update: RefUpdateDraft = { name, value: null, reason: "delete" };
+        if (expected !== undefined) update.expected = expected;
+        return refs.apply([update]).pipe(Effect.map(([result]) => result?.applied === true));
+      }),
 
       setRef: Effect.fn("Repository.setRef")(function* ({ expected, name, to }) {
         const target = isOid(to) ? to : yield* refs.resolve(to);
@@ -1817,7 +1891,8 @@ export const layer = Layer.effect(
           yield* Effect.suspend(() =>
             input.signal?.aborted === true ? Effect.interrupt : Effect.void,
           );
-          if (isGitlink(file.mode) || !Search.underPath(file.path, input.path)) continue;
+          if (isGitlink(file.mode) || isSymlink(file.mode)) continue;
+          if (!Search.underPath(file.path, input.path)) continue;
 
           let blob = searchIndex.get(file.oid);
           let data: Uint8Array | undefined;
@@ -1891,13 +1966,22 @@ export const layer = Layer.effect(
         }),
 
       merge: Effect.fn("Repository.merge")(function* (input) {
+        // Capture the destination before resolving or reading either history.
+        // Reading it at settlement would accept a push that arrived mid-merge
+        // as the expected value, then overwrite it with a result built without it.
+        const expected =
+          input.expected !== undefined
+            ? input.expected
+            : input.into === undefined || isOid(input.into)
+              ? undefined
+              : yield* refs.read(input.into);
         const resolveCommit = (name: string) =>
           Effect.gen(function* () {
             const oid = isOid(name) ? name : yield* refs.resolve(name);
             if (oid === null) {
               return yield* new Invalid({ field: "ref", reason: `unknown ref '${name}'` });
             }
-            return oid;
+            return yield* commitAt(revisionReader, oid);
           });
 
         const ours = yield* resolveCommit(input.ours);
@@ -1907,13 +1991,6 @@ export const layer = Layer.effect(
         const settled = (kind: MergeOutcome["kind"], commit: Oid, tree: Oid, base: Oid | null) =>
           Effect.gen(function* () {
             if (input.into !== undefined && kind !== "up-to-date") {
-              // The caller's snapshot wins when it took one; see `expected`.
-              const expected =
-                input.expected !== undefined
-                  ? input.expected
-                  : isOid(input.into)
-                    ? undefined
-                    : yield* refs.read(input.into);
               const update: RefUpdateDraft = {
                 name: input.into,
                 value: commit,
@@ -1969,10 +2046,17 @@ export const layer = Layer.effect(
 
       mergeBase,
       mergeTree,
-      isAncestor: (ancestor, descendant) =>
-        ancestor === descendant
-          ? Effect.succeed(true)
-          : ancestry([descendant]).pipe(Effect.map((seen) => seen.has(ancestor))),
+      isAncestor: Effect.fn("Repository.isAncestor")(
+        function* (ancestor, descendant) {
+          if (ancestor === descendant) return true;
+          const from = yield* commitAt(revisionReader, ancestor);
+          const to = yield* commitAt(revisionReader, descendant);
+          return from === to || (yield* ancestry([to])).has(from);
+        },
+        // An unfetched remote tip is an ordinary non-fast-forward, as in the
+        // underlying ancestry walk; it must not abort a whole push.
+        Effect.catchTag("ObjectNotFound", () => Effect.succeed(false)),
+      ),
 
       ancestry,
 

@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { Config, Effect, Layer, Result } from "effect";
+import { Config, Context, Effect, Layer, Result } from "effect";
 import { Argument, Flag } from "effect/unstable/cli";
 
 import {
@@ -24,6 +24,7 @@ import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as RedactionCache from "../hub/Redaction.node.ts";
 import { Repository } from "../git/Repository.ts";
+import { MergeState } from "../git/MergeState.ts";
 import { IndexStore, WorkTree } from "../git/Work.ts";
 import { workspace } from "../git/Work.node.ts";
 import * as AfterPush from "../server/AfterPush.node.ts";
@@ -86,7 +87,14 @@ export const resolveRev = Effect.fn("cli.resolveRev")(function* (
   rev: string,
 ) {
   if (isOid(rev)) return rev;
-  for (const candidate of [rev, `refs/heads/${rev}`, `refs/tags/${rev}`]) {
+  for (const candidate of [
+    rev,
+    `refs/${rev}`,
+    `refs/tags/${rev}`,
+    `refs/heads/${rev}`,
+    `refs/remotes/${rev}`,
+    `refs/remotes/${rev}/HEAD`,
+  ]) {
     const found = yield* repository.resolve(candidate);
     if (found !== null) return found;
   }
@@ -286,9 +294,34 @@ export const workFlag = Flag.string("work").pipe(
   Flag.withDescription("Explicit checkout selector for extension commands"),
 );
 
+/** The checkout a working-tree command runs in, and where its paths are relative to. */
+export class WorkPaths extends Context.Service<
+  WorkPaths,
+  { readonly root: string; readonly base: string }
+>()("cli/WorkPaths") {}
+
+/** A path argument as the checkout knows it: relative to its root, `/`-separated. */
+export const workPath = Effect.fn("cli.workPath")(function* (value: string) {
+  const paths = yield* WorkPaths;
+  return (
+    path.relative(paths.root, path.resolve(paths.base, value)).split(path.sep).join("/") || "."
+  );
+});
+
 export const withWork = <A, E>(
   work: { readonly _tag: "None" } | { readonly _tag: "Some"; readonly value: string },
-  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore>,
+  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore | MergeState | WorkPaths>,
+  options?: {
+    /**
+     * Refuse a `--work` that disagrees with `--work-tree` or `GIT_WORK_TREE`
+     * rather than letting the latter win. For the working-tree verbs the two
+     * are a repository and a checkout, and naming both is how git itself is
+     * driven; for a verb that signs an account of one checkout, a selector
+     * that lost in silence meant a signed exposure over whichever won, with
+     * nothing to say the operator had named the other.
+     */
+    readonly oneCheckout?: boolean;
+  },
 ) =>
   Effect.gen(function* () {
     const invocation = yield* GitInvocation;
@@ -298,23 +331,29 @@ export const withWork = <A, E>(
         reason: "this command requires a work tree",
       });
     }
-    // Two selectors that disagree are refused, not resolved by precedence.
-    // `--work-tree` and `GIT_WORK_TREE` arrive as `invocation.workTree`, and
-    // an explicit `--work` used to lose to them in silence — which for
-    // `context for` meant a signed exposure over whichever checkout won,
-    // with nothing to say the operator had named the other one.
-    const explicit = work._tag === "None" ? null : path.resolve(invocation.cwd, work.value);
     if (
-      explicit !== null &&
+      options?.oneCheckout === true &&
+      work._tag === "Some" &&
       invocation.workTree !== undefined &&
-      path.resolve(invocation.workTree) !== explicit
+      path.resolve(invocation.workTree) !== path.resolve(invocation.cwd, work.value)
     ) {
       return yield* new Invalid({
         field: "work",
-        reason: `--work names '${explicit}' but --work-tree or GIT_WORK_TREE names '${invocation.workTree}'; name one checkout`,
+        reason: `--work names '${path.resolve(invocation.cwd, work.value)}' but --work-tree or GIT_WORK_TREE names '${invocation.workTree}'; name one checkout`,
       });
     }
-    const selected = explicit === null ? invocation : { ...invocation, workTree: explicit };
+    // `--work` is the extension's checkout selector: it chooses a repository
+    // to discover. An explicit `--work-tree` or `GIT_WORK_TREE` already names
+    // the checkout, and an explicit Git directory already selects its
+    // metadata separately — so the selector fills in only what is unnamed.
+    let selected = invocation;
+    if (invocation.workTree === undefined && work._tag === "Some") {
+      const location = path.resolve(invocation.cwd, work.value);
+      selected =
+        invocation.gitDir === undefined
+          ? { ...invocation, cwd: location }
+          : { ...invocation, workTree: location };
+    }
     const found = yield* discoverRepository(selected);
     if (found === null || found.workTree === null) {
       return yield* new Invalid({
@@ -322,12 +361,20 @@ export const withWork = <A, E>(
         reason: "not a Git work tree",
       });
     }
+    // Paths are relative to where the command was run when that is inside
+    // the checkout, and to the checkout itself otherwise.
+    const relative = path.relative(found.workTree, invocation.cwd);
+    const base =
+      relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+        ? found.workTree
+        : invocation.cwd;
     return yield* effect.pipe(
+      Effect.provideService(WorkPaths, { root: found.workTree, base }),
       Effect.provide(
         GitRepository.layer.pipe(
           Layer.provide(GitRepository.hooksNoop),
           Layer.provide(stores(found.gitDir)),
-          Layer.provideMerge(workspace(found.workTree)),
+          Layer.provideMerge(workspace(found.workTree, found.gitDir)),
           Layer.provideMerge(RedactionCache.beside(found.gitDir)),
         ),
       ),

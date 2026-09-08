@@ -8,11 +8,75 @@ import { describe, it } from "@effect/vitest";
 
 import { hasGit } from "../testing/Git.ts";
 import { sameProcessResult, runProcess } from "../testing/Process.ts";
+import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
 
 const source = path.resolve("src", "cli", "main.ts");
 const sea = path.resolve("dist", "sea", process.platform === "win32" ? "git+.exe" : "git+");
 
 describe.skipIf(!hasGit || !fs.existsSync(sea))("SEA CLI parity", () => {
+  it("installs session hooks that run without Node or a source checkout", async () => {
+    const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "sea-hooks-"));
+    try {
+      const install = path.join(root, "standalone ' install");
+      const work = path.join(root, "work ' tree");
+      await fsPromises.mkdir(install);
+      await fsPromises.mkdir(work);
+      const executable = path.join(install, "git+");
+      await fsPromises.copyFile(sea, executable);
+      await fsPromises.chmod(executable, 0o755);
+      const fixture = await enableHubUnder(root, "project", ["hub.session"]);
+      const key = path.join(root, "key");
+      await fsPromises.writeFile(key, opensshPrivateKey(fixture.member, "test"), { mode: 0o600 });
+      const installed = await runProcess({
+        command: executable,
+        args: ["session", "enable", "--root", root, "--work", work, "--key", key, "project"],
+      });
+      assert.equal(installed.code, 0, installed.stdout.toString() + installed.stderr.toString());
+      const settings: { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> } =
+        JSON.parse(await fsPromises.readFile(path.join(work, ".claude", "settings.json"), "utf8"));
+      const invoke = (event: string, body: string) => {
+        const command = settings.hooks[event]?.[0]?.hooks[0]?.command;
+        assert.ok(command !== undefined);
+        return runProcess({
+          command: "/bin/sh",
+          args: ["-c", command],
+          cwd: work,
+          env: {
+            ...process.env,
+            PATH: path.join(root, "no-node"),
+            CHR33S_GIT_BRANCH: "refs/heads/topic",
+          },
+          stdin: new TextEncoder().encode(body),
+        });
+      };
+      const started = await invoke(
+        "UserPromptSubmit",
+        JSON.stringify({ prompt: "record from a standalone install" }),
+      );
+      assert.equal(started.code, 0, started.stdout.toString() + started.stderr.toString());
+      const id = (
+        await fsPromises.readFile(path.join(work, ".chr33s", "session.id"), "utf8")
+      ).trim();
+      const stopped = await invoke("Stop", "{}");
+      assert.equal(stopped.code, 0, stopped.stdout.toString() + stopped.stderr.toString());
+      const shown = await runProcess({
+        command: executable,
+        args: ["session", "show", "--root", root, "--repo", "project", id],
+      });
+      assert.equal(shown.code, 0);
+      const projection: { prompts: Array<{ prompt: string }>; refs: Array<string> } = JSON.parse(
+        shown.stdout.toString(),
+      );
+      assert.deepEqual(
+        projection.prompts.map((entry) => entry.prompt),
+        ["record from a standalone install"],
+      );
+      assert.deepEqual(projection.refs, ["refs/heads/topic"]);
+    } finally {
+      await fsPromises.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("matches source help byte-for-byte", async () => {
     const [fromSource, fromSea] = await Promise.all([
       runProcess({ command: process.execPath, args: [source, "--help"] }),

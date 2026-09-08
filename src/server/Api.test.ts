@@ -43,20 +43,23 @@ const repository = GitRepository.layer.pipe(
   Layer.provide(stores),
 );
 
-const live = Layer.mergeAll(
-  Api.handlers,
-  Api.hubHandlers,
-  HttpPlatform.layer.pipe(Layer.provide(FileSystem.layerNoop({}))),
-  Etag.layerWeak,
-  FileSystem.layerNoop({}),
-  Path.layer,
-).pipe(
-  Layer.provideMerge(repository),
-  Layer.provideMerge(Subscribers.memory),
-  // These repositories have no genesis, so the policy boundary refuses writes
-  // to them unless the host says otherwise — `serve --open`'s choice.
-  Layer.provideMerge(Policy.anonymousWrites(true)),
-);
+const withRepository = (backend: Layer.Layer<GitRepository.Repository>) =>
+  Layer.mergeAll(
+    Api.handlers,
+    Api.hubHandlers,
+    HttpPlatform.layer.pipe(Layer.provide(FileSystem.layerNoop({}))),
+    Etag.layerWeak,
+    FileSystem.layerNoop({}),
+    Path.layer,
+  ).pipe(
+    Layer.provideMerge(backend),
+    Layer.provideMerge(Subscribers.memory),
+    // These repositories have no genesis, so the policy boundary refuses writes
+    // to them unless the host says otherwise — `serve --open`'s choice.
+    Layer.provideMerge(Policy.anonymousWrites(true)),
+  );
+
+const live = withRepository(repository);
 
 /**
  * The handlers reach `Repository` and `Subscribers` through the request
@@ -101,6 +104,134 @@ const alice = {
  * reported as a `Cause` with its fiber trace.
  */
 describe("Api", () => {
+  it.live("creates commit branches and reads history through annotated tags", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+        const first = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "first",
+            author: alice,
+            files: [{ path: "file.txt", content: "first\n" }],
+          },
+        });
+        const second = yield* client.repo.create({
+          params: { repo: "r" },
+          payload: {
+            message: "second",
+            author: alice,
+            files: [{ path: "file.txt", content: "second\n" }],
+          },
+        });
+        let target = second.oid;
+        for (const name of ["release", "nested"]) {
+          const tag = yield* client.repo.tagCreate({
+            params: { repo: "r" },
+            payload: { name, target, message: name },
+          });
+          target = tag.oid;
+          const branch = yield* client.repo.branch({
+            params: { repo: "r" },
+            payload: { name: `from-${name}`, base: `refs/tags/${name}` },
+          });
+          assert.equal(branch.oid, second.oid);
+          assert.equal(
+            (yield* client.repo.read({ params: { repo: "r", oid: branch.oid } })).message,
+            "second",
+          );
+          const log = yield* client.repo.log({ params: { repo: "r", oid: tag.oid } });
+          assert.deepEqual(
+            log.commits.map((commit) => commit.oid),
+            [second.oid, first.oid],
+          );
+          const page = yield* client.repo.commits({
+            params: { repo: "r", oid: tag.oid },
+            query: { limit: "1" },
+          });
+          assert.equal(page.items[0]?.oid, second.oid);
+          assert.equal(page.has_more, true);
+          const history = yield* client.repo.history({
+            params: { repo: "r", oid: tag.oid },
+            query: { path: "file.txt" },
+          });
+          assert.deepEqual(
+            history.items.map((commit) => commit.oid),
+            [second.oid, first.oid],
+          );
+          const merged = yield* client.repo.merge({
+            params: { repo: "r" },
+            payload: { ours: first.oid, theirs: `refs/tags/${name}`, author: alice },
+          });
+          assert.equal(merged.commit, second.oid);
+          const picked = yield* client.repo["cherry-pick"]({
+            params: { repo: "r" },
+            payload: { commit: `refs/tags/${name}`, onto: first.oid },
+          });
+          const rebased = yield* client.repo.rebase({
+            params: { repo: "r" },
+            payload: { branch: `refs/tags/${name}`, onto: first.oid },
+          });
+          for (const replay of [picked, rebased]) {
+            assert.ok(replay.head !== null);
+            const read = yield* client.repo.read({ params: { repo: "r", oid: replay.head } });
+            assert.deepEqual(read.parents, [first.oid]);
+          }
+        }
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live(
+    "rejects a files commit built from a tip that mismatched its explicit expectation",
+    () => {
+      let race = false;
+      const raced = Layer.effect(
+        GitRepository.Repository,
+        Effect.gen(function* () {
+          const git = yield* GitRepository.Repository;
+          return GitRepository.Repository.of({
+            ...git,
+            resolve: Effect.fn("test.deleteAfterSnapshot")(function* (ref) {
+              const tip = yield* git.resolve(ref);
+              if (race && ref === "refs/heads/main" && tip !== null) {
+                race = false;
+                yield* git.deleteRef(ref).pipe(Effect.orDie);
+              }
+              return tip;
+            }),
+          });
+        }),
+      ).pipe(Layer.provide(repository));
+      return dispatched(
+        Effect.gen(function* () {
+          const client = yield* HttpApiTest.groups(Api.api, ["repo"]);
+          const git = yield* GitRepository.Repository;
+          yield* client.repo.create({
+            params: { repo: "r" },
+            payload: { message: "old branch", files: [{ path: "old.txt", content: "old" }] },
+          });
+          race = true;
+          const outcome = yield* client.repo
+            .create({
+              params: { repo: "r" },
+              payload: {
+                message: "new branch",
+                expected: null,
+                files: [{ path: "new.txt", content: "new" }],
+              },
+            })
+            .pipe(
+              Effect.as(null),
+              Effect.catchTag("RefConflict", (error) => Effect.succeed(error._tag)),
+            );
+          assert.equal(outcome, "RefConflict");
+          assert.equal(yield* git.resolve("refs/heads/main"), null);
+        }).pipe(Effect.scoped, Effect.provide(withRepository(raced))),
+      );
+    },
+  );
+
   it.effect("swaps against the value the rewrite charge was judged on", () =>
     Effect.promise(async () => {
       // The charge is decided from a snapshot of `into`, and the write happens
@@ -708,6 +839,42 @@ describe("Api", () => {
         assert.deepEqual(bare.files, full.files);
         assert.deepEqual(atHead.files, full.files);
         assert.deepEqual(atOid.files, full.files);
+
+        const repo = yield* GitRepository.Repository;
+        const commitTree = (yield* repo.readCommit(second.oid)).tree;
+        const release = yield* repo.tag({
+          name: "release",
+          target: second.oid,
+          message: "release",
+        });
+        for (const [name, target] of [
+          ["nested", release.oid],
+          ["tree", commitTree],
+        ] as const) {
+          yield* repo.tag({ name, target, message: name });
+          const ref = `refs/tags/${name}`;
+          assert.deepEqual(
+            (yield* client.repo.files({ params: { repo: "r" }, query: { ref } })).files,
+            full.files,
+          );
+          assert.equal(
+            (yield* client.repo.file({
+              params: { repo: "r" },
+              query: { ref, path: "readme.md", encoding: "utf8" },
+            })).content,
+            "hello again\n",
+          );
+          const search = yield* client.repo.grep({
+            params: { repo: "r" },
+            payload: { ref, pattern: "hello", fixed: true },
+          });
+          assert.equal(search.matches.length, 1);
+          const compared = yield* client.repo.diff({
+            params: { repo: "r" },
+            payload: { from: "main", to: ref },
+          });
+          assert.deepEqual(compared.files, []);
+        }
 
         // A bare name that resolves to nothing is a clean `Invalid`, naming
         // what was sent — not a 404 on a qualified name nobody sent.
@@ -1646,6 +1813,22 @@ describe("Api hub", () => {
         // The edge lives on the children; the parent's own ref never hears of
         // it, so it carries no children of its own to report.
         assert.deepEqual(byId.get(first.task)?.children, []);
+        const pagedTasks = [];
+        for (let cursor: string | undefined; ;) {
+          const next = yield* client.hub.tasks({
+            params: { repo: "r" },
+            query: { limit: "1", cursor },
+          });
+          pagedTasks.push(...next.items);
+          if (!next.has_more) break;
+          assert.notEqual(next.next_cursor, null);
+          cursor = next.next_cursor ?? undefined;
+        }
+        assert.deepEqual(
+          pagedTasks,
+          answer.items,
+          "pagination must preserve the same task hierarchy",
+        );
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );
@@ -1710,6 +1893,12 @@ describe("Api hub", () => {
         assert.equal(byId.get(b.task)?.parent, null);
         assert.deepEqual(byId.get(a.task)?.children, []);
         assert.deepEqual(byId.get(b.task)?.children, []);
+        const firstPage = yield* client.hub.tasks({ params: { repo: "r" }, query: { limit: "1" } });
+        assert.equal(
+          firstPage.items[0]?.parent,
+          null,
+          "a cycle spanning pages must still be severed",
+        );
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );

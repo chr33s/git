@@ -69,6 +69,49 @@ const disk = (root: string) =>
 const scenario = <A, E>(effect: Effect.Effect<A, E, ObjectStore | Repository | RefStore>) =>
   Effect.runPromise(effect.pipe(Effect.provide(memory)));
 
+for (const operation of ["cherry-pick", "rebase"] as const) {
+  it(`${operation} preserves a destination moved during initial revision resolution`, () =>
+    scenario(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const base = yield* commitOn({ branch: "main", message: "base", files: { a: "base" } });
+        yield* repository.branch({ name: "topic", base });
+        const topic = yield* commitOn({ branch: "topic", message: "topic", files: { b: "topic" } });
+        const name = operation === "rebase" ? "refs/heads/topic" : "refs/heads/main";
+        const before = operation === "rebase" ? topic : base;
+        const arrived = yield* repository.commitTree({
+          tree: yield* repository.writeFiles({
+            base: (yield* repository.readCommit(before)).tree,
+            changes: [{ path: "concurrent", content: encoder.encode("keep") }],
+          }),
+          parents: [before],
+          message: "concurrent",
+          author: alice,
+        });
+        let pending = true;
+        const raced = Repository.of({
+          ...repository,
+          resolve: Effect.fn("test.moveDuringReplayResolution")(function* (ref) {
+            const captured = yield* repository.resolve(ref);
+            if (pending && ref === name) {
+              pending = false;
+              yield* repository.setRef({ name, to: arrived }).pipe(Effect.orDie);
+            }
+            return captured;
+          }),
+        });
+        const replay =
+          operation === "rebase"
+            ? rebase({ branch: "refs/heads/topic", onto: "refs/heads/main", into: name })
+            : cherryPick({ commit: "refs/heads/topic", onto: "refs/heads/main", into: name });
+        const result = yield* replay.pipe(Effect.provideService(Repository, raced), Effect.result);
+        assert.equal(yield* repository.resolve(name), arrived);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") assert.equal(result.failure._tag, "RefConflict");
+      }),
+    ));
+}
+
 /** The same, backed by a directory `git` itself can be pointed at. */
 const onDisk = <A, E>(root: string, effect: Effect.Effect<A, E, Repository | RefStore>) =>
   Effect.runPromise(effect.pipe(Effect.provide(disk(root))));
@@ -588,12 +631,9 @@ describe("rebase", () => {
             files: { "a.txt": "alpha, edited by topic\n" },
           });
 
-          // A merge of `main` into `topic`: it puts `first` on `topic`'s
-          // first-parent walk while `main` already has it — the range is
-          // `onto..branch`, so `first` is not replayed and not reported — and
-          // leaves a merge whose change is entirely present once `one` has
-          // been replayed.
-          const merged = yield* repository.merge({
+          // The range excludes the upstream commits on either parent chain;
+          // flattening also omits the merge itself, leaving only `one`.
+          yield* repository.merge({
             ours: "refs/heads/topic",
             theirs: "refs/heads/main",
             author: alice,
@@ -612,7 +652,6 @@ describe("rebase", () => {
             a: yield* fileAt(outcome.head!, "a.txt"),
             first,
             history: yield* messagesFrom(outcome.head!),
-            merged: merged.commit,
             onMain,
             one,
             outcome,
@@ -623,7 +662,7 @@ describe("rebase", () => {
       assert.equal(result.outcome.kind, "replayed");
       assert.deepEqual(
         result.outcome.commits.map((entry) => entry.original),
-        [result.one, result.merged],
+        [result.one],
       );
 
       // `first` is not in `onto..topic` at all, so it is neither replayed nor
@@ -632,15 +671,18 @@ describe("rebase", () => {
       assert.notEqual(result.outcome.commits[0]?.replayed, null);
       assert.equal(result.outcome.head, result.outcome.commits[0]?.replayed);
 
-      assert.equal(result.outcome.commits[1]?.replayed, null, "the merge had nothing left to add");
-      assert.deepEqual(result.outcome.commits[1]?.conflicts, []);
+      assert.equal(
+        result.outcome.commits.length,
+        1,
+        "merge commits are omitted from a flat rebase",
+      );
 
       assert.deepEqual(result.history, ["one", "second on main", "first"]);
       assert.equal(result.a, "alpha, edited by topic\n");
     }),
   );
 
-  it.effect("reports up-to-date and moves nothing when the branch is already contained", () =>
+  it.effect("advances a contained branch to the target without replaying commits", () =>
     Effect.promise(async () => {
       const result = await scenario(
         Effect.gen(function* () {
@@ -668,10 +710,14 @@ describe("rebase", () => {
         }),
       );
 
-      assert.equal(result.outcome.kind, "up-to-date");
+      assert.equal(result.outcome.kind, "replayed");
       assert.equal(result.outcome.head, result.onMain);
       assert.deepEqual(result.outcome.commits, []);
-      assert.equal(result.topic, result.first, "nothing was replayed, so the branch stays put");
+      assert.equal(
+        result.topic,
+        result.onMain,
+        "the branch advances even when there is nothing to replay",
+      );
     }),
   );
 });

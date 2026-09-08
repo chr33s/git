@@ -202,6 +202,47 @@ describe.skipIf(!hasGit)("bisect, against git", () => {
     }
   };
 
+  it.live("counts shared ancestors once across repeated and criss-cross merges", () =>
+    Effect.promise(async () => {
+      git("init", "-q", "-b", "main", ".");
+      const edges = [
+        [1, undefined, undefined],
+        [2, 1, undefined],
+        [3, 1, undefined],
+        [4, 2, 3],
+        [5, 3, 2],
+        [6, 4, 5],
+        [7, 4, undefined],
+        [8, 5, undefined],
+        [9, 6, 7],
+        [10, 9, 8],
+        [11, 10, undefined],
+      ] as const;
+      const marks = fastImport(
+        root,
+        edges
+          .map(([mark, from, merge]) =>
+            importCommit({
+              branch: `refs/heads/commit-${mark}`,
+              mark,
+              from,
+              merge,
+              message: `commit ${mark}`,
+              files: [],
+            }),
+          )
+          .join(""),
+      );
+      const good = marks.get(1);
+      assert.ok(good !== undefined);
+      for (const mark of [4, 5, 6, 9, 10, 11]) {
+        const bad = marks.get(mark);
+        assert.ok(bad !== undefined);
+        assertOptimal((await ours(bad, [good])).commit, bad, [good]);
+      }
+    }),
+  );
+
   it.effect("picks the same commit as git on a linear history", () =>
     Effect.promise(async () => {
       const made = chainOf(13);

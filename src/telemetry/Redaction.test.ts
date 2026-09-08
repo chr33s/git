@@ -579,7 +579,7 @@ describe("trace redaction", () => {
           const where = yield* enabled();
           const made = yield* exposed(where.genesis, where.agent, SESSION, "shared view");
           const packed = yield* Exposure.packOf(made.written.commit);
-          const pack = yield* Pack.decode(packed.bytes);
+          const pack = yield* Pack.decode(packed.bytes ?? new Uint8Array());
 
           const mine = yield* Records.record(
             {
@@ -651,7 +651,7 @@ describe("trace redaction", () => {
           const where = yield* enabled();
           const made = yield* exposed(where.genesis, where.agent, SESSION, "shared view");
           const packed = yield* Exposure.packOf(made.written.commit);
-          const pack = yield* Pack.decode(packed.bytes);
+          const pack = yield* Pack.decode(packed.bytes ?? new Uint8Array());
 
           const first = yield* Records.record(
             {

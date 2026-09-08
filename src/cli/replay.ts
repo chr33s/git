@@ -8,6 +8,7 @@
 import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
+import { Invalid } from "../git/Error.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
 import { cherryPick, rebase } from "../git/Rebase.ts";
 import { Repository } from "../git/Repository.ts";
@@ -40,11 +41,13 @@ const reportReplay = (outcome: {
       // on the target, or one whose change was empty once applied.
       yield* Console.log(
         entry.replayed === null
-          ? `skipped ${entry.original}`
+          ? `${entry.conflicts.length > 0 ? "conflicted" : "skipped"} ${entry.original}`
           : `${entry.original} -> ${entry.replayed}`,
       );
     }
     yield* Console.log(`${outcome.kind}${outcome.head === null ? "" : ` at ${outcome.head}`}`);
+    if (outcome.kind === "conflicted")
+      return yield* new Invalid({ field: "replay", reason: "unresolved conflicts" });
   });
 
 export const cherryPickCommand = Command.make(

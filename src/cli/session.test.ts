@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -114,6 +115,54 @@ describe("cli session", () => {
       ])
     ).trim();
 
+  it.live("refuses session reports and decisions with absent targets", () =>
+    Effect.promise(async () => {
+      for (const [verb, flags] of [
+        ["produce", []],
+        ["ask", ["--question", "What should happen?"]],
+        ["answer", ["--decision", "missing", "--chose", "continue"]],
+      ] as const) {
+        const session = `missing-${verb}`;
+        const output = await failing([
+          "session",
+          verb,
+          "--root",
+          root,
+          "--key",
+          key,
+          "--session",
+          session,
+          ...flags,
+          "project",
+        ]);
+        assert.match(output, /no session/, verb);
+        await assert.rejects(fs.readFile(path.join(project, "refs", "hub", "session", session)), {
+          code: "ENOENT",
+        });
+      }
+      const session = await openSession("a real session with no question");
+      const ref = path.join(project, "refs", "hub", "session", session);
+      const before = await fs.readFile(ref, "utf8");
+      const output = await failing([
+        "session",
+        "answer",
+        "--root",
+        root,
+        "--key",
+        key,
+        "--session",
+        session,
+        "--decision",
+        "missing",
+        "--chose",
+        "continue",
+        "project",
+      ]);
+      assert.match(output, /no decision/);
+      assert.equal(await fs.readFile(ref, "utf8"), before);
+    }),
+  );
+
   it.effect("records what was asked, and reads it back after the sandbox is gone", () =>
     Effect.promise(async () => {
       const session = await openSession("document how to set up agents with their own ssh key");
@@ -186,6 +235,22 @@ describe("cli session", () => {
       assert.equal(shown.notes.length, 1);
       assert.deepEqual(shown.usage, { inputTokens: 1200, outputTokens: 800 });
       assert.deepEqual(shown.unreadable, []);
+
+      // And a session this repository has never heard of is an error rather
+      // than an empty document. `Session.project` answers for any id — it
+      // walks a ref that need not exist — so a typo printed a projection with
+      // nothing in it and exited zero, which reads as "this session did
+      // nothing" rather than "there is no such session".
+      const missing = await failing([
+        "session",
+        "show",
+        "--root",
+        root,
+        "--repo",
+        "project",
+        "0192f000-0000-7000-8000-0000000000ff",
+      ]);
+      assert.match(missing, /has no session '0192f000-0000-7000-8000-0000000000ff'/);
     }),
   );
 
@@ -268,6 +333,41 @@ describe("cli session", () => {
     }),
   );
 
+  it.effect("finds the latest production even when an older session resumes", () =>
+    Effect.promise(async () => {
+      const first = await openSession("older session");
+      const second = await openSession("newer session");
+      const produce = (session: string) =>
+        cli([
+          "session",
+          "produce",
+          "--root",
+          root,
+          "--key",
+          key,
+          "--session",
+          session,
+          "--ref",
+          "refs/heads/topic",
+          "project",
+        ]);
+      const show = async (branch: string) =>
+        JSON.parse(
+          await cli(["session", "show", "--root", root, "--branch", branch, "--repo", "project"]),
+        );
+      await produce(first);
+      await produce(second);
+      assert.equal((await show("refs/heads/topic")).session, second);
+      await produce(first);
+      assert.equal((await show("refs/heads/topic")).session, first);
+      assert.equal(
+        (await show("topic")).session,
+        first,
+        "the documented short branch spelling works",
+      );
+    }),
+  );
+
   it.effect("keeps one session's events on one ref, and hides them from a source clone", () =>
     Effect.promise(async () => {
       const session = await openSession("first");
@@ -347,8 +447,32 @@ describe("cli session", () => {
 
   it.effect("installs hooks that record a session, and installs them once", () =>
     Effect.promise(async () => {
-      const work = path.join(root, "work");
+      const work = path.join(root, "work ' tree");
       await fs.mkdir(work, { recursive: true });
+      const legacyScript = path.join(work, ".chr33s", "session.mjs");
+      const custom = { hooks: [{ type: "command", command: "echo custom" }] };
+      await fs.mkdir(path.join(work, ".claude"));
+      await fs.writeFile(
+        path.join(work, ".claude", "settings.json"),
+        JSON.stringify({
+          hooks: Object.fromEntries(
+            [
+              ["UserPromptSubmit", "start"],
+              ["Stop", "stop"],
+            ].map(([event, phase]) => [
+              event,
+              [
+                custom,
+                {
+                  hooks: [
+                    { type: "command", command: `node ${JSON.stringify(legacyScript)} ${phase}` },
+                  ],
+                },
+              ],
+            ]),
+          ),
+        }),
+      );
 
       await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
       await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
@@ -359,23 +483,31 @@ describe("cli session", () => {
       const settings = JSON.parse(
         await fs.readFile(path.join(work, ".claude", "settings.json"), "utf8"),
       );
-      assert.equal(settings.hooks.UserPromptSubmit.length, 1);
-      assert.equal(settings.hooks.Stop.length, 1);
+      assert.equal(settings.hooks.UserPromptSubmit.length, 2);
+      assert.equal(settings.hooks.Stop.length, 2);
+      assert.deepEqual(settings.hooks.UserPromptSubmit[0], custom);
+      assert.deepEqual(settings.hooks.Stop[0], custom);
 
       // And the hook actually records, driven the way the harness drives it:
       // the prompt arrives as JSON on stdin.
-      const script = path.join(work, ".chr33s", "session.mjs");
+      const script = path.join(work, ".chr33s", "session.sh");
       // `execFileSync`, because the hook reads its event from stdin and only the
       // synchronous form takes `input` — the async one leaves the pipe open and
       // the script waits on it forever.
-      execFileSync(process.execPath, [script, "start"], {
+      execFileSync("/bin/sh", [script, "start"], {
         input: JSON.stringify({ session_id: "harness-a", prompt: "fix the flaky test" }),
         encoding: "utf8",
       });
 
       // Keyed by the harness's own session: two agents in one checkout must
       // not share a state file, or the second reports against the first's id.
-      const state = path.join(work, ".chr33s", "session.harness-a.id");
+      const keyed = (name: string, harness: string, extension: string) =>
+        path.join(
+          work,
+          ".chr33s",
+          `${name}.${createHash("sha256").update(harness).digest("hex")}.${extension}`,
+        );
+      const state = keyed("session", "harness-a", "id");
       const id = (await fs.readFile(state, "utf8")).trim();
       const shown = JSON.parse(
         await cli(["session", "show", "--root", root, "--repo", "project", id]),
@@ -386,20 +518,18 @@ describe("cli session", () => {
       );
 
       // A second start is the same session, not a second account of it.
-      execFileSync(process.execPath, [script, "start"], {
+      execFileSync("/bin/sh", [script, "start"], {
         input: JSON.stringify({ session_id: "harness-a", prompt: "and again" }),
         encoding: "utf8",
       });
       assert.equal((await fs.readFile(state, "utf8")).trim(), id, "one opening per session");
 
       // A concurrent harness session opens its own, and reports its own.
-      execFileSync(process.execPath, [script, "start"], {
+      execFileSync("/bin/sh", [script, "start"], {
         input: JSON.stringify({ session_id: "harness-b", prompt: "something else" }),
         encoding: "utf8",
       });
-      const other = (
-        await fs.readFile(path.join(work, ".chr33s", "session.harness-b.id"), "utf8")
-      ).trim();
+      const other = (await fs.readFile(keyed("session", "harness-b", "id"), "utf8")).trim();
       assert.notEqual(other, id, "concurrent harness sessions do not share an id");
 
       // Stopping reports what it produced and clears the state, so the next
@@ -407,10 +537,10 @@ describe("cli session", () => {
       // A learning the agent left behind is handed over by file rather than on
       // a command line, and a session that left none records none.
       await fs.writeFile(
-        path.join(work, ".chr33s", "learning.harness-a.txt"),
+        keyed("learning", "harness-a", "txt"),
         "gotcha: the flaky test needs the production fixture\n",
       );
-      execFileSync(process.execPath, [script, "stop"], {
+      execFileSync("/bin/sh", [script, "stop"], {
         input: JSON.stringify({ session_id: "harness-a" }),
         encoding: "utf8",
         env: { ...process.env, CHR33S_GIT_BRANCH: "refs/heads/topic" },
@@ -423,7 +553,7 @@ describe("cli session", () => {
       assert.equal(fsSync.existsSync(state), false);
       // The learning goes with the state: redelivering it would count one
       // observation twice.
-      const learning = path.join(work, ".chr33s", "learning.harness-a.txt");
+      const learning = keyed("learning", "harness-a", "txt");
       assert.equal(fsSync.existsSync(learning), false);
 
       // A report that does not land keeps the learning for the next stop of
@@ -432,13 +562,64 @@ describe("cli session", () => {
       await fs.writeFile(state, `${id}\n`);
       // Over the record cap, which `produce` refuses before writing anything.
       await fs.writeFile(learning, `gotcha: ${"kept until it is recorded ".repeat(12_000)}\n`);
-      execFileSync(process.execPath, [script, "stop"], {
-        input: JSON.stringify({ session_id: "harness-a" }),
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      assert.throws(() =>
+        execFileSync("/bin/sh", [script, "stop"], {
+          input: JSON.stringify({ session_id: "harness-a" }),
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }),
+      );
       assert.equal(fsSync.existsSync(state), false);
       assert.equal(fsSync.existsSync(learning), true, "an unrecorded learning is not discarded");
+    }),
+  );
+
+  it.live("keeps overlapping harness sessions separate in one checkout", () =>
+    Effect.promise(async () => {
+      const work = path.join(root, "shared-work");
+      await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
+      const script = path.join(work, ".chr33s", "session.sh");
+      const invoke = (phase: string, session: string, prompt: string, branch = "") =>
+        execFileSync("/bin/sh", [script, phase], {
+          input: JSON.stringify({ session_id: session, prompt }),
+          encoding: "utf8",
+          env: { ...process.env, CHR33S_GIT_BRANCH: branch },
+        });
+
+      invoke("start", "harness-a", "first session's work");
+      invoke("start", "harness-b", "second session's work");
+      invoke("start", "harness-a", "duplicate start");
+      const ids = await inRepository(
+        project,
+        Effect.gen(function* () {
+          const repository = yield* GitRepository.Repository;
+          return (yield* repository.refs)
+            .map(([name]) => name)
+            .filter((name) => name.startsWith("refs/hub/session/"))
+            .map((name) => name.slice("refs/hub/session/".length));
+        }),
+      );
+      assert.equal(ids.length, 2, "each harness opens its own session; duplicate starts reuse it");
+
+      invoke("stop", "never-started", "", "refs/heads/unrelated");
+      invoke("stop", "harness-b", "", "refs/heads/second");
+      invoke("stop", "harness-a", "", "refs/heads/first");
+      for (const id of ids) {
+        const shown = JSON.parse(
+          await cli(["session", "show", "--root", root, "--repo", "project", id]),
+        );
+        assert.equal(shown.prompts.length, 1);
+        const prompt = shown.prompts[0].prompt;
+        assert.ok(["first session's work", "second session's work"].includes(prompt));
+        assert.deepEqual(shown.refs, [
+          prompt === "first session's work" ? "refs/heads/first" : "refs/heads/second",
+        ]);
+      }
+      assert.deepEqual(
+        (await fs.readdir(path.join(work, ".chr33s"))).filter((name) => name.endsWith(".id")),
+        [],
+        "stopping both harnesses clears both pending records",
+      );
     }),
   );
 

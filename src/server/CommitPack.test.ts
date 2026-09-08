@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import { Effect, Fiber, Layer, Predicate } from "effect";
+import { Deferred, Effect, Fiber, Layer, Predicate } from "effect";
 
 import { hashObject } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
@@ -354,6 +354,62 @@ describe("CommitPack", () => {
         const tip = (yield* repository.resolve("refs/heads/main"))!;
         const files = yield* repository.listFiles((yield* repository.readCommit(tip)).tree);
         assert.ok(files.some((file) => file.path === "c.txt"));
+      }),
+    ),
+  );
+
+  it.live("does not resurrect a deleted branch from a mismatched streamed snapshot", () =>
+    run(
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        const first = yield* send(
+          post(
+            ndjson([
+              { type: "commit", message: "first\n", author: alice },
+              { type: "file", path: "old.txt" },
+              { type: "chunk", data: utf8("old branch contents\n") },
+              { type: "end" },
+              { type: "done" },
+            ]),
+          ),
+        );
+        const snapshot = yield* Deferred.make<void>();
+        const observed = Repository.of({
+          ...repository,
+          resolve: Effect.fn("test.observeSnapshot")(function* (ref) {
+            const tip = yield* repository.resolve(ref);
+            if (ref === "refs/heads/main") yield* Deferred.succeed(snapshot, undefined);
+            return tip;
+          }),
+        });
+        let release = () => {};
+        const tailReady = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(ndjson([{ type: "commit", message: "new branch\n", expected: null }])),
+            );
+          },
+          async pull(controller) {
+            await tailReady;
+            // Early refusal cancels the stream before this pending pull resumes.
+            if (controller.desiredSize === null) return;
+            controller.enqueue(encoder.encode(ndjson([{ type: "done" }])));
+            controller.close();
+          },
+        });
+        const flight = yield* Effect.forkChild(
+          send(post(body)).pipe(Effect.provideService(Repository, observed)),
+        );
+        yield* Deferred.await(snapshot);
+        assert.equal(yield* repository.resolve("refs/heads/main"), first.payload.oid);
+        yield* repository.deleteRef("refs/heads/main");
+        release();
+        const answer = yield* Fiber.join(flight);
+        assert.equal(answer.status, 409, JSON.stringify(answer.payload));
+        assert.equal(yield* repository.resolve("refs/heads/main"), null);
       }),
     ),
   );

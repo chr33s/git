@@ -99,6 +99,10 @@ tempting each time the JSON surface grows.
 
 ## Why it is built this way
 
+Replay publication captures its destination-ref expectation before resolving
+the source and onto revisions. A concurrent update during those initial reads
+must fail the final compare-and-swap, just like movement during tree replay.
+
 This is a ground-up rewrite of an earlier implementation. Four problems in that
 code were structural rather than stylistic, and they are the whole argument:
 
@@ -132,10 +136,181 @@ generated types, and a hand-written binding lookup) for one binding.
 ### One Durable Object per repository
 
 Not an arbitrary mapping: the DO's input gate provides the serialization that
-`RefStore.apply`'s compare-and-swap demands. The filesystem backend buys the
-same guarantee with `rename(2)`; the node host stands in for the input gate
-with a per-repository mutex, and for instance isolation with one cached layer
-per repository name.
+`RefStore.apply`'s compare-and-swap demands. The filesystem backend reserves
+Git-compatible `.lock` files around comparison and atomic renames, including
+`packed-refs.lock` for deletion and multi-ref rollback. The Node host also
+serializes its own requests with a per-repository mutex and keeps one cached
+layer per repository name.
+
+The Node adapter propagates premature HTTP response closure through the web
+request's abort signal and each direct Effect runtime. A canceled request
+waiting for the repository gate does not enter its handler. Response delivery
+still owns the repository lease until streaming finishes or is canceled.
+
+Native worktree mutations reserve Git's `index.lock` through `IndexStore.withLock`
+before reading the index, and retain it through ref and merge-state updates.
+The callback receives index access owned by that reservation; its Effect has no
+environment requirements. Checkout binds its captured services inside the callback.
+Direct index saves also reserve the lock. Contending filesystem writers fail
+with `StorageFailure`/`EEXIST` and can retry, while the memory index uses a semaphore.
+Read-only status remains available. Index publication and individual filesystem
+mutations finish before interruption releases the reservation. Failure and
+interruption release it, and failed index publication removes temporary output.
+
+Queue cleanup deletes a settled candidate branch only if it still holds the OID
+that the pass observed or published. `Repository.deleteRef` forwards an optional
+expectation to the ref store's atomic update, preserving a concurrent writer's
+replacement while allowing the queue pass to finish its bookkeeping.
+
+Queue settlement identifies an entry by its `queue.entered` event commit. A
+conditional leave reprojects after an append conflict and preserves re-entries,
+including those naming the same head. Merge bookkeeping similarly rechecks the
+current PR head and appends against the raw ref that preceded that check.
+`Event.appendTo` does not automatically rebase an explicitly guarded append;
+the caller owns revalidation. Candidate cleanup runs only for entries the pass
+actually removed, so a retained proposal keeps its candidate ref.
+
+Native ignore discovery loads `core.excludesFile` before `info/exclude` and
+per-directory `.gitignore` rules. `IgnoreConfig.node.ts` loads system, XDG, home,
+repository, and enabled worktree config in order, expanding unconditional
+includes at their position. Effect `Config` supplies HOME, XDG_CONFIG_HOME, and
+the Git global/system overrides when the worktree layer is built. With no
+configured excludes file, it reads XDG's default `git/ignore`. An explicit empty
+local setting disables that fallback. Relative excludes paths resolve from the
+selected worktree root; include paths resolve from the including config file.
+Quoted Git values and `~/` expansion are supported. Linked worktrees use common
+repository config followed by their own enabled `config.worktree`. Conditional
+includes and command-scoped Git configuration are not yet interpreted. The
+default system path is `/etc/gitconfig`; installations using a different build
+prefix can specify `GIT_CONFIG_SYSTEM`.
+
+`WorkTree.trustExecutableBit` exposes `core.filemode` without adding environment
+requirements to worktree operations. Memory worktrees trust modes. Native status,
+add, and removal safety checks preserve an indexed regular file's mode when
+filemode is disabled; new regular files use 100644, while symlink/type changes
+still count. Resolving an unmerged path takes the stage-2 mode when present.
+Staged mode differences remain visible regardless of the filesystem setting.
+
+Native status reports nonzero index stages in `unmerged`, with Git's two-letter
+conflict code derived from the stages present. Those paths are excluded from
+ordinary staged, unstaged, and untracked lists. Editing a conflicted file does
+not resolve it; staging a resolution replaces its conflict stages. The CLI
+prints conflict codes alongside ordinary porcelain rows, and non-forced
+checkout explicitly refuses any unmerged paths before checking other changes.
+Successful checkout clears abandoned merge bookkeeping after publishing the
+index and HEAD. Those three completion steps are uninterruptible under the index
+reservation, so cancellation cannot leave a newly published checkout with an
+old merge parent queued for its next commit. Refusals preserve merge state.
+
+File-backed remotes and webhook subscribers reserve a sibling `.lock` file
+before reading and editing their JSON snapshot. Contending writers fail with
+`StorageFailure`/`EEXIST` and may retry; readers continue to see the complete
+published file. Failed edits remove their reservation and temporary output.
+
+Creating an empty filesystem repository calls `Node.initializeBare` explicitly:
+Git needs `objects/`, `refs/` and HEAD even before the first commit. Store layers
+remain safe to open for reads without creating those paths. The native CLI and
+Artifacts provider use this initializer for their creation paths.
+The Node host uses `NodeStorage` to initialize on the first object, ref or pack
+write. Its initialization guard is shared by concurrent writes and permits retry
+after a filesystem failure; read-only requests do not create repositories.
+
+Shallow history is repository metadata on `RefStore`: `shallow` reads the
+boundaries and `updateShallow` merges additions/removals. Node uses Git's
+`shallow` file and `shallow.lock`; memory, OPFS, and Cloudflare retain the same
+set in their own storage. Fetch persists boundary changes after unpacking and
+before publishing refs. Artifacts forks copy the boundary set, and published
+snapshots carry it to stateless readers. `Repository.readCommit` preserves the
+stored parent headers; `readHistoryCommit` removes parents only in the history
+view, so traversal stops even if older objects are available through alternates.
+Push sends the source's shallow declarations before its ref commands. The
+receiver preserves its own existing boundaries and follows Git's default of
+refusing refs that require new ones. `server/Shallow.ts` captures established
+receiver history before unpacking, so retrying a refused pack cannot turn its
+leftover objects into an accepted boundary. Partial pushes report each refusal;
+an atomic push with any refusal changes no refs.
+
+Tree revision lookup peels annotated tags until it reaches a tree or commit.
+The JSON file/diff endpoints, native tree and restore commands, search, and archive export
+share this resolver. Shallow fetch also peels the complete tag chain before
+applying depth to the target commit, retaining the tag objects in the transfer.
+Branch creation, log and path-history traversal, merge operations, ancestry
+checks, cherry-pick and rebase peel tag revisions to a commit as well.
+Branches store that commit's OID; logs emit commit OIDs and resolve the starting
+revision separately for each stream execution. Raw `readCommit` and `readTag`
+methods continue to require the requested object type.
+
+Native worktree commits read pending merge heads through `MergeState`, alongside
+the index and filesystem ports. Its Node layer uses the selected checkout's Git
+directory, including linked-worktree metadata. Commit records those heads after
+the existing branch parent, permits a merge with an unchanged tree, and pins the
+branch expectation while publishing. Successful publication clears Git's merge
+metadata; a rejected commit retains it for retry. Publication and cleanup are
+not interrupted between those steps. In-memory checkouts provide `MergeState.none`.
+
+Filesystem discovery applies repository `info/exclude` followed by root and nested
+`.gitignore` files, using the pinned `ignore` matcher. Nested patterns are rebased
+to the checkout root so later negations retain their precedence. Ignored directories
+are not walked. Status and add consult indexed paths directly, so ignored tracked
+files can still be modified or deleted. Linked worktrees read excludes from their
+common repository, and matching uses the repository's `core.ignorecase` setting.
+
+Discovery receives indexed paths so it can stop at gitlinks while still walking
+ordinary tracked directories that later acquire nested repository metadata.
+Embedded checkouts are staged through `WorkTree.gitlink`, which reads their HEAD
+using the filesystem ref store, including git-directory files, common directories
+and packed refs. The index stores mode 160000 and that commit OID; it never stores
+the nested checkout's files as part of the gitlink. An unborn nested checkout
+fails staging before index publication. Deinitialized submodules retain their
+existing gitlinks. Status compares an initialized submodule's HEAD with its
+indexed gitlink, so advancing or detaching to another commit is reported as an
+unstaged modification without changing the index.
+
+Non-recursive checkout preserves a nested repository when its gitlink disappears
+from the target tree. Returning to a branch with that gitlink updates the outer
+index without overwriting the preserved nested checkout. Its content and HEAD
+remain unchanged in both directions, including forced checkout.
+
+Normal checkout checks untracked path ancestry before changing files. A target
+file cannot replace a directory containing untracked content, and an untracked
+file cannot occupy a target directory's path. Both are refused with index, HEAD
+and worktree untouched; the preflight covers more than exact filename matches.
+
+After that preflight, `WorkTree.prepareWrites` discovers and removes files
+blocking target directories and directories blocking target files. This lets
+forced checkout and replacement of ignored content complete. Gitlink destinations
+are excluded. Cleanup precedes target writes and finishes before interruption
+releases the index reservation; arbitrary filesystem failures are still reported.
+
+Outgoing pushes retain the object plan and stream the pack through `client/Upload`.
+Each authentication retry starts a fresh body. The upload scope owns its reader
+and socket cancellation, including early refusals. Browser fetch cannot send a
+request stream over HTTP/1.x, so that host streams into a temporary OPFS file and
+passes the resulting File to fetch. Normal completion, failure and interruption
+remove it. Per-file Web Locks preserve active uploads across tabs; the next
+upload reclaims files whose owning tab has closed. This browser path requires
+OPFS and Web Locks. Push, client fetch, and server-side fetch reuse the final
+advertisement URL after an initial redirect for subsequent protocol requests.
+
+The local Artifacts registry reloads its JSON file for each read. Updates reserve
+`.registry.json.lock` before reading and replace the file by atomic rename before
+releasing that reservation. Writes through one handle queue; competing handles
+or processes can retry a typed lock-contention error. `RepoStores.reserve` separately
+holds each repository name through a complete lifecycle operation, including
+rollback; forks reserve both source and target. Memory stores share a reservation
+map, while Node uses per-name files under `.operations` to coordinate providers
+and processes. A process killed without finalizers leaves locks requiring
+operator recovery. Fork bookkeeping separately reserves `.forks.json.lock` and
+reloads the current links before changing them. Reads refresh the document;
+changed links invalidate composed stores, including cached descendants. A local
+semaphore keeps refresh and composition from racing that provider's own writes.
+Token snapshots still belong to individual providers and need separate review.
+
+Node object stores cache each alternates file separately and validate every file
+in the transitive chain on lookup. An intermediate repository can change its
+object source without changing a child's own alternates file. Unchanged files
+reuse their parsed paths; changed files refresh their outgoing links, and cache
+entries outside the current chain are discarded.
 
 ### The pure/effectful seam
 
@@ -223,6 +398,19 @@ an inflate can only report a bomb that has already been built.
 every repository ever touched stayed resident on the node host).
 `PartitionedSemaphore` is _not_ a per-key mutex: its permits are capacity
 shared across keys. The node host uses a per-repository promise chain.
+
+Wake dispatch reserves `wake.cursor.json.lock` through cursor reading, rule
+execution and cursor publication. Concurrent CLI or host processes receive a
+typed contention error and can retry; dry runs do not acquire the reservation.
+Success, failure and interruption release it. After an unclean process exit,
+an operator must confirm the owner has stopped before removing its stale lock.
+
+Node post-receive work belongs to the host scope, including wake rules, webhook
+delivery and replication. It survives the triggering request; host shutdown
+interrupts it and waits for finalizers. The serve CLI owns its host as a scoped
+resource, so SIGINT/SIGTERM closes it before the runtime exits. It uses
+`close({ force: true })` to stop unfinished HTTP bodies before awaiting
+background cleanup; programmatic close drains requests unless force is requested.
 
 ### HTTP
 
@@ -391,11 +579,30 @@ lands with the tree shape `Trace.append` writes and audits the same way.
 
 ### Working tree
 
+CLI invocation parsing resolves explicit `--git-dir` and `--work-tree` paths
+after all `-C` options. A global `--bare` supplies the directory at that option
+only if no Git directory selector is already set. Delegated Git commands and
+native extensions receive the same normalized invocation.
+Each nonempty `-C` resolves through the filesystem before the next option:
+symlinks and `..` follow directory-change semantics, and a failed intermediate
+step stops the command. Existing explicit selectors are canonicalized too;
+nonexistent selectors remain available to `init` without collapsing their path
+components.
+
+Inbox submission owns its Git subprocess and, on Unix, its transport process
+group. Interruption requests termination, forces exit after a short grace period
+if necessary, and waits for pipes and processes to close before returning.
+
+Installed session hooks scope their pending report to the harness's `session_id`,
+so separate harnesses in one checkout retain their own prompts and reports. State
+filenames use the ID's SHA-256 digest; callers without an ID use the legacy
+`.chr33s/session.id`. A stop removes only its selected pending report.
+
 `status`, `add`, `rm`, `mv`, `restore`, `switch`, `commit`, over an index at
-`.git/index` in git's own `DIRC` v2 format. Two ports rather than one:
-`WorkTree` is what is on disk, `IndexStore` is what has been staged — a server
-has neither, a CLI has both, and a browser could have the second without the
-first.
+`.git/index` in git's own `DIRC` v2 format. `WorkTree` describes files on disk,
+`IndexStore` holds staged content and exclusive edit access, and `MergeState`
+holds pending merge metadata. A server needs none of these; the native CLI binds
+them to its selected checkout.
 
 Both implementations can be pointed at the same checkout. `git+ status`
 prints git's porcelain, `git status` reads the index we wrote, and

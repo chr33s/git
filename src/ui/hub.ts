@@ -20,6 +20,7 @@
  * never an optimistic guess. When the repository refuses the event (a fresh
  * key is not a member), the caller falls back to tab-local state and says so.
  */
+import { Effect } from "effect";
 import { AsyncResult } from "effect/unstable/reactivity";
 
 import type {
@@ -45,6 +46,7 @@ import {
 } from "./model.ts";
 import { ago, initials } from "./time.ts";
 import { store } from "./store.ts";
+import { repositoryPath } from "../client/Url.ts";
 
 const repo = repoFromDocument();
 
@@ -122,29 +124,48 @@ const reviewCard = (pull: HubPullSummary): ChangeRequest["review"] => {
   };
 };
 
-const mapPull = (pull: HubPullSummary): ChangeRequest => ({
-  id: pull.id,
-  kind: "CR",
-  title: pull.title,
-  status: pullStatus(pull),
-  avatar: initials(shortAuthor(pull.author)),
-  desc: "",
-  assignees: [],
-  labels: [],
-  comments: [],
-  updated: ago(new Date(pull.at)),
-  sourceRef: pull.head ?? "",
-  targetRef: pull.base,
-  diffStat: "",
-  commitCount: "",
-  diffFile: "",
-  commits: [],
-  checks: [],
-  review: reviewCard(pull),
-  diff: [],
-  hub: true,
-  reviewHead: pull.head ?? undefined,
-});
+const mapPull = (pull: HubPullSummary): ChangeRequest => {
+  const mapped: ChangeRequest = {
+    id: pull.id,
+    kind: "CR",
+    title: pull.title,
+    status: pullStatus(pull),
+    avatar: initials(shortAuthor(pull.author)),
+    desc: "",
+    assignees: [],
+    labels: [],
+    comments: [],
+    updated: ago(new Date(pull.at)),
+    sourceRef: pull.head ?? "",
+    targetRef: pull.base,
+    diffStat: "",
+    commitCount: "",
+    diffFile: "",
+    commits: [],
+    checks: [],
+    review: reviewCard(pull),
+    diff: [],
+    hub: true,
+    reviewHead: pull.head ?? undefined,
+  };
+  const previous = store.get(pull.id);
+  // Listings omit the heavy detail fields. Retain the loaded detail for
+  // this revision while letting the new summary own status and mergeability.
+  if (
+    previous?.hub !== true ||
+    !isChangeRequest(previous) ||
+    (previous.reviewHead ?? null) !== pull.head
+  )
+    return mapped;
+  return {
+    ...mapped,
+    desc: previous.desc,
+    comments: previous.comments,
+    threads: previous.threads,
+    checks: previous.checks,
+    commitCount: previous.commitCount,
+  };
+};
 
 const mapCheck = (check: HubCheck): ChangeRequest["checks"][number] => ({
   name: check.name,
@@ -191,7 +212,7 @@ const fromHub = new Set<string>();
 const deniedByServer = async (): Promise<boolean> => {
   try {
     const base = apiBase() ?? "";
-    const response = await fetch(`${base}/${encodeURIComponent(repo)}/hub/tasks?limit=1`);
+    const response = await fetch(`${base}${repositoryPath(repo)}/hub/tasks?limit=1`);
     return response.status === 401 || response.status === 403;
   } catch {
     return false;
@@ -201,10 +222,53 @@ const deniedByServer = async (): Promise<boolean> => {
 const DENIED =
   "this repository requires authentication to read — grant this browser's key to see live state";
 
-const tasksAtom = GitPlusApi.query("hub", "tasks", { params: { repo }, query: {} });
-const pullsAtom = GitPlusApi.query("hub", "pulls", { params: { repo }, query: {} });
+/** Refresh a complete listing together, including pages fetched on earlier reads. */
+const allPages = Effect.fn("hub.allPages")(function* <A, E, R>(
+  read: (cursor: string | undefined) => Effect.Effect<
+    {
+      readonly items: ReadonlyArray<A>;
+      readonly has_more: boolean;
+      readonly next_cursor: string | null;
+    },
+    E,
+    R
+  >,
+) {
+  const items: A[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  while (true) {
+    const page = yield* read(cursor);
+    items.push(...page.items);
+    if (!page.has_more) return { items };
+    if (page.next_cursor === null || seen.has(page.next_cursor)) {
+      return yield* new ApiError({
+        tag: "InvalidResponse",
+        status: 200,
+        message: "hub listing returned a missing or repeated pagination cursor",
+      });
+    }
+    cursor = page.next_cursor;
+    seen.add(cursor);
+  }
+});
 
-const sessionsAtom = GitPlusApi.query("hub", "sessions", { params: { repo }, query: {} });
+const tasksAtom = GitPlusApi.runtime.atom(
+  GitPlusApi.use((client) =>
+    allPages((cursor) => client.hub.tasks({ params: { repo }, query: { cursor } })),
+  ),
+);
+const pullsAtom = GitPlusApi.runtime.atom(
+  GitPlusApi.use((client) =>
+    allPages((cursor) => client.hub.pulls({ params: { repo }, query: { cursor } })),
+  ),
+);
+
+const sessionsAtom = GitPlusApi.runtime.atom(
+  GitPlusApi.use((client) =>
+    allPages((cursor) => client.hub.sessions({ params: { repo }, query: { cursor } })),
+  ),
+);
 
 /** Ask the hub again; every mounted subscription folds the answer back in. */
 export const refreshListings = (): void => {
@@ -240,10 +304,15 @@ export const seed = (): void => {
   const apply = (): void => {
     if (tasks === null || pulls === null) return;
     if (tasks.length === 0 && pulls.length === 0) return;
+    const changed = pulls.filter(
+      (pull) => hydrating.has(pull.id) && (store.get(pull.id)?.reviewHead ?? null) !== pull.head,
+    );
     const mapped: Task[] = [...pulls.map(mapPull), ...tasks.map(mapTask)];
     fromHub.clear();
     for (const task of mapped) fromHub.add(task.id);
     store.adopt(mapped);
+    for (const pull of changed)
+      registry.refresh(GitPlusApi.query("hub", "pull", { params: { repo, id: pull.id } }));
   };
 
   registry.subscribe(
@@ -301,6 +370,9 @@ export const hydrate = (id: string): void => {
       if (!AsyncResult.isSuccess(result)) return;
       const detail: HubPullDetail = result.value;
       store.patch(id, (task) => {
+        // A listing may already name a newer proposal while its older
+        // detail request is completing. That response cannot replace it.
+        if ((task.reviewHead ?? null) !== detail.head) return task;
         const hydrated = {
           ...task,
           desc: detail.description,

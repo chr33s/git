@@ -27,6 +27,7 @@ import { Effect, Layer } from "effect";
 import { generate } from "../crypto/SshSignature.ts";
 import { type Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
+import * as MergeState from "../git/MergeState.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { indexMemory, workTreeMemory, WorkTree } from "../git/Work.ts";
@@ -107,6 +108,7 @@ describe.skipIf(!hasGit)("Context Exposure against git", () => {
               Layer.provideMerge(stores(root)),
               Layer.provideMerge(indexMemory),
               Layer.provideMerge(workTreeMemory),
+              Layer.provideMerge(MergeState.none),
             ),
           ),
         ),
@@ -166,6 +168,7 @@ describe.skipIf(!hasGit)("Context Exposure against git", () => {
               Layer.provideMerge(stores(root)),
               Layer.provideMerge(indexMemory),
               Layer.provideMerge(workTreeMemory),
+              Layer.provideMerge(MergeState.none),
             ),
           ),
         ),

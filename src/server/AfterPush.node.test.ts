@@ -6,6 +6,7 @@ import { Effect, Fiber, Layer } from "effect";
 import { Hooks } from "../git/Repository.ts";
 import type { ReceiveResult } from "../git/Repository.ts";
 import { collected, deliveries } from "./AfterPush.node.ts";
+import { EMPTY_TREE_OID } from "../git/Format.ts";
 
 describe("AfterPush.deliveries", () => {
   it.effect("returns from the hook before the receiver has answered", () =>
@@ -126,6 +127,24 @@ describe("AfterPush.collected", () => {
     });
 
   const landed = (ref: string): ReceiveResult => ({ ref, from: null, to: null, ok: true });
+
+  it.effect("keeps the first old value and final successful value of each ref", () =>
+    Effect.gen(function* () {
+      const sent: Array<ReadonlyArray<ReceiveResult>> = [];
+      const held = collected(recording(sent));
+      const ref = "refs/heads/main";
+      yield* Effect.gen(function* () {
+        const hooks = yield* Hooks;
+        yield* hooks.postReceive([{ ref, from: null, to: EMPTY_TREE_OID, ok: true }]);
+        yield* hooks.postReceive([{ ref, from: EMPTY_TREE_OID, to: null, ok: true }]);
+        yield* hooks.postReceive([{ ref, from: null, to: EMPTY_TREE_OID, ok: false }]);
+      }).pipe(Effect.provide(held.layer));
+      yield* held.flush;
+      assert.deepEqual(sent, [[{ ref, from: null, to: null, ok: true }]]);
+      yield* held.flush;
+      assert.equal(sent.length, 1, "flushing again does not resend the batch");
+    }),
+  );
 
   it.effect("sends what a verb did as one thing that happened", () =>
     Effect.promise(async () => {

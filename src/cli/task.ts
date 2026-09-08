@@ -10,6 +10,7 @@ import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
+import type { Oid } from "../git/Store.ts";
 import * as Task from "../hub/Task.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { commaList, readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
@@ -30,6 +31,24 @@ const keyFlag = Flag.string("key").pipe(
 );
 
 const taskArgument = Argument.string("task");
+
+const existingTask = Effect.fn("task.existingTask")(function* (task: string) {
+  const state = yield* Task.project(task);
+  if (!state.exists) {
+    return yield* new Invalid({ field: "task", reason: `${task} does not exist` });
+  }
+  return state;
+});
+
+const confirmEvent = Effect.fn("task.confirmEvent")(function* (task: string, commit: Oid) {
+  const state = yield* Task.project(task);
+  if (state.ignored.includes(commit)) {
+    return yield* new Invalid({
+      field: "task",
+      reason: `${task}: the event was ignored by the task projection; re-read its state`,
+    });
+  }
+});
 
 const open = Command.make(
   "open",
@@ -91,32 +110,47 @@ const claim = Command.make(
   ({ key, repo, root, task, ttl }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
-      const outcome = yield* withRepo(
+      yield* withRepo(
         root,
         repo,
         Effect.gen(function* () {
           // Read before writing, so a claimant that lost the race says so
           // rather than appending a second claim nobody honours. Advisory, and
-          // deliberately: two agents reading at once can both pass this, and
-          // the projection still names one holder.
-          const state = yield* Task.project(task);
-          if (state.claim !== null) return { taken: true, until: state.claim.expiresAt };
-          yield* Task.claim({
+          // deliberately: two agents reading at once can both pass this. The
+          // projection after appending decides whether this claim won.
+          const state = yield* existingTask(task);
+          if (state.closed !== null) {
+            return yield* new Invalid({
+              field: "task",
+              reason: `${task} is closed; reopen it before claiming`,
+            });
+          }
+          if (state.claim !== null) {
+            return yield* new Invalid({
+              field: "task",
+              reason: `${task} is already claimed until ${state.claim.expiresAt}`,
+            });
+          }
+          const commit = yield* Task.claim({
             repo: yield* identityOf(repo),
             task,
             key: signer,
             ttlSeconds: ttl,
           });
-          return { taken: false, until: "" };
+          const confirmed = yield* Task.project(task);
+          if (
+            !confirmed.exists ||
+            confirmed.closed !== null ||
+            confirmed.claim?.commit !== commit
+          ) {
+            return yield* new Invalid({
+              field: "task",
+              reason: `${task}: this claim did not acquire the lease; re-read its state before starting work`,
+            });
+          }
         }),
       );
 
-      if (outcome.taken) {
-        return yield* new Invalid({
-          field: "task",
-          reason: `${task} is already claimed until ${outcome.until}`,
-        });
-      }
       yield* Console.log(`Claimed ${task} for ${ttl}s`);
     }),
 );
@@ -131,7 +165,9 @@ const release = Command.make(
         root,
         repo,
         Effect.gen(function* () {
-          yield* Task.release({ repo: yield* identityOf(repo), task, key: signer });
+          yield* existingTask(task);
+          const commit = yield* Task.release({ repo: yield* identityOf(repo), task, key: signer });
+          yield* confirmEvent(task, commit);
         }),
       );
       yield* Console.log(`Released ${task}`);
@@ -158,7 +194,8 @@ const close = Command.make(
         root,
         repo,
         Effect.gen(function* () {
-          yield* Task.close({
+          yield* existingTask(task);
+          const commit = yield* Task.close({
             repo: yield* identityOf(repo),
             task,
             key: signer,
@@ -166,6 +203,7 @@ const close = Command.make(
             pulls: commaList(pull),
             sessions: commaList(session),
           });
+          yield* confirmEvent(task, commit);
         }),
       );
       yield* Console.log(`Closed ${task} (${outcome})`);
@@ -182,7 +220,9 @@ const reopen = Command.make(
         root,
         repo,
         Effect.gen(function* () {
-          yield* Task.reopen({ repo: yield* identityOf(repo), task, key: signer });
+          yield* existingTask(task);
+          const commit = yield* Task.reopen({ repo: yield* identityOf(repo), task, key: signer });
+          yield* confirmEvent(task, commit);
         }),
       );
       yield* Console.log(`Reopened ${task}`);
@@ -215,6 +255,7 @@ const reparent = Command.make(
         root,
         repo,
         Effect.gen(function* () {
+          yield* existingTask(task);
           yield* Task.reparent({ repo: yield* identityOf(repo), task, parent, key: signer });
         }),
       );

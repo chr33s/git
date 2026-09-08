@@ -21,6 +21,7 @@ import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import { absent } from "../hub/Redaction.ts";
 import { type Authorize, fetchAuthorized, operationOf } from "./Authorize.ts";
+import { prepare as prepareUpload } from "./Upload.ts";
 
 const decoder = new TextDecoder();
 
@@ -31,6 +32,8 @@ export interface PushRef {
   readonly remote: string;
   /** Delete the remote ref. */
   readonly delete?: boolean;
+  /** Refuse the update unless the advertised remote value matches this lease. */
+  readonly expected?: Oid | null;
 }
 
 export interface PushResult {
@@ -208,10 +211,33 @@ export const push = Effect.fn("Client.push")(function* (input: {
         authorize,
       );
       if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
-      return readAdvertisement(response.body);
+      const advertised = await readAdvertisement(response.body);
+      // Git follows the initial redirect and uses its final repository URL
+      // for subsequent requests. Stream bodies cannot be replayed by fetch's
+      // automatic redirect handler. Preserve fetch's cross-origin token rule.
+      const resolved = new URL(response.url || target);
+      let base = url;
+      if (resolved.pathname.endsWith("/info/refs")) {
+        resolved.pathname = resolved.pathname.slice(0, -"/info/refs".length);
+        resolved.search = "";
+        resolved.hash = "";
+        base = resolved.href.replace(/\/$/, "");
+      }
+      return {
+        ...advertised,
+        url: base,
+        token: new URL(base).origin === new URL(url).origin ? token : undefined,
+      };
     },
     catch: failure,
   });
+
+  if (atomic === true && !advertisement.capabilities.has("atomic")) {
+    return yield* new Invalid({
+      field: "atomic",
+      reason: "the remote does not support atomic push",
+    });
+  }
 
   const outcomes: Array<PushResult | null> = refs.map(() => null);
   const commands: Command[] = [];
@@ -220,6 +246,11 @@ export const push = Effect.fn("Client.push")(function* (input: {
     const name = request.remote;
     const advertised = advertisement.refs.get(name);
     const old = advertised ?? ZERO_OID;
+
+    if (request.expected !== undefined && request.expected !== (advertised ?? null)) {
+      outcomes[index] = { ref: name, ok: false, reason: "stale remote value" };
+      continue;
+    }
 
     if (request.delete === true) {
       // Nothing to delete is a failed command, not a silent success: the
@@ -266,6 +297,11 @@ export const push = Effect.fn("Client.push")(function* (input: {
 
   // Every requested ref was already where it belongs, or refused here. There
   // is no request to make, and an empty command list is one the server rejects.
+  if (atomic === true && outcomes.some((outcome) => outcome?.ok === false)) {
+    for (const command of commands)
+      outcomes[command.index] = { ref: command.ref, ok: false, reason: "atomic push rejected" };
+    return settle();
+  }
   if (commands.length === 0) return settle();
 
   const wants = [
@@ -277,9 +313,9 @@ export const push = Effect.fn("Client.push")(function* (input: {
    * only reads the object phase when a command creates or moves a ref, so
    * trailing pack bytes there would be read as another pkt-line.
    */
-  const packBytes =
+  const pack =
     wants.length === 0
-      ? new Uint8Array(0)
+      ? Stream.empty
       : yield* Effect.gen(function* () {
           const request = { wants, haves: [...new Set(advertisement.refs.values())] };
           // Strict first, and retried once against what the tombstones account
@@ -297,7 +333,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
           // corruption it is.
           const plan =
             strict ?? (yield* repository.fetch({ ...request, exclude: yield* absent() }));
-          return concat(yield* Stream.runCollect(repository.packOids(plan.oids)));
+          return repository.packOids(plan.oids);
         });
 
   const sideband = advertisement.capabilities.has("side-band-64k");
@@ -307,7 +343,8 @@ export const push = Effect.fn("Client.push")(function* (input: {
     ...(atomic === true && advertisement.capabilities.has("atomic") ? ["atomic"] : []),
   ].join(" ");
 
-  const body = concat([
+  const prefix = [
+    ...[...(yield* repository.shallow)].map((oid) => pkt(`shallow ${oid}\n`)),
     ...commands.map((command, index) => {
       const line = `${command.old} ${command.next ?? ZERO_OID} ${command.ref}`;
       // Capabilities follow a NUL on the first command — receive-pack's
@@ -315,23 +352,23 @@ export const push = Effect.fn("Client.push")(function* (input: {
       return pkt(index === 0 ? `${line}\0${capabilities}\n` : `${line}\n`);
     }),
     FLUSH,
-    packBytes,
-  ]);
+  ];
+  const upload = yield* prepareUpload(Stream.fromIterable(prefix).pipe(Stream.concat(pack)));
+  const lifetime = yield* Effect.abortSignal;
 
   const reported = yield* Effect.tryPromise({
     // As the advertisement above: interruptible only if the signal reaches the
     // socket, and this is the half that streams a pack to a peer.
     try: async (signal) => {
       const response = await fetchAuthorized(
-        `${url}/git-receive-pack`,
+        `${advertisement.url}/git-receive-pack`,
         {
           method: "POST",
           headers: {
             "content-type": "application/x-git-receive-pack-request",
-            ...authorization(token),
+            ...authorization(advertisement.token),
           },
-          body,
-          signal,
+          signal: AbortSignal.any([signal, lifetime]),
         },
         {
           operation: "git-receive-pack",
@@ -345,12 +382,20 @@ export const push = Effect.fn("Client.push")(function* (input: {
           })),
         },
         authorize,
+        upload.options,
       );
       if (!response.ok) throw new Error(`receive-pack returned ${response.status}`);
       return readReport(response.body, sideband);
     },
     catch: failure,
-  });
+  }).pipe(
+    Effect.catch(
+      (error): Effect.Effect<never, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> => {
+        const cause = upload.failure();
+        return cause === undefined ? Effect.fail(error) : Effect.failCause(cause);
+      },
+    ),
+  );
 
   const unpack = reported.find((line) => line.startsWith("unpack "))?.slice(7) ?? "ok";
   const statuses = new Map<string, PushResult>();
@@ -379,7 +424,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
   }
 
   return settle();
-}) satisfies (input: {
+}, Effect.scoped) satisfies (input: {
   readonly url: string;
   readonly refs: ReadonlyArray<PushRef>;
   readonly token?: string;

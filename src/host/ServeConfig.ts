@@ -71,7 +71,7 @@ export const parseHosts = (raw: string): Result.Result<ReadonlyArray<string>, st
 };
 
 /**
- * Environment values and the one set of defaults for both node entry points.
+ * Environment values and defaults for fields not selected explicitly.
  *
  * `GIT_HOSTS` comes back as the raw string rather than a parsed list, and that
  * is what makes `--hosts` able to override it. Parsed here, a malformed
@@ -80,12 +80,19 @@ export const parseHosts = (raw: string): Result.Result<ReadonlyArray<string>, st
  * explicitly on the command line*, which is the precedence this module's own
  * docstring promises. Now the value is only parsed if it is going to be used.
  */
-export const configuration = Effect.fn("host.ServeConfig.configuration")(function* () {
+export const configuration = Effect.fn("host.ServeConfig.configuration")(function* (
+  overrides: Partial<ServeConfig> = {},
+) {
   return {
-    root: yield* Config.string("GIT_ROOT").pipe(Config.withDefault("repos")),
-    port: yield* Config.number("PORT").pipe(Config.withDefault(8080)),
-    hostname: yield* Config.string("HOSTNAME").pipe(Config.withDefault("127.0.0.1")),
-    hosts: yield* Config.string("GIT_HOSTS").pipe(Config.withDefault("")),
+    root: overrides.root ?? (yield* Config.string("GIT_ROOT").pipe(Config.withDefault("repos"))),
+    port: overrides.port ?? (yield* Config.number("PORT").pipe(Config.withDefault(8080))),
+    hostname:
+      overrides.hostname ??
+      (yield* Config.string("HOSTNAME").pipe(Config.withDefault("127.0.0.1"))),
+    hosts:
+      overrides.hosts === undefined
+        ? yield* Config.string("GIT_HOSTS").pipe(Config.withDefault(""))
+        : "",
   } as const;
 });
 
@@ -133,7 +140,7 @@ export const merge = (
 export const resolve = Effect.fn("host.ServeConfig.resolve")(function* (
   overrides: Partial<ServeConfig>,
 ) {
-  const merged = merge(yield* configuration(), overrides);
+  const merged = merge(yield* configuration(overrides), overrides);
   if (Result.isFailure(merged)) {
     return yield* new Invalid({ field: "GIT_HOSTS", reason: merged.failure });
   }

@@ -125,6 +125,34 @@ describe("Artifacts registry conformance", () => {
 });
 
 describe("GitRepo over HTTP", () => {
+  it.effect("streams an outgoing push from one Durable Object into another", () =>
+    Effect.promise(async () => {
+      const source = repoName();
+      const target = repoName();
+      const created = await json<{ oid: string }>(
+        await commit(source, { message: "pushed by workerd" }),
+      );
+      const response = await harness.fetch(`/${source}/push`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: new URL(target, base).href, refs: [{ local: "main" }] }),
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.deepEqual(await json(response), {
+        refs: [{ ref: "refs/heads/main", ok: true, reason: null }],
+      });
+      const refs = await json<{ refs: Array<{ name: string; oid: string }> }>(
+        await harness.fetch(`/${target}/refs`),
+      );
+      assert.deepEqual(refs.refs, [{ name: "refs/heads/main", oid: created.oid }]);
+      assert.equal(
+        (await json<{ message: string }>(await harness.fetch(`/${target}/commit/${created.oid}`)))
+          .message,
+        "pushed by workerd",
+      );
+    }),
+  );
+
   it.effect("commits, lists refs and reads the commit back", () =>
     Effect.promise(async () => {
       const repo = repoName();

@@ -18,6 +18,7 @@ import type { Repository } from "../git/Repository.ts";
 import type { ObjectStore, RefStore } from "../git/Store.ts";
 import * as Api from "../server/Api.ts";
 import { fetchRepository, lsRemote } from "./Fetch.ts";
+import { repositoryClient } from "./Url.ts";
 
 export { fetchRepository, lsRemote };
 
@@ -28,17 +29,15 @@ export { fetchRepository, lsRemote };
  */
 export const remote = (baseUrl: string, options?: { readonly token?: string }) => {
   const token = options?.token;
-  // `make` documents `transformClient` as optionally `undefined` and treats
-  // that the same as leaving it out, so an anonymous client passes no
-  // transform rather than a transform that does nothing.
-  const withAuthorization =
-    token === undefined
-      ? undefined
-      : (client: HttpClient.HttpClient) =>
-          client.pipe(
-            HttpClient.mapRequest(HttpClientRequest.setHeader("authorization", `Bearer ${token}`)),
-          );
-  return HttpApiClient.make(Api.api, { baseUrl, transformClient: withAuthorization }).pipe(
+  const transformClient = (client: HttpClient.HttpClient) => {
+    const routed = repositoryClient(client);
+    return token === undefined
+      ? routed
+      : routed.pipe(
+          HttpClient.mapRequest(HttpClientRequest.setHeader("authorization", `Bearer ${token}`)),
+        );
+  };
+  return HttpApiClient.make(Api.api, { baseUrl, transformClient }).pipe(
     Effect.provide(FetchHttpClient.layer),
   );
 };

@@ -150,6 +150,24 @@ export const storeContract = (label: string, backend: Backend, runner: Runner): 
   });
 
   describe(`${label}: RefStore contract`, () => {
+    it("persists independent shallow-boundary additions and removals", async () => {
+      await run(
+        Effect.gen(function* () {
+          const refs = yield* RefStore;
+          assert.deepEqual([...(yield* refs.shallow)], []);
+          yield* refs.updateShallow({ add: [a], remove: [] });
+          const before = yield* refs.shallow;
+          yield* refs.updateShallow({ add: [b], remove: [] });
+          assert.deepEqual([...(yield* refs.shallow)].sort(), [a, b]);
+          assert.deepEqual([...before], [a]);
+          yield* refs.updateShallow({ add: [], remove: [a] });
+          assert.deepEqual([...(yield* refs.shallow)], [b]);
+          yield* refs.updateShallow({ add: [], remove: [b] });
+          assert.deepEqual([...(yield* refs.shallow)], []);
+          assert.deepEqual(yield* refs.list(), []);
+        }),
+      );
+    });
     it("creates a ref only when it does not exist", async () => {
       const state = await run(
         Effect.gen(function* () {

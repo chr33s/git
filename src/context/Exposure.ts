@@ -1078,6 +1078,9 @@ const renderStatus = Effect.fn("context.Exposure.renderStatus")(function* (
  * with the same oid reached another way is the same bytes only because the
  * oid says so — which is exactly what the audit checks and this call does not
  * have to repeat.
+ *
+ * `bytes` is `null` for a record whose tree names the pack but whose blob has
+ * been collected — a redacted exposure after `gc`.
  */
 export const packOf = Effect.fn("context.Exposure.packOf")(function* (commit: Oid) {
   const repository = yield* Repository;
@@ -1085,21 +1088,21 @@ export const packOf = Effect.fn("context.Exposure.packOf")(function* (commit: Oi
   const entry = yield* repository
     .findPath(info.tree, PACK)
     .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  if (entry === null) {
+    return yield* new Invalid({ field: "pack", reason: `${qualify(commit)} retains no ${PACK}` });
+  }
   // The blob as well as the entry, and for the same reason. A redaction is
   // *designed* to leave the tree entry naming a blob that is gone — the commit
   // has to stay for the hash chain — so this is the ordinary post-`gc` state
   // of a removed exposure, not a corrupt repository. Guarded on the lookup and
   // not on the read, `context why <a redacted exposure>` came back with a raw
   // `ObjectNotFound` where every other reader of this data says what happened.
-  const bytes =
-    entry === null
-      ? null
-      : yield* repository
-          .readBlob(entry.oid)
-          .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  if (entry === null || bytes === null) {
-    return yield* new Invalid({ field: "pack", reason: `${qualify(commit)} retains no ${PACK}` });
-  }
+  // Handed back as `null` rather than refused here: the caller can tell a
+  // counted tombstone from a missing object, and only one of those is an
+  // answer.
+  const bytes = yield* repository
+    .readBlob(entry.oid)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
   return { oid: entry.oid, bytes } as const;
 });
 

@@ -1,11 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
-import { Effect } from "effect";
+import { Effect, Exit } from "effect";
 
 import type { RepoId } from "./Genesis.ts";
 import {
@@ -41,6 +41,57 @@ describe("KnownRepos", () => {
     Effect.runPromise(effect.pipe(Effect.provide(file(location))));
 
   describe("the file", () => {
+    it.effect("refuses competing edits without removing the other writer's lock", () =>
+      Effect.promise(async () => {
+        const original = `https://git.example.com/acme ${alpha}\n`;
+        writeFileSync(location, original);
+        writeFileSync(`${location}.lock`, "another writer's pending update");
+        for (const operation of [
+          Effect.flatMap(KnownRepos, (store) =>
+            store.remember({ url: "https://git.example.com/other", repoId: beta }),
+          ),
+          Effect.flatMap(KnownRepos, (store) => store.forget("https://git.example.com/acme")),
+        ]) {
+          const outcome = await run(Effect.exit(operation));
+          assert.ok(Exit.isFailure(outcome));
+          assert.equal(readFileSync(location, "utf8"), original);
+          assert.equal(readFileSync(`${location}.lock`, "utf8"), "another writer's pending update");
+        }
+        rmSync(`${location}.lock`);
+        await run(
+          Effect.flatMap(KnownRepos, (store) =>
+            store.remember({ url: "https://git.example.com/other", repoId: beta }),
+          ),
+        );
+        assert.equal((await run(Effect.flatMap(KnownRepos, (store) => store.list))).length, 2);
+        assert.equal(existsSync(`${location}.lock`), false);
+      }),
+    );
+
+    it.effect("releases its own lock after a read failure or an unchanged edit", () =>
+      Effect.promise(async () => {
+        mkdirSync(location);
+        const outcome = await run(
+          Effect.exit(
+            Effect.flatMap(KnownRepos, (store) =>
+              store.remember({ url: "https://git.example.com/acme", repoId: alpha }),
+            ),
+          ),
+        );
+        assert.ok(Exit.isFailure(outcome));
+        assert.equal(existsSync(`${location}.lock`), false);
+        rmSync(location, { recursive: true });
+        assert.equal(
+          await run(
+            Effect.flatMap(KnownRepos, (store) => store.forget("https://git.example.com/acme")),
+          ),
+          false,
+        );
+        assert.equal(existsSync(location), false);
+        assert.equal(existsSync(`${location}.lock`), false);
+      }),
+    );
+
     it.effect("is empty before anything has been written", () =>
       Effect.promise(async () => {
         assert.deepEqual(await run(Effect.flatMap(KnownRepos, (store) => store.list)), []);

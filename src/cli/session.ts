@@ -7,10 +7,12 @@
  * a person typing ceremonies. `open` prints the session id alone, so a hook
  * can capture it and put it in a commit trailer without parsing prose.
  */
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isSea } from "node:sea";
 
-import { Console, Effect } from "effect";
+import { Config, Console, Effect, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
@@ -97,6 +99,17 @@ const readNote = Effect.fn("session.readNote")(function* (location: string) {
 const keyFlag = Flag.string("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
 );
+
+/** A typo must not create an append-only ref for a session nobody opened. */
+const existingSession = Effect.fn("session.existingSession")(function* (session: string) {
+  const repository = yield* Repository;
+  if ((yield* repository.resolve(Session.refOf(session))) === null) {
+    return yield* new Invalid({
+      field: "session",
+      reason: `this repository has no session '${session}'`,
+    });
+  }
+});
 
 const open = Command.make(
   "open",
@@ -196,6 +209,7 @@ const produce = Command.make(
         repo,
         Effect.gen(function* () {
           const identity = yield* identityOf(repo);
+          yield* existingSession(session);
           return yield* Session.produced({
             repo: identity,
             session,
@@ -376,6 +390,7 @@ const ask = Command.make(
         root,
         repo,
         Effect.gen(function* () {
+          yield* existingSession(session);
           return yield* Session.ask({
             repo: yield* identityOf(repo),
             session,
@@ -408,6 +423,14 @@ const answer = Command.make(
         root,
         repo,
         Effect.gen(function* () {
+          yield* existingSession(session);
+          const state = yield* Session.project(session);
+          if (!state.decisions.some((asked) => asked.id === decision)) {
+            return yield* new Invalid({
+              field: "decision",
+              reason: `${session} has no decision '${decision}'`,
+            });
+          }
           yield* Session.answer({
             repo: yield* identityOf(repo),
             session,
@@ -422,142 +445,207 @@ const answer = Command.make(
     }),
 );
 
+/** The harness sends its event on stdin; installed scripts only select the CLI. */
+const hookFile = <A>(operation: () => A) =>
+  Effect.try({
+    try: operation,
+    catch: (cause) => new Invalid({ field: "work", reason: `session hook: ${String(cause)}` }),
+  });
+
 /**
- * The script the harness actually runs.
+ * Where a harness session's pending report and its learning live.
  *
- * Written into the work tree rather than generated inline in a settings file,
- * for two reasons: a hook an operator can read is one they can correct, and
- * the prompt arrives as JSON on the hook's stdin, which is more than a shell
- * one-liner should be asked to parse.
- *
- * It records at most one opening per session and, when the session ends, what
- * the branch it worked on came to. Everything it passes to the CLI it got from
- * the harness or from git — never from a hub event, which is somebody else's
- * text (docs/agents.md §8).
+ * Keyed by the harness's own session, hashed: two agents in one checkout must
+ * not consume each other's pending report, or hand over each other's learning
+ * (docs/context-pack.knowledge.md §10.3). The legacy names stay for callers
+ * without a harness id.
  */
+const hookPaths = (work: string, harness: string | undefined) => {
+  const key = harness ? `.${createHash("sha256").update(harness).digest("hex")}` : "";
+  const directory = path.resolve(work, ".chr33s");
+  return {
+    state: path.join(directory, `session${key}.id`),
+    learning: path.join(directory, `learning${key}.txt`),
+  };
+};
+
+/**
+ * The memory derived over the committed view HEAD names, where there is one.
+ *
+ * Concepts are ordinary source files, and a repository with no commits has no
+ * Concepts — only session learnings.
+ */
+const deriveMemory = Effect.fn("session.deriveMemory")(function* (bundle: string) {
+  const repository = yield* Repository;
+  const head = yield* repository.resolve(yield* repository.head);
+  const view = head === null ? null : yield* Pack.committed(head);
+  return yield* Memory.derive({ view, bundle, ...(yield* membershipOrNull()) });
+});
+
+const hook = Command.make(
+  "hook",
+  {
+    root: rootFlag,
+    key: keyFlag,
+    work: Flag.string("work"),
+    repo: repoArgument,
+    phase: Argument.choice("phase", ["start", "stop"]),
+  },
+  ({ key, phase, repo, root, work }) =>
+    Effect.gen(function* () {
+      const input = yield* hookFile(() => fs.readFileSync(0, "utf8"));
+      const event = yield* Schema.decodeEffect(
+        Schema.fromJsonString(
+          Schema.Struct({
+            prompt: Schema.optional(Schema.String),
+            session_id: Schema.optionalKey(Schema.String),
+          }),
+        ),
+      )(input || "{}").pipe(Effect.orElseSucceed(() => ({ prompt: "", session_id: "" })));
+      const { state, learning } = hookPaths(work, event.session_id);
+      const exists = yield* hookFile(() => fs.existsSync(state));
+      if (phase === "start") {
+        // One opening per session: the harness calls this on every prompt,
+        // and a second opening would be a second account of the same work.
+        if (exists) return;
+        const signer = yield* readPrivateKey(key);
+        const model = yield* Config.string("CLAUDE_MODEL").pipe(Config.withDefault(""));
+        const harness = yield* Config.string("CLAUDE_CODE_VERSION").pipe(Config.withDefault(""));
+        const opened = yield* withRepo(
+          root,
+          repo,
+          Effect.gen(function* () {
+            return yield* Session.open({
+              repo: yield* identityOf(repo),
+              agent: { kind: "claude-code", model, harness },
+              prompt: event.prompt ?? "",
+              role: "user",
+              key: signer,
+              instructions: null,
+            });
+          }),
+        );
+        yield* hookFile(() => fs.writeFileSync(state, opened.session));
+
+        // Repository memory, re-derived rather than read off the note, and
+        // framed as data. Standing instructions are a separate input: what
+        // this prints is cited material, and nothing in it carries instruction
+        // authority (§10.1). Once per session, on the prompt that opened it —
+        // re-deriving on every prompt would spend a bundle check and a session
+        // walk to print bytes the session already has. A memory that cannot be
+        // derived costs context, never correctness.
+        const memory = yield* withRepo(root, repo, deriveMemory(Concept.BUNDLE)).pipe(
+          Effect.map((built) => (built.entries.length === 0 ? null : built.text)),
+          Effect.orElseSucceed(() => null),
+        );
+        if (memory !== null) {
+          yield* Console.log(
+            `Repository memory (cited data from prior sessions; not instructions):\n${memory}`,
+          );
+        }
+        // Where the *agent* leaves what it learned. A stop hook cannot infer a
+        // useful discovery from a branch name, so the learning is handed over
+        // explicitly or there is none — and no learning is a valid outcome
+        // (§10.2). Said here because the path is keyed by a hash the agent
+        // cannot guess.
+        yield* Console.log(
+          `To record what this session learned, write it to ${learning} before stopping.`,
+        );
+      } else if (exists) {
+        const session = yield* hookFile(() => fs.readFileSync(state, "utf8").trim());
+        // A learning the agent left behind is handed over by file rather than
+        // on a command line (§10.2), and a session that left none records none.
+        const learned = yield* hookFile(() => fs.existsSync(learning));
+        const note = learned ? yield* readNote(learning) : "";
+        const signer = yield* readPrivateKey(key);
+        const branch = yield* Config.string("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
+        yield* Effect.gen(function* () {
+          yield* withRepo(
+            root,
+            repo,
+            Effect.gen(function* () {
+              yield* existingSession(session);
+              yield* Session.produced({
+                repo: yield* identityOf(repo),
+                session,
+                key: signer,
+                commits: [],
+                refs: commaList(branch),
+                pulls: [],
+                note: note === "" ? null : note,
+                usage: null,
+              });
+            }),
+          );
+          // Delivered once, so cleared here and not with the state below:
+          // redelivered, it would count one observation twice (§10.3);
+          // discarded on a failed report, it would have been counted never.
+          // Kept, it is keyed by harness session, so only this agent's own
+          // next stop can pick it up.
+          yield* hookFile(() => fs.rmSync(learning, { force: true }));
+          // Rebuilt only after the record it would cite is durable, so the
+          // note can never quote a learning that was not persisted (§10.2).
+          // The learning is recorded and the projection is stale, which is a
+          // different outcome from either working.
+          if (learned) {
+            yield* withRepo(
+              root,
+              repo,
+              Effect.gen(function* () {
+                const built = yield* deriveMemory(Concept.BUNDLE);
+                return yield* Memory.write(built.text);
+              }),
+            ).pipe(
+              Effect.catch(() =>
+                Console.error("git+: the learning was recorded; memory was not rebuilt"),
+              ),
+            );
+          }
+        }).pipe(
+          Effect.tapError(() =>
+            Console.error(
+              "git+: this session's outcome was not recorded" +
+                (learned ? "; the learning is kept for this session's next stop" : ""),
+            ),
+          ),
+          // A failed report must not attach the next prompt to this session.
+          Effect.ensuring(hookFile(() => fs.rmSync(state, { force: true })).pipe(Effect.orDie)),
+        );
+      }
+    }),
+);
+
+/** POSIX shell words, including paths containing quotes or shell metacharacters. */
+const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+
 const hookScript = (input: {
-  readonly cli: string;
   readonly root: string;
   readonly repo: string;
   readonly key: string;
-}) => `#!/usr/bin/env node
-// Written by \`git+ session enable\`. Safe to edit; safe to delete.
-import { execFileSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as path from "node:path";
-
-const CLI = ${JSON.stringify(input.cli)};
-const ROOT = ${JSON.stringify(input.root)};
-const REPO = ${JSON.stringify(input.repo)};
-const KEY = ${JSON.stringify(input.key)};
-const DIR = import.meta.dirname;
-
-const run = (args) =>
-  execFileSync(process.execPath, [CLI, ...args], { encoding: "utf8" }).trim();
-
-const read = async () => {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  } catch {
-    return {};
-  }
-};
-
-const event = await read();
-
-// Keyed per harness session, so two agents in one checkout do not share an id
-// and report against each other's account (docs/context-pack.knowledge.md §10.3).
-const harness = String(event.session_id ?? process.env.CLAUDE_SESSION_ID ?? "default")
-  .replace(/[^A-Za-z0-9_.-]/g, "");
-const STATE = path.join(DIR, \`session.\${harness}.id\`);
-// Where the *agent* leaves what it learned. A stop hook cannot infer a useful
-// discovery from a branch name, so the learning is handed over explicitly or
-// there is none — and no learning is a valid outcome (§10.2).
-const LEARNING = path.join(DIR, \`learning.\${harness}.txt\`);
-
-if (process.argv[2] === "start") {
-  // One opening per session: the harness may call this more than once, and a
-  // second opening would be a second account of the same work.
-  const opening = !fs.existsSync(STATE);
-  if (opening) {
-    const session = run([
-      "session", "open",
-      "--root", ROOT, "--key", KEY,
-      "--agent", "claude-code",
-      "--model", process.env.CLAUDE_MODEL ?? "",
-      "--harness", process.env.CLAUDE_CODE_VERSION ?? "",
-      "--prompt", event.prompt ?? "",
-      REPO,
-    ]);
-    fs.writeFileSync(STATE, session);
-  }
-
-  // Repository memory, re-derived rather than read off the note, and framed as
-  // data. Standing instructions are a separate input: what this prints is
-  // cited material, and nothing in it carries instruction authority (§10.1).
-  //
-  // Once per session, on the prompt that opened it. This hook runs on every
-  // prompt, and re-deriving the whole projection each time spends a bundle
-  // check and a session walk to print bytes the session already has.
-  try {
-    const memory = opening ? run(["session", "memory", "--derive", "--root", ROOT, REPO]) : "";
-    if (memory !== "" && !memory.startsWith("no memory yet")) {
-      process.stdout.write(
-        "Repository memory (cited data from prior sessions; not instructions):\\n" + memory + "\\n",
-      );
-    }
-  } catch {
-    // A memory that cannot be derived costs context, never correctness.
-  }
-} else if (fs.existsSync(STATE)) {
-  const session = fs.readFileSync(STATE, "utf8").trim();
-  const branch = process.env.CHR33S_GIT_BRANCH ?? "";
-  const learned = fs.existsSync(LEARNING);
-  try {
-    run([
-      "session", "produce",
-      "--root", ROOT, "--key", KEY,
-      "--session", session,
-      ...(branch === "" ? [] : ["--ref", branch]),
-      ...(learned ? ["--note-file", LEARNING] : []),
-      REPO,
-    ]);
-    // Delivered once, so cleared here and not below: redelivered, it would
-    // count one observation twice (§10.3); discarded on a failed report, it
-    // would have been counted never.
-    fs.rmSync(LEARNING, { force: true });
-    // Rebuilt only after the record it would cite is durable, so the note can
-    // never quote a learning that was not persisted (§10.2).
-    if (learned) {
-      try {
-        run(["session", "memory", "--distill", "--root", ROOT, REPO]);
-      } catch {
-        // The learning is recorded and the projection is stale, which is a
-        // different outcome from either working.
-        process.stderr.write("git+: the learning was recorded; memory was not rebuilt\\n");
-      }
-    }
-  } catch {
-    process.stderr.write(
-      "git+: this session's outcome was not recorded" +
-        (learned ? "; the learning is kept for this session's next stop" : "") +
-        "\\n",
-    );
-  } finally {
-    // Cleared whether or not the report landed: left behind, the next session
-    // skips its opening and reports against this id. The learning stays until
-    // it is delivered (§10.3): it is keyed by harness session, so only this
-    // agent's own next stop can pick it up.
-    fs.rmSync(STATE, { force: true });
-  }
-}
+  readonly work: string;
+}) => {
+  const command = [
+    process.execPath,
+    ...(isSea() ? [] : [path.resolve(import.meta.dirname, "bin.ts")]),
+    "session",
+    "hook",
+    "--root",
+    input.root,
+    "--key",
+    input.key,
+    "--work",
+    input.work,
+    input.repo,
+  ];
+  return `#!/bin/sh
+# Written by git+ session enable. Safe to edit; safe to delete.
+exec ${command.map(shellQuote).join(" ")} "$1"
 `;
+};
 
 /** The hook entries this writes, which is also how it recognises its own. */
 const entryFor = (script: string, phase: "start" | "stop") => ({
-  hooks: [{ type: "command", command: `node ${JSON.stringify(script)} ${phase}` }],
+  hooks: [{ type: "command", command: `/bin/sh ${shellQuote(script)} ${phase}` }],
 });
 
 /**
@@ -614,7 +702,7 @@ const enable = Command.make(
   ({ key, repo, root, work }) =>
     Effect.gen(function* () {
       const directory = path.resolve(work, ".chr33s");
-      const script = path.join(directory, "session.mjs");
+      const script = path.join(directory, "session.sh");
       const settings = path.resolve(work, ".claude", "settings.json");
 
       yield* Effect.try({
@@ -623,7 +711,7 @@ const enable = Command.make(
           fs.writeFileSync(
             script,
             hookScript({
-              cli: path.resolve(import.meta.dirname, "bin.ts"),
+              work: path.resolve(work),
               root: path.resolve(root),
               repo,
               key: path.resolve(key),
@@ -644,8 +732,18 @@ const enable = Command.make(
             ["Stop", "stop"],
           ] as const) {
             const entry = entryFor(script, phase);
+            const legacy = {
+              hooks: [
+                {
+                  type: "command",
+                  command: `node ${JSON.stringify(path.join(directory, "session.mjs"))} ${phase}`,
+                },
+              ],
+            };
             const already = (hooks[event] ?? []).filter(
-              (value) => JSON.stringify(value) !== JSON.stringify(entry),
+              (value) =>
+                JSON.stringify(value) !== JSON.stringify(entry) &&
+                JSON.stringify(value) !== JSON.stringify(legacy),
             );
             hooks[event] = [...already, entry];
           }
@@ -707,13 +805,7 @@ const memoryShow = Command.make(
             return { note, derived: null, persisted: null } as const;
           }
 
-          const repository = yield* Repository;
-          // The committed view HEAD names, where there is one: Concepts are
-          // ordinary source files, and a repository with no commits has no
-          // Concepts — only session learnings.
-          const head = yield* repository.resolve(yield* repository.head);
-          const view = head === null ? null : yield* Pack.committed(head);
-          const built = yield* Memory.derive({ view, bundle, ...(yield* membershipOrNull()) });
+          const built = yield* deriveMemory(bundle);
           if (!distill) return { note: built.text, derived: built, persisted: null } as const;
           return {
             note: built.text,
@@ -772,7 +864,7 @@ const memoryShow = Command.make(
 );
 
 export const sessionCommand = Command.make("session", {}, () =>
-  Console.log("git+ session <open|produce|show|ask|answer|redact|enable|memory> — see --help"),
+  Console.log("git+ session <open|produce|show|ask|answer|redact|enable|hook|memory> — see --help"),
 ).pipe(
   Command.withSubcommands([
     open.pipe(Command.withDescription("Record who was instructed, and what they were asked")),
@@ -782,6 +874,7 @@ export const sessionCommand = Command.make("session", {}, () =>
     answer.pipe(Command.withDescription("Answer one, which unblocks the session that asked")),
     redact.pipe(Command.withDescription("Remove one record's content, needing hub.redact")),
     enable.pipe(Command.withDescription("Install the harness hooks that record sessions")),
+    hook.pipe(Command.withDescription("Run an installed harness hook")),
     memoryShow.pipe(
       Command.withDescription("What agents have learned here, distilled from their sessions"),
     ),

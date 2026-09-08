@@ -16,6 +16,7 @@ import { stores } from "../git/Memory.ts";
 import { FLUSH, pkt } from "../git/Pkt.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Hooks, Repository } from "../git/Repository.ts";
+import type { Oid } from "../git/Store.ts";
 import { of as fixedRemotes, type Remote } from "./Remotes.ts";
 import { covered, hooks } from "./Sending.ts";
 
@@ -46,6 +47,76 @@ const named = (carried: ReadonlyArray<{ readonly ref: string }>) =>
   carried.map((result) => result.ref);
 
 describe("what a standing instruction carries", () => {
+  for (const advanced of [false, true]) {
+    it.effect(`forwards a deletion only from its original value (advanced=${advanced})`, () =>
+      Effect.promise(async () => {
+        const original = globalThis.fetch;
+        let held: Oid | null = null;
+        let posts = 0;
+        globalThis.fetch = async (_url, init) => {
+          if (init?.method === "POST") {
+            posts++;
+            held = null;
+            return new Response(
+              concatBytes([pkt("unpack ok\n"), pkt("ok refs/heads/main\n"), FLUSH]),
+            );
+          }
+          return new Response(
+            concatBytes([pkt(`${held} refs/heads/main\0report-status\n`), FLUSH]),
+          );
+        };
+        try {
+          const current = await Effect.runPromise(
+            Effect.gen(function* () {
+              const repository = yield* Repository;
+              const hook = yield* Hooks;
+              const old = yield* repository.commitTree({
+                tree: EMPTY_TREE_OID,
+                parents: [],
+                message: "old",
+                author,
+              });
+              const newer = yield* repository.commitTree({
+                tree: EMPTY_TREE_OID,
+                parents: [old],
+                message: "new",
+                author,
+              });
+              const current = advanced ? newer : old;
+              held = current;
+              // The mirror has already received a newer write while this old
+              // deletion was waiting to be forwarded.
+              yield* hook.postReceive([{ ref: "refs/heads/main", from: old, to: null, ok: true }]);
+              return current;
+            }).pipe(
+              Effect.provide(
+                hooks({
+                  background: (effect) => effect.pipe(Effect.asVoid, Effect.ignoreCause),
+                }).pipe(
+                  Layer.provide(
+                    fixedRemotes([
+                      { name: "mirror", url: "http://fixture", sync: { mode: "mirror", refs: [] } },
+                    ]),
+                  ),
+                  Layer.provideMerge(
+                    GitRepository.layer.pipe(
+                      Layer.provide(GitRepository.hooksNoop),
+                      Layer.provideMerge(stores),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          assert.equal(held, advanced ? current : null);
+          assert.equal(posts, advanced ? 0 : 1);
+        } finally {
+          globalThis.fetch = original;
+        }
+      }),
+    );
+  }
+
   it.effect("takes everything the mode covers when no patterns are named", () =>
     Effect.sync(() => {
       // `{mode: "push"}` has to mean what it looks like it means. Read as "no

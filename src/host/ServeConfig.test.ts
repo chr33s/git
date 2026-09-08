@@ -11,11 +11,42 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
-import { Result } from "effect";
+import { ConfigProvider, Effect, Result } from "effect";
 
-import { merge, parseHosts } from "./ServeConfig.ts";
+import { merge, parseHosts, resolve } from "./ServeConfig.ts";
 
 const ENVIRONMENT = { root: "repos", port: 8080, hostname: "127.0.0.1", hosts: "" };
+
+describe("configuration resolution", () => {
+  it.effect("lets an explicit port override a malformed environment value", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolve({ port: 0 });
+      assert.equal(resolved.port, 0);
+      assert.equal(resolved.root, "repos");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ PORT: "invalid" })))),
+  );
+
+  it.effect("still rejects a malformed port when there is no override", () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.result(resolve({}));
+      assert.ok(Result.isFailure(result));
+      assert.match(String(result.failure), /PORT/);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ PORT: "invalid" })))),
+  );
+
+  it.effect("uses the configured port and then the default when neither is overridden", () =>
+    Effect.gen(function* () {
+      const configured = yield* resolve({}).pipe(
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ PORT: "8123" }))),
+      );
+      assert.equal(configured.port, 8123);
+      const defaults = yield* resolve({}).pipe(
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+      );
+      assert.equal(defaults.port, 8080);
+    }),
+  );
+});
 
 const accepted = (raw: string): ReadonlyArray<string> => {
   const parsed = parseHosts(raw);

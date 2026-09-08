@@ -16,6 +16,7 @@ import { Effect, Layer } from "effect";
 
 import { EMPTY_TREE_OID, type Signature } from "../git/Format.ts";
 import { stores } from "../git/Memory.ts";
+import * as MergeState from "../git/MergeState.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import { indexMemory, IndexStore, workTreeMemory, WorkTree } from "../git/Work.ts";
@@ -36,10 +37,11 @@ const world = GitRepository.layer.pipe(
   Layer.provideMerge(stores),
   Layer.provideMerge(indexMemory),
   Layer.provideMerge(workTreeMemory),
+  Layer.provideMerge(MergeState.none),
 );
 
 const scenario = <A, E>(
-  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore>,
+  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore | MergeState.MergeState>,
 ): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(world)));
 
 /** A checkout with two files committed on `main`, and HEAD pointing at it. */

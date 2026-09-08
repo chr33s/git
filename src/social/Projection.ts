@@ -160,7 +160,9 @@ const intersect = (
 };
 
 const pathKey = (path: TrustPath): string =>
-  `${path.principals.join("\u0000")}\u0001${[...path.scopes].sort().join(",")}`;
+  // Equal routes with different remaining depths can reach different descendants.
+  // `pathsTo` collapses these alternatives when counting independent evidence.
+  `${path.principals.join("\u0000")}\u0001${[...path.scopes].sort().join(",")}\u0001${path.remainingDepth}`;
 
 export const project = (input: {
   readonly roots: ReadonlyArray<PrincipalId>;

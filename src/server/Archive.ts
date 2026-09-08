@@ -20,8 +20,8 @@ import { Effect, Stream } from "effect";
 import { Invalid, ObjectNotFound, type StorageFailure, statusOf } from "../git/Error.ts";
 import { isGitlink, isTree } from "../git/Format.ts";
 import { crc32 } from "../git/PackIndex.ts";
-import { Repository, type TreeFile } from "../git/Repository.ts";
-import type { Oid } from "../git/Store.ts";
+import { Repository, treeAt, type TreeFile } from "../git/Repository.ts";
+import { isOid, type Oid } from "../git/Store.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -529,30 +529,6 @@ const failure = (status: number, message: string): Response =>
     headers: { "content-type": "text/plain; charset=utf-8" },
   });
 
-/** The tree an archive request names: a ref, tag or commit, peeled to a tree. */
-const treeOf = (
-  repository: typeof Repository.Service,
-  start: Oid,
-): Effect.Effect<Oid | null, ArchiveError> =>
-  Effect.gen(function* () {
-    let current = start;
-    // Bounded by the tag chain's length; a tag of a tag of a commit is legal.
-    for (let step = 0; step < 16; step++) {
-      const object = yield* repository.readObject(current);
-      if (object.type === "tree") return current;
-      if (object.type === "commit") {
-        current = (yield* repository.readCommit(current)).tree;
-        continue;
-      }
-      if (object.type === "tag") {
-        current = (yield* repository.readTag(current)).object;
-        continue;
-      }
-      return null;
-    }
-    return null;
-  });
-
 /**
  * Route `GET …/archive/<name>`; `null` means "not an archive request", so a
  * host can try the next handler.
@@ -578,11 +554,16 @@ export const handle = Effect.fn("Archive.handle")(
     const repository = yield* Repository;
     const ref = url.searchParams.get("ref") ?? "HEAD";
 
-    const resolved = yield* repository.resolve(ref);
+    // Match the JSON archive endpoint's revision forms. RefStore resolves
+    // exact names; short branches and literal object IDs belong to this API.
+    const resolved = isOid(ref)
+      ? ref
+      : yield* repository.resolve(
+          ref === "HEAD" || ref.startsWith("refs/") ? ref : `refs/heads/${ref}`,
+        );
     if (resolved === null) return failure(404, `unknown ref '${ref}'`);
 
-    const root = yield* treeOf(repository, resolved);
-    if (root === null) return failure(404, `'${ref}' does not name a tree`);
+    const root = yield* treeAt(repository, resolved);
 
     const path = url.searchParams.get("path") ?? "";
     const tree = yield* Effect.gen(function* () {

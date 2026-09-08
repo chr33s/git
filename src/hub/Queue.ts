@@ -264,6 +264,7 @@ const prOf = (payload: QueuePayload): string | null =>
 export const issue = Effect.fn("hub.Queue.issue")(function* (
   payload: QueuePayload,
   key: PrivateKey,
+  expected?: Oid | null,
 ) {
   if (!isQueueId(payload.queue)) {
     return yield* new Invalid({
@@ -347,6 +348,7 @@ export const issue = Effect.fn("hub.Queue.issue")(function* (
     message: `${payload.type} ${payload.id}\n`,
     payload: bytes,
     signatures: [signature],
+    expected,
   });
 });
 
@@ -399,19 +401,38 @@ export const candidate = Effect.fn("hub.Queue.candidate")(function* (input: {
   );
 });
 
-export const leave = Effect.fn("hub.Queue.leave")(function* (input: {
-  readonly repo: string;
-  readonly queue: string;
-  readonly pr: string;
-  readonly reason: QueueLeft["reason"];
-  readonly key: PrivateKey;
-}) {
-  const base = yield* context(input.repo, input.queue);
-  return yield* issue(
-    { ...base, type: "queue.left", pr: input.pr, reason: input.reason },
-    input.key,
-  );
-});
+export const leave = Effect.fn("hub.Queue.leave")(
+  function* (input: {
+    readonly repo: string;
+    readonly queue: string;
+    readonly pr: string;
+    readonly reason: QueueLeft["reason"];
+    readonly key: PrivateKey;
+    readonly entered?: Oid;
+  }) {
+    const repository = yield* Repository;
+    const expected =
+      input.entered === undefined ? undefined : yield* repository.readRef(refOf(input.queue));
+    if (input.entered !== undefined) {
+      const current = yield* project(input.queue);
+      if (current.entries.find((entry) => entry.pr === input.pr)?.entered !== input.entered)
+        return null;
+    }
+    const base = yield* context(input.repo, input.queue);
+    return yield* issue(
+      { ...base, type: "queue.left", pr: input.pr, reason: input.reason },
+      input.key,
+      expected,
+    );
+  },
+  (effect, input) =>
+    effect.pipe(
+      Effect.retry({
+        times: 3,
+        while: (error) => input.entered !== undefined && error._tag === "RefConflict",
+      }),
+    ),
+);
 
 export const close = Effect.fn("hub.Queue.close")(function* (input: {
   readonly repo: string;
@@ -474,6 +495,8 @@ export const entries = Effect.fn("hub.Queue.entries")(function* (queue: string, 
 /** One pull request's place in the queue. */
 export interface Entry {
   readonly pr: string;
+  /** The event that owns this occurrence, including same-head re-entries. */
+  readonly entered: Oid;
   /** The revision it was entered at, which a candidate is built from. */
   readonly head: Oid;
   readonly by: Fingerprint | null;
@@ -581,7 +604,13 @@ export const project = Effect.fn("hub.Queue.project")(function* (queue: string, 
         // request that pushed a fix while queued went to the back, which is not
         // what re-entering means and not what this function says it does.
         // Leaving and entering again is how something moves to the back.
-        queued.set(payload.pr, { pr: payload.pr, head, by: signer, candidate: null });
+        queued.set(payload.pr, {
+          pr: payload.pr,
+          entered: commit,
+          head,
+          by: signer,
+          candidate: null,
+        });
         break;
       }
 

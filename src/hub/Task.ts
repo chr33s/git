@@ -636,7 +636,9 @@ export const project = Effect.fn("hub.Task.project")(function* (task: string, no
     parent,
     // `available` is the question an agent woken by a task actually asks.
     available: opened !== null && closed === null && !holding,
-    claim: holding && claim !== null ? { by: claim.by, expiresAt: claim.expiresAt } : null,
+    // The winning record distinguishes concurrent workers even when they use
+    // the same signing key. Authorship alone cannot confirm acquisition.
+    claim: holding ? claim : null,
     closed,
     sessions,
     // Said out loud rather than swallowed: a record that did not count is

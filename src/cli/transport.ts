@@ -50,6 +50,8 @@ export const fetchCommand = Command.make(
       for (const rejected of result.rejected) {
         yield* Console.error(`refused ${rejected.name}: not a fast-forward`);
       }
+      if (result.rejected.length > 0)
+        return yield* new Invalid({ field: "fetch", reason: "some refs were rejected" });
       if (moved.length === 0 && result.rejected.length === 0) yield* Console.log("up to date");
     }).pipe(Effect.provide(stores(path.join(root, repo)))),
 );

@@ -23,7 +23,7 @@ import {
   isFingerprint,
 } from "../crypto/SshSignature.ts";
 import { fetchRepository, lsRemote } from "../client/Fetch.ts";
-import { Invalid } from "../git/Error.ts";
+import { Invalid, StorageFailure } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
@@ -788,28 +788,27 @@ const enable = Command.make(
         const target = { objects: yield* ObjectStore, refs: yield* RefStore };
         const all: string[] = [];
         const joined: string[] = [];
-        // The trust refs one at a time and the hub namespaces together. The
-        // order is load-bearing — an event is judged against the membership
-        // graph, so the grants have to arrive before the events that lean on
-        // them — but within the hub group it is not, and a call per refspec
-        // meant an advertisement and an `ls-refs` round trip each. Splitting
-        // `refs/hub/*` into one entry per namespace made that a round trip per
-        // namespace for strictly less data than the single glob fetched.
-        // Rejections are still attributed: `result.rejected` carries ref
-        // names.
+        // Two passes rather than one per refspec. The ordering is what the
+        // loop was for — an event is judged against the membership graph, so
+        // the grants have to arrive before the events that lean on them — and
+        // that is a split between the trust refs and the hub ones, not a
+        // reason to talk to the remote once per pattern. Each call begins with
+        // its own advertisement and, for the hidden namespaces, an `ls-refs`
+        // round trip, so enabling a hub paid four of those for two orderings.
+        // The extra specs ride in the hub group, after the trust one.
+        // Rejections are still attributed: `result.rejected` carries ref names.
         const hub = Refspec.HUB_FETCH.filter((spec) => spec.source.startsWith("refs/hub/"));
         const groups = [
-          ...Refspec.HUB_FETCH.filter((spec) => !spec.source.startsWith("refs/hub/")).map(
-            (spec) => [spec],
-          ),
+          Refspec.HUB_FETCH.filter((spec) => !hub.includes(spec)),
           [...hub, ...extra],
         ];
-        for (const specs of groups) {
+        for (const refspecs of groups) {
+          if (refspecs.length === 0) continue;
           const result = yield* fetchRepository({
             url,
             stores: target,
             token: credential,
-            refspecs: specs,
+            refspecs,
           });
           all.push(...result.refs.map((update) => update.name));
 
@@ -929,7 +928,18 @@ const disable = Command.make(
                 Refspec.HUB_MANAGED.some((spec) => Refspec.map(spec, name) !== null)),
           );
         if (managed.length > 0) {
-          yield* refs.apply(managed.map((name) => ({ name, value: null, reason: "hub disable" })));
+          const applied = yield* refs.apply(
+            managed.map((name) => ({ name, value: null, reason: "hub disable" })),
+            { atomic: true },
+          );
+          const refused = applied.find((result) => !result.applied);
+          if (refused !== undefined) {
+            return yield* new StorageFailure({
+              operation: "hub.disable",
+              path: refused.name,
+              cause: refused.reason ?? "ref deletion refused",
+            });
+          }
         }
         return managed.length;
       }).pipe(Effect.provide(localRepository(`${root}/${name}`)));
