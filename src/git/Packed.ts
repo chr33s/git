@@ -173,17 +173,16 @@ export const packed = (
   );
 
   const read = (oid: Oid): Effect.Effect<RawObject, ObjectNotFound | StorageFailure> =>
-    loose
-      .read(oid)
-      .pipe(
-        Effect.catchTag("ObjectNotFound", () =>
-          fromPack(oid).pipe(
-            Effect.flatMap((found) =>
-              found === null ? Effect.fail(new ObjectNotFound({ oid })) : Effect.succeed(found),
-            ),
+    loose.read(oid).pipe(
+      Effect.catchTag("ObjectNotFound", () =>
+        fromPack(oid).pipe(
+          Effect.filterOrFail(
+            (found) => found !== null,
+            () => new ObjectNotFound({ oid }),
           ),
         ),
-      );
+      ),
+    );
 
   const store: ObjectStore["Service"] = {
     read,

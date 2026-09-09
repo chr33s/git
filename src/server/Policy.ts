@@ -43,6 +43,7 @@ import * as Event from "../hub/Event.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
 import * as Task from "../hub/Task.ts";
+import * as Note from "../hub/Note.ts";
 import * as Queue from "../hub/Queue.ts";
 import * as SocialLog from "../social/Log.ts";
 import * as Inbox from "../social/Inbox.ts";
@@ -1040,13 +1041,15 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
         ? { exact: ["social.write"] }
         : Task.taskOf(name) !== null
           ? { exact: ["hub.task", "hub.redact"] }
-          : Session.sessionOf(name) !== null
-            ? { exact: ["hub.session", "hub.redact"] }
-            : Queue.queueOf(name) !== null
-              ? { exact: ["hub.queue"] }
-              : name.startsWith("refs/hub/")
-                ? { prefix: "hub." }
-                : { prefix: "member." };
+          : Note.noteOf(name) !== null
+            ? { exact: ["hub.note", "hub.redact"] }
+            : Session.sessionOf(name) !== null
+              ? { exact: ["hub.session", "hub.redact"] }
+              : Queue.queueOf(name) !== null
+                ? { exact: ["hub.queue"] }
+                : name.startsWith("refs/hub/")
+                  ? { prefix: "hub." }
+                  : { prefix: "member." };
     const charge = needed(update.name);
     const passes =
       "exact" in charge
@@ -1184,11 +1187,12 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     Event.prOf(update.name) === null &&
     Session.sessionOf(update.name) === null &&
     Task.taskOf(update.name) === null &&
+    Note.noteOf(update.name) === null &&
     Queue.queueOf(update.name) === null
   ) {
     return refused(
       update.name,
-      `${update.name} does not name a pull request, session, task or queue`,
+      `${update.name} does not name a pull request, session, task, note or queue`,
     );
   }
 
@@ -1227,14 +1231,16 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // let a fleet's ordinary week exhaust what a repository's pull requests
     // are allowed, and a session ref is exactly as undeletable as a pull
     // request's.
-    const classOf = (name: string): "sessions" | "tasks" | "queues" | "pull requests" =>
+    const classOf = (name: string): "sessions" | "tasks" | "notes" | "queues" | "pull requests" =>
       Session.sessionOf(name) !== null
         ? "sessions"
         : Task.taskOf(name) !== null
           ? "tasks"
-          : Queue.queueOf(name) !== null
-            ? "queues"
-            : "pull requests";
+          : Note.noteOf(name) !== null
+            ? "notes"
+            : Queue.queueOf(name) !== null
+              ? "queues"
+              : "pull requests";
 
     const kind = classOf(update.name);
     const held =
@@ -1242,9 +1248,11 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
         ? yield* Session.sessions()
         : kind === "tasks"
           ? yield* Task.tasks()
-          : kind === "queues"
-            ? yield* Queue.queues()
-            : yield* Event.pullRequests();
+          : kind === "notes"
+            ? yield* Note.notes()
+            : kind === "queues"
+              ? yield* Queue.queues()
+              : yield* Event.pullRequests();
     const opened = [...opening].filter((name) => classOf(name) === kind).length;
     const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
@@ -1512,6 +1520,39 @@ const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, cur
  *
  * Only what the push adds is walked, so an ordinary push reads one commit.
  */
+/**
+ * What an event calls itself, read by whichever namespace owns the ref.
+ *
+ * Every namespace, not the two that had been noticed. The chain here decoded
+ * social statements and sent everything else to `Event.decode` — which cannot
+ * read a task or a session, so both came back `null` and the refusal degraded
+ * to "may not add a event" for exactly the records a reader would most want
+ * named.
+ *
+ * Early returns rather than one conditional expression, and that is not a
+ * style choice: an `Effect` whose success type is the union of several payload
+ * unions is more than inference follows, and it gives up by widening — which
+ * is how `Redaction.excluded` came to have `unknown` for its errors and its
+ * context. Each branch here yields its own concrete type and leaves.
+ */
+const kindOf = Effect.fn("Policy.kindOf")(function* (
+  ref: string,
+  payload: Uint8Array,
+  social: boolean,
+) {
+  const named = <A extends { readonly type: string }>(decoded: Effect.Effect<A, Invalid>) =>
+    decoded.pipe(
+      Effect.map((event) => event.type),
+      Effect.orElseSucceed(() => null),
+    );
+
+  if (social) return yield* named(Statement.decode(payload));
+  if (Note.noteOf(ref) !== null) return yield* named(Note.decode(payload));
+  if (Task.taskOf(ref) !== null) return yield* named(Task.decode(payload));
+  if (Session.sessionOf(ref) !== null) return yield* named(Session.decode(payload));
+  return yield* named(Event.decode(payload));
+});
+
 const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   ref: string,
   to: Oid,
@@ -1554,15 +1595,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     );
     if (record === null) continue;
     const signed = yield* Verify.signers(record.payload, record.signatures);
-    const kind = social
-      ? yield* Statement.decode(record.payload).pipe(
-          Effect.map((payload) => payload.type),
-          Effect.orElseSucceed(() => null),
-        )
-      : yield* Event.decode(record.payload).pipe(
-          Effect.map((payload) => payload.type),
-          Effect.orElseSucceed(() => null),
-        );
+    const kind = yield* kindOf(ref, record.payload, social);
 
     // Every event, without an exemption list. Three attempts at one — first
     // "grants authority", then "moves authority", then a list of families —

@@ -49,6 +49,7 @@ Choose the document for the job rather than reading the design set front to back
 | understand repository identity, membership, PRs, reviews, checks, or policy | [`docs/hub.md`](docs/hub.md)                             |
 | grant agents access or record agent sessions, tasks, and wake rules         | [`docs/agents.md`](docs/agents.md)                       |
 | operate or reason about the merge queue                                     | [`docs/queue.md`](docs/queue.md)                         |
+| record and audit code-anchored constraints, or read them before editing     | [`docs/notes.md`](docs/notes.md)                         |
 | understand social identity, introductions, federation, and discovery        | [`docs/web-of-trust.md`](docs/web-of-trust.md)           |
 | change the implementation or add a backend/surface                          | [`docs/internals.md`](docs/internals.md)                 |
 

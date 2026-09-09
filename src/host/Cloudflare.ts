@@ -28,6 +28,7 @@ import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
+import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Archive from "../server/Archive.ts";
 import * as CommitPack from "../server/CommitPack.ts";
@@ -216,7 +217,7 @@ export default Repo.make(
         const existing = routers.get(repo);
         if (existing !== undefined) return existing;
         const router = HttpRouter.toWebHandler(
-          Api.layer(remotes(repo)).pipe(
+          Api.layer(remotes(repo), anchorSyntax).pipe(
             Layer.provideMerge(live(repo)),
             Layer.provideMerge(subscribers(repo)),
             Layer.provideMerge(openWrites),

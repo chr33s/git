@@ -17,6 +17,7 @@ import { FetchHttpClient, HttpClient, HttpRouter } from "effect/unstable/http";
 import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
 import * as Api from "../server/Api.ts";
+import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
@@ -333,7 +334,7 @@ export class GitRepo extends DurableObject<TestEnv> {
 
     const api = (this.#api ??= (() => {
       const router = HttpRouter.toWebHandler(
-        Api.layer(this.#remoteRegistry(repo)).pipe(
+        Api.layer(this.#remoteRegistry(repo), anchorSyntax).pipe(
           Layer.provideMerge(this.#live(repo)),
           Layer.provideMerge(this.#registry(repo)),
           Layer.provideMerge(this.#openWrites()),

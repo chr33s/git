@@ -50,6 +50,7 @@ import { GitInvocation } from "./GitCompat.ts";
 import { parseInvocation, runCoreCompatibility } from "./GitCompat.node.ts";
 import { hubCommand } from "./hub.ts";
 import { idCommand } from "./id.ts";
+import { noteCommand, whyCommand } from "./note.ts";
 import * as replay from "./replay.ts";
 import {
   cliSignature,
@@ -1106,6 +1107,10 @@ const git = Command.make("git+").pipe(
     init.pipe(Command.withDescription("Create an empty bare repository")),
     log.pipe(Command.withDescription("Commit history, newest first")),
     merge.pipe(Command.withDescription("Three-way merge two revisions")),
+    noteCommand.pipe(Command.withDescription("Code-anchored repository constraints")),
+    whyCommand.pipe(
+      Command.withDescription("Explain what must be preserved before editing source"),
+    ),
     work.mv.pipe(Command.withDescription("Move a tracked path, staging both halves")),
     prCommand.pipe(Command.withDescription("Pull requests: open, review, discuss, check, merge")),
     pullCommand.pipe(Command.withDescription("Fast-forward one branch from a remote")),

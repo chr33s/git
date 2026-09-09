@@ -23,6 +23,7 @@ export const CAPABILITIES = [
   "hub.redact",
   "hub.session",
   "hub.task",
+  "hub.note",
   "hub.queue",
   "social.write",
   "member.invite",

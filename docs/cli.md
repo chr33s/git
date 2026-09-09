@@ -40,6 +40,8 @@ SUBCOMMANDS
   init                Create an empty bare repository
   log                 Commit history, newest first
   merge               Three-way merge two revisions
+  note                Code-anchored repository constraints
+  why                 Explain what must be preserved before editing source
   mv                  Move a tracked path, staging both halves
   pr                  Pull requests: open, review, discuss, check, merge
   pull                Fast-forward one branch from a remote

@@ -169,8 +169,8 @@ describe.skipIf(!hasGit)("native gitlink porcelain against Git", () => {
           assert.equal(expected.status === 0, kind !== "unborn", expected.stderr);
           let succeeded: boolean;
           if (driver === "library") {
-            const result = await Effect.runPromise(
-              Checkout.add(["."]).pipe(Effect.provide(layerFor(native)), Effect.exit),
+            const result = await Effect.runPromiseExit(
+              Checkout.add(["."]).pipe(Effect.provide(layerFor(native))),
             );
             succeeded = result._tag === "Success";
           } else {

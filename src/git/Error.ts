@@ -45,6 +45,17 @@ export class StorageFailure extends Schema.TaggedError<StorageFailure>()(
   { httpApiStatus: 500 },
 ) {}
 
+/** A source anchor could not be inspected by the selected resolver. */
+export class AnchorResolutionFailure extends Schema.TaggedError<AnchorResolutionFailure>()(
+  "AnchorResolutionFailure",
+  {
+    operation: Schema.String,
+    path: Schema.String,
+    reason: Schema.String,
+  },
+  { httpApiStatus: 422 },
+) {}
+
 export class Invalid extends Schema.TaggedError<Invalid>()(
   "Invalid",
   {
@@ -70,6 +81,7 @@ export type GitError =
   | RefConflict
   | PackCorrupt
   | StorageFailure
+  | AnchorResolutionFailure
   | Invalid
   | HookRejected;
 
@@ -78,6 +90,7 @@ export const GitError = Schema.Union([
   RefConflict,
   PackCorrupt,
   StorageFailure,
+  AnchorResolutionFailure,
   Invalid,
   HookRejected,
 ]);
@@ -97,5 +110,7 @@ export const statusOf = (error: GitError): number => {
       return 422;
     case "StorageFailure":
       return 500;
+    case "AnchorResolutionFailure":
+      return 422;
   }
 };

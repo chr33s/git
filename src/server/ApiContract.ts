@@ -608,6 +608,128 @@ export const HubSessionDetail = Schema.Struct({
 });
 export type HubSessionDetail = (typeof HubSessionDetail)["Type"];
 
+/**
+ * A note's confirmed fingerprint, as `hub/Anchor.ts` computes one.
+ *
+ * `signatureHash` is null where the resolver cannot tell a declaration from a
+ * body, which is a different thing from a declaration that hashed to nothing
+ * — see §11. Every key stays present either way, so a reader never has to
+ * decide whether an absent field means unknown, unsupported or omitted.
+ */
+export const HubNoteBaseline = Schema.Struct({
+  resolver: Schema.String,
+  normalization: Schema.String,
+  signatureHash: Schema.NullOr(Schema.String),
+  contentHash: Schema.String,
+  rawHash: Schema.String,
+});
+export type HubNoteBaseline = (typeof HubNoteBaseline)["Type"];
+
+export const HubNoteStatus = Schema.Literals([
+  "fresh",
+  "content-changed",
+  "contract-changed",
+  "anchor-missing",
+  "source-missing",
+  "unverifiable",
+  "rebaseline-required",
+  "conflicted",
+]);
+export type HubNoteStatus = (typeof HubNoteStatus)["Type"];
+
+/** One anchored note, as `hub/NoteProjection.ts` folds it. */
+export const HubNote = Schema.Struct({
+  id: Schema.String,
+  path: Schema.String,
+  anchor: Schema.String,
+  text: Schema.String,
+  createdAt: Schema.String,
+  createdBy: Schema.String,
+  updatedAt: Schema.String,
+  updatedBy: Schema.String,
+  active: Schema.Boolean,
+  pinned: Schema.Boolean,
+  baseline: Schema.NullOr(HubNoteBaseline),
+  /**
+   * The lifecycle events two replicas wrote and nobody has answered.
+   *
+   * Empty on an ordinary note. A non-empty list is §8's conflict: the fold
+   * declined to pick a winner, so a reader must treat the note as unresolved
+   * rather than reading `text` and `active` as somebody's decision.
+   */
+  competing: Schema.Array(
+    Schema.Struct({ commit: OidString, event: Schema.String, id: Schema.String }),
+  ),
+});
+export type HubNote = (typeof HubNote)["Type"];
+
+export const HubNotePage = Page(HubNote);
+export type HubNotePage = (typeof HubNotePage)["Type"];
+
+/** One note, whole: its folded state and the records it was folded from. */
+export const HubNoteDetail = Schema.Struct({
+  note: HubNote,
+  events: Schema.Array(
+    Schema.Struct({
+      commit: OidString,
+      id: Schema.String,
+      type: Schema.String,
+      issuedAt: Schema.String,
+    }),
+  ),
+  /** Commits carrying a record this replica could not read — see §21 redaction. */
+  unreadable: Schema.Array(OidString),
+});
+export type HubNoteDetail = (typeof HubNoteDetail)["Type"];
+
+/**
+ * One audited note: what it says, and what the source says now.
+ *
+ * `current` is what this read computed and `baseline` is what was signed.
+ * They differ on every drifted note, and the difference is deliberately not
+ * reconciled here — §15 makes advancing a baseline a signed act, never a
+ * consequence of somebody having looked.
+ */
+export const HubNoteAudit = Schema.Struct({
+  id: Schema.String,
+  path: Schema.String,
+  anchor: Schema.String,
+  text: Schema.String,
+  status: HubNoteStatus,
+  baseline: Schema.NullOr(HubNoteBaseline),
+  current: Schema.NullOr(HubNoteBaseline),
+  active: Schema.Boolean,
+  pinned: Schema.Boolean,
+  pathMovedFrom: Schema.NullOr(Schema.String),
+});
+export type HubNoteAudit = (typeof HubNoteAudit)["Type"];
+
+export const HubNoteCheck = Schema.Struct({
+  query: Schema.NullOr(Schema.String),
+  base: Schema.NullOr(Schema.String),
+  head: Schema.String,
+  notes: Schema.Array(HubNoteAudit),
+  /** Whether anything here requires an explicit judgment before a merge. */
+  actionable: Schema.Boolean,
+});
+export type HubNoteCheck = (typeof HubNoteCheck)["Type"];
+
+/** What `git+ why` answers, over HTTP: anchored constraints plus §4's memory. */
+export const HubWhy = Schema.Struct({
+  query: Schema.String,
+  head: Schema.String,
+  notes: Schema.Array(HubNoteAudit),
+  memory: Schema.Array(
+    Schema.Struct({
+      kind: Schema.String,
+      text: Schema.String,
+      observations: Schema.Int,
+      cites: Schema.Array(Schema.String),
+    }),
+  ),
+});
+export type HubWhy = (typeof HubWhy)["Type"];
+
 /** A member as the trust projection holds it — the public record only. */
 export const HubMember = Schema.Struct({
   fingerprint: Schema.String,

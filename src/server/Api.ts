@@ -30,7 +30,13 @@ import {
 
 import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
-import { Invalid, ObjectNotFound, PackCorrupt, RefConflict } from "../git/Error.ts";
+import {
+  AnchorResolutionFailure,
+  Invalid,
+  ObjectNotFound,
+  PackCorrupt,
+  RefConflict,
+} from "../git/Error.ts";
 import {
   EMPTY_TREE_OID,
   isGitlink,
@@ -52,6 +58,12 @@ import {
 import * as HubTask from "../hub/Task.ts";
 import { hierarchy } from "../hub/TaskHierarchy.ts";
 import * as HubSession from "../hub/Session.ts";
+import * as HubNote from "../hub/Note.ts";
+import * as HubNotes from "../hub/NoteProjection.ts";
+import * as NoteAudit from "../hub/NoteAudit.ts";
+import * as NoteIndex from "../hub/NoteIndex.ts";
+import * as HubMemory from "../hub/Memory.ts";
+import { AnchorResolver } from "../hub/Anchor.ts";
 import { archive as archiveTree, type Format as ArchiveFormat } from "./Archive.ts";
 import {
   project as projectTrust,
@@ -102,6 +114,10 @@ import {
   HubPullDetail,
   HubPullPage,
   HubPullSummary,
+  HubNoteCheck,
+  HubNoteDetail,
+  HubNotePage,
+  HubWhy,
   HubSessionDetail,
   HubSessionPage,
   HubSessionSummary,
@@ -1170,6 +1186,48 @@ const hub = HttpApiGroup.make("hub")
       params: { ...RepoParam, id: Schema.String },
       success: HubPullDetail,
       error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    /**
+     * Registered before `/hub/notes/:id`, and the order is load-bearing: a
+     * note id is one ref path component, so `check` is a name a note could
+     * have, and a parameter route declared first would swallow it.
+     */
+    HttpApiEndpoint.get("noteCheck", "/hub/notes/check", {
+      params: RepoParam,
+      query: {
+        path: Schema.optional(Schema.String),
+        base: Schema.optional(Schema.String),
+        head: Schema.optional(Schema.String),
+      },
+      success: HubNoteCheck,
+      error: [AnchorResolutionFailure, ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("notes", "/hub/notes", {
+      params: RepoParam,
+      query: { ...Cursor, path: Schema.optional(Schema.String) },
+      success: HubNotePage,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("note", "/hub/notes/:id", {
+      params: { ...RepoParam, id: Schema.String },
+      success: HubNoteDetail,
+      error: [ObjectNotFound, Invalid],
+    }),
+  )
+  .add(
+    // The read an agent makes before editing a file: what somebody said must
+    // stay true here, and whether it still holds against a revision.
+    HttpApiEndpoint.get("why", "/hub/why", {
+      params: RepoParam,
+      query: { path: Schema.String, head: Schema.optional(Schema.String) },
+      success: HubWhy,
+      error: [AnchorResolutionFailure, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -2515,6 +2573,43 @@ const fromBase64 = (content: string): Uint8Array | null => {
   }
 };
 
+/**
+ * A revision an anchored-note read is asked about, as an oid.
+ *
+ * The server is bare, so "now" is a commit rather than a checkout — which is
+ * also what makes the same endpoint answer for a pull request's head. A
+ * repository with nothing committed has no source to compare a baseline
+ * against, and saying so is more use than reporting every note missing.
+ */
+const commitOf = Effect.fn("Api.commitOf")(function* (name: string, field: "base" | "head") {
+  const repository = yield* Repository;
+  const revision = revisionOf(name);
+  const oid = isOid(revision) ? revision : yield* repository.resolve(revision);
+  if (oid === null) {
+    // Named by the caller: only the call site knows which query parameter the
+    // value came from, and reporting `head` for a bad `base` sends a client
+    // to fix the one that was already right.
+    return yield* new Invalid({ field, reason: `unknown revision '${name}'` });
+  }
+  return oid;
+});
+
+/** One projected note on the wire; a conflict travels as a non-empty list. */
+const noteView = (note: HubNotes.Projection) => ({
+  id: note.id,
+  path: note.path,
+  anchor: note.anchor,
+  text: note.text,
+  createdAt: note.createdAt,
+  createdBy: note.createdBy,
+  updatedAt: note.updatedAt,
+  updatedBy: note.updatedBy,
+  active: note.active,
+  pinned: note.pinned,
+  baseline: note.baseline,
+  competing: note.state === "conflicted" ? note.competing : [],
+});
+
 export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
   group
     .handle("tasks", ({ query }) =>
@@ -2687,6 +2782,93 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
         };
       }),
     )
+    .handle("notes", ({ query }) =>
+      Effect.gen(function* () {
+        // Selected through the index, which folds only the notes a path
+        // query could be about and falls back to the full walk when the refs
+        // have moved under it. Paged after that rather than before: unlike the
+        // task listing, a path filter has to know each note's path to answer.
+        const selected = yield* NoteIndex.select(query.path);
+        return page(selected.map(noteView), query);
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("note", ({ params }) =>
+      Effect.gen(function* () {
+        const repository = yield* Repository;
+        if (
+          !HubNote.isNoteId(params.id) ||
+          (yield* repository.readRef(HubNote.refOf(params.id))) === null
+        ) {
+          return yield* new Invalid({
+            field: "note",
+            reason: `this repository has no note '${params.id}'`,
+          });
+        }
+        const projected = yield* HubNotes.project(params.id);
+        if (projected === null) {
+          return yield* new Invalid({
+            field: "note",
+            reason: `${params.id} has no signed creation and projects to nothing`,
+          });
+        }
+        const walked = yield* HubNote.entries(params.id);
+        return {
+          note: noteView(projected),
+          events: walked.events.map((entry) => ({
+            commit: entry.commit,
+            id: entry.payload.id,
+            type: entry.payload.type,
+            issuedAt: entry.payload.issuedAt,
+          })),
+          unreadable: walked.unreadable,
+        };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("noteCheck", ({ query }) =>
+      Effect.gen(function* () {
+        const head = yield* commitOf(query.head ?? "HEAD", "head");
+        const source = yield* NoteAudit.revision(head);
+        // A range answers renames from its own diff; a single revision has to
+        // be told which paths it holds, or a note whose file moved into the
+        // queried path is filtered out before the audit can follow it.
+        const notes = yield* NoteIndex.select(
+          query.path,
+          query.base === undefined ? yield* NoteAudit.present(source, query.path) : undefined,
+        );
+        const audited =
+          query.base === undefined
+            ? yield* NoteAudit.auditAll(notes, source, query.path)
+            : yield* NoteAudit.auditRange(
+                notes,
+                yield* commitOf(query.base, "base"),
+                head,
+                query.path,
+              );
+        return {
+          query: query.path ?? null,
+          base: query.base ?? null,
+          head,
+          notes: audited,
+          actionable: audited.some((entry) => NoteAudit.actionable(entry.status)),
+        };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
+    .handle("why", ({ query }) =>
+      Effect.gen(function* () {
+        const head = yield* commitOf(query.head ?? "HEAD", "head");
+        const source = yield* NoteAudit.revision(head);
+        const notes = yield* NoteAudit.auditAll(
+          yield* NoteIndex.select(query.path, yield* NoteAudit.present(source, query.path)),
+          source,
+          query.path,
+        );
+        // §4 keeps the two halves separate storage concepts and lets one read
+        // return both: the anchored constraints for this path, and what the
+        // repository generally holds.
+        const memory = yield* HubMemory.distill();
+        return { query: query.path, head, notes, memory: memory.entries };
+      }).pipe(Effect.catchTag("StorageFailure", Effect.die)),
+    )
     .handle("append", ({ payload }) =>
       Effect.gen(function* () {
         const bytes = fromBase64(payload.payload);
@@ -2730,11 +2912,24 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
                     capability: event.type === "event.redacted" ? "hub.redact" : "hub.session",
                   })),
                   Effect.catchTag("Invalid", () =>
-                    Effect.fail(
-                      new Invalid({
-                        field: "payload",
-                        reason: "the payload is not a pull-request, task or session event",
-                      }),
+                    HubNote.decode(bytes).pipe(
+                      Effect.map((event) => ({
+                        ref: HubNote.refOf(event.note),
+                        message: `${event.type} ${event.id}\n`,
+                        valid: HubNote.isNoteId(event.note),
+                        field: "note",
+                        repo: event.repo,
+                        capability: event.type === "event.redacted" ? "hub.redact" : "hub.note",
+                      })),
+                      Effect.catchTag("Invalid", () =>
+                        Effect.fail(
+                          new Invalid({
+                            field: "payload",
+                            reason:
+                              "the payload is not a pull-request, task, session or note event",
+                          }),
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -2995,8 +3190,23 @@ export const hubHandlers = HttpApiBuilder.group(api, "hub", (group) =>
  * serving `/remotes` as permanently empty with nothing in the types to say
  * so. A host without persistence says `Remotes.none` where it builds the
  * layer, so the choice is visible exactly where it is made.
+ *
+ * The anchor resolver is a parameter for the same reason and one more:
+ * `toWebHandler` erases a handler's remaining requirements to `unknown`, so a
+ * resolver merged in somewhere central and later dropped would not fail to
+ * compile — it would answer `git+ why` with "Service not found" at runtime, on
+ * the read an agent makes before every edit. Named here, a host that has no
+ * parser says so in one word (`Anchor.file`, §30's whole-file minimum) and a
+ * host that cannot load one names `Anchor.file` instead.
+ *
+ * Every host currently passes the same `Anchor.syntax` layer, and that is the
+ * point rather than a redundancy: a host quietly deploying a *different*
+ * resolver from the one the CLI signs baselines with makes every note read
+ * `rebaseline-required` — which §24 leaves advisory, so the merge check goes
+ * green with the real drift hidden behind it. Naming the resolver at each host
+ * is what makes such a divergence a visible edit rather than a default.
  */
-export const layer = (registry: Layer.Layer<Remotes>) =>
+export const layer = (registry: Layer.Layer<Remotes>, resolver: Layer.Layer<AnchorResolver>) =>
   HttpApiBuilder.layer(api).pipe(
     Layer.provide(handlers),
     Layer.provide(remoteHandlers),
@@ -3010,4 +3220,5 @@ export const layer = (registry: Layer.Layer<Remotes>) =>
     // the app layer *outputs* — which is why every host merges `Repository`
     // in the same way.
     Layer.provideMerge(registry),
+    Layer.provideMerge(resolver),
   );

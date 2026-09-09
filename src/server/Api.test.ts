@@ -16,7 +16,9 @@ import { Etag, HttpPlatform, HttpRouter } from "effect/unstable/http";
 import { HttpApiTest } from "effect/unstable/httpapi";
 
 import { fingerprint, formatPublicKey, generate, NAMESPACE, sign } from "../crypto/SshSignature.ts";
+import * as Anchor from "../hub/Anchor.ts";
 import * as HubEvent from "../hub/Event.ts";
+import * as HubNote from "../hub/Note.ts";
 import * as PullRequest from "../hub/PullRequest.ts";
 import * as HubTask from "../hub/Task.ts";
 import * as HubSession from "../hub/Session.ts";
@@ -48,6 +50,9 @@ const withRepository = (backend: Layer.Layer<GitRepository.Repository>) =>
   ).pipe(
     Layer.provideMerge(backend),
     Layer.provideMerge(Subscribers.memory),
+    // The whole-file resolver, which is what a host with no parser deploys and
+    // enough for every anchor these tests ask about.
+    Layer.provideMerge(Anchor.file),
     // These repositories have no genesis, so the policy boundary refuses writes
     // to them unless the host says otherwise — `serve --open`'s choice.
     Layer.provideMerge(Policy.anonymousWrites(true)),
@@ -64,7 +69,8 @@ const live = withRepository(repository);
  * them — so the markers are satisfied at dispatch, just not anywhere the
  * type system can watch it happen.
  *
- * SAFETY: `live` merges `Repository` and `Subscribers` into the test context,
+ * SAFETY: `live` merges `Repository`, `Subscribers` and `AnchorResolver` into
+ * the test context,
  * which is exactly where the in-process dispatch resolves these request-scoped
  * markers; the cast erases what every dispatched request already receives.
  */
@@ -74,13 +80,48 @@ const dispatched = <E>(
     E,
     | HttpRouter.Request<"Requires", GitRepository.Repository>
     | HttpRouter.Request<"Requires", Subscribers.Subscribers>
+    | HttpRouter.Request<"Requires", Anchor.AnchorResolver>
   >,
 ): Effect.Effect<void, E> => {
-  // SAFETY: `live` already merged Repository and Subscribers into the
-  // dispatch context; HttpApiTest cannot name that in the type.
+  // SAFETY: `live` already merged Repository, Subscribers and the anchor
+  // resolver into the dispatch context; HttpApiTest cannot name that in the
+  // type.
   // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off
   return effect as Effect.Effect<void, E>;
 };
+
+const AUTH = "export function verify(token) {\n  return token.length > 0\n}\n";
+const notesEncoder = new TextEncoder();
+
+/** One commit holding exactly these files, on `refs/heads/main`. */
+const committed = Effect.fn("test.committed")(function* (files: Record<string, string>) {
+  const git = yield* GitRepository.Repository;
+  const tree = yield* git.writeFiles({
+    changes: Object.entries(files).map(([path, content]) => ({
+      path,
+      content: notesEncoder.encode(content),
+      mode: "100644",
+    })),
+  });
+  return yield* git.commit({
+    branch: "refs/heads/main",
+    tree,
+    message: "source\n",
+    author: { name: "A", email: "a@example.com", at: new Date(1_700_000_000_000), offset: 0 },
+  });
+});
+
+/** The fingerprint a `note add` against this content would have recorded. */
+const baselineOf = Effect.fn("test.baselineOf")(function* (path: string, content: string) {
+  const resolved = yield* (yield* Anchor.AnchorResolver).resolve(
+    path,
+    notesEncoder.encode(content),
+    Anchor.FILE_ANCHOR,
+  );
+  assert.equal(resolved._tag, "Found");
+  if (resolved._tag !== "Found") throw new Error("unreachable");
+  return resolved.fingerprint;
+});
 
 const alice = {
   name: "Alice",
@@ -2150,6 +2191,189 @@ describe("Api hub extensions", () => {
 
         const detail = yield* client.hub.session({ params: { repo: "r", id: session } });
         assert.equal(detail.prompts[0]?.prompt, "opened over JSON");
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("lists anchored notes and narrows them to a path", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("author@example.com");
+        yield* committed({ "src/auth.ts": AUTH, "docs/readme.md": "# readme\n" });
+        const auth = yield* HubNote.create({
+          repo: "r",
+          path: "src/auth.ts",
+          anchor: Anchor.FILE_ANCHOR,
+          text: "comparison must remain constant-time",
+          baseline: yield* baselineOf("src/auth.ts", AUTH),
+          key,
+        });
+        yield* HubNote.create({
+          repo: "r",
+          path: "docs/readme.md",
+          anchor: Anchor.FILE_ANCHOR,
+          text: "the synopsis is generated; edit the generator",
+          baseline: null,
+          key,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const all = yield* client.hub.notes({ params: { repo: "r" }, query: {} });
+        assert.equal(all.items.length, 2);
+
+        const scoped = yield* client.hub.notes({
+          params: { repo: "r" },
+          query: { path: "src/" },
+        });
+        assert.deepEqual(
+          scoped.items.map((note) => note.id),
+          [auth.note],
+        );
+        const only = scoped.items[0]!;
+        assert.equal(only.text, "comparison must remain constant-time");
+        assert.equal(only.active, true);
+        assert.equal(only.baseline?.normalization, "exact-v1");
+        // Empty on an unconflicted note, and present either way: §21 keeps
+        // every documented key on the wire so a reader never guesses.
+        assert.deepEqual(only.competing, []);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("answers one note with the records it was folded from", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("author@example.com");
+        yield* committed({ "src/auth.ts": AUTH });
+        const created = yield* HubNote.create({
+          repo: "r",
+          path: "src/auth.ts",
+          anchor: Anchor.FILE_ANCHOR,
+          text: "comparison must remain constant-time",
+          baseline: yield* baselineOf("src/auth.ts", AUTH),
+          key,
+        });
+        yield* HubNote.setPinned({ repo: "r", note: created.note, pinned: true, key });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const detail = yield* client.hub.note({ params: { repo: "r", id: created.note } });
+        assert.equal(detail.note.pinned, true);
+        assert.deepEqual(
+          detail.events.map((event) => event.type),
+          ["note.created", "note.pinned"],
+        );
+        assert.deepEqual(detail.unreadable, []);
+
+        const missing = yield* client.hub
+          .note({ params: { repo: "r", id: "01991f71-b8d7-7def-82d8-0c30c58ae122" } })
+          .pipe(Effect.flip);
+        assert.equal(missing._tag, "Invalid");
+        assert.match(missing._tag === "Invalid" ? missing.reason : "", /has no note/);
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("audits a revision, and keeps `check` from reading as a note id", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("author@example.com");
+        const base = yield* committed({
+          "src/auth.ts": AUTH,
+          "src/parse.ts": "export const P = 1\n",
+        });
+        yield* HubNote.create({
+          repo: "r",
+          path: "src/auth.ts",
+          anchor: Anchor.FILE_ANCHOR,
+          text: "comparison must remain constant-time",
+          baseline: yield* baselineOf("src/auth.ts", AUTH),
+          key,
+        });
+        const head = yield* committed({
+          "src/auth.ts": AUTH.replace("length > 0", "length > 1"),
+          "src/parse.ts": "export const P = 1\n",
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        // `/hub/notes/check` is a path a note id could also spell; this is the
+        // assertion that the static route was registered first and wins.
+        const audited = yield* client.hub.noteCheck({ params: { repo: "r" }, query: {} });
+        assert.equal(audited.head, head);
+        assert.equal(audited.actionable, true);
+        assert.deepEqual(
+          audited.notes.map((note) => note.status),
+          ["content-changed"],
+        );
+
+        // Scoped to a range that touched nothing the note is anchored to.
+        const unrelated = yield* client.hub.noteCheck({
+          params: { repo: "r" },
+          query: { base: head, head },
+        });
+        assert.deepEqual(unrelated.notes, []);
+        assert.equal(unrelated.actionable, false);
+        assert.equal(unrelated.base, head);
+
+        // And against the revision the baseline was taken from, it is fresh —
+        // the note did not change, the source did.
+        const before = yield* client.hub.noteCheck({
+          params: { repo: "r" },
+          query: { head: base },
+        });
+        assert.deepEqual(
+          before.notes.map((note) => note.status),
+          ["fresh"],
+        );
+      }).pipe(Effect.scoped, Effect.provide(live)),
+    ),
+  );
+
+  it.live("answers `why` with the constraints on a path and the repository's memory", () =>
+    dispatched(
+      Effect.gen(function* () {
+        const key = yield* generate("author@example.com");
+        yield* committed({ "src/auth.ts": AUTH });
+        yield* HubNote.create({
+          repo: "r",
+          path: "src/auth.ts",
+          anchor: Anchor.FILE_ANCHOR,
+          text: "comparison must remain constant-time",
+          baseline: yield* baselineOf("src/auth.ts", AUTH),
+          key,
+        });
+        const session = yield* HubSession.open({
+          repo: "r",
+          agent: { kind: "claude", model: "opus", harness: "cli" },
+          prompt: "wire notes over HTTP",
+          key,
+        });
+        yield* HubSession.produced({
+          repo: "r",
+          session: session.session,
+          note: "convention: authentication code uses Uint8Array internally",
+          key,
+        });
+
+        const client = yield* HttpApiTest.groups(Api.api, ["hub"]);
+        const answer = yield* client.hub.why({
+          params: { repo: "r" },
+          query: { path: "src/auth.ts" },
+        });
+        assert.deepEqual(
+          answer.notes.map((note) => [note.anchor, note.status]),
+          [["@file", "fresh"]],
+        );
+        // §4: both halves in one read, and still separate storage concepts.
+        assert.deepEqual(
+          answer.memory.map((entry) => [entry.kind, entry.text]),
+          [["convention", "authentication code uses Uint8Array internally"]],
+        );
+
+        const elsewhere = yield* client.hub.why({
+          params: { repo: "r" },
+          query: { path: "docs/" },
+        });
+        assert.deepEqual(elsewhere.notes, []);
       }).pipe(Effect.scoped, Effect.provide(live)),
     ),
   );

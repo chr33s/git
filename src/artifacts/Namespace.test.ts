@@ -821,10 +821,9 @@ describe("the node provider's fork links", () => {
         await seed(root, "parent");
         const children = Array.from({ length: 12 }, (_, index) => `child-${index}`);
         await Effect.runPromise(
-          Effect.all(
-            children.map((child) => stores.fork(child, "parent")),
-            { concurrency: "unbounded" },
-          ),
+          Effect.forEach(children, (child) => stores.fork(child, "parent"), {
+            concurrency: "unbounded",
+          }),
         );
 
         const byName = (a: string, b: string) => a.localeCompare(b);

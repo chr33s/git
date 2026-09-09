@@ -39,6 +39,7 @@ import {
 import * as Event from "./Event.ts";
 import { project } from "./Projection.ts";
 import * as Session from "./Session.ts";
+import * as Note from "./Note.ts";
 import * as Task from "./Task.ts";
 import * as Tombstone from "./Tombstone.ts";
 
@@ -101,11 +102,12 @@ export const blobs = Effect.fn("hub.Redaction.blobs")(function* (
 // a tombstone raises — may this key write one, does a written one count — are
 // asked directly against the trust graph. See `Tombstone.ts`.
 
-/** Every session and task ref on this repository. */
+/** Every session, task and note ref on this repository. */
 const recordRefs = Effect.fn("hub.Redaction.recordRefs")(function* () {
   return [
     ...(yield* Session.sessions()).map(Session.refOf),
     ...(yield* Task.tasks()).map(Task.refOf),
+    ...(yield* Note.notes()).map(Note.refOf),
   ];
 });
 
@@ -129,6 +131,7 @@ const tombstonesOn = Effect.fn("hub.Redaction.tombstonesOn")(function* (ref: str
   if (head === null) return found;
 
   const session = Session.sessionOf(ref) !== null;
+  const note = Note.noteOf(ref) !== null;
   const parents = yield* Dag.reachable(
     head,
     null,
@@ -164,6 +167,9 @@ const tombstonesOn = Effect.fn("hub.Redaction.tombstonesOn")(function* (ref: str
     let named: string | null = null;
     if (session) {
       const payload = yield* Session.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+      if (payload?.type === "event.redacted") named = payload.targetCommit;
+    } else if (note) {
+      const payload = yield* Note.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
       if (payload?.type === "event.redacted") named = payload.targetCommit;
     } else {
       const payload = yield* Task.decode(record.payload).pipe(Effect.orElseSucceed(() => null));

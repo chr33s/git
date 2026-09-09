@@ -811,6 +811,8 @@ export interface Walk<A> {
   readonly records: ReadonlyArray<WalkedRecord<A>>;
   /** Full walked ancestry, including joins, for causal projection decisions. */
   readonly parents: Dag.Parents;
+  /** The walked commits in topological order, joins included. */
+  readonly ordered: ReadonlyArray<Oid>;
   /** Commits carrying a record this replica could not read or decode. */
   readonly unreadable: ReadonlyArray<Oid>;
   /**
@@ -845,14 +847,21 @@ export const walk = Effect.fn("hub.Event.walk")(function* <A>(
   const repository = yield* Repository;
   const head = yield* repository.resolve(ref);
   if (head === null) {
-    return { records: [], parents: new Map(), unreadable: [], walked: 0 } satisfies Walk<A>;
+    return {
+      records: [],
+      parents: emptyParents,
+      ordered: emptyOrder,
+      unreadable: [],
+      walked: 0,
+    } satisfies Walk<A>;
   }
 
   const parents = yield* Dag.reachable(head, null, isHubCommit, yield* ceilingOf());
+  const ordered = Dag.topological(parents);
   const records: Array<WalkedRecord<A>> = [];
   const unreadable: Array<Oid> = [];
 
-  for (const commit of Dag.topological(parents)) {
+  for (const commit of ordered) {
     if (!(yield* Record.carries(commit, RECORD))) continue;
     // A redaction deletes the payload and leaves the tree entry naming it, so
     // the read fails where every other event's succeeds. That absence is what
@@ -880,7 +889,7 @@ export const walk = Effect.fn("hub.Event.walk")(function* <A>(
     });
   }
 
-  return { records, parents, unreadable, walked: parents.size } satisfies Walk<A>;
+  return { records, parents, ordered, unreadable, walked: parents.size } satisfies Walk<A>;
 });
 
 export const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {

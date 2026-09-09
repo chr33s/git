@@ -31,7 +31,7 @@ import { cliSignature, mustResolve } from "./shared.ts";
  * which is the layout `git` itself uses and the reason the two can be
  * pointed at the same directory.
  */
-const workFlag = Flag.string("work").pipe(
+export const workFlag = Flag.string("work").pipe(
   Flag.optional,
   Flag.withDescription("Explicit checkout selector for extension commands"),
 );
@@ -48,7 +48,7 @@ const workPath = Effect.fn("cli.workPath")(function* (value: string) {
   );
 });
 
-const withWork = <A, E>(
+export const withWork = <A, E>(
   work: { readonly _tag: "None" } | { readonly _tag: "Some"; readonly value: string },
   effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore | MergeState | WorkPaths>,
 ) =>

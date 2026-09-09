@@ -89,11 +89,8 @@ describe.skipIf(!hasGit)("checkout path obstructions against Git", () => {
             assert.equal(expected.status === 0, !refused, expected.stderr);
             let succeeded: boolean;
             if (driver === "library") {
-              const exit = await Effect.runPromise(
-                Checkout.checkout("target", { force }).pipe(
-                  Effect.provide(layerFor(native)),
-                  Effect.exit,
-                ),
+              const exit = await Effect.runPromiseExit(
+                Checkout.checkout("target", { force }).pipe(Effect.provide(layerFor(native))),
               );
               succeeded = exit._tag === "Success";
             } else {

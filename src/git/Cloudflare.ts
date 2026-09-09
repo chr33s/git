@@ -70,8 +70,9 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
           try: () => bucket.get(key(oid)),
           catch: failure("read", key(oid)),
         }).pipe(
-          Effect.flatMap((object) =>
-            object === null ? Effect.fail(new ObjectNotFound({ oid })) : Effect.succeed(object),
+          Effect.filterOrFail(
+            (object) => object !== null,
+            () => new ObjectNotFound({ oid }),
           ),
         );
 

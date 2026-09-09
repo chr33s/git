@@ -37,6 +37,7 @@ import {
 import { project as projectTrust } from "../trust/Projection.ts";
 import * as AfterPush from "../server/AfterPush.node.ts";
 import * as Api from "../server/Api.ts";
+import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Archive from "../server/Archive.ts";
@@ -482,7 +483,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     // `Scope` nobody ever closes, and one built with the requester baked in
     // would answer every later request as whoever made the first.
     const router = HttpRouter.toWebHandler(
-      Api.layer(remotes).pipe(
+      Api.layer(remotes, anchorSyntax).pipe(
         Layer.provideMerge(layer),
         Layer.provideMerge(subscribers),
         Layer.provideMerge(openWrites),
