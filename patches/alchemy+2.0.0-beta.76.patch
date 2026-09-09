@@ -1,8 +1,8 @@
 diff --git a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts b/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
-index a3a59be4..4cfff68b 100644
+index 6e40b9ed..3ea3267e 100644
 --- a/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
 +++ b/node_modules/alchemy/lib/Cloudflare/Artifacts/ReadWriteNamespace.d.ts
-@@ -63,8 +63,12 @@ export type ForkOptions = {
+@@ -64,8 +64,12 @@ export type ForkOptions = {
   * {@link ArtifactsRepo} so each method returns an Effect.
   */
  export interface RepoClient {
@@ -31,10 +31,10 @@ index c321e75d..d8cd6f1f 100644
      listTokens: () => tryPromise(() => raw.listTokens()),
      revokeToken: (tokenOrId) => tryPromise(() => raw.revokeToken(tokenOrId)),
 diff --git a/node_modules/alchemy/package.json b/node_modules/alchemy/package.json
-index a2665475..705b099d 100644
+index 0f8abda0..7f83b162 100644
 --- a/node_modules/alchemy/package.json
 +++ b/node_modules/alchemy/package.json
-@@ -168,6 +168,12 @@
+@@ -157,6 +157,12 @@
        "worker": "./src/Cloudflare/Live.ts",
        "import": "./lib/Cloudflare/Live.js"
      },
@@ -48,10 +48,10 @@ index a2665475..705b099d 100644
        "types": "./lib/Cloudflare/*/index.d.ts",
        "bun": "./src/Cloudflare/*/index.ts",
 diff --git a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts b/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
-index a1210aa4..215238c9 100644
+index b736b2ce..0d80db94 100644
 --- a/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
 +++ b/node_modules/alchemy/src/Cloudflare/Artifacts/ReadWriteNamespace.ts
-@@ -67,8 +67,12 @@ export type ForkOptions = {
+@@ -68,8 +68,12 @@ export type ForkOptions = {
   * {@link ArtifactsRepo} so each method returns an Effect.
   */
  export interface RepoClient {

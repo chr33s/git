@@ -22,10 +22,10 @@ repo sets `save-exact=true` deliberately.
 
 | package                 | version         | why it matters                                               |
 | ----------------------- | --------------- | ------------------------------------------------------------ |
-| `effect`                | `4.0.0-rc.111`  | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
-| `alchemy`               | `2.0.0-beta.74` | Workers stack as effects                                     |
-| `@effect/platform-node` | `4.0.0-rc.111`  | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
-| `@effect/tsgo`          | `0.36.5`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
+| `effect`                | `4.0.0-rc.112`  | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
+| `alchemy`               | `2.0.0-beta.76` | Workers stack as effects                                     |
+| `@effect/platform-node` | `4.0.0-rc.112`  | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
+| `@effect/tsgo`          | `0.43.0`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
 | `typescript`            | `7.0.2`         | TypeScript-Go                                                |
 
 `alchemy` is behind a `patch-package` patch. Oxlint `typeCheck` and `tsc` both
