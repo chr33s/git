@@ -33,3 +33,16 @@ declare module "*.svg?raw" {
  * package exports it.
  */
 declare module "@pierre/diffs/components/web-components";
+
+/**
+ * The build-mode constant the bundler folds.
+ *
+ * `import.meta.env.DEV` is Vite's, replaced with a literal at transform time,
+ * so a `if (!import.meta.env.DEV) return` takes the branch — and everything
+ * only that branch reaches — out of the production bundle. Declared narrowly:
+ * this is the one member the UI reads, and widening it to Vite's whole `env`
+ * would invite reading configuration that no longer exists at runtime.
+ */
+interface ImportMeta {
+  readonly env: { readonly DEV: boolean };
+}

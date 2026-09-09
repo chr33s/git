@@ -8,9 +8,14 @@
  * > to repository content. […] Change Requests are not a parallel entity type;
  * > they are a specialization of Task.
  *
- * That inheritance is why `ChangeRequest extends Task` here rather than the two
- * sitting side by side in a union: everything that reads a Task reads a Change
- * Request unchanged, and the hierarchy can mix them freely.
+ * That inheritance is why a Change Request is a Task with more fields here
+ * rather than the two sitting side by side in a union: everything that reads a
+ * Task reads a Change Request unchanged, and the hierarchy can mix them freely.
+ *
+ * Every type below is a Schema, and the TypeScript type is read back off it.
+ * The Foldkit Model holds these values, and a Foldkit Model is declared as a
+ * Schema — so writing the interface and a matching Schema separately would be
+ * two statements of one shape, free to drift. One statement, read twice.
  *
  * Nothing in this module talks to the server. The repository's git-native hub
  * (`src/hub/PullRequest.ts`, `src/hub/Projection.ts`) models pull requests as
@@ -20,123 +25,155 @@
  * change to one module.
  */
 
-export type Kind = "Task" | "CR";
+import { Schema } from "effect";
 
-export type Status =
-  | "Todo"
-  | "In progress"
-  | "In review"
-  | "Checks failing"
-  | "Done"
-  | "Open"
-  | "Merged";
+export const Kind = Schema.Literals(["Task", "CR"]);
+export type Kind = typeof Kind.Type;
 
-export interface Person {
-  readonly name: string;
-  readonly avatar: string;
-}
+export const Status = Schema.Literals([
+  "Todo",
+  "In progress",
+  "In review",
+  "Checks failing",
+  "Done",
+  "Open",
+  "Merged",
+]);
+export type Status = typeof Status.Type;
 
-export interface Label {
-  readonly name: string;
-  /** A CSS custom-property name from `tokens.css`, not a literal colour. */
-  readonly hue: LabelHue;
-}
+export const Person = Schema.Struct({
+  name: Schema.String,
+  avatar: Schema.String,
+});
+export type Person = typeof Person.Type;
 
-export type LabelHue = "accent" | "blue" | "purple" | "red" | "amber" | "orange";
+/** A CSS custom-property name from `tokens.css`, not a literal colour. */
+export const LabelHue = Schema.Literals(["accent", "blue", "purple", "red", "amber", "orange"]);
+export type LabelHue = typeof LabelHue.Type;
 
-export interface Comment {
-  readonly avatar: string;
-  readonly author: string;
-  readonly when: string;
-  readonly text: string;
-}
+export const Label = Schema.Struct({
+  name: Schema.String,
+  hue: LabelHue,
+});
+export type Label = typeof Label.Type;
 
-export interface Commit {
-  readonly sha: string;
-  readonly msg: string;
-  readonly when: string;
-}
+export const Comment = Schema.Struct({
+  avatar: Schema.String,
+  author: Schema.String,
+  when: Schema.String,
+  text: Schema.String,
+});
+export type Comment = typeof Comment.Type;
 
-export interface Check {
-  readonly name: string;
-  readonly detail: string;
-  readonly ok: boolean;
-}
+export const Commit = Schema.Struct({
+  sha: Schema.String,
+  msg: Schema.String,
+  when: Schema.String,
+});
+export type Commit = typeof Commit.Type;
 
-export interface Review {
-  readonly headline: string;
-  readonly detail: string;
-  readonly ok: boolean;
-  readonly action: string;
-  readonly merged?: boolean;
-}
+export const Check = Schema.Struct({
+  name: Schema.String,
+  detail: Schema.String,
+  ok: Schema.Boolean,
+});
+export type Check = typeof Check.Type;
+
+export const Review = Schema.Struct({
+  headline: Schema.String,
+  detail: Schema.String,
+  ok: Schema.Boolean,
+  action: Schema.String,
+  merged: Schema.optional(Schema.Boolean),
+});
+export type Review = typeof Review.Type;
 
 /** A single line of the fixture diff: line number, text, and which side. */
-export interface DiffLine {
-  readonly n: number;
-  readonly text: string;
-  readonly kind: "add" | "del" | "context";
-}
+export const DiffLine = Schema.Struct({
+  n: Schema.Finite,
+  text: Schema.String,
+  kind: Schema.Literals(["add", "del", "context"]),
+});
+export type DiffLine = typeof DiffLine.Type;
 
 /** One review thread on a hub Change Request, with its conversation. */
-export interface Thread {
-  readonly id: string;
-  readonly path: string | null;
-  readonly resolved: boolean;
-  readonly comments: readonly Comment[];
-}
+export const Thread = Schema.Struct({
+  id: Schema.String,
+  path: Schema.NullOr(Schema.String),
+  resolved: Schema.Boolean,
+  comments: Schema.Array(Comment),
+});
+export type Thread = typeof Thread.Type;
 
 /** One agent session, as the hub projects it — provenance, not planning. */
-export interface SessionRow {
-  readonly id: string;
-  readonly agent: string;
-  readonly refs: readonly string[];
-  readonly pulls: readonly string[];
-  readonly commits: number;
-  readonly openDecisions: number;
-  readonly tokens: number;
-}
-
-export interface Task {
-  readonly id: string;
-  readonly kind: Kind;
-  readonly title: string;
-  readonly status: Status;
-  readonly avatar: string;
-  readonly desc: string;
-  readonly assignees: readonly Person[];
-  readonly labels: readonly Label[];
-  readonly comments: readonly Comment[];
-  readonly updated: string;
-  readonly parent?: string;
-  readonly children?: readonly string[];
-  /** Set when this row is the hub's projection rather than a fixture. */
-  readonly hub?: boolean;
-  /** Hub Change Requests carry their review threads once hydrated. */
-  readonly threads?: readonly Thread[];
-  /** The proposed revision a hub review approves — the head oid. */
-  readonly reviewHead?: string;
-}
+export const SessionRow = Schema.Struct({
+  id: Schema.String,
+  agent: Schema.String,
+  refs: Schema.Array(Schema.String),
+  pulls: Schema.Array(Schema.String),
+  commits: Schema.Finite,
+  openDecisions: Schema.Finite,
+  tokens: Schema.Finite,
+});
+export type SessionRow = typeof SessionRow.Type;
 
 /**
- * A Task with a proposed repository change attached.
+ * The members every Task has, Change Requests included.
  *
- * The extra members are exactly the ones the spec lists as what a Change
- * Request adds: source ref, target ref, diff, commits, reviews and approvals,
- * automated checks, and mergeability state.
+ * The Change Request members are optional here rather than absent, because a
+ * Task and a Change Request share one list and one row renderer: a reader that
+ * had to narrow before touching `title` would be narrowing on every line.
+ * `isChangeRequest` is what narrows, once, where the extra members are used.
  */
-export interface ChangeRequest extends Task {
-  readonly kind: "CR";
-  readonly sourceRef: string;
-  readonly targetRef: string;
-  readonly diffStat: string;
-  readonly commitCount: string;
-  readonly diffFile: string;
-  readonly commits: readonly Commit[];
-  readonly checks: readonly Check[];
-  readonly review: Review;
-  readonly diff: readonly DiffLine[];
-}
+export const Task = Schema.Struct({
+  id: Schema.String,
+  kind: Kind,
+  title: Schema.String,
+  status: Status,
+  avatar: Schema.String,
+  desc: Schema.String,
+  assignees: Schema.Array(Person),
+  labels: Schema.Array(Label),
+  comments: Schema.Array(Comment),
+  updated: Schema.String,
+  parent: Schema.optional(Schema.String),
+  children: Schema.optional(Schema.Array(Schema.String)),
+  /** Set when this row is the hub's projection rather than a fixture. */
+  hub: Schema.optional(Schema.Boolean),
+  /** Hub Change Requests carry their review threads once hydrated. */
+  threads: Schema.optional(Schema.Array(Thread)),
+  /** The proposed revision a hub review approves — the head oid. */
+  reviewHead: Schema.optional(Schema.String),
+
+  // What a Change Request adds: source ref, target ref, diff, commits,
+  // reviews and approvals, automated checks, and mergeability state — exactly
+  // the list the spec gives. `isChangeRequest` is what makes them non-optional.
+  sourceRef: Schema.optional(Schema.String),
+  targetRef: Schema.optional(Schema.String),
+  diffStat: Schema.optional(Schema.String),
+  commitCount: Schema.optional(Schema.String),
+  diffFile: Schema.optional(Schema.String),
+  commits: Schema.optional(Schema.Array(Commit)),
+  checks: Schema.optional(Schema.Array(Check)),
+  review: Schema.optional(Review),
+  diff: Schema.optional(Schema.Array(DiffLine)),
+});
+export type Task = typeof Task.Type;
+
+/** A Task with a proposed repository change attached. */
+export type ChangeRequest = Task &
+  Readonly<{
+    kind: "CR";
+    sourceRef: string;
+    targetRef: string;
+    diffStat: string;
+    commitCount: string;
+    diffFile: string;
+    commits: readonly Commit[];
+    checks: readonly Check[];
+    review: Review;
+    diff: readonly DiffLine[];
+  }>;
 
 /**
  * Whether a Task carries a proposed change.
@@ -144,7 +181,8 @@ export interface ChangeRequest extends Task {
  * A predicate rather than a `kind === "CR"` test at each call site, so the
  * narrowing and the rule live in one place.
  */
-export const isChangeRequest = (task: Task): task is ChangeRequest => task.kind === "CR";
+export const isChangeRequest = (task: Task): task is ChangeRequest =>
+  task.kind === "CR" && task.review !== undefined;
 
 /**
  * Which token a status paints itself with.

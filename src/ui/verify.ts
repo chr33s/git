@@ -34,7 +34,7 @@ import * as GitRepository from "../git/Repository.ts";
 import * as HubTask from "../hub/Task.ts";
 import { serve as serveHost } from "../host/Node.ts";
 import * as Contract from "../server/ApiContract.ts";
-import { assetResponse } from "../server/Static.ts";
+import { assetResponse, UI_HOME } from "../server/Static.ts";
 import { enableHubUnder } from "../testing/Hub.ts";
 import * as Certificate from "../trust/Certificate.ts";
 import * as Log from "../trust/Log.ts";
@@ -765,6 +765,12 @@ const serve = async (api: boolean, port: number): Promise<Server> => {
 
       const asset = await assetResponse(dist, new Request(`http://localhost${path}`));
       if (asset === null) {
+        // The front door is the UI's, as it is on the Worker and the node
+        // host: this stub stands in for them, so it has to answer alike.
+        if (path === "/") {
+          response.writeHead(302, { location: UI_HOME });
+          return response.end();
+        }
         response.writeHead(404);
         return response.end("not found");
       }
@@ -838,7 +844,7 @@ const oneOrigin = async (input: {
       index.status === 200 && (index.headers.get("content-type") ?? "").startsWith("text/html"),
       `${String(index.status)} ${index.headers.get("content-type") ?? ""}`,
     );
-    const entry = await fetch(`${origin}/${input.entry}`);
+    const entry = await fetch(`${origin}/hub/${input.entry}`);
     check(
       "and its entry module beside it",
       entry.status === 200 &&
@@ -866,7 +872,7 @@ const oneOrigin = async (input: {
       `${String(post.status)} ${said.slice(0, 80)}`,
     );
 
-    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1500);
     check(
       "and the UI it served actually mounts",
@@ -884,6 +890,18 @@ const oneOrigin = async (input: {
   }
 };
 
+/**
+ * The rail's Tasks item, clicked.
+ *
+ * In-application navigation rather than `page.goto`: the shell answers it with
+ * `pushState`, so the document — and the tab-local store with it — survives.
+ * A suite that reloaded between two related assertions would be measuring the
+ * boot state twice instead of the transition between them.
+ */
+const tasksTab = async (page: Page): Promise<void> => {
+  await page.click('.gp-nav-item:has(.gp-nav-label:text-is("Tasks"))');
+};
+
 const shot = async (page: Page, name: string): Promise<void> => {
   if (shots !== undefined) await page.screenshot({ path: join(shots, `${name}.png`) });
 };
@@ -898,7 +916,7 @@ const render = async (browser: Browser, origin: string): Promise<void> => {
   const screens = ["code", "activity", "tasks", "detail/CR-14", "settings"];
   for (const theme of ["light", "dark"]) {
     for (const screen of screens) {
-      await page.goto(`${origin}/#/${screen}`, { waitUntil: "domcontentloaded" });
+      await page.goto(`${origin}/hub/${screen}`, { waitUntil: "domcontentloaded" });
       await page.evaluate((value) => {
         localStorage.setItem("gp-theme", value);
         document.documentElement.dataset["theme"] = value;
@@ -928,7 +946,7 @@ const render = async (browser: Browser, origin: string): Promise<void> => {
   // a client that cannot connect at all must say something different, which is
   // what the dead-port pass below checks. Conflating them is how a client
   // sending unqualified refs looked exactly like a missing server.
-  await page.goto(`${origin}/#/code`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/code`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1500);
   const answered = ((await page.textContent(".gp-notice")) ?? "").replace(/\s+/g, " ").trim();
   check(
@@ -946,7 +964,7 @@ const render = async (browser: Browser, origin: string): Promise<void> => {
     );
     await route.fulfill({ response, body });
   });
-  await page.goto(`${origin}/index.html#/code`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(2000);
   const dead = ((await page.textContent(".gp-notice")) ?? "").replace(/\s+/g, " ").trim();
   check(
@@ -962,11 +980,11 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   console.info("\ninteract");
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
-  const hash = (): Promise<string> => page.evaluate(() => globalThis.location.hash);
+  const route = (): Promise<string> => page.evaluate(() => globalThis.location.pathname);
   const railWidth = (): Promise<number> =>
     page.evaluate(() => document.querySelector(".gp-sidebar")?.getBoundingClientRect().width ?? 0);
 
-  await page.goto(`${origin}/#/tasks`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/tasks`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(800);
 
   check("tasks list shows the whole hierarchy", (await page.locator(".gp-task-row").count()) === 9);
@@ -1016,7 +1034,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
 
   await page.click(".gp-task-row:nth-child(3)");
   await page.waitForTimeout(500);
-  check("a task row opens its detail", (await hash()) === "#/detail/CR-14");
+  check("a task row opens its detail", (await route()) === "/hub/detail/CR-14");
   check(
     "the detail names the Change Request",
     (await page.textContent(".gp-detail-title"))?.trim() === "Add auth middleware",
@@ -1067,7 +1085,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   // The last crumb is the task's own parent; the first is the release.
   await page.click(".gp-crumbs .gp-parent-link:last-of-type");
   await page.waitForTimeout(500);
-  check("the last crumb walks up the hierarchy", (await hash()) === "#/detail/T-12");
+  check("the last crumb walks up the hierarchy", (await route()) === "/hub/detail/T-12");
   check(
     "the parent lists its four subtasks",
     (await page.locator(".gp-subtask-row").count()) === 4,
@@ -1075,7 +1093,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
 
   await page.click(".gp-subtask-row:nth-child(2)");
   await page.waitForTimeout(500);
-  check("a subtask walks back down", (await hash()) === "#/detail/CR-14");
+  check("a subtask walks back down", (await route()) === "/hub/detail/CR-14");
 
   // Last of the checks on this hierarchy: re-filing appends rather than
   // restoring a position, so T-12's subtask order changes and the reads by
@@ -1100,7 +1118,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ["light", "dark"].includes(await page.evaluate(() => localStorage.getItem("gp-theme") ?? "")),
   );
 
-  await page.goto(`${origin}/#/activity`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/activity`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(600);
   check("the timeline lays out every event", (await page.locator(".gp-cal-event").count()) === 7);
   const columns = (): Promise<number> => page.locator(".gp-cal-day").count();
@@ -1115,9 +1133,13 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   check("and widens it back", (await columns()) === 14);
   await page.click(".gp-cal-event:nth-child(1)");
   await page.waitForTimeout(500);
-  check("a timeline card opens its task", (await hash()).startsWith("#/detail/"), await hash());
+  check(
+    "a timeline card opens its task",
+    (await route()).startsWith("/hub/detail/"),
+    await route(),
+  );
 
-  await page.goto(`${origin}/#/detail/CR-15`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/detail/CR-15`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(600);
   check(
     "a deep link restores the right Change Request",
@@ -1131,9 +1153,10 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   );
 
   // --- merging ------------------------------------------------------------
-  // Hash-only navigations share one document, so the store carries state
-  // from here on: the merge and the created task below stay visible.
-  await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "domcontentloaded" });
+  // From here on the checks build on one another, so the navigations have to
+  // be the ones the application makes: `pushState`, one document, the store
+  // intact. A `goto` would reload and take the merge below with it.
+  await page.goto(`${origin}/hub/detail/CR-14`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(600);
   await page.click(".gp-merge-btn");
   await page.waitForTimeout(400);
@@ -1157,7 +1180,8 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   );
 
   // --- creating a task ----------------------------------------------------
-  await page.goto(`${origin}/#/tasks`, { waitUntil: "domcontentloaded" });
+  // The rail, not a reload: the badge below counts against the merge above.
+  await tasksTab(page);
   await page.waitForTimeout(400);
   await page.click(".gp-tasks-head .gp-btn-primary");
   await page.waitForTimeout(400);
@@ -1167,7 +1191,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   // The submit signs and tries the hub first; offline that fails fast and
   // falls back to the tab-local store, but the round trip needs a moment.
   await page.waitForTimeout(1200);
-  check("creating a task opens its detail", (await hash()) === "#/detail/T-21");
+  check("creating a task opens its detail", (await route()) === "/hub/detail/T-21");
   check(
     "and it carries the typed title",
     (await page.textContent(".gp-detail-title"))?.trim() === "Verify the composer",
@@ -1203,7 +1227,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   );
   await page.keyboard.type("auth");
   await page.waitForTimeout(900);
-  check("a query opens the Search screen", (await hash()) === "#/search");
+  check("a query opens the Search screen", (await route()) === "/hub/search");
   check("and matches tasks by title", (await page.locator(".gp-search-task-row").count()) === 2);
   check(
     "code search says it needs the server when there is none",
@@ -1211,7 +1235,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   );
 
   // --- what has no endpoint says so, rather than pretending ---------------
-  await page.goto(`${origin}/#/settings`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/settings`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(700);
   check(
     "the danger zone is disabled while it has no endpoint",
@@ -1225,7 +1249,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ((await page.textContent('[data-card="remotes"]')) ?? "").includes("not reachable"),
   );
 
-  await page.goto(`${origin}/#/code`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/code`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1400);
   check(
     "the editor is read-only against the sample repository",
@@ -1246,7 +1270,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ),
   );
 
-  // --- hash routes carry any path, and malformed ones fail visibly --------
+  // --- routes carry any path, and malformed ones fail visibly -------------
   // Spaces, a literal `%`, a `#`, Unicode and nesting all ride inside
   // component-encoded segments, so the copied URL and a refresh reopen the
   // same path instead of truncating at the first reserved character.
@@ -1255,24 +1279,27 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  await page.goto(`${origin}/#/code/${encoded}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/code/${encoded}`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(700);
-  const wantedPath = () =>
-    page.evaluate(() => {
-      const code = document.querySelector("gp-code");
-      // SAFETY: `wanted` is gp-code's reactive property, set by the shell's
-      // route parsing; absent means the element or the property is not there.
-      return (code as { wanted?: string | null } | null)?.wanted ?? null;
-    });
+  // The address is the contract: what it holds after a navigation and after
+  // a reload has to be byte-identical, or a copied link opens something else.
+  // The sample repository has no such file, so the screen shows its README —
+  // which is the honest answer to "open a path that is not here", and not
+  // what this is asking about.
   check(
     "an encoded file path survives navigation and refresh",
-    (await hash()) === `#/code/${encoded}` && (await wantedPath()) === tricky,
+    (await route()) === `/hub/code/${encoded}`,
+    await route(),
   );
   await page.reload({ waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(700);
-  check("and the reload decodes it back to the same file", (await wantedPath()) === tricky);
+  await page.waitForTimeout(1200);
+  check(
+    "and the reload keeps every escape in it",
+    (await route()) === `/hub/code/${encoded}` && (await page.locator(".gp-shell").count()) === 1,
+    await route(),
+  );
 
-  await page.goto(`${origin}/#/code/%E0%A4%A`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${origin}/hub/code/%E0%A4%A`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(700);
   check(
     "a malformed escape leaves the shell usable with a visible navigation error",
@@ -1283,6 +1310,54 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ),
   );
 
+  // --- the addresses themselves ------------------------------------------
+  // The UI answers under one prefix and the API owns everything else, so
+  // these are the seams where the two meet: the front door, the addresses
+  // this UI used before it moved there, and the browser's own history.
+
+  const landing = await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(500);
+  check(
+    "the origin root sends the reader to the default screen",
+    (await route()) === "/hub/code" && landing?.status() === 200,
+    await route(),
+  );
+
+  // A bookmark written against the fragment routes still opens what it names.
+  // The rewrite is synchronous and ahead of the bundle, so the wrong screen is
+  // never painted first — and it `replace`s, so Back still leaves the app.
+  await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(700);
+  check(
+    "a link written against the old fragment routes still opens its screen",
+    (await route()) === "/hub/detail/CR-14" &&
+      (await page.locator(".gp-detail-title").count()) === 1,
+    await route(),
+  );
+
+  // Every screen is one history entry, so Back and Forward walk them without
+  // reloading — which is what `popstate` is wired for and a `hashchange`
+  // listener would no longer hear.
+  await page.goto(`${origin}/hub/tasks`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(500);
+  await page.click(".gp-task-row");
+  await page.waitForTimeout(500);
+  const opened = await route();
+  await page.goBack({ waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(500);
+  check(
+    "Back returns to the list it came from",
+    (await route()) === "/hub/tasks" && (await page.locator(".gp-task-row").count()) > 0,
+    await route(),
+  );
+  await page.goForward({ waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(500);
+  check(
+    "and Forward reopens what Back closed",
+    (await route()) === opened && (await page.locator(".gp-detail-title").count()) === 1,
+    await route(),
+  );
+
   await page.close();
 };
 
@@ -1291,9 +1366,9 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   console.info("\nlive");
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
-  const hash = (): Promise<string> => page.evaluate(() => globalThis.location.hash);
+  const route = (): Promise<string> => page.evaluate(() => globalThis.location.pathname);
 
-  await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/hub/code`, { waitUntil: "networkidle" });
   await page.waitForTimeout(2500);
   check(
     "no fallback notice when the API answers",
@@ -1566,7 +1641,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await page.unroute("**/core/file?*");
   await shot(page, "live-code-switched");
 
-  await page.goto(`${origin}/#/detail/CR-14`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/hub/detail/CR-14`, { waitUntil: "networkidle" });
   await page.waitForTimeout(800);
   await page.click('.gp-tab[value="diff"]');
   await page.waitForTimeout(2500);
@@ -1587,7 +1662,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await shot(page, "live-diff");
 
   // --- Activity, from real commit history --------------------------------
-  await page.goto(`${origin}/#/activity`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/hub/activity`, { waitUntil: "networkidle" });
   await page.waitForTimeout(2500);
   check("activity does not fall back", (await page.locator(".gp-notice").count()) === 0);
   check(
@@ -1641,7 +1716,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   );
 
   // --- search, over /grep -------------------------------------------------
-  await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/hub/code`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
   await page.keyboard.press("Control+k");
   await page.keyboard.type("export const");
@@ -1657,7 +1732,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   );
   await page.click(".gp-search-hit");
   await page.waitForTimeout(1800);
-  check("a hit opens the file in Code", (await hash()).startsWith("#/code/"), await hash());
+  check("a hit opens the file in Code", (await route()).startsWith("/hub/code/"), await route());
   check(
     "and the viewer shows that file",
     ((await page.textContent(".gp-card-head")) ?? "").includes(".ts"),
@@ -1665,7 +1740,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await shot(page, "live-search");
 
   // --- Settings, the administration surface ------------------------------
-  await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/hub/settings`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
   const fields = await page.locator(".gp-field-value").allTextContents();
   check("settings names the repository the client is pointed at", fields[0]?.trim() === "core");
@@ -1786,7 +1861,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await shot(page, "live-settings");
 
   // --- merging a Change Request against the real endpoint -----------------
-  await page.goto(`${origin}/#/detail/CR-19`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/hub/detail/CR-19`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1200);
   await page.click(".gp-merge-btn");
   await page.waitForTimeout(1500);
@@ -1866,6 +1941,10 @@ const localMode = async (browser: Browser): Promise<void> => {
         response.writeHead(asset.status, Object.fromEntries(asset.headers));
         return response.end(Buffer.from(await asset.arrayBuffer()));
       }
+      if (url.pathname === "/") {
+        response.writeHead(302, { location: UI_HOME });
+        return response.end();
+      }
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const body = Buffer.concat(chunks);
@@ -1903,7 +1982,7 @@ const localMode = async (browser: Browser): Promise<void> => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
   try {
-    await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/code`, { waitUntil: "networkidle" });
 
     // The swap is asynchronous: the clone runs off the boot path, and the
     // sync controls exist only once the screen holds the local client.
@@ -1976,7 +2055,7 @@ const localMode = async (browser: Browser): Promise<void> => {
     check("the server's main moved to the pushed commit", pushed !== undefined && pushed !== head);
 
     // The hub task, adopted from `GET /hub/tasks` in place of the fixtures.
-    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
     check(
       "the Tasks screen shows the hub's task, not the fixtures",
@@ -1999,7 +2078,7 @@ const localMode = async (browser: Browser): Promise<void> => {
 
     // A task created here: signed with the browser's own key, appended over
     // POST /hub/events, and read back from the server's projection.
-    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
     await page.click(".gp-tasks-head .gp-btn-primary");
     await page.waitForTimeout(400);
@@ -2018,7 +2097,7 @@ const localMode = async (browser: Browser): Promise<void> => {
       "and its detail is the projection, not a tab-local copy",
       ((await page.textContent(".gp-detail-title")) ?? "").includes("Opened by the browser key"),
     );
-    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
     // Two rows and one header: the release, the work under it, and the task
     // this browser opened, which belongs to nothing.
@@ -2032,7 +2111,7 @@ const localMode = async (browser: Browser): Promise<void> => {
       served.items.find((task) => task.title === title)?.task ?? "";
     const created = idOf("Opened by the browser key");
     const release = idOf("v0.4 — Identity");
-    await page.goto(`${origin}/#/detail/${created}`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/detail/${created}`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
     await page.selectOption(".gp-meta-select", release);
     await page.waitForTimeout(2500);
@@ -2047,7 +2126,7 @@ const localMode = async (browser: Browser): Promise<void> => {
       "and the release reads it back as its own",
       (filed.items.find((task) => task.task === release)?.children ?? []).includes(created),
     );
-    await page.goto(`${origin}/#/tasks`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/tasks`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
     check(
       "so the list draws it under that release",
@@ -2059,9 +2138,9 @@ const localMode = async (browser: Browser): Promise<void> => {
     // Stage the proposal's branch while writes are still open: a browser's
     // git push has no envelope, so on a genesis'd repository the push comes
     // first and the signed events after.
-    const hash = async (): Promise<string> => await page.evaluate(() => window.location.hash);
+    const route = async (): Promise<string> => await page.evaluate(() => window.location.pathname);
 
-    await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/code`, { waitUntil: "networkidle" });
     await page.waitForSelector(".gp-sync", { timeout: 30_000 });
     await page.click(".gp-branch-trigger");
     await page.waitForTimeout(400);
@@ -2079,7 +2158,7 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.click(".gp-sync button:first-child");
     await page.waitForTimeout(2000);
 
-    await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/settings`, { waitUntil: "networkidle" });
     await page.waitForSelector('input[aria-label="Browser public key"]', { timeout: 15_000 });
     const browserKey = await page.inputValue('input[aria-label="Browser public key"]');
     check("Settings shows the browser's public key", browserKey.startsWith("ssh-ed25519 "));
@@ -2111,7 +2190,7 @@ const localMode = async (browser: Browser): Promise<void> => {
     );
 
     // --- a Change Request, opened and reviewed under the granted key -------
-    await page.goto(`${origin}/#/code`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/code`, { waitUntil: "networkidle" });
     await page.reload({ waitUntil: "networkidle" });
     await page.waitForSelector(".gp-sync", { timeout: 30_000 });
     await page.click(".gp-branch-trigger");
@@ -2126,9 +2205,9 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.fill("#gp-propose-title", "Proposed from the browser");
     await page.click("ui-dialog.gp-propose form button[type='submit']");
     await page.waitForTimeout(4000);
-    const detailHash = await hash();
-    check("proposing opens the new Change Request", detailHash.startsWith("#/detail/"));
-    const prId = detailHash.slice("#/detail/".length);
+    const detailPath = await route();
+    check("proposing opens the new Change Request", detailPath.startsWith("/hub/detail/"));
+    const prId = detailPath.slice("/hub/detail/".length);
 
     const pulls = await fetch(`${upstream}/core/hub/pulls`).then(async (response) =>
       Schema.decodeUnknownSync(Contract.HubPullPage)(await response.json()),
@@ -2177,7 +2256,7 @@ const localMode = async (browser: Browser): Promise<void> => {
     );
 
     // --- branch rules, published from the Settings form --------------------
-    await page.goto(`${origin}/#/settings`, { waitUntil: "networkidle" });
+    await page.goto(`${origin}/hub/settings`, { waitUntil: "networkidle" });
     await page.waitForSelector('[data-card="policy"] form', { timeout: 15_000 });
     await page.fill("#gp-policy-approvals", "1");
     await page.click('[data-card="policy"] button[type="submit"]');

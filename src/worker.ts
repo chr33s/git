@@ -19,7 +19,7 @@ import * as GitRepository from "./git/Repository.ts";
 import { Storage } from "./git/Store.ts";
 import Repos from "./host/Cloudflare.ts";
 import { Repo } from "./host/Cloudflare.ts";
-import { normalize, routeOf } from "./server/Route.ts";
+import { normalize, routeOf, UI_PREFIX } from "./server/Route.ts";
 import * as Snapshot from "./server/Snapshot.ts";
 import { Objects } from "./objects.ts";
 
@@ -48,27 +48,58 @@ export class Git extends Alchemy.Worker<Git, GitBindings, Repo>()("git") {}
  */
 export const compatibility = { date: "2025-12-10", flags: ["nodejs_compat"] };
 
+/** Vite's `base`, and the asset manifest's prefix. Trailing slash required. */
+const UI_BASE = `${UI_PREFIX}/`;
+
+/** The one page every client route under `/hub` resolves to. */
+const UI_ENTRY = `${UI_BASE}index.html`;
+
+/**
+ * The static-asset fetcher, bound because this Worker declares `assets`.
+ *
+ * Declared here rather than threaded through `GitBindings`: the binding is
+ * the asset layer's own, added by the platform when assets are configured,
+ * and this handler needs exactly one method from it.
+ */
+interface AssetFetcher {
+  readonly fetch: (request: Request) => Promise<Response>;
+}
+
 export default Git.make(
   {
     main: import.meta.url,
     compatibility,
     // The Vite+ UI build (`vp build` → `dist/ui`) rides along as the
-    // Worker's static assets, so `/` serves the page and the page's requests
-    // to `/:repo/...` stay same-origin — the arrangement the UI's readme
-    // promises. Routing is assets-first: a request matching a file (the
-    // entry page, `main.js`, a hashed chunk) is answered by the asset layer
-    // and never invokes this script; everything else — every repository
-    // route — falls through to the router below. Cache rules ship as
-    // `dist/ui/_headers`, written by the build. The build fails if the
-    // entry outputs are missing, so a deploy cannot publish the API with no
-    // UI behind it; a repository whose *name* collides with an asset file
-    // would be shadowed, which the path shapes make implausible (assets live
-    // at the root and repository routes always carry a second segment).
-    assets: "dist/ui",
+    // Worker's static assets, so the page and its requests to `/:repo/...`
+    // stay same-origin — the arrangement the UI's readme promises. Routing
+    // is assets-first: a request matching a file (the entry page, `main.js`,
+    // a hashed chunk) is answered by the asset layer and never invokes this
+    // script; everything else falls through to the router below. Cache rules
+    // ship as `dist/ui/_headers`, written by the build. The build fails if
+    // the entry outputs are missing, so a deploy cannot publish the API with
+    // no UI behind it.
+    //
+    // `base` mirrors Vite's: the manifest is uploaded under `/hub/`, so
+    // nothing the UI owns sits at the origin root where a repository name
+    // could shadow it — and `hub` itself is reserved in `server/Route.ts`,
+    // which is the other half of that guarantee. Cloudflare matches the
+    // manifest literally and never strips a prefix, which is why the prefix
+    // is applied at upload rather than per request. `notFoundHandling` stays
+    // at its default: `single-page-application` would answer *every*
+    // unmatched path with the page, swallowing `/:repo/info/refs` before
+    // this script ever saw it.
+    assets: { directory: "dist/ui", base: UI_BASE },
   },
   Effect.gen(function* () {
     const repos = yield* Repo;
     const bucket = yield* Alchemy.R2.ReadWriteBucket(Objects);
+
+    // Read once, with the other bindings, rather than per request: this is
+    // the Worker's own environment and it does not change between them.
+    // SAFETY: `assets` is configured above, so the platform binds `ASSETS`;
+    // `WorkerEnvironment` is the untyped binding record it arrives in, and
+    // `AssetFetcher` is the one method of it this handler calls.
+    const assets = (yield* Alchemy.WorkerEnvironment)["ASSETS"] as AssetFetcher;
 
     /**
      * Serve an anonymous `git-upload-pack` read from R2 alone, or `null`.
@@ -121,11 +152,33 @@ export default Git.make(
     return {
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
-        const route = routeOf(new URL(request.url, "http://x").pathname);
+        const url = new URL(request.url, "http://x");
+
+        // The UI routes on the client, so only its entry page and its bundles
+        // exist as files. Every deeper address — a file path on the Code
+        // screen, a Change Request id — matches no asset and arrives here,
+        // and is answered with that same page: the bundle reads
+        // `location.pathname` and renders the screen the address names.
+        if (url.pathname === UI_PREFIX || url.pathname.startsWith(UI_BASE)) {
+          const page = yield* Effect.promise(() =>
+            assets.fetch(new Request(new URL(UI_ENTRY, url), { headers: request.headers })),
+          );
+          return HttpServerResponse.raw(page);
+        }
+
+        const route = routeOf(url.pathname);
         if (route === null) {
-          // The asset layer already served everything that matches a file,
-          // `/` included — so a path that names neither an asset nor a
-          // repository is simply not found, not a malformed API call.
+          // The root belongs to the UI, not to a repository: send it to the
+          // screen the shell opens by default rather than 404 at the door.
+          if (url.pathname === "/") {
+            return HttpServerResponse.empty({
+              status: 302,
+              headers: { location: `${UI_PREFIX}/code` },
+            });
+          }
+          // The asset layer already served everything that matches a file, so
+          // a path naming neither an asset nor a repository is simply not
+          // found, not a malformed API call.
           return HttpServerResponse.text("not found", { status: 404 });
         }
 

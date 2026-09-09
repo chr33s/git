@@ -8,12 +8,18 @@
  * development. This is the third place that needed it, so it is the one place
  * it lives: `serve --ui` hands the finished bundle to the same origin too.
  *
- * Reads are attempted, not routed. A path either names a file that was built
- * or it does not, and the caller falls through to the git handler when it does
- * not — which is why nothing here needs a list of the routes the API owns.
+ * Everything the UI owns lives under `UI_PREFIX`, and everything outside it
+ * belongs to the API — so the split is one comparison rather than a list of
+ * routes to maintain. Under the prefix a path either names a built file or it
+ * names a client route, and a client route is answered with the entry page,
+ * because the bundle reads `location.pathname` and renders from there. That is
+ * the same shape the deployed Worker takes, where Cloudflare's asset manifest
+ * carries the prefix and `worker.ts` serves the page for what it misses.
  */
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
+
+import { UI_PREFIX } from "./Route.ts";
 
 /** The extensions the built UI actually emits; anything else is a byte stream. */
 export const mimeOf = (extension: string): string => {
@@ -71,6 +77,20 @@ const decodedPath = (pathname: string): string | null => {
  * view into a pooled allocation typed `ArrayBufferLike`, and `BodyInit` takes
  * a view over a plain `ArrayBuffer`.
  */
+/**
+ * This request's path inside the UI's directory, or `null` when it is not the
+ * UI's at all.
+ *
+ * `/hub/main.js` reads as `/main.js`; `/hub` and `/hub/` read as the root.
+ * `/hubbub` is *not* under the prefix — the comparison is on whole segments,
+ * because a repository is free to be called that.
+ */
+const underPrefix = (pathname: string): string | null => {
+  if (pathname === UI_PREFIX) return "/";
+  if (!pathname.startsWith(`${UI_PREFIX}/`)) return null;
+  return pathname.slice(UI_PREFIX.length);
+};
+
 export const fileAt = async (
   root: string,
   pathname: string,
@@ -111,13 +131,24 @@ export const assetResponse = async (root: string, request: Request): Promise<Res
   if (request.method !== "GET" && request.method !== "HEAD") return null;
 
   const { pathname } = new URL(request.url);
-  const bytes = await fileAt(root, pathname);
+  const within = underPrefix(pathname);
+  if (within === null) return null;
+
+  // A client route matched no file. It is still the UI's, so it gets the UI's
+  // page — with its own address left in the bar, which is the whole point of
+  // the deep link. `index.html` is looked up rather than assumed present: a
+  // root with no build falls through and the caller answers as it would have.
+  const found = await fileAt(root, within);
+  const served = found === null ? "/index.html" : within;
+  const bytes = found ?? (await fileAt(root, served));
   if (bytes === null) return null;
 
   // The decoded name, so an escaped extension picks the same type the lookup
-  // just used rather than falling through to `application/octet-stream`.
+  // just used rather than falling through to `application/octet-stream`. A
+  // client route carries no extension of its own and was answered with the
+  // page, so it is typed as the page rather than as a byte stream.
   const headers = {
-    "content-type": mimeOf(extname(decodedPath(pathname) ?? pathname)),
+    "content-type": mimeOf(extname(decodedPath(served) ?? served)),
     "content-length": String(bytes.byteLength),
   };
   return new Response(request.method === "HEAD" ? null : bytes, { headers });
@@ -131,3 +162,6 @@ export const assetResponse = async (root: string, request: Request): Promise<Res
  */
 export const built = async (root: string): Promise<boolean> =>
   (await stat(join(root, "index.html")).catch(() => null))?.isFile() === true;
+
+/** Where a request for the origin root belongs, now that the UI has moved. */
+export const UI_HOME = `${UI_PREFIX}/code`;

@@ -1,47 +1,14 @@
 /**
- * Atoms, subscribed the Lit way.
+ * One shared `AtomRegistry` for the page.
  *
- * One shared `AtomRegistry` holds every atom's state for the page, and
- * `AtomController` is the bridge to Lit's reactive-controller lifecycle: it
- * subscribes on `hostConnected`, re-renders the host on every change, and
- * unsubscribes on `hostDisconnected` — the same discipline the screens
- * already apply to the task store by hand.
+ * The hub's listings are queried as atoms — memoized and result-tracked — so
+ * asking twice costs one fetch. The registry holds their state, and it is
+ * page state: a second registry would be a second set of answers.
+ *
+ * Nothing subscribes to it from a view. Foldkit's Commands read through it and
+ * turn what it answers into Messages, which is what keeps the atoms an
+ * implementation detail of the hub rather than a second store beside the Model.
  */
-import type { ReactiveController, ReactiveControllerHost } from "lit";
+import { AtomRegistry } from "effect/unstable/reactivity";
 
-import { type Atom, AtomRegistry } from "effect/unstable/reactivity";
-
-/** The one registry every screen shares — atom state is page state. */
 export const registry = AtomRegistry.make();
-
-export class AtomController<A> implements ReactiveController {
-  readonly #host: ReactiveControllerHost;
-  readonly #atom: Atom.Atom<A>;
-  #unsubscribe: (() => void) | null = null;
-
-  /** The atom's current value; reading it never triggers a fetch by itself. */
-  value: A;
-
-  constructor(host: ReactiveControllerHost, atom: Atom.Atom<A>) {
-    this.#host = host;
-    this.#atom = atom;
-    this.value = registry.get(atom);
-    host.addController(this);
-  }
-
-  hostConnected(): void {
-    this.#unsubscribe = registry.subscribe(
-      this.#atom,
-      (value) => {
-        this.value = value;
-        this.#host.requestUpdate();
-      },
-      { immediate: true },
-    );
-  }
-
-  hostDisconnected(): void {
-    this.#unsubscribe?.();
-    this.#unsubscribe = null;
-  }
-}

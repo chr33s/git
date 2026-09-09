@@ -12,10 +12,31 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { UI_PREFIX } from "../server/Route.ts";
+import { isScreen } from "./route.ts";
 import { serve as serveHost } from "../host/Node.ts";
 
 const ui = dirname(fileURLToPath(import.meta.url));
 const root = join(ui, "..", "..");
+
+/**
+ * Whether this address is a screen rather than a module.
+ *
+ * The screen names and Vite's module ids share one prefix, and some of them
+ * collide outright: `/hub/code` is the Code screen, and `src/ui/code.ts` is a
+ * module Vite would happily resolve for the same path. So the check is the
+ * closed set of screens rather than a guess about what a module path looks
+ * like — `route.ts` owns that set, and both halves read it from there.
+ *
+ * Production has no such ambiguity: the asset manifest holds built file names,
+ * and the Worker serves the page for everything else.
+ */
+const screenRoute = (pathname: string): boolean => {
+  if (pathname === UI_PREFIX || pathname === `${UI_PREFIX}/`) return true;
+  if (!pathname.startsWith(`${UI_PREFIX}/`)) return false;
+  const [screen] = pathname.slice(UI_PREFIX.length + 1).split("/");
+  return screen !== undefined && (screen === "index.html" || isScreen(screen));
+};
 
 const isDirectory = (target: string): Promise<boolean> =>
   stat(target).then(
@@ -49,14 +70,34 @@ const host = await serveHost({
     return {
       handle: (request, response, next) => {
         const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-        if ((pathname === "/" || pathname === "/index.html") && request.method === "GET") {
+
+        // The root belongs to the UI: match what the Worker answers there.
+        if (pathname === "/" && request.method === "GET") {
+          response.writeHead(302, { location: `${UI_PREFIX}/code` });
+          response.end();
+          return;
+        }
+
+        // Every client route renders the same page. Serving it here is what
+        // makes a deep link survive a reload in development the way it does
+        // in production, where the Worker serves the page from the asset
+        // layer for exactly the same misses.
+        const page = (): void => {
           void readFile(join(ui, "index.html"), "utf8")
-            .then((page) => vite.transformIndexHtml(pathname, page))
-            .then((page) => {
+            .then((html) => vite.transformIndexHtml(pathname, html))
+            .then((html) => {
               response.writeHead(200, { "content-type": "text/html" });
-              response.end(page);
+              response.end(html);
             })
             .catch(next);
+        };
+
+        // Ahead of Vite, not behind it: `/hub/code` is the Code screen, and
+        // Vite would otherwise resolve the same path to `src/ui/code.ts` and
+        // answer with a module. `page()` transforms the entry through Vite
+        // either way, so `/hub/index.html` still gets its HMR client.
+        if (screenRoute(pathname) && (request.method === "GET" || request.method === "HEAD")) {
+          page();
           return;
         }
         vite.middlewares(request, response, next);
@@ -66,7 +107,7 @@ const host = await serveHost({
   },
 });
 
-console.info(`\nui:   ${host.url}`);
+console.info(`\nui:   ${host.url}${UI_PREFIX}/code`);
 console.info(
   `      repositories under ${
     preview === undefined

@@ -8,7 +8,7 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect } from "effect";
 
-import { normalize, routeOf } from "./Route.ts";
+import { normalize, reserved, routeOf, UI_PREFIX } from "./Route.ts";
 
 describe("routeOf", () => {
   it.effect("reads the repository and the route behind it", () =>
@@ -53,6 +53,25 @@ describe("routeOf", () => {
       assert.equal(routeOf("/.hidden"), null);
       // A name that is nothing but the suffix leaves an empty key behind.
       assert.equal(routeOf("/.git"), null);
+    }),
+  );
+
+  it.effect("refuses the name the browser UI answers for", () =>
+    Effect.sync(() => {
+      const name = UI_PREFIX.slice(1);
+      assert.equal(reserved(name), true);
+      // `/hub/tasks` is this application's Tasks screen. If it also read as a
+      // repository called `hub`, whichever host checked second would win —
+      // so no such repository can be created, and the name never resolves.
+      assert.equal(routeOf(`${UI_PREFIX}/tasks`), null);
+      assert.equal(routeOf(UI_PREFIX), null);
+      assert.equal(routeOf(`${UI_PREFIX}.git`), null);
+
+      // Only the whole segment. A repository is free to be called `hubbub`,
+      // and one called `hubs` is not the UI either.
+      assert.equal(reserved("hubbub"), false);
+      assert.equal(routeOf("/hubbub/info/refs")?.repo, "hubbub");
+      assert.equal(routeOf("/hubs")?.repo, "hubs");
     }),
   );
 });

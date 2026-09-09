@@ -1,17 +1,20 @@
 /**
- * The hub, read through the derived atom client and folded into the store.
+ * The hub, read through the derived atom client.
  *
  * `GET /hub/tasks` and `GET /hub/pulls` are queried as atoms — memoized,
- * result-tracked — and while they answer with anything, the store's contents
- * are the projection rather than the design's fixtures. A repository whose
- * hub is empty (or absent, or unreachable) keeps the fixtures: the sample
- * data is the UI's documented offline state, and an empty live hub would
- * render an empty product with nothing to review it by.
+ * result-tracked — and every read here answers its caller with a value rather
+ * than pushing anywhere. A Foldkit Command asks, and what it does with the
+ * answer is fold it into the Model as a Message; that is what keeps the atoms
+ * an implementation detail of this module rather than a second store beside
+ * the Model.
  *
- * Loaded lazily by `store.ts` — this module pulls the derived client and the
- * `HttpApi` declaration with it, and the entry bundle should not pay for
- * that before first paint (the same argument `highlight.ts` makes for
- * Shiki).
+ * A repository whose hub is empty (or absent, or unreachable) keeps the
+ * fixtures: the sample data is the UI's documented offline state, and an empty
+ * live hub would render an empty product with nothing to review it by.
+ *
+ * Loaded lazily — this module pulls the derived client and the `HttpApi`
+ * declaration with it, and the entry bundle should not pay for that before
+ * first paint (the same argument `highlight.ts` makes for Shiki).
  *
  * Writes go through the browser's own signing key (`identity.ts`): a task
  * opened here, or a comment on a hub pull request, is signed locally and
@@ -34,18 +37,17 @@ import type {
 
 import { ApiError } from "./api.ts";
 import { registry } from "./atoms.ts";
+import type { Atom } from "effect/unstable/reactivity";
 import { apiBase, GitPlusApi, repoFromDocument } from "./client.ts";
 import {
   type ChangeRequest,
   type Comment,
-  isChangeRequest,
   type SessionRow,
   type Status,
   type Task,
   type Thread,
 } from "./model.ts";
 import { ago, initials } from "./time.ts";
-import { store } from "./store.ts";
 import { repositoryPath } from "../client/Url.ts";
 
 const repo = repoFromDocument();
@@ -148,23 +150,7 @@ const mapPull = (pull: HubPullSummary): ChangeRequest => {
     hub: true,
     reviewHead: pull.head ?? undefined,
   };
-  const previous = store.get(pull.id);
-  // Listings omit the heavy detail fields. Retain the loaded detail for
-  // this revision while letting the new summary own status and mergeability.
-  if (
-    previous?.hub !== true ||
-    !isChangeRequest(previous) ||
-    (previous.reviewHead ?? null) !== pull.head
-  )
-    return mapped;
-  return {
-    ...mapped,
-    desc: previous.desc,
-    comments: previous.comments,
-    threads: previous.threads,
-    checks: previous.checks,
-    commitCount: previous.commitCount,
-  };
+  return mapped;
 };
 
 const mapCheck = (check: HubCheck): ChangeRequest["checks"][number] => ({
@@ -270,13 +256,6 @@ const sessionsAtom = GitPlusApi.runtime.atom(
   ),
 );
 
-/** Ask the hub again; every mounted subscription folds the answer back in. */
-export const refreshListings = (): void => {
-  registry.refresh(tasksAtom);
-  registry.refresh(pullsAtom);
-  registry.refresh(sessionsAtom);
-};
-
 const mapSession = (session: HubSessionSummary): SessionRow => ({
   id: session.session,
   agent:
@@ -291,130 +270,149 @@ const mapSession = (session: HubSessionSummary): SessionRow => ({
 });
 
 /**
- * Subscribe the store to the hub listings.
+ * One Change Request's detail, as the screen shows it.
  *
- * Both atoms stay mounted for the life of the page; a later invalidation
- * (or refetch) folds straight back into the store, which notifies the
- * screens exactly as a local mutation would.
+ * Only the revision under review: superseded heads' checks are history, not
+ * current evidence, and the server's own count of the commit range replaces
+ * the review-count proxy the listing carries.
  */
-export const seed = (): void => {
-  let tasks: readonly HubTask[] | null = null;
-  let pulls: readonly HubPullSummary[] | null = null;
-
-  const apply = (): void => {
-    if (tasks === null || pulls === null) return;
-    if (tasks.length === 0 && pulls.length === 0) return;
-    const changed = pulls.filter(
-      (pull) => hydrating.has(pull.id) && (store.get(pull.id)?.reviewHead ?? null) !== pull.head,
-    );
-    const mapped: Task[] = [...pulls.map(mapPull), ...tasks.map(mapTask)];
-    fromHub.clear();
-    for (const task of mapped) fromHub.add(task.id);
-    store.adopt(mapped);
-    for (const pull of changed)
-      registry.refresh(GitPlusApi.query("hub", "pull", { params: { repo, id: pull.id } }));
-  };
-
-  registry.subscribe(
-    tasksAtom,
-    (result) => {
-      if (AsyncResult.isSuccess(result)) {
-        tasks = result.value.items.filter((task) => task.exists);
-        apply();
-      } else if (AsyncResult.isFailure(result)) {
-        void deniedByServer().then((was) => {
-          if (was) store.denyLive(DENIED);
-        });
-      }
-    },
-    { immediate: true },
-  );
-  registry.subscribe(
-    pullsAtom,
-    (result) => {
-      if (AsyncResult.isSuccess(result)) {
-        pulls = result.value.items;
-        apply();
-      } else if (AsyncResult.isFailure(result)) {
-        void deniedByServer().then((was) => {
-          if (was) store.denyLive(DENIED);
-        });
-      }
-    },
-    { immediate: true },
-  );
-  registry.subscribe(
-    sessionsAtom,
-    (result) => {
-      if (AsyncResult.isSuccess(result)) {
-        store.adoptSessions(result.value.items.map(mapSession));
-      }
-    },
-    { immediate: true },
-  );
-};
-
-const hydrating = new Set<string>();
+const detailOf = (detail: HubPullDetail): Task => ({
+  ...mapPull(detail),
+  desc: detail.description,
+  comments: threadComments(detail.threadList),
+  threads: detail.threadList.map(mapThread),
+  reviewHead: detail.head ?? undefined,
+  checks: detail.checkList.map(mapCheck),
+  commitCount: String(detail.commits),
+});
 
 /**
- * Fill one hub Change Request's discussion, checks and review from the
- * detail endpoint. A no-op for fixture ids: the design's data is complete.
+ * Ask the hub again.
+ *
+ * The listings are atoms, so invalidating them is what makes the next
+ * `listings()` read the repository rather than the answer it already had.
  */
-export const hydrate = (id: string): void => {
-  if (!fromHub.has(id) || hydrating.has(id)) return;
-  hydrating.add(id);
-  const atom = GitPlusApi.query("hub", "pull", { params: { repo, id } });
-  registry.subscribe(
-    atom,
-    (result) => {
-      if (!AsyncResult.isSuccess(result)) return;
-      const detail: HubPullDetail = result.value;
-      store.patch(id, (task) => {
-        // A listing may already name a newer proposal while its older
-        // detail request is completing. That response cannot replace it.
-        if ((task.reviewHead ?? null) !== detail.head) return task;
-        const hydrated = {
-          ...task,
-          desc: detail.description,
-          comments: threadComments(detail.threadList),
-          threads: detail.threadList.map(mapThread),
-          reviewHead: detail.head ?? undefined,
-        };
-        if (!isChangeRequest(task)) return hydrated;
-        return {
-          ...hydrated,
-          // Only the revision under review: superseded heads' checks are
-          // history, not current evidence, and the server's own count of
-          // the commit range replaces the review-count proxy that once
-          // stood in for it.
-          checks: detail.checkList
-            .filter((check) => detail.head !== null && check.head === detail.head)
-            .map(mapCheck),
-          commitCount: String(detail.commits),
-          // The Merge button states the server's judgment — approvals,
-          // required checks, threads, target movement — never a client-side
-          // reconstruction of branch policy from counts.
-          review:
-            task.review.merged === true
-              ? task.review
-              : {
-                  ...task.review,
-                  ok: detail.mergeable.ok,
-                  detail: detail.mergeable.ok
-                    ? task.review.detail
-                    : (detail.mergeable.reasons[0] ?? task.review.detail),
-                },
-        };
-      });
-    },
-    { immediate: true },
-  );
+export const refreshListings = (): void => {
+  registry.refresh(tasksAtom);
+  registry.refresh(pullsAtom);
+  registry.refresh(sessionsAtom);
 };
 
-/** Poll the store briefly for an id the refresh is about to deliver. */
+/**
+ * What the hub holds, as a value.
+ *
+ * The Foldkit half of this module: `seed` below pushes into `store.ts` and
+ * this answers a caller instead, so a Command can ask and turn the answer
+ * into a Message. Both read the same atoms, so asking twice costs one fetch.
+ *
+ * Three outcomes, and they are not interchangeable. `Denied` is a repository
+ * that turned this browser away — the caller must empty rather than fall back,
+ * because showing the sample over a refusal dresses a denial up as data.
+ * `Unreachable` is offline, where the fixtures are the documented behaviour.
+ * `Empty` tasks *and* pulls is a repository with no hub, which is the same.
+ */
+export type Listings =
+  | {
+      readonly _tag: "Loaded";
+      readonly tasks: readonly Task[];
+      readonly sessions: readonly SessionRow[];
+    }
+  | { readonly _tag: "Denied"; readonly reason: string }
+  | { readonly _tag: "Unreachable"; readonly reason: string };
+
+export const listings = async (): Promise<Listings> => {
+  const read = async <A>(
+    atom: Atom.Atom<AsyncResult.AsyncResult<{ readonly items: readonly A[] }, unknown>>,
+  ): Promise<readonly A[] | null> =>
+    await new Promise<readonly A[] | null>((resolve) => {
+      const stop = registry.subscribe(
+        atom,
+        (result) => {
+          if (AsyncResult.isSuccess(result)) {
+            resolve(result.value.items);
+            // After this turn: `subscribe` has not returned its unsubscribe
+            // yet when `immediate` delivers a value that is already settled.
+            queueMicrotask(stop);
+          } else if (AsyncResult.isFailure(result)) {
+            resolve(null);
+            queueMicrotask(stop);
+          }
+        },
+        { immediate: true },
+      );
+    });
+
+  const [tasks, pulls, sessions] = await Promise.all([
+    read(tasksAtom),
+    read(pullsAtom),
+    read(sessionsAtom),
+  ]);
+
+  if (tasks === null || pulls === null) {
+    return (await deniedByServer())
+      ? { _tag: "Denied", reason: DENIED }
+      : { _tag: "Unreachable", reason: "the repository's hub could not be read" };
+  }
+
+  const live = tasks.filter((task) => task.exists);
+  if (live.length === 0 && pulls.length === 0) {
+    return { _tag: "Unreachable", reason: "this repository's hub is empty" };
+  }
+
+  const mapped: Task[] = [...pulls.map(mapPull), ...live.map(mapTask)];
+  fromHub.clear();
+  for (const task of mapped) fromHub.add(task.id);
+  return {
+    _tag: "Loaded",
+    tasks: mapped,
+    sessions: (sessions ?? []).map(mapSession),
+  };
+};
+
+/**
+ * One hub Change Request's discussion, checks and review.
+ *
+ * Answers with the detail rather than pushing it anywhere: the caller is a
+ * Foldkit Command, and what it does with the answer is fold it into the Model
+ * as a Message. `null` for a fixture id — the design's data is complete — and
+ * for a detail the listing has already moved past, because a response naming a
+ * superseded head cannot replace the proposal that superseded it.
+ */
+export const hydrated = async (id: string, head: string | null): Promise<Task | null> => {
+  if (!fromHub.has(id)) return null;
+  const atom = GitPlusApi.query("hub", "pull", { params: { repo, id } });
+  const detail = await new Promise<HubPullDetail | null>((resolve) => {
+    const stop = registry.subscribe(
+      atom,
+      (result) => {
+        if (AsyncResult.isSuccess(result)) {
+          resolve(result.value);
+          queueMicrotask(stop);
+        } else if (AsyncResult.isFailure(result)) {
+          resolve(null);
+          queueMicrotask(stop);
+        }
+      },
+      { immediate: true },
+    );
+  });
+  if (detail === null) return null;
+  if (head !== null && (detail.head ?? null) !== head) return null;
+  return detailOf(detail);
+};
+
+/**
+ * Wait briefly for an id the refresh is about to deliver.
+ *
+ * A signed event lands, the projection is re-read, and only then does the
+ * listing name what was just written — so a caller that navigated straight to
+ * the new id would arrive before it exists. Polling the listing rather than a
+ * store is what lets this module have no store at all.
+ */
 const settled = async (id: string): Promise<boolean> => {
   for (let waited = 0; waited < 4000; waited += 200) {
-    if (store.get(id) !== undefined) return true;
+    const held = await listings();
+    if (held._tag === "Loaded" && held.tasks.some((task) => task.id === id)) return true;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   return false;
@@ -474,9 +472,9 @@ export const commentOn = async (id: string, body: string): Promise<boolean> => {
   // Only a Change Request: pull-request and task ids share one shape, so a
   // task id reaching the pull-request comment API would *create* a ghost
   // `refs/hub/pr/<task>` ref. Live task discussion waits for a task-comment
-  // event to exist in the protocol; the detail screen says so.
-  const task = store.get(id);
-  if (!fromHub.has(id) || task === undefined || !isChangeRequest(task)) return false;
+  // event to exist in the protocol; the detail screen says so. The caller
+  // holds the task and has already checked that, so this checks provenance.
+  if (!fromHub.has(id)) return false;
   try {
     const { commentOnPull } = await import("./identity.ts");
     await commentOnPull({ pr: id, body });
@@ -513,12 +511,18 @@ export const openPull = async (input: {
 };
 
 /** Approve or reject the revision a hub Change Request proposes. */
-export const review = async (id: string, decision: "approve" | "reject"): Promise<boolean> => {
-  const task = store.get(id);
-  if (!fromHub.has(id) || task?.reviewHead === undefined) return false;
+export const review = async (
+  id: string,
+  decision: "approve" | "reject",
+  head: string,
+): Promise<boolean> => {
+  // The head is the caller's: a review approves one revision, and the one on
+  // screen is the one the reader judged. Reading it here from a listing that
+  // may have moved on would approve something else.
+  if (!fromHub.has(id) || head === "") return false;
   try {
     const identity = await import("./identity.ts");
-    await identity.reviewPull({ pr: id, head: task.reviewHead, decision });
+    await identity.reviewPull({ pr: id, head, decision });
     refreshPull(id);
     return true;
   } catch {
@@ -563,19 +567,13 @@ export const resolveThread = async (
  * canonical state untouched: an offline or refused merge leaves the Change
  * Request open, because it *is* open.
  */
-export const merge = async (id: string): Promise<string | null> => {
-  const task = store.get(id);
-  if (
-    !fromHub.has(id) ||
-    task === undefined ||
-    !isChangeRequest(task) ||
-    task.reviewHead === undefined
-  ) {
+export const merge = async (id: string, head: string, base: string): Promise<string | null> => {
+  if (!fromHub.has(id) || head === "") {
     return "this is not a hub Change Request the browser can settle";
   }
   try {
     const identity = await import("./identity.ts");
-    await identity.mergePull({ pr: id, head: task.reviewHead, base: task.targetRef });
+    await identity.mergePull({ pr: id, head, base });
     // What shows next is the projection, re-read — never an optimistic flip.
     refreshPull(id);
     return null;

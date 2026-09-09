@@ -19,13 +19,47 @@ Five screens, in one shell with a collapsible rail:
 Both palettes ship. The rail's toggle pins one and remembers it; with no stored
 choice the page follows `prefers-color-scheme`.
 
-Screens are addressable — `#/tasks`, `#/detail/CR-14` — so a link survives a
-refresh.
+Screens are addressable — `/hub/tasks`, `/hub/detail/CR-14`,
+`/hub/code/src/server/Api.ts` — so a link survives a refresh. The prefix keeps
+the page clear of `/:repo/...`, which is why `hub` is not a repository name
+(`src/server/Route.ts`); `route.ts` owns the parsing, and the Worker, the node
+host and `dev:ui` each answer a client route with the same page.
+
+## Architecture
+
+The UI is one [Foldkit](https://github.com/foldkit/foldkit) application, which
+means one shape repeated everywhere:
+
+| Piece                         | Where                                         |
+| ----------------------------- | --------------------------------------------- |
+| Every application fact        | `app.model.ts`                                |
+| Every application event       | `app.message.ts`                              |
+| Every state transition        | `app.update.ts` — pure, and exhaustive        |
+| Every one-shot effect         | `app.command*.ts`                             |
+| Every ongoing external source | `app.subscription.ts`                         |
+| Every element-owned library   | `mount.pierre-*.ts`                           |
+| The addresses                 | `route.ts` (strings), `app.route.ts` (parsed) |
+| The views                     | `app.view.ts`, `view.*.ts`                    |
+
+What follows from that, and is worth knowing before changing anything here:
+
+- A view is a function of the Model. It cannot fetch, store, or touch the DOM;
+  the most it can do about a click is name a Message.
+- `update` is pure. Anything that reaches the world outside the Model is a
+  Command it returns, and every Command answers with a Message — so a failure
+  the reader should see is a failure the Model holds.
+- No live handle is in the Model. The API clients, the OPFS repository
+  (`repository.ts`) and the Pierre instances all have lifetimes, and a lifetime
+  is not a fact.
+- DevTools is on in development: every Message, every Model, and time travel
+  across both.
 
 ## Stack
 
-- **[Lit](https://lit.dev)** for the components, rendering into the **light
-  DOM** rather than a shadow root (`base.ts` explains why).
+- **[Foldkit](https://github.com/foldkit/foldkit)** for the application: Model,
+  Message, update, view, Commands, Subscriptions and Mounts, over Effect.
+  Rendering is a virtual DOM into the **light DOM**, never a shadow root —
+  `element.base-wc.ts` explains why that matters here.
 - **[`@chr33s/base-wc`](https://github.com/chr33s/base-wc)** for behaviour:
   `ui-tabs`, `ui-switch`, `ui-toggle-group`, `ui-search-field`. Its contract is
   light DOM and native-first form controls, which is what the light-DOM choice
@@ -35,7 +69,8 @@ refresh.
   explorer. It is path-first, so the `/files` response feeds it unchanged.
 - **[`@pierre/diffs`](https://github.com/pierrecomputer/pierre)** for the file
   view and Change Request diffs, with Shiki highlighting.
-- **Vite+** for builds, source transforms and same-origin HMR.
+- **Vite+** for builds, source transforms and same-origin HMR, with Foldkit's
+  plugin for state-preserving reloads.
 
 ## Data
 

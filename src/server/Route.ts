@@ -15,6 +15,22 @@
 /** No traversal, no hidden files, no path separators. */
 const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * Names the origin has already spent.
+ *
+ * The browser UI serves from `/hub/...` (`UI_PREFIX`), so a repository called
+ * `hub` would be unreachable — `/hub/tasks` reads as this application's Tasks screen, not as
+ * that repository's `tasks` route. Rejecting the name here is what keeps the
+ * ambiguity from ever being created: the hosts branch on `/hub` before they
+ * call `routeOf`, and no storage key can collide with the branch they take.
+ */
+export const UI_PREFIX = "/hub";
+
+const RESERVED: readonly string[] = [UI_PREFIX.slice(1)];
+
+/** Whether the UI, rather than a repository, answers for this first segment. */
+export const reserved = (name: string): boolean => RESERVED.includes(name);
+
 export interface Route {
   /** Suffix stripped, validated. */
   readonly repo: string;
@@ -35,7 +51,7 @@ export const routeOf = (pathname: string): Route | null => {
 
   // Only the trailing `.git` is a suffix; `my.git.repo` keeps its name.
   const repo = first.endsWith(".git") ? first.slice(0, -4) : first;
-  if (!REPO_NAME.test(repo) || repo.includes("..")) return null;
+  if (!REPO_NAME.test(repo) || repo.includes("..") || reserved(repo)) return null;
 
   return { repo, route: segments[1] ?? "", rest: segments.slice(1).join("/") };
 };

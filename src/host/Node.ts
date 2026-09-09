@@ -47,7 +47,7 @@ import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
 import { collects, routeOf, settledWithin } from "../server/Route.ts";
-import { assetResponse } from "../server/Static.ts";
+import { assetResponse, UI_HOME } from "../server/Static.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import { resolve as resolveConfiguration, type ServeConfig } from "./ServeConfig.ts";
 import { stores as writableStores } from "./NodeStorage.ts";
@@ -671,12 +671,10 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       const authority = incoming.headers.host ?? fallbackAuthority;
       const url = new URL(incoming.url ?? "/", `http://${authority}`);
 
-      // The built UI first, and only where it actually has the file. A miss
-      // falls through to the repository routing below, so the API keeps every
-      // path it owns and no list of them has to be maintained here. A
-      // repository whose name collides with a built asset is shadowed by it —
-      // the assets are hashed bundle names and `index.html`, so that is a
-      // repository called `index.html`.
+      // The built UI first. Everything it owns is under one prefix, so it
+      // shadows nothing the API answers for and no list of API routes has to
+      // be maintained here — `hub` is simply not a repository name any more
+      // (`server/Route.ts`), which is what makes the prefix unambiguous.
       const asset =
         options.ui === undefined
           ? null
@@ -684,6 +682,14 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       if (asset !== null) {
         outgoing.writeHead(asset.status, nodeHeaders(asset.headers));
         outgoing.end(Buffer.from(await asset.arrayBuffer()));
+        return;
+      }
+
+      // The root is the UI's front door, not a repository's: send it to the
+      // screen the shell opens by default, exactly as the Worker does.
+      if (options.ui !== undefined && url.pathname === "/") {
+        outgoing.writeHead(302, { location: UI_HOME });
+        outgoing.end();
         return;
       }
 

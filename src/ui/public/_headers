@@ -1,14 +1,18 @@
-/*
+# Paths carry the `/hub` prefix the Worker serves this UI from. Cloudflare's
+# asset layer matches these rules against the incoming request path and never
+# strips a prefix, so `base` rewriting the manifest does not rewrite this file.
+
+/hub/*
   Cache-Control: public, max-age=31536000, immutable
 
-/index.html
+/hub/index.html
   Cache-Control: public, max-age=0, must-revalidate
 
-/main.js
+/hub/main.js
   Cache-Control: public, max-age=0, must-revalidate
 
-/main.js.map
+/hub/main.js.map
   Cache-Control: public, max-age=0, must-revalidate
 
-/main.css
+/hub/main.css
   Cache-Control: public, max-age=0, must-revalidate
