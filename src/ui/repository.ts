@@ -16,13 +16,23 @@
  * client carries the pack machinery and the Effect runtime, and first paint
  * should not wait on either.
  */
-import type { CodeApi, GitApi, SyncCapable } from "./api.ts";
+import type { CodeApi, GitApi, SearchApi, SyncCapable } from "./api.ts";
 
 /** The OPFS-backed client, once its first-load clone lands. */
-let local: (CodeApi & SyncCapable) | null = null;
+let local: (CodeApi & SearchApi & SyncCapable) | null = null;
 
 /** Opened once; a second caller joins the first rather than cloning twice. */
 let opening: Promise<boolean> | null = null;
+
+/**
+ * The last subject `signAs` was told about.
+ *
+ * Remembered rather than passed, because the clone and `/whoami` race and
+ * either can land first. Holding it here is what makes the two orderings the
+ * same: whichever arrives second finds the other already recorded, and a
+ * commit written through the clone carries the reader's name in both.
+ */
+let signer: string | null = null;
 
 /**
  * Open — and on first load, clone — the repository in OPFS.
@@ -50,16 +60,17 @@ export const open = async (http: GitApi, author: string | null): Promise<boolean
 /**
  * Author local commits as whoever `/whoami` said is asking.
  *
- * Called again when identity resolves, because the clone and the identity
- * answer race and either can land first.
+ * Called from both sides of the race — when identity resolves, and when the
+ * clone opens — and each call is a no-op until both have happened.
  */
 export const signAs = (subject: string | null): void => {
-  if (local === null || subject === null) return;
+  if (subject !== null) signer = subject;
+  if (local === null || signer === null) return;
   // SAFETY: `author` belongs to `LocalGitApi` alone, which is the only thing
   // `open` above ever assigns to `local`.
   (local as { author?: { name: string; email: string } }).author = {
-    name: subject,
-    email: `${subject}@git-plus.local`,
+    name: signer,
+    email: `${signer}@git-plus.local`,
   };
 };
 
@@ -71,6 +82,18 @@ export const signAs = (subject: string | null): void => {
  * client otherwise.
  */
 export const reading = (http: GitApi): CodeApi => local ?? http;
+
+/**
+ * The client the Search screen should read through.
+ *
+ * The same rule as `reading`, and for the same reason: once the clone is open
+ * it holds work that origin has not seen. Searching the server instead would
+ * answer over the older tree — a file committed in the browser and not yet
+ * pushed is on screen in Code and missing from the search that is supposed to
+ * find it — and would report the server's outage as a failure for a
+ * repository the browser is holding.
+ */
+export const searching = (http: GitApi): SearchApi => local ?? http;
 
 /** The sync verbs, or `null`: against the HTTP client there is no "against". */
 export const syncing = (): (CodeApi & SyncCapable) | null => local;

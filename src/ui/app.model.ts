@@ -136,6 +136,17 @@ export const ActivityScreen = Schema.Struct({
   /** How many days back the window's last column sits; 0 means it ends today. */
   offset: Schema.Finite,
   commits: AsyncData.Schema(Schema.Array(TimelineCommit), Schema.String).schema,
+  /**
+   * Which read the timeline is waiting on.
+   *
+   * The boot read goes to the server and the one the OPFS clone triggers goes
+   * to the browser's own objects, so the two answer different histories and
+   * either can land first — and `interrupt` does not supersede, because
+   * Foldkit cancels nothing unless `update` returns an Interrupt Command. The
+   * counter is what `wantedRef` is for the Code screen: an answer that does
+   * not name the newest request is dropped rather than painted over it.
+   */
+  wanted: Schema.Finite,
 });
 export type ActivityScreen = typeof ActivityScreen.Type;
 
@@ -167,6 +178,22 @@ export type SettingsData = typeof SettingsData.Type;
  */
 export const SettingsFailure = Schema.Literals(["Denied", "Offline"]);
 export type SettingsFailure = typeof SettingsFailure.Type;
+
+/**
+ * The five fields the Branch policy card holds, and nothing else.
+ *
+ * Named on its own because the card is compared against answers and against
+ * what it published, and those comparisons should not have to carry the other
+ * cards' boxes along with them.
+ */
+export const PolicyForm = Schema.Struct({
+  policyProtected: Schema.String,
+  policyApprovals: Schema.String,
+  policyChecks: Schema.String,
+  policyRequirePullRequest: Schema.Boolean,
+  policyRequireResolvedThreads: Schema.Boolean,
+});
+export type PolicyForm = typeof PolicyForm.Type;
 
 /** What the reader has typed into the Settings forms. */
 export const SettingsForms = Schema.Struct({
@@ -207,6 +234,24 @@ export const SettingsScreen = Schema.Struct({
   notes: Schema.Record(Schema.String, Schema.String),
   /** One action at a time: the lists are reloaded after each. */
   busy: Schema.Boolean,
+  /**
+   * The Branch policy card as it was last published, or `null`.
+   *
+   * The card is bound to the Model and so has to decide, on every answer,
+   * whether to follow the repository or leave what is typed alone. A publish
+   * is the one moment it is *known* to be level with the repository — which
+   * the values alone cannot always say, because a publish that only respelled
+   * the policy comes back looking like any other reload.
+   *
+   * The text rather than a flag, because a flag has to be spent before it can
+   * be wrong and there is no moment that is safe to spend it: cleared on the
+   * publish's own answer it never survives a failed reload, and cleared on the
+   * failure it strands the card. Naming the text instead makes the question
+   * self-answering — the card may take the repository's spelling of what it
+   * published for exactly as long as it still holds it, and a box typed into
+   * since no longer matches.
+   */
+  policyPublished: Schema.NullOr(PolicyForm),
   /**
    * The default branch's reflog, once the reader asks for it.
    *
@@ -287,6 +332,16 @@ export const CodeView = Schema.Struct({
   tip: Schema.NullOr(Schema.String),
   /** Set when this is the design's sample rather than the repository. */
   offline: Schema.Boolean,
+  /**
+   * Set while the repository has not answered yet.
+   *
+   * Pending is not fallen back, and the two used to look identical: the sample
+   * repository painted its fabricated tree and commit under a notice claiming
+   * the API was unreachable during every ordinary load, branch switch and
+   * refresh. Writes stay disabled either way — there is still no tip to pin an
+   * edit to — but nothing is asserted about the server until it has answered.
+   */
+  pending: Schema.Boolean,
   reason: Schema.String,
 });
 export type CodeView = typeof CodeView.Type;
@@ -332,6 +387,17 @@ export const CodeScreen = Schema.Struct({
   history: AsyncData.Schema(Schema.Array(HistoryRow), Schema.String).schema,
   /** The commit being viewed, when the reader followed history back. */
   at: Schema.NullOr(Schema.String),
+  /**
+   * Which editing session the pane is showing.
+   *
+   * The editor's text is captured once, when it mounts, so the view has to
+   * key its host on something that changes when a session starts over. The
+   * file's name cannot be it: a new file's name is typed a character at a
+   * time, and remounting per keystroke pulls the caret out of the field. This
+   * counter is what the name was standing in for — bumped when an edit or a
+   * new file begins, and by nothing else.
+   */
+  session: Schema.Finite,
   /** Reviewing the draft against the blob rather than reading the file. */
   diffing: Schema.Boolean,
   copied: Schema.Boolean,

@@ -3,14 +3,17 @@
  *
  * The UI serves from real paths under `/hub`, not from the fragment. Foldkit's
  * router parses `url.pathname` and its runtime listens for `popstate`, never
- * for `hashchange` — so a hash route is invisible to it, and the framework
- * migration in `docs/hub.foldkit.md` cannot begin until the addresses move.
- * The prefix exists because the Worker resolves a bare first segment to a
- * repository (`src/server/Route.ts`); `hub` is reserved there so this page and
+ * for `hashchange`, so a hash route would be invisible to it. The prefix
+ * exists because the Worker resolves a bare first segment to a repository
+ * (`src/server/Route.ts`); `hub` is reserved there so this page and
  * `/:repo/...` can share one origin without either shadowing the other.
  *
- * The Lit shell reads this module today and Foldkit's route parsers will read
- * it tomorrow, so both agree on one answer while the two frameworks overlap.
+ * This is the string half. `app.route.ts` builds its routers from `PREFIX`
+ * here and `route.test.ts` checks the round trip against `pathOf`, so the two
+ * cannot disagree about an address; `dev.ts` reads `isScreen` to tell a screen
+ * from a module Vite would otherwise resolve for the same path. The prefix the
+ * *hosts* match on is `src/server/Route.ts`'s `UI_PREFIX`, which `PREFIX`
+ * below is checked against.
  */
 /**
  * The screens this UI can show.
@@ -109,8 +112,11 @@ export const routeOf = (pathname: string): Route | null => {
  * link clicked into a page already open. Both go when the links age out.
  */
 export const fromLegacyHash = (hash: string): string | null => {
-  if (!hash.startsWith("#/")) return null;
-  const [screen, ...rest] = hash.slice(2).split("/");
+  // With or without the "#": `location.hash` carries it and Foldkit's parsed
+  // `Url.hash` does not, and both callers are real.
+  const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!fragment.startsWith("/")) return null;
+  const [screen, ...rest] = fragment.slice(1).split("/");
   if (screen === undefined || !isScreen(screen)) return null;
   return rest.length === 0 ? `${PREFIX}/${screen}` : `${PREFIX}/${screen}/${rest.join("/")}`;
 };

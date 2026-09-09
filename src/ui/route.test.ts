@@ -9,7 +9,20 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect } from "effect";
 
+import { UI_PREFIX } from "../server/Route.ts";
 import { fromLegacyHash, pathOf, PREFIX, routeOf } from "./route.ts";
+
+describe("the prefix", () => {
+  it.effect("is the one the hosts reserve and match on", () =>
+    Effect.sync(() => {
+      // Two literals, one boundary: `src/server/Route.ts` refuses `hub` as a
+      // repository name and both hosts answer under it, while this module is
+      // what the page's own addresses are built from. They cannot be allowed
+      // to drift apart in silence.
+      assert.equal(PREFIX, UI_PREFIX);
+    }),
+  );
+});
 
 describe("routeOf", () => {
   it.effect("reads the screen and what it opens", () =>

@@ -54,7 +54,7 @@ const init = (url: Url.Url): Update.Return<Model, AppMessage> => {
       },
       tasksScreen: { filter: "all", title: "", desc: "", parent: "", submitting: false },
       searchScreen: { code: AsyncData.Idle() },
-      activityScreen: { zoom: "week", offset: 0, commits: AsyncData.Loading() },
+      activityScreen: { zoom: "week", offset: 0, commits: AsyncData.Loading(), wanted: 0 },
       detailScreen: {
         tab: "conversation",
         // Seeded from the address: a cold load on a Change Request is opening
@@ -81,6 +81,7 @@ const init = (url: Url.Url): Update.Return<Model, AppMessage> => {
         panel: "none",
         history: AsyncData.Idle(),
         at: null,
+        session: 0,
         diffing: false,
         copied: false,
         sync: null,
@@ -96,6 +97,7 @@ const init = (url: Url.Url): Update.Return<Model, AppMessage> => {
         browserKey: null,
         notes: {},
         busy: false,
+        policyPublished: null,
         reflog: null,
         forms: {
           resetRef: "",
@@ -118,7 +120,7 @@ const init = (url: Url.Url): Update.Return<Model, AppMessage> => {
     commands: [
       FetchIdentity(),
       LoadTasks(),
-      LoadCommits(),
+      LoadCommits({ wanted: 0 }),
       LoadSettings(),
       LoadBrowserKey(),
       // The address may already name a file; opening it is what makes a deep

@@ -127,6 +127,18 @@ export const CopyText = Command.define("CopyText", {
     ),
 });
 
+/**
+ * How long "Copied" stays on the button.
+ *
+ * A Command because `update` is pure and a wait is not a fact. The write
+ * settles in a millisecond or two, so without this the confirmation was
+ * replaced before anyone could read it.
+ */
+export const ForgetCopied = Command.define("ForgetCopied", {
+  messages: [AppMessage.ForgotCopied],
+  execute: Effect.sleep("1500 millis").pipe(Effect.as(AppMessage.ForgotCopied())),
+});
+
 /** Open a dialog that has no trigger of its own — the branch menu's. */
 export const OpenDialog = Command.define("OpenDialog", {
   args: { selector: Schema.String },

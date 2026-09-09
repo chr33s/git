@@ -1,14 +1,15 @@
 /**
  * The addresses, as a parsed value.
  *
- * `route.ts` is the string half of this — the prefix, the encoding, the shape
- * the Lit shell reads — and this is the same contract expressed the way
- * Foldkit's router wants it: a union of what an address *means*, plus parsers
- * that turn a path into one and print one back into a path.
+ * `route.ts` is the string half of this — the prefix, the encoding, and the
+ * shape the node host and the Worker read — and this is the same contract
+ * expressed the way Foldkit's router wants it: a union of what an address
+ * *means*, plus parsers that turn a path into one and print one back into a
+ * path.
  *
  * The two agree by construction. Every router here is built from `PREFIX`, and
- * the round trip is checked in `app.route.test.ts` against `pathOf`, so the
- * shell and Foldkit cannot drift apart while both are in the page.
+ * `route.test.ts` checks the round trip against `pathOf`, so the strings the
+ * server matches on and the routes this parses cannot drift apart.
  *
  * `restString` on the Code route is what makes a file path work as one route
  * parameter: `src/server/Api.ts` carries slashes that are structure to the URL

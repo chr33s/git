@@ -155,7 +155,7 @@ git+ task resolve --id="task-102" --status="completed"
 
 ## Web Interface
 
-The web interface in `src/ui/` provides a lightweight file browser, commit viewer, task manager, and pull request inspector powered by Lit and Web Components.
+The web interface in `src/ui/` provides a lightweight file browser, commit viewer, task manager, and pull request inspector, built as one [Foldkit](https://github.com/foldkit/foldkit) application over Effect.
 
 ```bash
 # Development mode: watch UI and bind embedded API server on :8000

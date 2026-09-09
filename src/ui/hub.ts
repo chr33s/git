@@ -63,8 +63,8 @@ const taskStatus = (task: HubTask): Status =>
  * A task, and what it belongs to.
  *
  * Only the edge is carried across. What it *means* — a release, an epic, a
- * parent story — is the reader's to name, and `store.ancestorsOf` is where
- * this UI names it.
+ * parent story — is the reader's to name, and `task.ts`'s `ancestorsOf` is
+ * where this UI names it.
  */
 const mapTask = (task: HubTask): Task => ({
   id: task.task,
@@ -282,15 +282,23 @@ const detailOf = (detail: HubPullDetail): Task => ({
   comments: threadComments(detail.threadList),
   threads: detail.threadList.map(mapThread),
   reviewHead: detail.head ?? undefined,
-  checks: detail.checkList.map(mapCheck),
+  // `checkList` is the whole history, labelled with the head each run was
+  // against (`src/server/ApiContract.ts`); only the current revision's runs are
+  // evidence about the code being reviewed. A superseded head's red `ci` beside
+  // the new green one reads as a failing proposal that is not failing.
+  checks: detail.checkList
+    .filter((check) => detail.head !== null && check.head === detail.head)
+    .map(mapCheck),
   commitCount: String(detail.commits),
 });
 
 /**
- * Ask the hub again.
+ * Drop whatever the listing atoms are holding.
  *
- * The listings are atoms, so invalidating them is what makes the next
- * `listings()` read the repository rather than the answer it already had.
+ * Belt and braces rather than the mechanism: the registry carries no idle TTL
+ * (`atoms.ts`), so a node is already released when the read that subscribed to
+ * it returns and the next `listings()` asks the repository again. This is what
+ * makes that true of a node something else is still holding.
  */
 export const refreshListings = (): void => {
   registry.refresh(tasksAtom);
@@ -301,9 +309,11 @@ export const refreshListings = (): void => {
 /**
  * What the hub holds, as a value.
  *
- * The Foldkit half of this module: `seed` below pushes into `store.ts` and
- * this answers a caller instead, so a Command can ask and turn the answer
- * into a Message. Both read the same atoms, so asking twice costs one fetch.
+ * This answers a caller rather than writing anywhere, so a Command can ask
+ * and turn the answer into a Message — which is what keeps the Model the only
+ * place the hub's answers are held. Each call is a fresh read: the registry
+ * holds nothing once the read that subscribed has returned, which is what lets
+ * `settled` below watch a projection catch up.
  *
  * Three outcomes, and they are not interchangeable. `Denied` is a repository
  * that turned this browser away — the caller must empty rather than fall back,
@@ -320,32 +330,39 @@ export type Listings =
   | { readonly _tag: "Denied"; readonly reason: string }
   | { readonly _tag: "Unreachable"; readonly reason: string };
 
-export const listings = async (): Promise<Listings> => {
-  const read = async <A>(
-    atom: Atom.Atom<AsyncResult.AsyncResult<{ readonly items: readonly A[] }, unknown>>,
-  ): Promise<readonly A[] | null> =>
-    await new Promise<readonly A[] | null>((resolve) => {
-      const stop = registry.subscribe(
-        atom,
-        (result) => {
-          if (AsyncResult.isSuccess(result)) {
-            resolve(result.value.items);
-            // After this turn: `subscribe` has not returned its unsubscribe
-            // yet when `immediate` delivers a value that is already settled.
-            queueMicrotask(stop);
-          } else if (AsyncResult.isFailure(result)) {
-            resolve(null);
-            queueMicrotask(stop);
-          }
-        },
-        { immediate: true },
-      );
-    });
+/**
+ * One settled answer from a listing atom, or `null` when it failed.
+ *
+ * Subscribes, takes the first settled result and lets go. The registry holds
+ * nothing after that (`atoms.ts`), so each call is a fresh read — which is
+ * what both `listings` and `settled` are relying on.
+ */
+const readAtom = async <A>(
+  atom: Atom.Atom<AsyncResult.AsyncResult<{ readonly items: readonly A[] }, unknown>>,
+): Promise<readonly A[] | null> =>
+  await new Promise<readonly A[] | null>((resolve) => {
+    const stop = registry.subscribe(
+      atom,
+      (result) => {
+        if (AsyncResult.isSuccess(result)) {
+          resolve(result.value.items);
+          // After this turn: `subscribe` has not returned its unsubscribe
+          // yet when `immediate` delivers a value that is already settled.
+          queueMicrotask(stop);
+        } else if (AsyncResult.isFailure(result)) {
+          resolve(null);
+          queueMicrotask(stop);
+        }
+      },
+      { immediate: true },
+    );
+  });
 
+export const listings = async (): Promise<Listings> => {
   const [tasks, pulls, sessions] = await Promise.all([
-    read(tasksAtom),
-    read(pullsAtom),
-    read(sessionsAtom),
+    readAtom(tasksAtom),
+    readAtom(pullsAtom),
+    readAtom(sessionsAtom),
   ]);
 
   if (tasks === null || pulls === null) {
@@ -408,6 +425,11 @@ export const hydrated = async (id: string, head: string | null): Promise<Task | 
  * listing name what was just written — so a caller that navigated straight to
  * the new id would arrive before it exists. Polling the listing rather than a
  * store is what lets this module have no store at all.
+ *
+ * The whole listing, not one atom of it: the id may be a task's or a Change
+ * Request's, and `listings` is where the two are folded into one set. Each
+ * pass is a real read — the registry holds nothing between them — which is
+ * exactly what makes the poll see the projection move.
  */
 const settled = async (id: string): Promise<boolean> => {
   for (let waited = 0; waited < 4000; waited += 200) {
@@ -436,7 +458,7 @@ export const createTask = async (input: {
     fromHub.add(task);
     refreshListings();
     // Wait for the projection to arrive so the navigation that follows finds
-    // the task in the store rather than an empty detail screen.
+    // the task in the Model rather than an empty detail screen.
     await settled(task);
     return task;
   } catch {

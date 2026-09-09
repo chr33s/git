@@ -87,6 +87,7 @@ const readAt = async (ref: string | null, keep: string | undefined): Promise<Cod
           },
     tip: tip ?? null,
     offline: false,
+    pending: false,
     reason: "",
   };
 };
@@ -94,8 +95,10 @@ const readAt = async (ref: string | null, keep: string | undefined): Promise<Cod
 /**
  * Load, or reload, the whole repository view.
  *
- * Interruptible: a reader switching branches while the previous one resolves
- * supersedes it rather than racing it. `ref` empty means "whatever HEAD names",
+ * A reader switching branches while the previous read resolves gets the newer
+ * answer: `wantedRef` names what was last asked for and `update` drops anything
+ * else, because `interrupt` registers a key rather than cancelling — nothing
+ * stops unless `update` returns an Interrupt. `ref` empty means "whatever HEAD names",
  * which is the first load; `keep` names a path to stay on if it still exists,
  * so a reload after a commit shows the file just written rather than jumping
  * back to the README.
@@ -132,7 +135,7 @@ export const LoadFileAt = Command.define("LoadFileAt", {
       return AppMessage.SucceededLoadFileAt({ oid, path, content });
     }).pipe(
       Effect.catch((cause) =>
-        Effect.succeed(AppMessage.FailedLoadFileAt({ path, reason: reasonOf(cause) })),
+        Effect.succeed(AppMessage.FailedLoadFileAt({ oid, path, reason: reasonOf(cause) })),
       ),
     ),
 });
@@ -150,7 +153,7 @@ export const LoadFile = Command.define("LoadFile", {
       return AppMessage.SucceededLoadFileAt({ oid: "", path, content });
     }).pipe(
       Effect.catch((cause) =>
-        Effect.succeed(AppMessage.FailedLoadFileAt({ path, reason: reasonOf(cause) })),
+        Effect.succeed(AppMessage.FailedLoadFileAt({ oid: "", path, reason: reasonOf(cause) })),
       ),
     ),
 });
@@ -185,10 +188,10 @@ export const LoadHistory = Command.define("LoadHistory", {
           when: "",
         }));
       });
-      return AppMessage.SucceededLoadHistory({ rows });
+      return AppMessage.SucceededLoadHistory({ path, rows });
     }).pipe(
       Effect.catch((cause) =>
-        Effect.succeed(AppMessage.FailedLoadHistory({ reason: reasonOf(cause) })),
+        Effect.succeed(AppMessage.FailedLoadHistory({ path, reason: reasonOf(cause) })),
       ),
     ),
 });
@@ -217,7 +220,7 @@ export const CommitFile = Command.define("CommitFile", {
         async () => await write({ branch, path, content, message, expected }),
       );
       return outcome === null
-        ? AppMessage.SucceededCommitFile({ keep })
+        ? AppMessage.SucceededCommitFile({ branch, keep })
         : AppMessage.FailedCommitFile({ reason: outcome });
     }).pipe(
       // `write` classifies what it recognises and rethrows the rest — a

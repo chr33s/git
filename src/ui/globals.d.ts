@@ -15,7 +15,7 @@ declare module "*.css";
 /**
  * SVG source imported as text.
  *
- * Vite's `?raw` query turns Phosphor assets into strings that `icons.ts`
+ * Vite's `?raw` query turns Phosphor assets into strings that `icon.ts`
  * inlines. There is no React/URL default here.
  */
 declare module "*.svg?raw" {

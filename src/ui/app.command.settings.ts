@@ -16,7 +16,7 @@ import { Effect } from "effect";
 
 import { AppMessage } from "./app.message.ts";
 import { reasonOf, refused } from "./thrown.ts";
-import { AdminAction, cardOf, list, short } from "./settings.ts";
+import { AdminAction, cardOf, count, filledBy, list, short } from "./settings.ts";
 
 const HEADS = "refs/heads/";
 
@@ -97,6 +97,7 @@ export const RunAdmin = Command.define("RunAdmin", {
       const note = yield* Effect.tryPromise(async () => await run(client, action));
       return AppMessage.SucceededAdmin({
         card: cardOf(action),
+        filled: filledBy(action),
         note: note.text,
         reflog: note.reflog,
       });
@@ -238,7 +239,7 @@ const run = async (client: GitApiLike, action: AdminAction): Promise<Outcome> =>
       const written = await client.policyWrite({
         ...current.rules,
         protected: list(action.protectedRefs),
-        requiredApprovals: Math.max(0, Number.parseInt(action.approvals, 10) || 0),
+        requiredApprovals: count(action.approvals),
         requiredChecks: list(action.checks),
         requirePullRequest: action.requirePullRequest,
         requireResolvedThreads: action.requireResolvedThreads,

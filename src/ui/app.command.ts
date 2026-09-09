@@ -21,6 +21,7 @@ import { SessionRow, Task } from "./model.ts";
 import { AppMessage } from "./app.message.ts";
 import { tasks as fixtures } from "./fixtures.ts";
 import { reasonOf } from "./thrown.ts";
+import * as Repository from "./repository.ts";
 
 /**
  * Ask the server who is asking.
@@ -136,12 +137,12 @@ export const seedSessions: readonly SessionRow[] = [];
 /**
  * Search file contents.
  *
- * Interruptible, keyed by the Command's own name: a reader typing turns one
- * query into several, and only the last one's answer is wanted. The old
- * implementation counted generations by hand and discarded late replies; this
- * interrupts the fiber instead, so a superseded search stops before it can
- * dispatch. The request already in flight still finishes at the server — the
- * client takes no `AbortSignal` — but nothing downstream waits on it.
+ * A reader typing turns one query into several, and only the last one's answer
+ * is wanted. `interrupt` alone does not give that: Foldkit registers an
+ * interrupt key and cancels nothing unless `update` returns an Interrupt
+ * Command, so every query dispatched is still running. The answer therefore
+ * names the query it is about and `update` drops the ones that are no longer
+ * in the box — the same shape `wantedRef` gives the Code screen.
  *
  * Literal and case-insensitive, because a reader types text rather than a
  * regular expression — the same contract `POST /grep` has always had.
@@ -149,11 +150,13 @@ export const seedSessions: readonly SessionRow[] = [];
 export const Grep = Command.define("Grep", {
   args: { pattern: Schema.String },
   messages: [AppMessage.SucceededGrep, AppMessage.FailedGrep],
-  interrupt: true,
   execute: ({ pattern }) =>
     Effect.gen(function* () {
       const api = yield* Effect.tryPromise(async () => await import("./api.ts"));
-      const client = api.clientFromDocument();
+      // Through the OPFS clone when there is one: it holds work origin has
+      // not seen, so searching the server would miss a file the Code screen
+      // is showing.
+      const client = Repository.searching(api.clientFromDocument());
       const state = yield* Effect.tryPromise(async () => await client.refState());
       const oid = yield* Effect.tryPromise(async () => await import("../git/Oid.ts"));
       const tip = oid.isOid(state.head)
@@ -162,11 +165,14 @@ export const Grep = Command.define("Grep", {
       // A repository with no commits has nothing to search, which is an empty
       // answer rather than a failure — the screen says "no matches", not
       // "unavailable", because the server answered perfectly well.
-      if (tip === undefined) return AppMessage.SucceededGrep({ matches: [], truncated: false });
+      if (tip === undefined) {
+        return AppMessage.SucceededGrep({ pattern, matches: [], truncated: false });
+      }
       const found = yield* Effect.tryPromise(
         async () => await client.grep(pattern, tip, undefined),
       );
       return AppMessage.SucceededGrep({
+        pattern,
         matches: found.matches.map((match) => ({
           path: match.path,
           line: match.line,
@@ -177,12 +183,7 @@ export const Grep = Command.define("Grep", {
     }).pipe(
       Effect.catch((cause) =>
         Effect.succeed(
-          AppMessage.FailedGrep({
-            reason:
-              cause instanceof Error && cause.message !== ""
-                ? cause.message
-                : "it is not reachable",
-          }),
+          AppMessage.FailedGrep({ pattern, reason: reasonOf(cause, "it is not reachable") }),
         ),
       ),
     ),
@@ -194,36 +195,45 @@ export const Grep = Command.define("Grep", {
  * One fetch covers paging too: ‹ walks back through what is already loaded
  * rather than repeating the per-commit header reads for each window. A hundred
  * commits is the bound, and a window past it reads as empty.
+ *
+ * The read is numbered rather than interrupted. The boot read asks the server
+ * and the one the clone triggers asks the browser's own objects, so the two
+ * answer different histories and either can land first — and a Command is only
+ * cancelled when `update` returns an Interrupt, which nothing here does.
  */
 export const LoadCommits = Command.define("LoadCommits", {
+  args: { wanted: Schema.Finite },
   messages: [AppMessage.SucceededLoadCommits, AppMessage.FailedLoadCommits],
-  interrupt: true,
-  execute: Effect.gen(function* () {
-    const api = yield* Effect.tryPromise(async () => await import("./api.ts"));
-    const client = api.clientFromDocument();
-    const state = yield* Effect.tryPromise(async () => await client.refState());
-    const oid = yield* Effect.tryPromise(async () => await import("../git/Oid.ts"));
-    const tip = oid.isOid(state.head)
-      ? state.head
-      : state.refs.find((ref) => ref.name === state.head)?.oid;
-    // A repository with no commits has history the server can describe: it is
-    // empty. That is a success, and the grid says "no commits in this window"
-    // rather than falling back to the design's sample.
-    if (tip === undefined) return AppMessage.SucceededLoadCommits({ commits: [] });
-    const commits = yield* Effect.tryPromise(async () => await client.recentCommits(tip, 100));
-    return AppMessage.SucceededLoadCommits({
-      commits: commits.map((commit) => ({
-        oid: commit.oid,
-        subject: commit.subject,
-        author: commit.author,
-        at: commit.at,
-      })),
-    });
-  }).pipe(
-    Effect.catch((cause) =>
-      Effect.succeed(
-        AppMessage.FailedLoadCommits({ reason: reasonOf(cause, "it is not reachable") }),
+  execute: ({ wanted }) =>
+    Effect.gen(function* () {
+      const api = yield* Effect.tryPromise(async () => await import("./api.ts"));
+      // The clone answers a hundred-commit window from local objects, and it is
+      // the timeline the reader's own commits are in.
+      const client = Repository.reading(api.clientFromDocument());
+      const state = yield* Effect.tryPromise(async () => await client.refState());
+      const oid = yield* Effect.tryPromise(async () => await import("../git/Oid.ts"));
+      const tip = oid.isOid(state.head)
+        ? state.head
+        : state.refs.find((ref) => ref.name === state.head)?.oid;
+      // A repository with no commits has history the server can describe: it is
+      // empty. That is a success, and the grid says "no commits in this window"
+      // rather than falling back to the design's sample.
+      if (tip === undefined) return AppMessage.SucceededLoadCommits({ wanted, commits: [] });
+      const commits = yield* Effect.tryPromise(async () => await client.recentCommits(tip, 100));
+      return AppMessage.SucceededLoadCommits({
+        wanted,
+        commits: commits.map((commit) => ({
+          oid: commit.oid,
+          subject: commit.subject,
+          author: commit.author,
+          at: commit.at,
+        })),
+      });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.succeed(
+          AppMessage.FailedLoadCommits({ wanted, reason: reasonOf(cause, "it is not reachable") }),
+        ),
       ),
     ),
-  ),
 });

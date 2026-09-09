@@ -1,10 +1,8 @@
 /**
  * Phosphor Icons (regular), as Foldkit views.
  *
- * The same glyphs `icons.ts` draws for Lit, from the same SVG source: inlined
- * so a single `color` on the parent themes them in both palettes. Two modules
- * rather than one only while both frameworks are in the page — `icons.ts` goes
- * when Lit does, and this stays.
+ * Inlined from the same SVG source the design uses, so a single `color` on
+ * the parent themes every glyph in both palettes.
  *
  * `InnerHTML` is how the markup gets in. It is the right tool here and a bad
  * one nearly everywhere else: the strings are build-time imports of files in

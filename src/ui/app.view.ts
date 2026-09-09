@@ -35,14 +35,12 @@ export const view = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Docume
       : h.p([h.Class("gp-notice gp-nav-error"), h.DataAttribute("error", "")], [model.navError]);
 
   /**
-   * Code is the one screen that is two columns of the shell, not one.
-   *
-   * Its explorer sits beside the content rather than inside it, so it supplies
-   * its own `.gp-main` and goes straight into the flex row. Every other screen
-   * is a single column, and the shell supplies that column for it.
-   */
-  /**
    * One column, keyed by the screen in it.
+   *
+   * Code is the exception and does not use this: its explorer sits beside the
+   * content rather than inside it, so it supplies its own `.gp-main` and goes
+   * straight into the flex row. Every other screen is a single column, and the
+   * shell supplies that column for it.
    *
    * The key is what stops the diff reusing one screen's elements for the
    * next: two screens both open with a `ui-toggle-group`, and a reused one

@@ -56,6 +56,34 @@ export const AdminAction = FoldkitSchema.defineTaggedUnion({
 });
 export type AdminAction = typeof AdminAction.Type;
 
+/**
+ * Which form an action consumed, or `""` for the ones that fill in nothing.
+ *
+ * Separate from `cardOf` because a card holds more than one action: Fetch,
+ * Push, Pull and Delete report into the Remotes card without ever reading its
+ * Add form, and emptying it on their answer would take a half-typed remote —
+ * credential and all — away from a reader who only wanted to check a row.
+ */
+export const filledBy = (action: AdminAction): string =>
+  AdminAction.match(action, {
+    ResetBranch: () => "branches",
+    CreateTag: () => "tags",
+    AddRemote: () => "remotes",
+    AddWebhook: () => "webhooks",
+    DeleteBranch: () => "",
+    DeleteTag: () => "",
+    FetchRemote: () => "",
+    PushRemote: () => "",
+    PullRemote: () => "",
+    DeleteRemote: () => "",
+    DeleteWebhook: () => "",
+    Fsck: () => "",
+    PreviewGc: () => "",
+    Gc: () => "",
+    ShowReflog: () => "",
+    WritePolicy: () => "",
+  });
+
 /** Which card an action reports into. */
 export const cardOf = (action: AdminAction): string =>
   AdminAction.match(action, {
@@ -76,3 +104,13 @@ export const cardOf = (action: AdminAction): string =>
     ShowReflog: () => "maintenance",
     WritePolicy: () => "policy",
   });
+
+/**
+ * A typed number, as the count the policy endpoint wants.
+ *
+ * Beside `list` because it answers the same question for the other kind of
+ * box, and shared with the card that reads one back: a form can then ask
+ * whether what is typed still *means* what the repository answered, rather
+ * than whether it is spelled the same way.
+ */
+export const count = (value: string): number => Math.max(0, Number.parseInt(value, 10) || 0);

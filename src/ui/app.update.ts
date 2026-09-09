@@ -11,12 +11,20 @@
  * thing with one less concept in the file.
  */
 import { AsyncData, Navigation, Update } from "foldkit";
+import { Option } from "effect";
 
 import { AppMessage } from "./app.message.ts";
-import { authorName, type Model } from "./app.model.ts";
+import {
+  authorName,
+  subjectOf,
+  type Model,
+  type PolicyForm,
+  type SettingsData,
+} from "./app.model.ts";
 import { isChangeRequest, type Task } from "./model.ts";
 import { AppRoute, urlOf } from "./app.route.ts";
-import { CreateTask, Grep, LoadTasks, MoveTask } from "./app.command.ts";
+import { fromLegacyHash } from "./route.ts";
+import { CreateTask, Grep, LoadCommits, LoadTasks, MoveTask } from "./app.command.ts";
 import {
   CommentRemote,
   HydrateDetail,
@@ -27,7 +35,7 @@ import {
   TaskAction,
   ThreadAction,
 } from "./app.command.detail.ts";
-import { LoadSettings, RunAdmin } from "./app.command.settings.ts";
+import { LoadBrowserKey, LoadSettings, RunAdmin } from "./app.command.settings.ts";
 import {
   CommitFile,
   CreateBranch,
@@ -50,6 +58,7 @@ import {
   ApplyTheme,
   CloseNewTaskDialog,
   CopyText,
+  ForgetCopied,
   FocusSearch,
   LoadUrl,
   OpenDialog,
@@ -57,7 +66,7 @@ import {
   RememberRail,
 } from "./app.command.shell.ts";
 import { initials } from "./time.ts";
-import { viewOf, writableBranch as writableRef } from "./code.ts";
+import { NEW_BRANCH_DIALOG, viewOf, writableBranch as writableRef } from "./code.ts";
 import * as Activity from "./activity.ts";
 import * as Settings from "./settings.ts";
 import * as Tasks from "./task.ts";
@@ -96,11 +105,43 @@ export const update = (model: Model, message: AppMessage): Return =>
         route._tag === "Code" && route.path !== "" && route.path !== view.selected
           ? route.path
           : null;
+      // Settings and Activity are read once and then only when something makes
+      // them stale, so opening them reads again. Without this a refused or
+      // offline first read could not be recovered — every control on Settings
+      // is disabled while the read has failed, so nothing the reader can click
+      // would ask again — and the timeline stayed frozen at boot, missing the
+      // commits the reader made during the session. The Lit screens they
+      // replaced re-read in `connectedCallback` on every visit.
+      //
+      // Arriving, not re-arriving: `pushUrl` dispatches a url change whether
+      // or not the address moved, and the rail's items stay clickable on the
+      // screen they name. Re-reading on that click would drop a typed but
+      // unsubmitted policy back to whatever the server still says.
+      const arriving = model.route._tag !== route._tag;
+      // `revalidateOrLoad` rather than a bare `Loading`, because the cards
+      // read "no data" as "this repository has none": a Settings screen that
+      // discarded its answer to re-read it said the repository had no
+      // branches and that its policy could not be read, for the whole round
+      // trip. `Refreshing` keeps the last answer on screen, and an already
+      // pending read yields `None` rather than a second request.
+      const reading =
+        arriving && route._tag === "Settings"
+          ? AsyncData.revalidateOrLoad(model.settingsScreen.data)
+          : Option.none();
+      const timeline =
+        arriving && route._tag === "Activity" ? model.activityScreen.wanted + 1 : null;
       return {
         model: {
           ...model,
           route,
           navError: route._tag === "NotFound" ? "this link's address is malformed" : null,
+          settingsScreen: Option.isSome(reading)
+            ? { ...model.settingsScreen, data: reading.value }
+            : model.settingsScreen,
+          activityScreen:
+            timeline === null
+              ? model.activityScreen
+              : { ...model.activityScreen, wanted: timeline },
           codeScreen:
             wanted === null || view.tip === null
               ? model.codeScreen
@@ -138,6 +179,15 @@ export const update = (model: Model, message: AppMessage): Return =>
           ...(wanted === null || view.tip === null
             ? []
             : [LoadFile({ tip: view.tip, path: wanted })]),
+          ...(Option.isSome(reading) ? [LoadSettings()] : []),
+          // The key is read once and then never again, so a boot read that
+          // failed left the one card that makes a refused screen recoverable
+          // — copy this browser's public key, grant it, come back — showing a
+          // bare "—" for the rest of the session.
+          ...(arriving && route._tag === "Settings" && model.settingsScreen.browserKey === null
+            ? [LoadBrowserKey()]
+            : []),
+          ...(timeline === null ? [] : [LoadCommits({ wanted: timeline })]),
         ],
       };
     },
@@ -147,12 +197,21 @@ export const update = (model: Model, message: AppMessage): Return =>
      *
      * Internal addresses are pushed so this application routes them without
      * a reload; anything else leaves, which is what a link off-site means.
+     *
+     * A `#/screen` fragment is one of this page's own addresses from before it
+     * moved to `/hub`. `index.html`'s inline script handles that on a cold
+     * load; this is the other half — a link clicked into a page already open,
+     * whose pathname alone is `/` and would otherwise land on Not Found.
      */
     RequestedUrl: ({ request }) =>
       Navigation.UrlRequest.match<Return>(request, {
         Internal: ({ url }) => ({
           model,
-          commands: [Navigate({ url: url.pathname })],
+          commands: [
+            Navigate({
+              url: fromLegacyHash(Option.getOrElse(url.hash, () => "")) ?? url.pathname,
+            }),
+          ],
         }),
         External: ({ href }) => ({ model, commands: [LoadUrl({ href })] }),
       }),
@@ -172,6 +231,19 @@ export const update = (model: Model, message: AppMessage): Return =>
      * Tasks from the Model, file contents from the server's `/grep`. Clearing
      * the field leaves the screen in place with its hint.
      */
+    // Typing, not searching: the Model keeps up with the box so the controlled
+    // value is never re-asserted over it. What shows under a query that has
+    // moved on is not that query's answer, so the previous one goes.
+    ChangedSearchDraft: ({ query }) => ({
+      model: {
+        ...model,
+        query,
+        searchScreen: {
+          code: query.trim() === "" ? AsyncData.Idle() : AsyncData.Loading(),
+        },
+      },
+    }),
+
     ChangedSearchQuery: ({ query }) => {
       const pattern = query.trim();
       return {
@@ -386,16 +458,17 @@ export const update = (model: Model, message: AppMessage): Return =>
       model: {
         ...model,
         tasks: { ...model.tasks, tasks: Tasks.moved(model.tasks.tasks, id, parent) },
-        detailScreen: { ...model.detailScreen, acting: false, moveNotice: null },
+        detailScreen: answersOpen(model, id)
+          ? { ...model.detailScreen, acting: false, moveNotice: null }
+          : model.detailScreen,
       },
     }),
 
     /** The hub kept the task where it was; say so rather than disagreeing. */
-    FailedMoveTask: ({ reason }) => ({
-      model: {
-        ...model,
-        detailScreen: { ...model.detailScreen, acting: false, moveNotice: reason },
-      },
+    FailedMoveTask: ({ id, reason }) => ({
+      model: answersOpen(model, id)
+        ? { ...model, detailScreen: { ...model.detailScreen, acting: false, moveNotice: reason } }
+        : model,
     }),
 
     CompletedCloseNewTaskDialog: () => ({ model }),
@@ -406,16 +479,16 @@ export const update = (model: Model, message: AppMessage): Return =>
       commands: [Navigate({ url: urlOf(AppRoute.Code({ path })) })],
     }),
 
-    SucceededGrep: ({ matches, truncated }) => ({
-      model: {
-        ...model,
-        searchScreen: { code: AsyncData.succeed({ matches, truncated }) },
-      },
-    }),
+    // Only the query that is in the box may paint. See `SucceededGrep`.
+    SucceededGrep: ({ pattern, matches, truncated }) =>
+      pattern === model.query.trim()
+        ? { model: { ...model, searchScreen: { code: AsyncData.succeed({ matches, truncated }) } } }
+        : { model },
 
-    FailedGrep: ({ reason }) => ({
-      model: { ...model, searchScreen: { code: AsyncData.fail(reason) } },
-    }),
+    FailedGrep: ({ pattern, reason }) =>
+      pattern === model.query.trim()
+        ? { model: { ...model, searchScreen: { code: AsyncData.fail(reason) } } }
+        : { model },
 
     // -- the Activity screen --------------------------------------------
     // Zooming resets the offset: a window paged twenty days back means one
@@ -450,19 +523,26 @@ export const update = (model: Model, message: AppMessage): Return =>
       },
     }),
 
-    SucceededLoadCommits: ({ commits }) => ({
-      model: {
-        ...model,
-        activityScreen: { ...model.activityScreen, commits: AsyncData.succeed(commits) },
-      },
-    }),
+    // Only the newest read paints. See `ActivityScreen.wanted`.
+    SucceededLoadCommits: ({ wanted, commits }) =>
+      wanted === model.activityScreen.wanted
+        ? {
+            model: {
+              ...model,
+              activityScreen: { ...model.activityScreen, commits: AsyncData.succeed(commits) },
+            },
+          }
+        : { model },
 
-    FailedLoadCommits: ({ reason }) => ({
-      model: {
-        ...model,
-        activityScreen: { ...model.activityScreen, commits: AsyncData.fail(reason) },
-      },
-    }),
+    FailedLoadCommits: ({ wanted, reason }) =>
+      wanted === model.activityScreen.wanted
+        ? {
+            model: {
+              ...model,
+              activityScreen: { ...model.activityScreen, commits: AsyncData.fail(reason) },
+            },
+          }
+        : { model },
 
     // -- the Settings screen --------------------------------------------
     /**
@@ -470,38 +550,105 @@ export const update = (model: Model, message: AppMessage): Return =>
      *
      * The policy inputs show what the repository enforces, so they have to be
      * filled from it — and the branch selector defaults to the branch the
-     * "Move" button would otherwise refuse to name. A reload after an action
-     * re-seeds them, which is what makes the published policy the one on
-     * screen rather than the one that was typed.
+     * "Move" button would otherwise refuse to name. A reload re-seeds them
+     * while nothing has been typed into them, which is what keeps the card
+     * showing the policy in force rather than one somebody left behind.
+     *
+     * The selector's own choice is re-seeded too when the branch it named is
+     * gone: the control is bound to the Model, so a name the answer no longer
+     * carries leaves it blank while the form still submits that name — and
+     * `reset` on a ref the repository does not have creates it, putting the
+     * branch the operator just deleted back.
      */
-    SucceededLoadSettings: ({ data }) => ({
-      model: {
-        ...model,
-        settingsScreen: {
-          ...model.settingsScreen,
-          data: AsyncData.succeed(data),
-          forms: {
-            ...model.settingsScreen.forms,
-            resetRef:
-              model.settingsScreen.forms.resetRef === ""
-                ? Settings.short(data.branches[0]?.name ?? "")
-                : model.settingsScreen.forms.resetRef,
-            policyProtected: data.policy?.rules.protected.join(", ") ?? "",
-            policyApprovals: String(data.policy?.rules.requiredApprovals ?? 0),
-            policyChecks: data.policy?.rules.requiredChecks.join(", ") ?? "",
-            policyRequirePullRequest: data.policy?.rules.requirePullRequest ?? false,
-            policyRequireResolvedThreads: data.policy?.rules.requireResolvedThreads ?? false,
+    SucceededLoadSettings: ({ data }) => {
+      const forms = model.settingsScreen.forms;
+      // Every one of the sixteen admin actions reloads Settings, and eleven of
+      // them fill no form at all. A reload that re-seeded the policy card
+      // regardless would take an operator who was halfway through typing a
+      // protected-ref list, had clicked "Show reflog" in another card, and
+      // snap both fields and both switches back to the server's answer — and
+      // then publish that answer when they pressed the button.
+      //
+      // So the card is re-seeded only while it still holds exactly what the
+      // last answer put there. Anything else is the operator's, including the
+      // policy they just published: it is what the new answer says too.
+      const held = AsyncData.getData(model.settingsScreen.data);
+      const seed = policySeed(data);
+      const before = Option.isSome(held) ? policySeed(held.value) : null;
+      const follow =
+        // Nothing has filled the card yet.
+        before === null ||
+        // Or it still holds what it published AND the repository now says
+        // that same thing, so the card is level with it whatever either is
+        // spelled — the case the values cannot tell on their own, because a
+        // publish that only respelled the policy answers with a policy that
+        // did not move. Both halves are needed: a publish the server refused
+        // leaves the card holding what it sent while the repository still
+        // enforces something else, and taking the answer there would throw
+        // away the rules the operator is about to send again.
+        (model.settingsScreen.policyPublished !== null &&
+          sameSpelling(policyOf(forms), model.settingsScreen.policyPublished) &&
+          samePolicy(model.settingsScreen.policyPublished, seed)) ||
+        // Or it still holds exactly what the last answer put there.
+        sameSpelling(policyOf(forms), before) ||
+        // Or the policy moved, and it moved to what this card already says —
+        // which is what the operator's own publish looks like coming back. The
+        // answer's spelling is the canonical one, so take it, and the card is
+        // level with the repository again rather than latched a space away
+        // from it. A reload that changed nothing cannot reach this, so a box
+        // halfway through a word is left alone.
+        (!sameSpelling(seed, before) && samePolicy(policyOf(forms), seed));
+      const policy = follow ? seed : policyOf(forms);
+      return {
+        model: {
+          ...model,
+          settingsScreen: {
+            ...model.settingsScreen,
+            data: AsyncData.succeed(data),
+            // Answered: whatever the card shows now is the repository's own
+            // spelling of it, so there is nothing left to reconcile.
+            policyPublished: null,
+            forms: {
+              ...forms,
+              resetRef: data.branches.some(
+                (branch) => Settings.short(branch.name) === forms.resetRef,
+              )
+                ? forms.resetRef
+                : Settings.short(data.branches[0]?.name ?? ""),
+              ...policy,
+            },
           },
         },
-      },
-    }),
+      };
+    },
 
-    FailedLoadSettings: ({ failure }) => ({
-      model: {
-        ...model,
-        settingsScreen: { ...model.settingsScreen, data: AsyncData.fail(failure) },
-      },
-    }),
+    /**
+     * A failed read, over the answer it was refreshing rather than instead of
+     * it.
+     *
+     * Every action on this screen reloads it, so a blip on that follow-up read
+     * used to blank a screen the application still held the answer for: the
+     * policy card lost the rules in force, every list said the repository was
+     * unreachable, and the guard above lost the seed it compares against, so
+     * the next good read wrote over what the operator had typed. `Stale` says
+     * both things at once — this is the last answer, and it could not be
+     * confirmed — which is what the cards need to keep showing it while
+     * refusing to act on it.
+     */
+    FailedLoadSettings: ({ failure }) => {
+      const held = AsyncData.getData(model.settingsScreen.data);
+      return {
+        model: {
+          ...model,
+          settingsScreen: {
+            ...model.settingsScreen,
+            data: Option.isSome(held)
+              ? AsyncData.Stale({ error: failure, data: held.value })
+              : AsyncData.fail(failure),
+          },
+        },
+      };
+    },
 
     SucceededLoadBrowserKey: ({ key }) => ({
       model: { ...model, settingsScreen: { ...model.settingsScreen, browserKey: key } },
@@ -533,7 +680,20 @@ export const update = (model: Model, message: AppMessage): Return =>
       model.settingsScreen.busy
         ? { model }
         : {
-            model: { ...model, settingsScreen: { ...model.settingsScreen, busy: true } },
+            model: {
+              ...model,
+              settingsScreen: {
+                ...model.settingsScreen,
+                busy: true,
+                // Recorded here rather than on the answer, because this is the
+                // text that went to the repository — by the time it answers,
+                // the boxes may have moved on.
+                policyPublished:
+                  Settings.cardOf(action) === "policy"
+                    ? policyOf(model.settingsScreen.forms)
+                    : model.settingsScreen.policyPublished,
+              },
+            },
             commands: [RunAdmin({ action })],
           },
 
@@ -544,7 +704,7 @@ export const update = (model: Model, message: AppMessage): Return =>
      * added a remote is done with that form, and one whose tag was refused
      * still has the name they typed.
      */
-    SucceededAdmin: ({ card, note, reflog }) => ({
+    SucceededAdmin: ({ card, filled, note, reflog }) => ({
       model: {
         ...model,
         settingsScreen: {
@@ -552,7 +712,7 @@ export const update = (model: Model, message: AppMessage): Return =>
           busy: false,
           notes: { ...model.settingsScreen.notes, [card]: note },
           reflog: reflog ?? model.settingsScreen.reflog,
-          forms: clearedForms(model.settingsScreen.forms, card),
+          forms: clearedForms(model.settingsScreen.forms, filled),
         },
       },
       commands: [LoadSettings()],
@@ -571,10 +731,22 @@ export const update = (model: Model, message: AppMessage): Return =>
 
     ClickedCopyBrowserKey: ({ text }) => ({ model, commands: [CopyText({ text })] }),
 
-    // The button says "Copied" until the clipboard write settles, and then
-    // goes back to offering the copy — a label stuck on "Copied" would stop
-    // reading as a button at all.
+    /**
+     * The clipboard has it.
+     *
+     * The confirmation starts here rather than on the click: a write settles
+     * in a millisecond or two, so a flag set on the click and cleared on the
+     * answer was never on screen long enough to be read. `ForgetCopied` is
+     * what ends it, a second and a half later — the wait is a Command because
+     * `update` is pure, and a label stuck on "Copied" would stop reading as a
+     * button at all.
+     */
     CompletedCopy: () => ({
+      model: { ...model, codeScreen: { ...model.codeScreen, copied: true } },
+      commands: [ForgetCopied()],
+    }),
+
+    ForgotCopied: () => ({
       model: { ...model, codeScreen: { ...model.codeScreen, copied: false } },
     }),
 
@@ -585,23 +757,30 @@ export const update = (model: Model, message: AppMessage): Return =>
      * A route can replace the task while its previous diff is still
      * resolving, so what is on screen may belong to that previous route while
      * the Command that would have corrected it was superseded.
+     *
+     * The read is marked Loading, and a selection that is already loading is
+     * left alone. Both halves matter: the tab is clickable while it is the
+     * open one, a diff reads both sides of every changed file, and nothing
+     * cancels a superseded read — so without this, clicking Diff three times
+     * runs three full reads of the same revision at once.
      */
     ChangedDetailTab: ({ tab }) => {
       const task = detailTask(model);
       const cr = task !== undefined && isChangeRequest(task) ? task : null;
-      const stale = !AsyncData.isLoading(model.detailScreen.diff);
+      const reading =
+        tab === "diff" && cr !== null && !AsyncData.isLoading(model.detailScreen.diff);
       return {
-        model: { ...model, detailScreen: { ...model.detailScreen, tab } },
-        commands:
-          tab === "diff" && cr !== null && stale
-            ? [
-                LoadDiff({
-                  id: cr.id,
-                  sourceRef: cr.sourceRef,
-                  targetRef: cr.targetRef,
-                }),
-              ]
-            : [],
+        model: {
+          ...model,
+          detailScreen: {
+            ...model.detailScreen,
+            tab,
+            diff: reading ? AsyncData.Loading() : model.detailScreen.diff,
+          },
+        },
+        commands: reading
+          ? [LoadDiff({ id: cr.id, sourceRef: cr.sourceRef, targetRef: cr.targetRef })]
+          : [],
       };
     },
 
@@ -671,17 +850,28 @@ export const update = (model: Model, message: AppMessage): Return =>
     },
 
     // The projection is what shows next, so the draft clears and the listing
-    // is re-read rather than a comment being drawn from this side.
-    SucceededComment: () => ({
-      model: {
-        ...model,
-        detailScreen: { ...model.detailScreen, acting: false, comment: "", notice: null },
-      },
+    // is re-read rather than a comment being drawn from this side. The draft
+    // clears only if it still holds what was sent: anything typed since is
+    // the reader's, not this answer's to discard.
+    SucceededComment: ({ id, body }) => ({
+      model: answersOpen(model, id)
+        ? {
+            ...model,
+            detailScreen: {
+              ...model.detailScreen,
+              acting: false,
+              comment: model.detailScreen.comment.trim() === body ? "" : model.detailScreen.comment,
+              notice: null,
+            },
+          }
+        : model,
       commands: [LoadTasks()],
     }),
 
-    FailedComment: ({ reason }) => ({
-      model: { ...model, detailScreen: { ...model.detailScreen, acting: false, notice: reason } },
+    FailedComment: ({ id, reason }) => ({
+      model: answersOpen(model, id)
+        ? { ...model, detailScreen: { ...model.detailScreen, acting: false, notice: reason } }
+        : model,
     }),
 
     ClickedMerge: () => {
@@ -713,27 +903,31 @@ export const update = (model: Model, message: AppMessage): Return =>
      * the merge in the sample list — clearly sample behaviour, and never
      * reachable by a hub entity, which took the other branch above.
      */
-    SucceededMerge: () => {
-      const task = detailTask(model);
+    SucceededMerge: ({ id }) => {
+      // The merged Change Request is the one that was asked about, not the one
+      // the route happens to name now — stamping "Merged" onto whatever the
+      // reader opened next would mark a Change Request nobody merged.
+      const task = Tasks.byId(model.tasks.tasks, id);
       const local = task !== undefined && task.hub !== true;
+      const screen = answersOpen(model, id)
+        ? { ...model.detailScreen, acting: false, notice: null }
+        : model.detailScreen;
       return {
         model: {
           ...model,
-          tasks:
-            task === undefined || !local
-              ? model.tasks
-              : {
-                  ...model.tasks,
-                  tasks: Tasks.replace(model.tasks.tasks, task.id, Tasks.merged),
-                },
-          detailScreen: { ...model.detailScreen, acting: false, notice: null },
+          tasks: local
+            ? { ...model.tasks, tasks: Tasks.replace(model.tasks.tasks, id, Tasks.merged) }
+            : model.tasks,
+          detailScreen: screen,
         },
         commands: local ? [] : [LoadTasks()],
       };
     },
 
-    FailedMerge: ({ reason }) => ({
-      model: { ...model, detailScreen: { ...model.detailScreen, acting: false, notice: reason } },
+    FailedMerge: ({ id, reason }) => ({
+      model: answersOpen(model, id)
+        ? { ...model, detailScreen: { ...model.detailScreen, acting: false, notice: reason } }
+        : model,
     }),
 
     ClickedReview: ({ decision }) => {
@@ -781,16 +975,36 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    SucceededThread: () => ({
-      model: {
-        ...model,
-        detailScreen: { ...model.detailScreen, acting: false, notice: null, replies: {} },
-      },
+    /**
+     * The thread settled.
+     *
+     * Only the reply that landed clears its own box, and only while it still
+     * holds what was sent. A resolve or a reopen carries no body and so
+     * touches no draft at all — the reader's unsent replies to other threads
+     * are theirs, not this answer's to discard.
+     */
+    SucceededThread: ({ id, thread, body }) => ({
+      model: answersOpen(model, id)
+        ? {
+            ...model,
+            detailScreen: {
+              ...model.detailScreen,
+              acting: false,
+              notice: null,
+              replies:
+                body !== "" && (model.detailScreen.replies[thread] ?? "").trim() === body
+                  ? { ...model.detailScreen.replies, [thread]: "" }
+                  : model.detailScreen.replies,
+            },
+          }
+        : model,
       commands: [LoadTasks()],
     }),
 
-    FailedThread: ({ reason }) => ({
-      model: { ...model, detailScreen: { ...model.detailScreen, acting: false, notice: reason } },
+    FailedThread: ({ id, reason }) => ({
+      model: answersOpen(model, id)
+        ? { ...model, detailScreen: { ...model.detailScreen, acting: false, notice: reason } }
+        : model,
     }),
 
     ClickedTaskAction: ({ action }) => {
@@ -805,19 +1019,17 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    SucceededTaskAction: () => ({
-      model: {
-        ...model,
-        detailScreen: { ...model.detailScreen, acting: false, taskNotice: null },
-      },
+    SucceededTaskAction: ({ id }) => ({
+      model: answersOpen(model, id)
+        ? { ...model, detailScreen: { ...model.detailScreen, acting: false, taskNotice: null } }
+        : model,
       commands: [LoadTasks()],
     }),
 
-    FailedTaskAction: ({ reason }) => ({
-      model: {
-        ...model,
-        detailScreen: { ...model.detailScreen, acting: false, taskNotice: reason },
-      },
+    FailedTaskAction: ({ id, reason }) => ({
+      model: answersOpen(model, id)
+        ? { ...model, detailScreen: { ...model.detailScreen, acting: false, taskNotice: reason } }
+        : model,
     }),
 
     /**
@@ -897,7 +1109,7 @@ export const update = (model: Model, message: AppMessage): Return =>
 
     SucceededLoadFileAt: ({ oid, path, content }) => {
       const view = viewOf(model);
-      if (view.selected !== path) return { model };
+      if (view.selected !== path || !answersRevision(model, oid)) return { model };
       return {
         model: {
           ...model,
@@ -910,9 +1122,9 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    FailedLoadFileAt: ({ path, reason }) => {
+    FailedLoadFileAt: ({ oid, path, reason }) => {
       const view = viewOf(model);
-      if (view.selected !== path) return { model };
+      if (view.selected !== path || !answersRevision(model, oid)) return { model };
       return {
         model: {
           ...model,
@@ -927,15 +1139,14 @@ export const update = (model: Model, message: AppMessage): Return =>
     /**
      * The whole screen reads one ref, so a switch refetches the lot rather
      * than trying to patch the explorer, the pane and the commit bar in place.
-     */
-    /**
+     *
      * The menu's last item is not a branch: it opens the dialog that creates
      * one. `ui-dialog` opens from a trigger it owns, and a menu item is not
      * that trigger, so this is the one place the show is a Command.
      */
     SelectedBranch: ({ ref }) =>
       ref === "__new-branch"
-        ? { model, commands: [OpenDialog({ selector: "ui-dialog.gp-new-branch" })] }
+        ? { model, commands: [OpenDialog({ selector: NEW_BRANCH_DIALOG })] }
         : ref === "__rebase"
           ? update(model, AppMessage.ClickedRebase())
           : {
@@ -945,6 +1156,19 @@ export const update = (model: Model, message: AppMessage): Return =>
               },
               commands: [LoadCode({ ref, keep: "" })],
             },
+
+    /**
+     * Cancel.
+     *
+     * The dialog closes as well as clearing: it is opened imperatively from a
+     * menu item rather than from a `[data-dialog-trigger]`, so `ui-dialog` has
+     * no trigger to press again and only Escape or the backdrop would have
+     * dismissed it — with the focus trap over the screen until then.
+     */
+    ClickedCancelNewBranch: () => ({
+      model: { ...model, codeScreen: { ...model.codeScreen, newBranch: "", syncNotice: null } },
+      commands: [CloseNewTaskDialog({ selector: NEW_BRANCH_DIALOG })],
+    }),
 
     ChangedNewBranch: ({ name }) => ({
       model: { ...model, codeScreen: { ...model.codeScreen, newBranch: name } },
@@ -970,14 +1194,14 @@ export const update = (model: Model, message: AppMessage): Return =>
         },
       },
       commands: [
-        CloseNewTaskDialog({ selector: "ui-dialog.gp-new-branch" }),
+        CloseNewTaskDialog({ selector: NEW_BRANCH_DIALOG }),
         LoadCode({ ref: name, keep: "" }),
       ],
     }),
 
     ClickedRefresh: () => ({
-      model: { ...model, codeScreen: { ...model.codeScreen, wantedRef: viewOf(model).ref } },
-      commands: [LoadCode({ ref: viewOf(model).ref, keep: viewOf(model).selected ?? "" })],
+      model: { ...model, codeScreen: { ...model.codeScreen, wantedRef: askedFor(model).ref } },
+      commands: [LoadCode({ ref: askedFor(model).ref, keep: askedFor(model).keep })],
     }),
 
     /** The commit bar toggles the recent-history panel it summarises. */
@@ -1010,22 +1234,49 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    SucceededLoadHistory: ({ rows }) => ({
-      model: { ...model, codeScreen: { ...model.codeScreen, history: AsyncData.succeed(rows) } },
-    }),
+    SucceededLoadHistory: ({ path, rows }) =>
+      answersPanel(model, path)
+        ? {
+            model: {
+              ...model,
+              codeScreen: { ...model.codeScreen, history: AsyncData.succeed(rows) },
+            },
+          }
+        : { model },
 
-    FailedLoadHistory: ({ reason }) => ({
-      model: { ...model, codeScreen: { ...model.codeScreen, history: AsyncData.fail(reason) } },
-    }),
+    FailedLoadHistory: ({ path, reason }) =>
+      answersPanel(model, path)
+        ? {
+            model: {
+              ...model,
+              codeScreen: { ...model.codeScreen, history: AsyncData.fail(reason) },
+            },
+          }
+        : { model },
 
-    /** Show the open file as it was at this commit — a read-only look back. */
+    /**
+     * Show the open file as it was at this commit — a read-only look back.
+     *
+     * The blob goes with the revision. The pane is keyed on what it is showing
+     * and a revision's text is the same length as another's often enough —
+     * a typo fix, a version bump — that the key would not change and the
+     * mounted viewer, whose text is captured once, would keep painting the
+     * revision the banner says the reader has left. Blanking it also removes
+     * the frame where the tip's text sits under a historic commit's name.
+     */
     ClickedHistoryRow: ({ oid }) => {
       const view = viewOf(model);
       if (view.selected === null) return { model };
       return {
         model: {
           ...model,
-          codeScreen: { ...model.codeScreen, mode: "view", at: oid, diffing: false },
+          codeScreen: {
+            ...model.codeScreen,
+            mode: "view",
+            at: oid,
+            diffing: false,
+            view: AsyncData.succeed({ ...view, content: null }),
+          },
         },
         commands: [LoadFileAt({ oid, path: view.selected })],
       };
@@ -1035,7 +1286,14 @@ export const update = (model: Model, message: AppMessage): Return =>
       const view = viewOf(model);
       if (view.selected === null || view.tip === null) return { model };
       return {
-        model: { ...model, codeScreen: { ...model.codeScreen, at: null } },
+        model: {
+          ...model,
+          codeScreen: {
+            ...model.codeScreen,
+            at: null,
+            view: AsyncData.succeed({ ...view, content: null }),
+          },
+        },
         commands: [LoadFile({ tip: view.tip, path: view.selected })],
       };
     },
@@ -1066,6 +1324,7 @@ export const update = (model: Model, message: AppMessage): Return =>
             message: "",
             editError: null,
             diffing: false,
+            session: model.codeScreen.session + 1,
           },
         },
       };
@@ -1074,6 +1333,12 @@ export const update = (model: Model, message: AppMessage): Return =>
     ClickedNewFile: () => {
       const view = viewOf(model);
       if (!writableCode(view)) return { model };
+      // Leaving a historical revision means leaving its text with it. Clearing
+      // `at` alone took the read-only banner away and left the old blob in the
+      // pane — Cancel then the pencil would then have opened that revision as a
+      // draft of the tip, and committing it would have written the old file
+      // over the new one.
+      const lookingBack = model.codeScreen.at !== null && view.selected !== null;
       return {
         model: {
           ...model,
@@ -1085,8 +1350,29 @@ export const update = (model: Model, message: AppMessage): Return =>
             message: "",
             editError: null,
             diffing: false,
+            view: lookingBack
+              ? AsyncData.succeed({ ...view, content: null })
+              : model.codeScreen.view,
+            // The panel closes with it: its rows belong to the file that was
+            // open, and clicking one from here would leave a card that is
+            // creating a file and viewing another at once — with the button
+            // that would close the panel disabled precisely because a file is
+            // being created. The revision goes too: a file that does not exist
+            // yet is not being looked back at, and leaving `at` set put the
+            // history banner's "read-only" over a working Commit button.
+            panel: "none",
+            history: AsyncData.Idle(),
+            at: null,
+            // A second "+" is a second session over the same key, and the
+            // editor's text was captured at mount — without this the pane
+            // would keep the abandoned draft while the Model holds none.
+            session: model.codeScreen.session + 1,
           },
         },
+        commands:
+          lookingBack && view.selected !== null && view.tip !== null
+            ? [LoadFile({ tip: view.tip, path: view.selected })]
+            : [],
       };
     },
 
@@ -1184,13 +1470,29 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    SucceededCommitFile: ({ keep }) => ({
-      model: {
-        ...model,
-        codeScreen: { ...model.codeScreen, saving: false, wantedRef: viewOf(model).ref },
-      },
-      commands: [LoadCode({ ref: viewOf(model).ref, keep })],
-    }),
+    /**
+     * The write landed on `branch`, and that is the ref re-read.
+     *
+     * Unless the reader has moved on: a branch chosen while the commit was out
+     * has its own read in flight, and `wantedRef` is what lets that read paint.
+     * Overwriting it would supersede the switch with the branch the reader has
+     * left, so the commit's reload is simply dropped instead — the branch they
+     * are now on is the one being loaded, and it is loading already.
+     */
+    SucceededCommitFile: ({ branch, keep }) => {
+      const stale = askedFor(model).ref !== branch;
+      return {
+        model: {
+          ...model,
+          codeScreen: {
+            ...model.codeScreen,
+            saving: false,
+            wantedRef: stale ? model.codeScreen.wantedRef : branch,
+          },
+        },
+        commands: stale ? [] : [LoadCode({ ref: branch, keep })],
+      };
+    },
 
     FailedCommitFile: ({ reason }) => ({
       model: { ...model, codeScreen: { ...model.codeScreen, saving: false, editError: reason } },
@@ -1201,7 +1503,7 @@ export const update = (model: Model, message: AppMessage): Return =>
     }),
 
     ClickedClone: ({ text }) => ({
-      model: { ...model, codeScreen: { ...model.codeScreen, copied: true } },
+      model,
       commands: [CopyText({ text })],
     }),
 
@@ -1219,32 +1521,28 @@ export const update = (model: Model, message: AppMessage): Return =>
       model: { ...model, codeScreen: { ...model.codeScreen, sync } },
     }),
 
-    CompletedSync: ({ notice, reload }) => ({
-      model: {
-        ...model,
-        codeScreen: {
-          ...model.codeScreen,
-          syncing: false,
-          syncNotice: notice,
-          wantedRef: reload ? viewOf(model).ref : model.codeScreen.wantedRef,
+    CompletedSync: ({ notice, reload }) => {
+      // A push or a fetch can settle while a branch switch is still out, so
+      // the reload asks for what is actually wanted rather than for the
+      // sample's ref. See `askedFor`.
+      const asked = askedFor(model);
+      return {
+        model: {
+          ...model,
+          codeScreen: {
+            ...model.codeScreen,
+            syncing: false,
+            syncNotice: notice,
+            wantedRef: reload ? asked.ref : model.codeScreen.wantedRef,
+          },
         },
-      },
-      commands: [
-        RefreshSync({ ref: viewOf(model).ref }),
-        ...(reload
-          ? [LoadCode({ ref: viewOf(model).ref, keep: viewOf(model).selected ?? "" })]
-          : []),
-      ],
-    }),
+        commands: [
+          RefreshSync({ ref: asked.ref }),
+          ...(reload ? [LoadCode({ ref: asked.ref, keep: asked.keep })] : []),
+        ],
+      };
+    },
 
-    /**
-     * The clone landed, or it did not.
-     *
-     * Either way the screen reloads through whichever client now answers: the
-     * local repository turns a hundred-commit history read into local object
-     * reads rather than an N+1 of requests, and a browser that cannot hold one
-     * keeps the HTTP client with nothing about the page changing.
-     */
     /**
      * The clone landed, or it did not.
      *
@@ -1255,18 +1553,36 @@ export const update = (model: Model, message: AppMessage): Return =>
      * `wantedRef` moves only when a request is actually issued to replace
      * whatever is in flight. Resetting it either way would strand a branch
      * switch the reader made while the clone was still opening.
+     *
+     * Everything that reads the repository is re-read, not just Code. The
+     * timeline was drawn from origin at boot and a live query answered from
+     * it, so leaving them alone would have three screens disagreeing about
+     * one repository — the browser's own commits visible in Code and missing
+     * from both the search and the history that should hold them.
      */
-    SettledLocalRepository: ({ state }) =>
-      state === "Ready"
-        ? {
-            model: {
-              ...model,
-              localRepository: state,
-              codeScreen: { ...model.codeScreen, wantedRef: viewOf(model).ref },
-            },
-            commands: [LoadCode({ ref: viewOf(model).ref, keep: viewOf(model).selected ?? "" })],
-          }
-        : { model: { ...model, localRepository: state } },
+    SettledLocalRepository: ({ state }) => {
+      if (state !== "Ready") return { model: { ...model, localRepository: state } };
+      const pattern = model.query.trim();
+      const asked = askedFor(model);
+      const reading = model.activityScreen.wanted + 1;
+      return {
+        model: {
+          ...model,
+          localRepository: state,
+          codeScreen: { ...model.codeScreen, wantedRef: asked.ref },
+          activityScreen: { ...model.activityScreen, wanted: reading },
+        },
+        commands: [
+          LoadCode({ ref: asked.ref, keep: asked.keep }),
+          LoadCommits({ wanted: reading }),
+          ...(pattern === "" ? [] : [Grep({ pattern })]),
+          // The clone and `/whoami` race, and either can land first. Signing
+          // is re-applied here so a clone that opened second still commits as
+          // the reader rather than as the anonymous browser default.
+          SignLocalAs({ subject: subjectOf(model) }),
+        ],
+      };
+    },
 
     ChangedProposeField: ({ field, value }) => ({
       model: {
@@ -1441,17 +1757,145 @@ const detailTask = (model: Model): Task | undefined =>
   model.route._tag === "Detail" ? Tasks.byId(model.tasks.tasks, model.route.id) : undefined;
 
 /**
+ * Whether an answer asked about `id` still belongs on the screen.
+ *
+ * A hub round-trip outlives the click that started it, and `ChangedUrl` clears
+ * the Detail screen without cancelling what is still out. Without this, a
+ * refusal about one Change Request is announced against the one the reader
+ * opened next, and that one's half-written drafts are cleared by it.
+ */
+const answersOpen = (model: Model, id: string): boolean =>
+  model.route._tag === "Detail" && model.route.id === id;
+
+/**
+ * Whether a file read's answer is still the revision the reader is asking for.
+ *
+ * `LoadFile` and `LoadFileAt` are both interruptible, but Foldkit keys an
+ * interrupt by Command *name*, so neither supersedes the other: clicking
+ * "Back to tip" while a history read is out leaves both in flight. The path
+ * alone cannot tell them apart — they are the same file — so the answer
+ * carries its revision, empty for the tip, and only the one that matches what
+ * the click already recorded may paint.
+ */
+const answersRevision = (model: Model, oid: string): boolean =>
+  (oid === "" ? null : oid) === model.codeScreen.at;
+
+/**
+ * Whether a history answer belongs to the panel that is open.
+ *
+ * The branch panel asks with an empty path and the file panel with the open
+ * file's, and the two are the same Command — so the answer says which it is
+ * and the other is dropped rather than painted under the wrong heading.
+ */
+const answersPanel = (model: Model, path: string): boolean =>
+  path === ""
+    ? model.codeScreen.panel === "commits"
+    : model.codeScreen.panel === "filelog" && path === viewOf(model).selected;
+
+/**
+ * What a re-read of the Code screen should ask for.
+ *
+ * The screen's own ref and open file once it has them, and what the request
+ * already in flight asked for while it does not. `viewOf` answers an
+ * un-settled screen with the design's sample shape, whose ref is the design's
+ * own `main` — and re-reading *that* would supersede the boot request with a
+ * branch this repository may not have. `LoadCode` is interruptible and its
+ * answer is dropped unless it names `wantedRef`, so the real read would never
+ * land: the screen would settle empty, with no explorer, no commit bar and
+ * nothing said about why.
+ */
+const askedFor = (model: Model) => {
+  const held = AsyncData.getData(model.codeScreen.view);
+  // A settled *sample* is not the repository. Opening a file in the offline
+  // explorer stores the sample as a success so the click is not inert, and its
+  // ref is the design's own `main` — asking for that is the same mistake as
+  // asking for PENDING's.
+  if (held._tag === "Some" && !held.value.offline) {
+    return { ref: held.value.ref, keep: held.value.selected ?? "" };
+  }
+  return {
+    ref: model.codeScreen.wantedRef,
+    keep: model.route._tag === "Code" ? model.route.path : "",
+  };
+};
+
+/**
  * The inputs a landed action has consumed.
  *
- * Only the ones that action filled: a card whose form is a standing choice
- * (which branch to move, what the policy is) keeps it, and one that files
- * something new empties so the next entry starts blank.
+ * Keyed on what the action actually filled in — `settings.ts`'s `filledBy` —
+ * rather than on the card it reports into, because a card holds more than one
+ * action: a card whose form is a standing choice (which branch to move, what
+ * the policy is) keeps it, one that files something new empties so the next
+ * entry starts blank, and a read-only action beside either of them empties
+ * nothing at all.
  */
+/** The card, as an answer would fill it. */
+const policySeed = (data: SettingsData): PolicyForm => ({
+  policyProtected: data.policy?.rules.protected.join(", ") ?? "",
+  policyApprovals: String(data.policy?.rules.requiredApprovals ?? 0),
+  policyChecks: data.policy?.rules.requiredChecks.join(", ") ?? "",
+  policyRequirePullRequest: data.policy?.rules.requirePullRequest ?? false,
+  policyRequireResolvedThreads: data.policy?.rules.requireResolvedThreads ?? false,
+});
+
+/** The card, as it stands. */
+const policyOf = (forms: Model["settingsScreen"]["forms"]): PolicyForm => ({
+  policyProtected: forms.policyProtected,
+  policyApprovals: forms.policyApprovals,
+  policyChecks: forms.policyChecks,
+  policyRequirePullRequest: forms.policyRequirePullRequest,
+  policyRequireResolvedThreads: forms.policyRequireResolvedThreads,
+});
+
+/**
+ * Whether the card still holds, character for character, what an answer put
+ * there.
+ *
+ * The plain reading of "nobody has touched this", and the one a reload uses to
+ * decide whether the card may follow the repository. Character for character
+ * because a box being typed into passes through states that *mean* the same
+ * thing — `main, ` on the way to `main, release/*` is still the list `main` —
+ * and re-seeding one of those pulls the text out from under the caret.
+ */
+const sameSpelling = (forms: PolicyForm, seed: PolicyForm): boolean =>
+  forms.policyProtected === seed.policyProtected &&
+  forms.policyApprovals === seed.policyApprovals &&
+  forms.policyChecks === seed.policyChecks &&
+  forms.policyRequirePullRequest === seed.policyRequirePullRequest &&
+  forms.policyRequireResolvedThreads === seed.policyRequireResolvedThreads;
+
+/**
+ * Whether the card and an answer say the same thing, however either is spelled.
+ *
+ * The two sides are written by different code: `policySeed` renders a list as
+ * `join(", ")` and the count through `String`, while the publish path reads the
+ * same boxes through `Settings.list` and `Settings.count`. So an operator who
+ * typed `main,release/*` without the space and published it got the answer back
+ * spelled `main, release/*` — one character different, which the spelling test
+ * above reads as "still typing". Left at that the card stopped following the
+ * repository for the rest of the session, and the next publish wrote its stale
+ * list back over whatever anyone else had added.
+ */
+const samePolicy = (forms: PolicyForm, seed: PolicyForm): boolean => {
+  const same = (left: string, right: string): boolean => {
+    const one = Settings.list(left);
+    const other = Settings.list(right);
+    return one.length === other.length && one.every((entry, at) => entry === other[at]);
+  };
+  return (
+    same(forms.policyProtected, seed.policyProtected) &&
+    Settings.count(forms.policyApprovals) === Settings.count(seed.policyApprovals) &&
+    same(forms.policyChecks, seed.policyChecks) &&
+    forms.policyRequirePullRequest === seed.policyRequirePullRequest &&
+    forms.policyRequireResolvedThreads === seed.policyRequireResolvedThreads
+  );
+};
+
 const clearedForms = (
   forms: Model["settingsScreen"]["forms"],
-  card: string,
+  filled: string,
 ): Model["settingsScreen"]["forms"] => {
-  switch (card) {
+  switch (filled) {
     case "branches":
       return { ...forms, resetTo: "" };
     case "tags":

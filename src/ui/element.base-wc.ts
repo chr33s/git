@@ -18,8 +18,13 @@
  * elements the page owns. Foldkit's virtual DOM and these elements therefore
  * share one tree, which is fine for every element here: each owns behaviour
  * and attributes on children the view itself declares, and none of them
- * inserts, moves or removes a child of its own. An element that did would
- * need a Mount instead, because the diff would fight it.
+ * inserts, moves or removes a child the *view* declared. An element that did
+ * would need a Mount instead, because the diff would fight it.
+ *
+ * `ui-search-field` is the one that adds a node of its own — the clear button
+ * it appends after the input. That is safe because the view never declares a
+ * sibling there for the diff to reconcile it against, and because the element
+ * owns it for its whole life.
  */
 import { CustomElement, Html } from "foldkit";
 import { Effect, Schema } from "effect";
@@ -43,14 +48,27 @@ export const dialogPopup = CustomElement.define({
 });
 
 /**
- * The rail's search box. It debounces internally and emits a native `input`
- * once settled, so the Model sees a query the reader has stopped typing
- * rather than every keystroke.
+ * The rail's search box.
+ *
+ * Both events are bound, and each answers something the other cannot.
+ *
+ * `search` is the debounced one: the element emits it once the reader has
+ * stopped typing, so one query goes to `/grep` rather than one per keystroke.
+ * It is what decides *when* to search, and the clear button and Escape emit
+ * it immediately rather than waiting out a debounce nobody is still typing
+ * into.
+ *
+ * The inner input's `input` is bound too, and must be: the view binds `value`
+ * to the Model, Foldkit re-asserts a controlled value on every patch, and a
+ * Model that heard only the debounced query would rewrite the box back to it
+ * mid-word. That binding keeps the Model level with the box. The clear paths
+ * reach it as well — the element fires a native `input` on the control before
+ * emitting `search` — so the two never disagree about what the box holds.
  */
 export const searchField = CustomElement.define({
   tag: "ui-search-field",
   properties: { value: Schema.String },
-  events: {},
+  events: { search: Schema.Struct({ value: Schema.String }) },
 });
 
 /** A segmented control. `change` carries the value now selected. */
@@ -143,6 +161,23 @@ export const Outcome = Schema.Literals(["Closed", "NotFound"]);
 export type Outcome = typeof Outcome.Type;
 
 /**
+ * Open the `ui-dialog` matching `selector`.
+ *
+ * Most dialogs here open from a child carrying `data-dialog-trigger`, which
+ * the element wires itself — this is for the one that opens from a menu item
+ * instead, where there is no trigger to carry.
+ */
+export const showDialog = (selector: string): Effect.Effect<Outcome> =>
+  Effect.sync(() => {
+    const found = document.querySelector(selector);
+    if (!(found instanceof HTMLElement) || !("show" in found)) return "NotFound";
+    // SAFETY: `show` was just found on the element, and these selectors name
+    // only `ui-dialog` — whose `show()` takes no arguments.
+    (found as { show: () => void }).show();
+    return "Closed";
+  });
+
+/**
  * Close the `ui-dialog` matching `selector`.
  *
  * An Effect rather than a Command, because the Message it should answer with
@@ -162,23 +197,6 @@ export type Outcome = typeof Outcome.Type;
  * render that removed it is a race the reader can cause — closing the last
  * task while the dialog is dismissing — and it is not an error.
  */
-/**
- * Open the `ui-dialog` matching `selector`.
- *
- * Most dialogs here open from a child carrying `data-dialog-trigger`, which
- * the element wires itself — this is for the one that opens from a menu item
- * instead, where there is no trigger to carry.
- */
-export const showDialog = (selector: string): Effect.Effect<Outcome> =>
-  Effect.sync(() => {
-    const found = document.querySelector(selector);
-    if (!(found instanceof HTMLElement) || !("show" in found)) return "NotFound";
-    // SAFETY: `show` was just found on the element, and these selectors name
-    // only `ui-dialog` — whose `show()` takes no arguments.
-    (found as { show: () => void }).show();
-    return "Closed";
-  });
-
 export const hideDialog = (selector: string): Effect.Effect<Outcome> =>
   Effect.sync(() => {
     const found = document.querySelector(selector);

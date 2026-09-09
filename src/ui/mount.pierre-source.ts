@@ -81,13 +81,20 @@ export const PierreSource = Mount.defineStream("PierreSource", {
           Queue.offerUnsafe(queue, AppMessage.CompletedMountTree());
           return { viewer, session, detach };
         }),
-        ({ session, detach }) =>
+        ({ viewer, session, detach }) =>
           Effect.sync(() => {
             // Detaching first: the draft dies with the session, and the
             // viewer owns the pane again. Both are the library's, and the
             // host element is Foldkit's to remove.
             detach?.();
             session?.cleanUp();
+            // Then the viewer itself. `cleanUp` is what releases the resize
+            // and interaction managers and unsubscribes from theme changes,
+            // and the resize manager holds its observed elements in a
+            // process-wide map — so a viewer left uncleaned pins the file's
+            // whole rendered subtree for the life of the page, once per file
+            // opened.
+            viewer?.cleanUp();
           }),
       ),
     ),

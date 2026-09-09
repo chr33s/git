@@ -19,7 +19,7 @@ import type { Elements } from "./element.base-wc.ts";
 import * as icon from "./icon.ts";
 import { initials } from "./time.ts";
 import { AppMessage } from "./app.message.ts";
-import { AppRoute, railScreen, urlOf } from "./app.route.ts";
+import { AppRoute, railScreen } from "./app.route.ts";
 import { type Model, subjectOf } from "./app.model.ts";
 import * as Tasks from "./task.ts";
 
@@ -81,6 +81,7 @@ export const sidebar = (
           h.Attribute("debounce", "200"),
           h.Title("Search"),
           h.OnClick(AppMessage.ClickedSearchField()),
+          ui.searchField.OnSearch(({ value }) => AppMessage.ChangedSearchQuery({ query: value })),
         ],
         [
           icon.search(h),
@@ -92,7 +93,9 @@ export const sidebar = (
             h.Name("q"),
             h.AriaLabel("Search"),
             h.Value(model.query),
-            h.OnInput((query) => AppMessage.ChangedSearchQuery({ query })),
+            // Per keystroke, beside the element's debounced `search` above:
+            // this keeps the Model level with the box, that one searches.
+            h.OnInput((query) => AppMessage.ChangedSearchDraft({ query })),
           ]),
         ],
       ),
@@ -135,6 +138,3 @@ export const sidebar = (
       ),
     ],
   );
-
-/** The address every rail item links to, for a real `href` on a real link. */
-export const linkTo = urlOf;

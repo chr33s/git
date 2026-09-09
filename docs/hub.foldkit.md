@@ -847,7 +847,7 @@ Represent all relevant read-state facts explicitly, using `asyncData` for each i
 
 ### Replace Generation Counters
 
-Where the current implementation manually ignores stale async completions, use Foldkit interruptible Commands keyed by request identity when appropriate.
+Where the current implementation manually ignores stale async completions, keep the request identity in the Model and drop any answer that does not name it. Foldkit's `interrupt` registers a key rather than cancelling, so it is an addressing scheme for an explicit `Interrupt` Command, not a substitute for the guard.
 
 Examples:
 
@@ -1008,11 +1008,16 @@ and answers "An error occurred in Effect.tryPromise". Every place the reason is
 shown to a reader now classifies inside the async function, where the class is
 still there, and hands `update` a string.
 
-**Interruption stops a fiber, not a request already past its `await`.** Keying
-a Command `interrupt: true` is necessary and not sufficient: the Model also has
-to say which answer it is waiting for. `wantedRef` and `diffFor` are that, and
-they are the honest replacement for the generation counters the plan expected
-to delete outright.
+**`interrupt` does not supersede anything on its own.** It registers the
+running fiber under a key; Foldkit cancels nothing unless `update` returns the
+generated `Interrupt` Command, which nothing in this UI does. Every superseded
+request therefore still finishes and still dispatches its Message, so the Model
+has to name the answer it is waiting for and `update` has to drop the rest.
+`wantedRef`, `diffFor`, `answersRevision`, `answersOpen`, `answersPanel`, the
+`pattern` on a grep answer and the `ActivityScreen.wanted` counter are all that
+one rule. The generation counters the plan expected to delete were kept, in a
+form the Model can hold. `Grep` and `LoadCommits` declare no `interrupt` at all
+for the same reason: a key that cancels nothing buys them nothing.
 
 **A module path and a route can collide.** `src/ui/code.ts` and the address
 `/hub/code` are the same string to Vite's dev server, which answered a screen

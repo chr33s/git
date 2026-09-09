@@ -31,12 +31,23 @@ type H = Html.HtmlBuilder<AppMessage>;
  * A refusal names the cure, an outage names the fault. Conflating the two sent
  * operators of private repositories debugging a network that was fine.
  */
-const unavailable = (failure: SettingsFailure, fallback: string): string =>
+const unavailable = (failure: SettingsFailure | null, fallback: string): string =>
   failure === "Denied"
     ? "— this repository requires authentication; grant this browser's key to administer it."
     : failure === "Offline"
       ? "— the git+ API is not reachable."
       : `— ${fallback}.`;
+
+/**
+ * Whether the last read failed, whatever the screen is still showing.
+ *
+ * A card is drawn from the answer it holds and acts through the answer it
+ * trusts, and after a failed refresh those are not the same thing: the lists
+ * are the ones read a moment ago, and nothing on the screen may be acted on
+ * until a read confirms them.
+ */
+const unconfirmed = (model: Model): boolean =>
+  AsyncData.getError(model.settingsScreen.data)._tag === "Some";
 
 /** A card's list, or why it is empty — offline and empty read differently. */
 const rows = <A>(
@@ -46,7 +57,12 @@ const rows = <A>(
   row: (item: A) => Html.Html,
 ): Html.Html => {
   const failure = AsyncData.getError(model.settingsScreen.data);
-  if (failure._tag === "Some") {
+  // Only when there is nothing else to show. A refresh that failed over an
+  // answer the screen already had is `Stale`, and the operator is better
+  // served by the branches it read a moment ago — with every button beside
+  // them disabled — than by being told the repository is unreachable and
+  // shown nothing.
+  if (failure._tag === "Some" && items.length === 0) {
     return h.div([h.Class("gp-field-value")], [unavailable(failure.value, "unavailable")]);
   }
   if (items.length === 0) return h.div([h.Class("gp-field-value")], ["None yet."]);
@@ -214,7 +230,7 @@ const identity = (h: H, model: Model): Html.Html => {
 
 const branches = (h: H, model: Model, data: SettingsData | null): Html.Html => {
   const busy = model.settingsScreen.busy;
-  const offline = data === null;
+  const offline = data === null || unconfirmed(model);
   const fallback = data?.defaultBranch ?? null;
   return h.section(
     [h.Class("gp-setting-card"), h.DataAttribute("card", "branches")],
@@ -299,7 +315,7 @@ const branches = (h: H, model: Model, data: SettingsData | null): Html.Html => {
 
 const tags = (h: H, model: Model, data: SettingsData | null): Html.Html => {
   const busy = model.settingsScreen.busy;
-  const offline = data === null;
+  const offline = data === null || unconfirmed(model);
   const target = data?.defaultBranch ?? null;
   return h.section(
     [h.Class("gp-setting-card"), h.DataAttribute("card", "tags")],
@@ -376,7 +392,7 @@ const tags = (h: H, model: Model, data: SettingsData | null): Html.Html => {
 
 const remotes = (h: H, model: Model, data: SettingsData | null): Html.Html => {
   const busy = model.settingsScreen.busy;
-  const offline = data === null;
+  const offline = data === null || unconfirmed(model);
   const branch = data?.defaultBranch ?? null;
   return h.section(
     [h.Class("gp-setting-card"), h.DataAttribute("card", "remotes")],
@@ -409,7 +425,7 @@ const remotes = (h: H, model: Model, data: SettingsData | null): Html.Html => {
                   [
                     h.Class("gp-btn-quiet"),
                     h.Type("button"),
-                    h.Disabled(busy),
+                    h.Disabled(busy || offline),
                     h.OnClick(
                       AppMessage.SubmittedAdmin({
                         action: AdminAction.FetchRemote({ name: remote.name }),
@@ -422,7 +438,7 @@ const remotes = (h: H, model: Model, data: SettingsData | null): Html.Html => {
                   [
                     h.Class("gp-btn-quiet"),
                     h.Type("button"),
-                    h.Disabled(busy || branch === null),
+                    h.Disabled(busy || offline || branch === null),
                     h.OnClick(
                       AppMessage.SubmittedAdmin({
                         action: AdminAction.PushRemote({
@@ -438,7 +454,7 @@ const remotes = (h: H, model: Model, data: SettingsData | null): Html.Html => {
                   [
                     h.Class("gp-btn-quiet"),
                     h.Type("button"),
-                    h.Disabled(busy || branch === null),
+                    h.Disabled(busy || offline || branch === null),
                     h.OnClick(
                       AppMessage.SubmittedAdmin({
                         action: AdminAction.PullRemote({
@@ -454,7 +470,7 @@ const remotes = (h: H, model: Model, data: SettingsData | null): Html.Html => {
                   [
                     h.Class("gp-btn-quiet"),
                     h.Type("button"),
-                    h.Disabled(busy),
+                    h.Disabled(busy || offline),
                     h.OnClick(
                       AppMessage.SubmittedAdmin({
                         action: AdminAction.DeleteRemote({ name: remote.name }),
@@ -519,7 +535,7 @@ const remotes = (h: H, model: Model, data: SettingsData | null): Html.Html => {
 
 const webhooks = (h: H, model: Model, data: SettingsData | null): Html.Html => {
   const busy = model.settingsScreen.busy;
-  const offline = data === null;
+  const offline = data === null || unconfirmed(model);
   return h.section(
     [h.Class("gp-setting-card"), h.DataAttribute("card", "webhooks")],
     [
@@ -538,7 +554,7 @@ const webhooks = (h: H, model: Model, data: SettingsData | null): Html.Html => {
               [
                 h.Class("gp-btn-quiet"),
                 h.Type("button"),
-                h.Disabled(busy),
+                h.Disabled(busy || offline),
                 h.OnClick(
                   AppMessage.SubmittedAdmin({
                     action: AdminAction.DeleteWebhook({ id: hook.id }),
@@ -593,7 +609,7 @@ const webhooks = (h: H, model: Model, data: SettingsData | null): Html.Html => {
 
 const maintenance = (h: H, model: Model, data: SettingsData | null): Html.Html => {
   const busy = model.settingsScreen.busy;
-  const offline = data === null;
+  const offline = data === null || unconfirmed(model);
   const branch = data?.defaultBranch ?? null;
   const reflog = model.settingsScreen.reflog;
   const action = (label: string, next: AdminAction, disabled = false): Html.Html =>
@@ -708,8 +724,14 @@ const policy = (
         ? h.div(
             [h.Class("gp-field-value")],
             [
+              // `null` rather than "Offline" when the read simply came back
+              // without a policy: the server answered every other card on
+              // this screen, and calling that an outage sends an operator
+              // after a network that is fine. `LoadSettings` swallows a
+              // refused `GET /policy`, so this is the ordinary shape for a
+              // reader without `policy.read`.
               unavailable(
-                failure._tag === "Some" ? failure.value : "Offline",
+                failure._tag === "Some" ? failure.value : null,
                 "the policy could not be read",
               ),
             ],
@@ -779,7 +801,11 @@ const policy = (
                         [
                           h.Class("gp-btn-quiet"),
                           h.Type("submit"),
-                          h.Disabled(model.settingsScreen.busy),
+                          // Beside `busy` because the card can now be drawn
+                          // from an answer the last read failed to confirm,
+                          // and publishing from one would write rules the
+                          // repository may have moved past.
+                          h.Disabled(model.settingsScreen.busy || unconfirmed(model)),
                         ],
                         ["Publish policy"],
                       ),

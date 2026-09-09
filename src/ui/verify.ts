@@ -1234,6 +1234,32 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ((await page.textContent(".gp-notice")) ?? "").includes("Code search needs the server"),
   );
 
+  // The field clears itself on Escape and on the ✕ it inserts, and says so
+  // only through its own `search` event. A Model bound to the inner input's
+  // `input` never hears either, and then keeps answering for text that is no
+  // longer on screen — which is what this pins.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(500);
+  check(
+    "Escape clears the query the screen is answering",
+    (await page.locator(".gp-search-task-row").count()) === 0 &&
+      (await page.inputValue(".gp-search input")) === "",
+  );
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("auth");
+  await page.waitForTimeout(900);
+  check(
+    "and typing again searches again",
+    (await page.locator(".gp-search-task-row").count()) === 2,
+  );
+  await page.click(".gp-search [data-search-clear]");
+  await page.waitForTimeout(500);
+  check(
+    "the clear button reaches the Model too",
+    (await page.locator(".gp-search-task-row").count()) === 0 &&
+      (await page.inputValue(".gp-search input")) === "",
+  );
+
   // --- what has no endpoint says so, rather than pretending ---------------
   await page.goto(`${origin}/hub/settings`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(700);
@@ -1466,7 +1492,18 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   // --- a new file, from the explorer's "+" --------------------------------
   await page.click('.gp-explorer button[aria-label="New file"]');
   await editorBox(page).waitFor({ state: "visible" });
-  await page.fill(".gp-editor-path", "docs/notes.md");
+  // Typed, not filled. `fill` sets the whole value in one event; a reader
+  // types a character at a time, and the editor beside this field pulls the
+  // caret into itself whenever it mounts — so a path in the key would make
+  // this field unwriteable and only a paste would work.
+  await page.click(".gp-editor-path");
+  await page.keyboard.type("docs/notes.md");
+  await page.waitForTimeout(300);
+  check(
+    "the path field keeps the caret while a new file is named",
+    (await page.inputValue(".gp-editor-path")) === "docs/notes.md" &&
+      (await page.evaluate(() => document.activeElement?.matches(".gp-editor-path") === true)),
+  );
   await fillEditor(page, "# Notes\n");
   await page.click(".gp-editor-bar .gp-btn-primary");
   await page.waitForTimeout(1500);

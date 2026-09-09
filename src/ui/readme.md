@@ -118,8 +118,8 @@ pull requests, reviews, checks and tasks as signed events in `refs/hub/*`, and
 `GET /hub/pulls/:id`, and one write — `POST /hub/events`, which appends a
 _pre-signed_ event (the server holds nobody's key, so authorship stays where
 the key lives). `hub.ts` queries those endpoints through the derived atom
-client and folds the answers into `store.ts`; while the hub holds anything,
-the screens show the repository's own state. A repository whose hub is empty,
+client and answers with the Messages that fold them into the Model; while the
+hub holds anything, the screens show the repository's own state. A repository whose hub is empty,
 absent or unreachable keeps the design's fixtures (`fixtures.ts`) — the
 documented sample, never passed off as live.
 
@@ -194,9 +194,10 @@ client from `src/server/Api.ts`'s own `HttpApi` declaration
 (`AtomHttpApi.Service` from `effect/unstable/reactivity`), so paths, payloads
 and error unions cannot drift from the server — the compiler owns that now.
 It loads lazily (like Shiki) so the entry bundle does not carry the Effect
-runtime; `atoms.ts` bridges atom subscriptions into Lit's reactive-controller
-lifecycle. The hand-written `api.ts` remains for the screens that predate the
-derivation and migrates piecemeal.
+runtime; `atoms.ts` holds the one `AtomRegistry` the page reads through, and
+nothing subscribes to it from a view — Commands read it and turn what it
+answers into Messages. The hand-written `api.ts` remains for the screens that
+predate the derivation and migrates piecemeal.
 
 ### Pointing it at a repository
 
@@ -262,27 +263,62 @@ shape, end to end.
 
 ## Files
 
+The application, in the order the Architecture table above puts it:
+
+| File                      | Role                                             |
+| ------------------------- | ------------------------------------------------ |
+| `main.ts`                 | Entry point                                      |
+| `app.ts`                  | The application: `init`, wiring, DevTools        |
+| `app.model.ts`            | Every application fact, as a schema              |
+| `app.message.ts`          | Every application event                          |
+| `app.update.ts`           | Every state transition — pure, and exhaustive    |
+| `app.command.ts`          | Shared one-shot effects: tasks, grep, history    |
+| `app.command.code.ts`     | The Code screen's effects                        |
+| `app.command.detail.ts`   | The Change Request workflows                     |
+| `app.command.settings.ts` | The Settings administration surface              |
+| `app.command.shell.ts`    | Navigation, dialogs, the clipboard               |
+| `app.subscription.ts`     | Ongoing external sources: ⌘K, system palette     |
+| `app.route.ts`            | The routes, parsed                               |
+| `route.ts`                | The addresses, as strings — shared with the host |
+| `app.view.ts`             | The shell's view, and the screen switch          |
+| `view.shell.ts`           | The left rail                                    |
+| `view.*.ts`               | One module per screen                            |
+| `mount.pierre-*.ts`       | The `@pierre/diffs` and `@pierre/trees` mounts   |
+| `element.base-wc.ts`      | base-wc elements, declared to Foldkit            |
+| `elements.ts`             | base-wc element registration                     |
+| `icon.ts`                 | Phosphor Icons (regular), as Foldkit nodes       |
+
+What the screens read, and what they read it with:
+
+| File            | Role                                       |
+| --------------- | ------------------------------------------ |
+| `api.ts`        | Typed client for the JSON API              |
+| `client.ts`     | Atom client derived from `Api.ts`          |
+| `atoms.ts`      | The page's one `AtomRegistry`              |
+| `repository.ts` | Which client answers, and who holds it     |
+| `local.ts`      | OPFS repository; clone, commit, push       |
+| `hub.ts`        | Hub queries, answered as Messages          |
+| `identity.ts`   | The browser's signing key; hub writes      |
+| `thrown.ts`     | What a rejected promise carries, unwrapped |
+| `highlight.ts`  | Lazy `@pierre/diffs` loader                |
+
+The domain each screen is about:
+
+| File          | Role                                            |
+| ------------- | ----------------------------------------------- |
+| `model.ts`    | Task / Change Request domain                    |
+| `task.ts`     | Tasks as a tree: read, replace, re-file         |
+| `code.ts`     | The Code screen's view, and the design's sample |
+| `activity.ts` | The timeline's windows and rows                 |
+| `settings.ts` | The Settings cards, as data                     |
+| `fixtures.ts` | The design's Task data                          |
+| `theme.ts`    | Palette choice and persistence                  |
+| `time.ts`     | Relative times, in the design's words           |
+
+And the surrounding build:
+
 | File                   | Role                                          |
 | ---------------------- | --------------------------------------------- |
-| `main.ts`              | Entry point                                   |
-| `app.ts`               | Shell, routing                                |
-| `base.ts`              | Light-DOM Lit base, navigation event          |
-| `elements.ts`          | base-wc element registration                  |
-| `api.ts`               | Typed client for the JSON API                 |
-| `client.ts`            | Atom client derived from `Api.ts`             |
-| `atoms.ts`             | Atom ↔ Lit reactive-controller bridge         |
-| `hub.ts`               | Hub queries folded into the store             |
-| `identity.ts`          | The browser's signing key; hub writes         |
-| `local.ts`             | OPFS repository; clone, commit, push          |
-| `model.ts`             | Task / Change Request domain                  |
-| `fixtures.ts`          | The design's Task data                        |
-| `store.ts`             | The mutable, observable Task store            |
-| `theme.ts`             | Palette choice and persistence                |
-| `icons.ts`             | Phosphor Icons (regular), inline SVG          |
-| `highlight.ts`         | Lazy `@pierre/diffs` loader                   |
-| `nav.sidebar.ts`       | The left rail                                 |
-| `screen.*.ts`          | One module per screen                         |
-| `screen.search.ts`     | ⌘K results: tasks and `/grep` hits            |
 | `tokens.css`           | Both palettes, as custom properties           |
 | `styles/*.css`         | Shell, primitives, and screen styles          |
 | `dev.ts`               | Vite middleware mounted on the node host      |
@@ -318,12 +354,6 @@ shape, end to end.
   the lockfile now pins. Anything similar in a future version will surface as a
   `npm run check` failure in `node_modules/`, not in `src/ui/` — fix it upstream by
   preference, or carry it in `patches/` as the `alchemy` dependency does.
-
-- **Reactive fields use `accessor`.** `src/ui/tsconfig.json` enables
-  TypeScript's legacy decorators and disables define-style class fields. Vite's
-  Oxc transform then lowers Lit's decorators before the browser sees them;
-  `useDefineForClassFields: false` keeps generated fields from shadowing Lit's
-  prototype setters.
 
 - **Shiki is loaded on demand.** It carries every bundled grammar, which is
   megabytes. `highlight.ts` defers `@pierre/diffs` to first use so Activity,

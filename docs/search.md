@@ -17,15 +17,16 @@ already owns a stronger identity primitive: Git objects.
 
 ## Today
 
-`src/ui/screen.search.ts` chooses `refs/heads/main` (or the first branch when
-there is no `main`) and calls `SearchApi.grep(pattern, ref)`. The local client in
-`src/ui/local.ts` implements the same surface as the server: resolve the ref,
-walk its tree, read blobs, skip unsuitable content, decode text, and look for
-the lower-cased literal query line by line. Results are capped at 50 by default.
+The UI's `Grep` Command (`src/ui/app.command.ts`) resolves the repository's HEAD
+and calls `SearchApi.grep(pattern, ref)`. The local client in `src/ui/local.ts`
+implements the same surface as the server: resolve the ref, walk its tree, read
+blobs, skip unsuitable content, decode text, and look for the lower-cased
+literal query line by line. Results are capped at 50 by default.
 
-The UI has a generation counter so an old request cannot replace the result of
-a newer query. That protects presentation state, but it does not cancel the old
-work: a superseded grep can still finish walking and reading the repository.
+The answer names the query it is about, so an old request cannot replace the
+result of a newer one. That protects presentation state, but it does not cancel
+the old work: a superseded grep can still finish walking and reading the
+repository.
 
 The shape is approximately:
 
@@ -380,7 +381,7 @@ src/server/Api.ts / src/ui/local.ts
 
 The exact module names are not a commitment. The boundary is: indexing is a
 repository capability over Git objects, not a special-case optimization owned
-by `screen.search.ts` or the HTTP handler.
+by the UI's search Command or the HTTP handler.
 
 Because the index is derived state, the first implementation can be in-memory
 and lazily built. Persistence in OPFS, filesystem cache, R2/SQLite, or another

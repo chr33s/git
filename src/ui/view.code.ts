@@ -51,11 +51,13 @@ const explorer = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView):
                   h.Class("gp-icon-btn"),
                   h.Type("button"),
                   h.Title(
-                    view.offline
+                    Code.unreachable(view)
                       ? "Read-only — the git+ API is not reachable"
-                      : !writable(view)
-                        ? "Select or create a branch to edit"
-                        : "New file",
+                      : view.pending
+                        ? "Reading the repository…"
+                        : !writable(view)
+                          ? "Select or create a branch to edit"
+                          : "New file",
                   ),
                   h.AriaLabel("New file"),
                   h.Disabled(!writable(view)),
@@ -94,20 +96,34 @@ const explorer = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView):
           ),
         ],
       ),
-      // Keyed on the ref and the path count: a different tree is a different
-      // element, so the library builds a fresh one rather than being asked to
-      // reconcile two repositories inside one instance.
-      h.keyed("div")(`${view.ref}:${String(view.paths.length)}`, [
-        h.Class("gp-explorer-tree"),
-        h.OnMount(
-          PierreTree({
-            paths: view.paths,
-            repo: view.offline ? "" : model.repo,
-            selected: view.selected,
-            offline: view.offline,
-          }),
-        ),
-      ]),
+      // Keyed on the ref, the paths themselves and which repository this is: a
+      // different tree is a different element, so the library builds a fresh
+      // one rather than being asked to reconcile two repositories inside one
+      // instance. `offline` is part of that — the sample and the real
+      // repository can share a ref and a file list, and they do not share a
+      // git status. `selected` deliberately is not: the tree owns its scroll
+      // and its open folders, and rebuilding it on every click would throw
+      // both away.
+      //
+      // The paths and not how many there are, because a rename leaves the
+      // count alone and a host that is not re-keyed is never re-mounted — so
+      // the explorer went on listing a file that no longer exists, whose row
+      // `ClickedFile` then refuses because the path is not in the tree it is
+      // checked against, while the file that replaced it had no row at all.
+      h.keyed("div")(
+        `${view.ref}:${Code.fingerprint(view.paths.join("\n"))}:${String(view.offline)}`,
+        [
+          h.Class("gp-explorer-tree"),
+          h.OnMount(
+            PierreTree({
+              paths: view.paths,
+              repo: view.offline ? "" : model.repo,
+              selected: view.selected,
+              offline: view.offline,
+            }),
+          ),
+        ],
+      ),
     ],
   );
 
@@ -205,7 +221,7 @@ const branchMenu = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView
                         [
                           h.Class("gp-btn-quiet"),
                           h.Type("button"),
-                          h.OnClick(AppMessage.ChangedNewBranch({ name: "" })),
+                          h.OnClick(AppMessage.ClickedCancelNewBranch()),
                         ],
                         ["Cancel"],
                       ),
@@ -611,7 +627,15 @@ const diffReview = (h: H, model: Model, view: CodeView, name: string): Html.Html
   if (model.codeScreen.draft === (view.content ?? "")) {
     return h.div([h.Class("gp-empty")], ["No changes yet."]);
   }
-  return h.keyed("div")(`review:${name}:${model.theme}:${String(model.codeScreen.draft.length)}`, [
+  // Keyed like the source host beside it: a name that is being typed is not
+  // an identity, and rebuilding this one per keystroke means a dynamic import
+  // and a Shiki pass per character. The mount takes `path` for its grammar and
+  // captures it once, which is the same trade made there.
+  const identity =
+    model.codeScreen.newPath === null
+      ? `review:${name}:${model.theme}:${String(model.codeScreen.draft.length)}`
+      : `review:__new:${String(model.codeScreen.session)}:${model.theme}:${String(model.codeScreen.draft.length)}`;
+  return h.keyed("div")(identity, [
     h.Class("gp-diff-review-host gp-diff-host"),
     h.OnMount(
       PierreDiff({
@@ -727,13 +751,15 @@ const fileCard = (h: H, model: Model, view: CodeView): Html.Html => {
                     h.Type("button"),
                     h.DataAttribute("tight", ""),
                     h.Title(
-                      view.offline
+                      Code.unreachable(view)
                         ? "Read-only — the git+ API is not reachable"
-                        : !writable(view)
-                          ? "Select or create a branch to edit"
-                          : model.codeScreen.at !== null
-                            ? "Read-only — viewing an old commit"
-                            : "Edit file",
+                        : view.pending
+                          ? "Reading the repository…"
+                          : !writable(view)
+                            ? "Select or create a branch to edit"
+                            : model.codeScreen.at !== null
+                              ? "Read-only — viewing an old commit"
+                              : "Edit file",
                     ),
                     h.AriaLabel("Edit file"),
                     h.Disabled(
@@ -759,11 +785,24 @@ const fileCard = (h: H, model: Model, view: CodeView): Html.Html => {
             // patched underneath. Mount arguments are captured once, at
             // mount, so the blob's arrival has to change this key — otherwise
             // the pane keeps the empty text it was mounted with while the
-            // request was still out. The draft is deliberately *not* in it:
-            // in edit mode the Model tracks every keystroke, and remounting
-            // on each one would take the caret with it.
+            // request was still out.
+            //
+            // The draft is deliberately *not* in it: in edit mode the Model
+            // tracks every keystroke, and remounting on each one would take
+            // the caret with it. A new file's *path* is the same hazard —
+            // typed a character at a time into a field beside this one, while
+            // the editor pulls the caret into itself on mount — so a file
+            // being created is keyed on its editing *session* instead, and on
+            // nothing else. Not the name, which is being typed; not another
+            // file's blob, whose late arrival would remount this one. The
+            // session is what makes a second "+" a second editor rather than
+            // the first one still showing an abandoned draft. The cost is
+            // that a file being created has no grammar until it is saved and
+            // reopened.
             h.keyed("div")(
-              `${name}:${String(editing)}:${model.theme}:${model.codeScreen.at ?? ""}:${view.content === null ? "pending" : String(view.content.length)}`,
+              creating
+                ? `__new:${String(model.codeScreen.session)}:${model.theme}`
+                : `${name}:${String(editing)}:${model.theme}:${model.codeScreen.at ?? ""}:${Code.fingerprint(view.content)}`,
               [
                 h.Class("gp-source-host gp-diff-host"),
                 h.Hidden(model.codeScreen.diffing),
@@ -839,7 +878,7 @@ export const view = (
             [h.Class("gp-screen gp-screen--code")],
             [
               notice,
-              current.offline
+              Code.unreachable(current)
                 ? h.p(
                     [h.Class("gp-notice")],
                     [`Showing the design's sample repository — ${current.reason}.`],

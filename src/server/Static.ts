@@ -60,6 +60,20 @@ const decodedPath = (pathname: string): string | null => {
 };
 
 /**
+ * This request's path inside the UI's directory, or `null` when it is not the
+ * UI's at all.
+ *
+ * `/hub/main.js` reads as `/main.js`; `/hub` and `/hub/` read as the root.
+ * `/hubbub` is *not* under the prefix — the comparison is on whole segments,
+ * because a repository is free to be called that.
+ */
+const underPrefix = (pathname: string): string | null => {
+  if (pathname === UI_PREFIX) return "/";
+  if (!pathname.startsWith(`${UI_PREFIX}/`)) return null;
+  return pathname.slice(UI_PREFIX.length);
+};
+
+/**
  * The file `pathname` names under `root`, or `null`.
  *
  * `null` for a directory, for anything missing, and for a path that climbs out
@@ -77,20 +91,6 @@ const decodedPath = (pathname: string): string | null => {
  * view into a pooled allocation typed `ArrayBufferLike`, and `BodyInit` takes
  * a view over a plain `ArrayBuffer`.
  */
-/**
- * This request's path inside the UI's directory, or `null` when it is not the
- * UI's at all.
- *
- * `/hub/main.js` reads as `/main.js`; `/hub` and `/hub/` read as the root.
- * `/hubbub` is *not* under the prefix — the comparison is on whole segments,
- * because a repository is free to be called that.
- */
-const underPrefix = (pathname: string): string | null => {
-  if (pathname === UI_PREFIX) return "/";
-  if (!pathname.startsWith(`${UI_PREFIX}/`)) return null;
-  return pathname.slice(UI_PREFIX.length);
-};
-
 export const fileAt = async (
   root: string,
   pathname: string,

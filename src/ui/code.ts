@@ -133,16 +133,72 @@ const SAMPLE: CodeView = {
   },
   tip: null,
   offline: true,
+  pending: false,
   reason: "",
 };
+
+/**
+ * Nothing yet: the repository has been asked and has not answered.
+ *
+ * Empty rather than the sample, because the sample is a claim — that the
+ * server could not be reached — and until it answers there is nothing to
+ * claim. The explorer draws no tree, the commit bar no commit, and no notice
+ * says anything at all.
+ */
+const PENDING: CodeView = {
+  ...SAMPLE,
+  paths: [],
+  selected: null,
+  content: null,
+  head: null,
+  pending: true,
+};
+
+/**
+ * The selector `CloseDialog` is given; the dialog is found by it, not held.
+ *
+ * Here rather than beside the view that draws it: `update` closes the dialog
+ * and must not reach into a view module — `view.code.ts` pulls in the Pierre
+ * mounts, and the pure half of the application cannot depend on them.
+ */
+export const NEW_BRANCH_DIALOG = "ui-dialog.gp-new-branch";
+
+/**
+ * A blob's identity, for a keyed host that must rebuild when the text changes.
+ *
+ * Not the length: two revisions of a file are the same size often enough — a
+ * typo fix, a version bump, a refresh after an equal-length edit — that a
+ * length alone lets a stale blob keep the key it had, and a mount whose text
+ * was captured once then goes on painting the wrong revision.
+ *
+ * FNV-1a over the string, which is a fingerprint rather than a guarantee. A
+ * collision here means one stale pane until the next navigation; a hash strong
+ * enough to rule it out would cost more than that is worth on every render.
+ */
+export const fingerprint = (content: string | null): string => {
+  if (content === null) return "pending";
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < content.length; at++) {
+    hash ^= content.charCodeAt(at);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${String(content.length)}.${hash.toString(36)}`;
+};
+
+/**
+ * Whether the sample is standing in because the repository could not be read.
+ *
+ * Not the same as `offline`, which a still-pending view also carries: nothing
+ * may be said about the server until it has answered, so everything that names
+ * an outage asks this rather than reading `offline` directly.
+ */
+export const unreachable = (view: CodeView): boolean => view.offline && !view.pending;
 
 /** What is on screen: the repository, or the sample standing in for it. */
 export const viewOf = (model: Model): CodeView => {
   const held = AsyncData.getData(model.codeScreen.view);
   if (held._tag === "Some") return held.value;
   const failure = AsyncData.getError(model.codeScreen.view);
-  return {
-    ...SAMPLE,
-    reason: failure._tag === "Some" ? failure.value : "no API client was provided",
-  };
+  if (failure._tag !== "Some") return PENDING;
+  return { ...SAMPLE, reason: failure.value };
 };

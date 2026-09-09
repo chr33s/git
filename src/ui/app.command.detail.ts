@@ -22,9 +22,11 @@ import { absent, reasonOf } from "./thrown.ts";
 /**
  * Ask the server what changed, then read both sides of each file.
  *
- * Interruptible and keyed by the task: a reader clicking through Change
- * Requests supersedes the previous read rather than racing it, which is what
- * the old generation counter was doing by hand and paying for twice over.
+ * Keyed by the task, and guarded on the answer: a reader clicking through
+ * Change Requests gets the one they are looking at, because `diffFor` names it
+ * and `update` drops anything else. The key alone would not do that —
+ * `interrupt` registers an address, and nothing is cancelled unless `update`
+ * returns an Interrupt.
  */
 export const LoadDiff = Command.define("LoadDiff", {
   args: { id: Schema.String, sourceRef: Schema.String, targetRef: Schema.String },
@@ -54,13 +56,18 @@ export const LoadDiff = Command.define("LoadDiff", {
       );
       return AppMessage.SucceededLoadDiff({ id, files: loaded });
     }).pipe(
-      // Refs the repository does not have — the fixture case — leave the
-      // design's own diff showing, labelled as the sample it is.
-      Effect.orElseSucceed(() =>
-        AppMessage.FellBackLoadDiff({
-          id,
-          reason: `${id} names refs that are not in this repository`,
-        }),
+      // The design's own diff stands in either way, but not under the wrong
+      // sentence: a server that answered says why in its own words, and only
+      // a failure that says nothing is reported as refs this repository does
+      // not have. Claiming missing refs for an outage or a refused key sends
+      // the reader after a repository problem that is not there.
+      Effect.catch((cause) =>
+        Effect.succeed(
+          AppMessage.FellBackLoadDiff({
+            id,
+            reason: reasonOf(cause, `${id} names refs that are not in this repository`),
+          }),
+        ),
       ),
     ),
 });
@@ -80,13 +87,14 @@ export const CommentRemote = Command.define("CommentRemote", {
       const hub = yield* Effect.tryPromise(async () => await import("./hub.ts"));
       const sent = yield* Effect.tryPromise(async () => await hub.commentOn(id, body));
       return sent
-        ? AppMessage.SucceededComment()
+        ? AppMessage.SucceededComment({ id, body })
         : AppMessage.FailedComment({
+            id,
             reason: "the hub refused the comment — is this key a member?",
           });
     }).pipe(
       Effect.orElseSucceed(() =>
-        AppMessage.FailedComment({ reason: "the hub could not be reached" }),
+        AppMessage.FailedComment({ id, reason: "the hub could not be reached" }),
       ),
     ),
 });
@@ -106,11 +114,12 @@ export const MergeRemote = Command.define("MergeRemote", {
       const hub = yield* Effect.tryPromise(async () => await import("./hub.ts"));
       const refused = yield* Effect.tryPromise(async () => await hub.merge(id, head, base));
       return refused === null
-        ? AppMessage.SucceededMerge()
-        : AppMessage.FailedMerge({ reason: refused });
+        ? AppMessage.SucceededMerge({ id })
+        : AppMessage.FailedMerge({ id, reason: refused });
     }).pipe(
       Effect.orElseSucceed(() =>
         AppMessage.FailedMerge({
+          id,
           reason: "the hub could not be reached — the Change Request stays open",
         }),
       ),
@@ -139,14 +148,16 @@ export const MergeFixture = Command.define("MergeFixture", {
         async () => await mergeFixture({ id, title, sourceRef, targetRef }),
       );
       return outcome === null
-        ? AppMessage.SucceededMerge()
-        : AppMessage.FailedMerge({ reason: outcome });
+        ? AppMessage.SucceededMerge({ id })
+        : AppMessage.FailedMerge({ id, reason: outcome });
     }).pipe(
       // `mergeFixture` rethrows what it does not recognise. Recovered rather
       // than left as a defect: Foldkit's runner treats a defect as terminal,
       // and a Change Request that could not be merged is not a reason to end
       // the session.
-      Effect.catch((cause) => Effect.succeed(AppMessage.FailedMerge({ reason: reasonOf(cause) }))),
+      Effect.catch((cause) =>
+        Effect.succeed(AppMessage.FailedMerge({ id, reason: reasonOf(cause) })),
+      ),
     ),
 });
 
@@ -197,11 +208,14 @@ export const ReviewRemote = Command.define("ReviewRemote", {
       const hub = yield* Effect.tryPromise(async () => await import("./hub.ts"));
       const sent = yield* Effect.tryPromise(async () => await hub.review(id, decision, head));
       return sent
-        ? AppMessage.SucceededMerge()
-        : AppMessage.FailedMerge({ reason: "the hub refused the review — is this key a member?" });
+        ? AppMessage.SucceededMerge({ id })
+        : AppMessage.FailedMerge({
+            id,
+            reason: "the hub refused the review — is this key a member?",
+          });
     }).pipe(
       Effect.orElseSucceed(() =>
-        AppMessage.FailedMerge({ reason: "the hub could not be reached" }),
+        AppMessage.FailedMerge({ id, reason: "the hub could not be reached" }),
       ),
     ),
 });
@@ -224,11 +238,11 @@ export const ThreadAction = Command.define("ThreadAction", {
           : await hub.resolveThread(id, thread, action === "resolve"),
       );
       return sent
-        ? AppMessage.SucceededThread()
-        : AppMessage.FailedThread({ reason: "the hub refused the thread update" });
+        ? AppMessage.SucceededThread({ id, thread, body: action === "reply" ? body : "" })
+        : AppMessage.FailedThread({ id, reason: "the hub refused the thread update" });
     }).pipe(
       Effect.orElseSucceed(() =>
-        AppMessage.FailedThread({ reason: "the hub could not be reached" }),
+        AppMessage.FailedThread({ id, reason: "the hub could not be reached" }),
       ),
     ),
 });
@@ -245,11 +259,11 @@ export const TaskAction = Command.define("TaskAction", {
       const hub = yield* Effect.tryPromise(async () => await import("./hub.ts"));
       const sent = yield* Effect.tryPromise(async () => await hub.taskAction(id, action));
       return sent
-        ? AppMessage.SucceededTaskAction()
-        : AppMessage.FailedTaskAction({ reason: "the hub refused the task update" });
+        ? AppMessage.SucceededTaskAction({ id })
+        : AppMessage.FailedTaskAction({ id, reason: "the hub refused the task update" });
     }).pipe(
       Effect.orElseSucceed(() =>
-        AppMessage.FailedTaskAction({ reason: "the hub could not be reached" }),
+        AppMessage.FailedTaskAction({ id, reason: "the hub could not be reached" }),
       ),
     ),
 });
