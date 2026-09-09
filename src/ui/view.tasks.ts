@@ -64,15 +64,12 @@ const row = (h: Html.HtmlBuilder<AppMessage>, task: Task, depth: number): Html.H
     ],
     [
       depth > 0 ? h.span([h.Class("gp-task-glyph"), h.AriaHidden(true)], ["└"]) : h.empty,
-      h.span(
-        [
-          h.Class("gp-status-ring"),
-          h.Style({ "--gp-status-color": `var(--gp-${ringToken(task.status)})` }),
-          ...(isTerminal(task.status) ? [h.DataAttribute("filled", "")] : []),
-          h.AriaHidden(true),
-        ],
-        [],
-      ),
+      h.span([
+        h.Class("gp-status-ring"),
+        h.Style({ "--gp-status-color": `var(--gp-${ringToken(task.status)})` }),
+        ...(isTerminal(task.status) ? [h.DataAttribute("filled", "")] : []),
+        h.AriaHidden(true),
+      ]),
       kindChip(h, task),
       h.span([h.Class("gp-id")], [task.id]),
       h.span([h.Class("gp-task-title")], [task.title]),

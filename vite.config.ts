@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { foldkit } from "@foldkit/vite-plugin";
+import foldkitRecommended from "@foldkit/oxlint-plugin/recommended.json" with { type: "json" };
 import effectRecommended from "@effect/tsgo/oxlint-presets/recommended.json" with { type: "json" };
 import { defineConfig, type PluginOption } from "vite-plus";
 
@@ -12,6 +13,19 @@ const effectRules = Object.fromEntries(
       severity === "error" ? "error" : "warn",
     ],
   ),
+);
+
+const foldkitRules = Object.fromEntries(
+  Object.entries(foldkitRecommended.rules).map(
+    ([name, severity]): readonly [string, "error" | "off"] => [
+      name,
+      severity === "error" ? "error" : "off",
+    ],
+  ),
+);
+
+const foldkitOff = Object.fromEntries(
+  Object.keys(foldkitRecommended.rules).map((name): readonly [string, "off"] => [name, "off"]),
 );
 
 /** Keep developer Git configuration out of subprocess-backed test results. */
@@ -80,13 +94,30 @@ export default defineConfig(({ mode }) => ({
   },
   fmt: { ignorePatterns: [] },
   lint: {
-    jsPlugins: [{ name: "anti-slop", specifier: "./tools/oxlint/anti-slop/index.ts" }],
+    jsPlugins: [
+      { name: "anti-slop", specifier: "./tools/oxlint/anti-slop/index.ts" },
+      { name: "foldkit", specifier: "@foldkit/oxlint-plugin" },
+    ],
     options: { typeAware: true, typeCheck: true },
     plugins: ["unicorn", "typescript", "oxc", "effecttsgo"],
     overrides: [
+      // Foldkit's rules describe Model/Command/view discipline. They are
+      // noise on git, trust, artifacts and the Worker — those are not a
+      // Foldkit application. The UI's TEA surface is.
+      {
+        files: [
+          "src/ui/app.ts",
+          "src/ui/app.*.ts",
+          "src/ui/view.*.ts",
+          "src/ui/mount.*.ts",
+          "src/ui/element.*.ts",
+          "src/ui/main.ts",
+        ],
+        rules: foldkitRules,
+      },
       {
         files: ["src/**/*.test.ts", "src/**/*.integration.ts"],
-        rules: { "typescript/no-floating-promises": "off" },
+        rules: { "typescript/no-floating-promises": "off", ...foldkitOff },
       },
     ],
     rules: {

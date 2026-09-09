@@ -83,7 +83,13 @@ describe("the source tree", () => {
       // an Effect bump is a Foldkit bump and has to be made deliberately.
       const own = manifestAt("package.json");
       const declared = { ...own.dependencies, ...own.devDependencies };
-      for (const name of ["foldkit", "@foldkit/vite-plugin", "@foldkit/devtools", "effect"]) {
+      for (const name of [
+        "foldkit",
+        "@foldkit/vite-plugin",
+        "@foldkit/devtools",
+        "@foldkit/oxlint-plugin",
+        "effect",
+      ]) {
         const pin = declared[name];
         assert.notEqual(pin, undefined, `${name} is not installed`);
         assert.match(pin ?? "", /^\d/, `${name} is ranged rather than pinned: ${pin ?? ""}`);

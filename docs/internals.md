@@ -30,6 +30,8 @@ repo sets `save-exact=true` deliberately.
 
 `alchemy` is behind a `patch-package` patch. Oxlint `typeCheck` and `tsc` both
 run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).
+Foldkit's `@foldkit/oxlint-plugin` is loaded the same way, scoped to the UI's
+TEA files (`src/ui/app*.ts`, views, mounts, `element.base-wc.ts`).
 
 ## Module map
 

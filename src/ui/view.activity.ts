@@ -130,7 +130,8 @@ const sessions = (h: Html.HtmlBuilder<AppMessage>, model: Model): Html.Html => {
       h.div(
         [h.Class("gp-panel-card gp-sessions")],
         model.tasks.sessions.map((session) =>
-          h.div(
+          h.keyed("div")(
+            session.id,
             [h.Class("gp-list-row")],
             [
               h.span([h.Class("gp-sha")], [session.id.slice(0, 8)]),
@@ -271,8 +272,8 @@ export const view = (
           ...(now === null
             ? []
             : [
-                h.div([h.Class("gp-cal-now"), h.Style({ left: now }), h.AriaHidden(true)], []),
-                h.div([h.Class("gp-cal-now-dot"), h.Style({ left: now }), h.AriaHidden(true)], []),
+                h.div([h.Class("gp-cal-now"), h.Style({ left: now }), h.AriaHidden(true)]),
+                h.div([h.Class("gp-cal-now-dot"), h.Style({ left: now }), h.AriaHidden(true)]),
               ]),
           h.div([h.Class("gp-cal-grid")], cards),
         ],
