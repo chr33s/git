@@ -32,22 +32,17 @@ import "./screen.tasks.ts";
 const SCREENS: readonly string[] = ["activity", "code", "tasks", "detail", "settings", "search"];
 
 /**
- * Declared above `GpApp`, not below it.
- *
- * `@customElement` registers the tag as the class initialises, and `<gp-app>`
- * is already in the document — so `connectedCallback` runs during that
- * initialisation, before any `const` further down the module has a value. A
- * reference from below would land in the temporal dead zone and throw on the
- * very first navigation.
+ * Declared above `GpApp`: `connectedCallback` can run during class
+ * initialisation (the tag is already in the document), before a `const`
+ * further down the module has a value — a reference from below would land
+ * in the temporal dead zone and throw on the first navigation.
  */
 const isScreen = (value: string): value is Screen => SCREENS.includes(value);
 
 /**
  * Route ids, encoded per segment. A file path keeps its `/` as route
- * structure while everything inside a segment — spaces, `%`, `#`, Unicode —
- * is component-encoded, so a copied URL survives the address bar and a
- * refresh instead of being truncated at the first character the hash format
- * claims for itself.
+ * structure while everything inside a segment is component-encoded, so a
+ * copied URL survives the address bar and a refresh.
  */
 const encodeId = (id: string): string => id.split("/").map(encodeURIComponent).join("/");
 
@@ -202,12 +197,10 @@ export class GpApp extends GitPlusElement {
   };
 
   /**
-   * `#/tasks`, `#/detail/CR-14`, `#/code/src/server/Api.ts` — deep-linkable,
-   * and survives a refresh. Only the first segment is the screen; the rest is
-   * the id, decoded segment by segment and rejoined because a file path
-   * carries slashes. A malformed escape becomes a visible navigation error on
-   * the screen's bare state, never an exception during shell initialisation —
-   * and a route that names no id clears whatever an earlier one selected.
+   * `#/tasks`, `#/detail/CR-14`, `#/code/src/server/Api.ts` — only the first
+   * segment is the screen; the rest is the id, decoded segment by segment and
+   * rejoined because a file path carries slashes. A malformed escape becomes
+   * a visible navigation error rather than an exception during shell init.
    */
   #fromHash(): void {
     const [screen, ...rest] = globalThis.location.hash.replace(/^#\/?/, "").split("/");

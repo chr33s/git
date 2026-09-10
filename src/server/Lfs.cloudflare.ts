@@ -80,12 +80,10 @@ export const r2 = (options: CloudflareLfsOptions): Layer.Layer<LfsStore> =>
 
       write: (oid, body) =>
         Effect.gen(function* () {
-          // Staged under a temporary key, exactly as the node backend writes a
-          // temp file: putting the upload at its final key first means a PUT
-          // whose content does not match destroys the object already stored
-          // there — one that had been verified — and the delete on mismatch
-          // finishes the job. The name only becomes this content once the
-          // digest agrees.
+          // Staged under a temporary key, like the node backend's temp file:
+          // putting the upload at its final key first would let a mismatched
+          // PUT destroy an already-verified object. The name only becomes
+          // this content once the digest agrees.
           const staged = `${key(oid)}.${crypto.randomUUID()}.tmp`;
 
           const written = yield* Effect.tryPromise({

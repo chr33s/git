@@ -269,17 +269,6 @@ const gateWrite = Effect.fn("Api.gateWrite")(function* (ref: string, rewrites = 
 });
 
 /**
- * Judge one ref change and hand back the update to apply.
- *
- * The returned update carries the value the decision was made against, so the
- * write goes out under exactly that condition — deciding on one state and
- * writing against another is the race this boundary exists to close.
- *
- * `bindEnvelope: false`: an envelope describes a *push's* ref commands, and
- * this is not that conversation. Holding a JSON verb to commands it never
- * claimed would read silence as a denial.
- */
-/**
  * The requester may read this repository.
  *
  * Every ordinary read is charged `repo.read` by the guard before a handler
@@ -378,7 +367,6 @@ const requireCapability = Effect.fn("Api.requireCapability")(function* (capabili
   return yield* new Invalid({ field: "capability", reason: `this needs ${capability}` });
 });
 
-/** Whether a ref is there to be rewritten; a create discards nothing. */
 /**
  * Whether landing on `into` would drop commits it already holds.
  *
@@ -608,13 +596,13 @@ const treeFor = (
     return { tree, from: tip };
   });
 
-/** The tree a ref names, defaulting to HEAD — what "at this revision" means. */
 const ARCHIVE_TYPES = {
   tar: "application/x-tar",
   "tar.gz": "application/gzip",
   zip: "application/zip",
 } as const satisfies Record<ArchiveFormat, string>;
 
+/** The tree a ref names, defaulting to HEAD — what "at this revision" means. */
 const treeOfRef = (repository: Repository["Service"], ref: string | undefined) =>
   Effect.gen(function* () {
     const name = ref === undefined || ref === "" ? "HEAD" : ref;
@@ -1741,11 +1729,6 @@ export const handlers = HttpApiBuilder.group(api, "repo", (group) =>
           // written another way, and refused it to a member holding only
           // `source.push`. An `into` that does not exist yet holds nothing
           // that a merge could discard.
-          // Resolved exactly as `Repository.merge` resolves them: an oid as
-          // itself, anything else through the ref store, which follows
-          // symrefs. Qualifying first answered `null` for `HEAD` — and a
-          // `null` side is a side nothing matches, so the merge was charged a
-          // rewrite again for the one spelling git itself uses most.
           const judged = yield* discards(into, [request.ours, request.theirs]);
           yield* gateWrite(into, judged.rewrites);
           request.expected = judged.swap;

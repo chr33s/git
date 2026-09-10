@@ -102,16 +102,6 @@ export class TaskStore extends EventTarget {
   }
 
   /**
-   * The Tasks list, in display order.
-   *
-   * Unfiltered, the hierarchy: every root, each followed by its children —
-   * mixing Tasks and Change Requests in one list is the point of a Change
-   * Request being a specialization rather than a sibling type. Narrowed by
-   * kind or by a search query, the result is a flat list instead: a filter
-   * that hides a parent has nothing to hang its children under, so pretending
-   * the hierarchy survived would misdraw it.
-   */
-  /**
    * Where a task sits, outermost first: its release, then whatever is between.
    *
    * One chain rather than a "milestone" and a "parent" read separately — the
@@ -182,6 +172,16 @@ export class TaskStore extends EventTarget {
     return groups;
   }
 
+  /**
+   * The Tasks list, in display order.
+   *
+   * Unfiltered, the hierarchy: every root, each followed by its children —
+   * mixing Tasks and Change Requests in one list is the point of a Change
+   * Request being a specialization rather than a sibling type. Narrowed by
+   * kind or by a search query, the result is a flat list instead: a filter
+   * that hides a parent has nothing to hang its children under, so pretending
+   * the hierarchy survived would misdraw it.
+   */
   rows(filter: Filter = "all", query = ""): readonly Row[] {
     const needle = query.trim().toLowerCase();
     if (filter === "all" && needle === "") {

@@ -143,11 +143,6 @@ export const diff3 = (
 };
 
 /**
- * The merged text, newline-terminated. The merge is line-oriented, so a file
- * that arrived without a final newline gets one — git's own merge drivers do
- * the same rather than let the marker lines run into content.
- */
-/**
  * Whether a text's first line ends `\r\n`.
  *
  * git's own rule for which line ending its conflict markers carry, and it
@@ -219,18 +214,11 @@ export const mergeText = (input: MergeInput): TextMerge => {
     out.push(`>>>>>>> ${theirsLabel}${eol}`);
   }
 
-  // A file that ended without a newline still does: `splitLines` drops the
-  // distinction, so it is carried here from the inputs. Appending one changes
-  // every byte-for-byte comparison downstream of the merge.
-  //
-  // Which input to carry it from is the same three-way question the content
-  // answers, so it is answered the same way: the side that changed the
-  // terminator decides, and if both changed it they agree. An `||` over all
-  // three — what this was — restores a newline both sides deliberately
-  // removed, because the base still had one.
-  //
-  // A conflict that reaches the end of the file ends with a marker line, and
-  // a marker without its newline would run into whatever follows it.
+  // `splitLines` drops the trailing-newline distinction, so it's carried here
+  // from the inputs instead: the side that changed the terminator decides
+  // (both agree if both changed it), restoring a newline only if both sides
+  // deliberately removed one the base still had. A conflict ending at EOF
+  // always terminates, since a marker line needs its newline.
   const ourEnd = input.ours.endsWith("\n");
   const theirEnd = input.theirs.endsWith("\n");
   const baseEnd = input.base.endsWith("\n");

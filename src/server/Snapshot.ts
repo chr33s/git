@@ -8,13 +8,13 @@
  * for reads: a clone needs the refs (here) and the objects (already in R2),
  * and nothing about serving either requires waking the writer. So the host
  * publishes this snapshot to R2 *synchronously on every mutating request,
- * before acknowledging it* — the same "never acknowledge until persisted"
- * discipline a write-ahead log keeps — and the front Worker serves anonymous
- * `git-upload-pack` traffic (the advertisement and the pack) statelessly
- * from R2 alone, falling back to the Durable Object whenever the snapshot is
- * absent, unreadable, restricted, or the request is anything but an
- * anonymous read. R2 reads are strongly consistent, so a push acknowledged
- * through the writer is visible to the very next stateless read.
+ * before acknowledging it* — write-ahead-log discipline — and the front
+ * Worker serves anonymous `git-upload-pack` traffic (the advertisement and
+ * the pack) statelessly from R2 alone, falling back to the Durable Object
+ * whenever the snapshot is absent, unreadable, restricted, or the request is
+ * anything but an anonymous read. R2 reads are strongly consistent, so a
+ * push acknowledged through the writer is visible to the very next
+ * stateless read.
  *
  * Authorization is decided when the snapshot is written, where the trust
  * state lives: `anonymousRead` is `Auth.anonymousReadAllowed` over the trust
@@ -213,14 +213,14 @@ export const serve = (request: Request): Effect.Effect<Response | null, GitError
  * `latest` pointer the read path serves from.
  *
  * The latest snapshot answers "where are the refs now"; the journal answers
- * "where have they been" — which is the question every recovery starts
- * with. Each entry carries the *whole* refs view (a repository's ref list
- * is small; its history is what is large) plus the delta from the entry
- * before it, so an operator can read what a push did without diffing, and
- * `restore` can rebuild a ref store from any retained point without
- * replaying anything. Entries are sequenced with zero-padded keys so the
- * store lists them in order, and retention is a single keyed delete per
- * append — the entry that just fell off the window — never a listing.
+ * "where have they been" — the question every recovery starts with. Each
+ * entry carries the *whole* refs view (a repository's ref list is small;
+ * its history is what is large) plus the delta from the entry before it, so
+ * an operator can read what a push did without diffing, and `restore` can
+ * rebuild a ref store from any retained point without replaying anything.
+ * Entries are sequenced with zero-padded keys so the store lists them in
+ * order, and retention is a single keyed delete per append — the entry that
+ * just fell off the window — never a listing.
  *
  * Objects are content-addressed and never rewritten, so a journal entry
  * whose objects still exist (retention inside the `gc` horizon) names a

@@ -120,12 +120,6 @@ export interface SendingOptions {
 }
 
 /**
- * Hooks that forward on `post-receive`.
- *
- * Composed with whatever other hooks a host wants: `Hooks` is one service, so
- * a host that also delivers webhooks merges the two rather than choosing.
- */
-/**
  * The forwarder itself, for a host that composes it with other hooks.
  *
  * Taken as values rather than from context because `Hooks` is one service: a

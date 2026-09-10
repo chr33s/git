@@ -88,16 +88,13 @@ const statusFor = (tag: string): number =>
   tag in STATUS ? STATUS[tag as keyof typeof STATUS] : 500;
 
 /**
- * A local failure in the shape every screen already handles.
- *
- * The screens narrow on `ApiError` and switch on its `tag` — a local
- * `RefConflict` must read exactly like the server's, because it means the
- * same thing: somebody moved the branch while the editor was open.
- */
-/**
  * The shape every failure in this repository's error channel shares: a
  * `Data.TaggedError` with its tag, an `Error` message, and — on `Invalid`
  * and its relatives — a `reason` carrying the human detail.
+ *
+ * Screens narrow on `ApiError` and switch on its `tag` — a local
+ * `RefConflict` must read exactly like the server's, because it means the
+ * same thing: somebody moved the branch while the editor was open.
  */
 interface TaggedFailure {
   readonly _tag: string;

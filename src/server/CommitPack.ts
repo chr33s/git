@@ -113,7 +113,6 @@ interface JsonRecord {
   readonly [field: string]: Json;
 }
 
-/** Among JSON values, the non-null non-array objects are exactly the records. */
 const isJsonRecord = (value: Json | undefined): value is JsonRecord => Predicate.isObject(value);
 
 /** `null` rather than a throw: a bad line is an answer, not an exception. */
@@ -223,8 +222,7 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
       if (record === null) return yield* bad("a line is not a JSON object");
 
       const type = record.type;
-      // A non-string `type` shows as its JSON in the rejections below, rather
-      // than as an object's default stringification.
+      // JSON.stringify rather than String() so a non-string `type` reads as its value, not "[object Object]".
       const label = Predicate.isString(type) ? type : JSON.stringify(type);
       if (type !== "commit" && state.header === null) {
         return yield* bad(`'${label}' arrived before the commit header`);

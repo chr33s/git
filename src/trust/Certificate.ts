@@ -31,13 +31,6 @@ import {
 } from "./Principal.ts";
 
 /**
- * The capabilities this version knows, minus the scoped ones.
- *
- * A closed list rather than free strings: a typo in a grant would otherwise
- * be a capability that exists, is held by somebody, and authorizes nothing —
- * discovered when a merge is refused for a reason nobody can find.
- */
-/**
  * How many signatures on one record are ever worth verifying.
  *
  * Every entry costs an Ed25519 verification, and the list is attacker-chosen:

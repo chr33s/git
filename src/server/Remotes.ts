@@ -57,13 +57,11 @@ export interface Remote {
    * An SSH private key to mint a credential from, per request.
    *
    * The alternative to a stored token, and the only one that keeps working
-   * against a hub. Every credential such a destination accepts is either a
+   * against a hub: every credential such a destination accepts is either a
    * signature over *this* request or a delegation that expires within a day
-   * (§12), so a token registered once stops authenticating within a day of
-   * being written — and a standing instruction fails detached, into a log,
-   * which is where a mirror goes quiet without anybody being told. A key does
-   * not expire: the credential is minted where it is used, scoped by the
-   * trust graph to whatever its holder still holds.
+   * (§12), so a stored token goes stale within a day and a standing
+   * instruction then fails silently into a log. A key does not expire — the
+   * credential is minted where it is used, scoped by the trust graph.
    *
    * Write-only exactly as `credential` is, and for the same reason.
    */
@@ -169,14 +167,11 @@ export const validate = (input: NewRemote): Effect.Effect<NewRemote, Invalid> =>
       );
     }
     // A delegated credential lives a day at the outside (§12), so storing one
-    // registers a remote that authenticates until tomorrow and then stops.
-    // Refused for a *standing instruction* specifically, because that is
-    // where it stops quietly: a forward runs detached and reports into a log,
-    // so the mirror goes silent — revocations included — while the origin
-    // goes on accepting the pushes it is failing to send. A manual remote
-    // hands its 401 straight back to whoever asked, which is a person who can
-    // read it. Refused where it is written, as `fetch` mode is, with the
-    // thing that does keep working named in the refusal.
+    // on a *standing instruction* registers a remote that quietly stops
+    // authenticating tomorrow: a forward runs detached and reports into a
+    // log, so the mirror goes silent while the origin keeps accepting pushes
+    // it can't deliver. A manual remote instead hands its 401 straight back
+    // to whoever asked. Refused where it is written, like `fetch` mode.
     const standing = input.sync?.mode === "push" || input.sync?.mode === "mirror";
     if (standing && input.credential?.startsWith(DELEGATION_PREFIX) === true) {
       return Effect.fail(

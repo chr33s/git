@@ -223,8 +223,7 @@ export const add = Effect.fn("Checkout.add")(function* (paths: ReadonlyArray<str
 
   for (const requested of paths) {
     const normalized = requested === "." ? "" : yield* validatePath(requested);
-    // A path may name a file or a directory; git takes both, and a caller
-    // typing `src` means everything under it.
+    // A path may name a file or a directory: `src` matches everything under it.
     const matches =
       normalized === ""
         ? candidates

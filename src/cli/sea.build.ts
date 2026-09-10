@@ -2,56 +2,49 @@
  * Single-executable build (`npm run build:sea`).
  *
  * Two steps: Vite+ Pack folds the CLI and its dependencies into one minified
- * ESM file, then `node --build-sea` (Node 26+) embeds it into a copy of
- * the running node binary. The result is `dist/sea/git+` — one file
- * that needs no `node` or `node_modules` on the machine it runs on, for the
- * platform this script runs on.
+ * ESM file, then `node --build-sea` (Node 26+) embeds it into a copy of the
+ * running node binary. Result: `dist/sea/git+`, needing no `node` or
+ * `node_modules` on the machine it runs on, for the platform this builds on.
  *
- * Why the knobs are set the way they are (40 interleaved `--version` runs on
- * Node 26.7: ESM plus code cache median 46.2 ms and 81.2 MiB peak RSS;
- * CommonJS plus code cache 46.3 ms and 80.8 MiB):
- * - `import.meta.main` is defined to `false`: the bundle is one module, so
- *   every entry guard in it (`main.ts`, `host/Node.ts`) would agree it is
- *   "main" and fire together; `sea.ts` calls `run()` explicitly instead.
- * - ESM is as fast as CommonJS with Node 26.7's SEA code cache, avoids Pack's
- *   CommonJS warning, and is the format it recommends. Its banner restores
- *   `require` for CommonJS dependencies (undici) that use it dynamically.
+ * Knobs (40 interleaved `--version` runs on Node 26.7: ESM+code cache median
+ * 46.2 ms / 81.2 MiB peak RSS; CommonJS+code cache 46.3 ms / 80.8 MiB):
+ * - `import.meta.main` is forced `false`: the bundle is one module, so every
+ *   entry guard in it (`main.ts`, `host/Node.ts`) would see itself as "main"
+ *   and fire together; `sea.ts` calls `run()` explicitly instead.
+ * - ESM ties CommonJS on speed under Node 26.7's SEA code cache, avoids
+ *   Pack's CommonJS warning, and is the format it recommends. Its banner
+ *   restores `require` for CommonJS deps (undici) that use it dynamically.
  * - `useCodeCache` embeds the V8 compile cache in the executable, skipping
- *   parse/compile of the bundle on every start. It disables dynamic `import()`
- *   — safe here because everything is bundled — and ties the executable to
- *   the building node's version and platform, which is already true of the
- *   binary itself.
- * - Minification is start-up time as much as size: less source to read and
- *   fewer bytes of code cache to load.
+ *   parse/compile on every start. It disables dynamic `import()` — fine,
+ *   everything is bundled — and pins the executable to the building node's
+ *   version and platform, already true of the binary itself.
+ * - Minification saves start-up time, not just size: less source to read and
+ *   less code cache to load.
  *
- * One knob that is deliberately *not* here: an `onLoad` hook substituting a
- * stand-in constructor for the `globalThis.FormData` that `effect/Schema`
- * reads at module scope, which is what makes node materialize its bundled
- * `fetch` — and with it `http2` and `tls` — on every start. It is worth ~19 ms
- * and ~7 MiB of `--version`, and it is not taken: it rewrites a dependency so
- * that `Schema.FormData` in the binary rejects a real `FormData`, which is a
- * different program from the one the tests run. Nothing in a git CLI reaches
- * that schema today, and "today" is the whole of the argument for it.
+ * Deliberately not a knob: an `onLoad` hook to stub `globalThis.FormData`
+ * before `effect/Schema` reads it at module scope, which is what makes node
+ * materialize its bundled `fetch` (and `http2`/`tls`) on every start. Worth
+ * ~19 ms / ~7 MiB but not taken — it'd make `Schema.FormData` in the binary
+ * reject a real `FormData`, diverging from what the tests run. Nothing in a
+ * git CLI reaches that schema today, and "today" is the whole argument.
  *
- * `useSnapshot` — the other half of node's SEA start-up story, which would
- * serialize the heap after module initialization instead of only the compile
- * cache — does not work here on node 26.7. Three independent blockers, in
- * increasing order of how stuck they are:
- * - `node:http`, which `host/Node.ts` imports for `serve`, creates native
- *   handles (`HTTPParser`) the serializer refuses: "global handle not
- *   serialized". Fixable by loading the host lazily.
- * - node materializes its `fetch` implementation, and with it `http2` and
- *   `tls` handles, the first time anything touches `globalThis.FormData` —
- *   which `effect/Schema` does at module scope. Fixable only by rewriting
- *   effect at build time, which is the knob above and is not taken.
- * - `Effect.fn(...)` evaluated at module scope crashes the serializer outright
- *   (`std::length_error: vector::_M_range_insert`, no JS-level error). This
- *   repository has 63 of them, and there is no user-space workaround.
- * Snapshotting is also not obviously worth wanting here: built against the
- * largest subset that does snapshot (`effect/unstable/cli` plus
- * `@effect/platform-node`, no app code), the snapshot binary starts in 39 ms
- * against the code cache's 27 ms and carries 13 MiB more RSS — deserializing
- * effect's heap costs more than compiling it from cache.
+ * `useSnapshot` — serializing the heap after module init instead of just the
+ * compile cache — doesn't work on node 26.7, three blockers in increasing
+ * order of stuck:
+ * - `node:http` (imported by `host/Node.ts` for `serve`) creates native
+ *   `HTTPParser` handles the serializer refuses ("global handle not
+ *   serialized"). Fixable by loading the host lazily.
+ * - `globalThis.FormData` access at `effect/Schema`'s module scope
+ *   materializes `fetch`'s `http2`/`tls` handles, same as above. Fixable
+ *   only by the rewrite declined above.
+ * - `Effect.fn(...)` at module scope crashes the serializer outright
+ *   (`std::length_error: vector::_M_range_insert`, no JS-level error) — 63
+ *   call sites here, no user-space workaround.
+ * Also not obviously worth it: built against the largest subset that does
+ * snapshot (`effect/unstable/cli` + `@effect/platform-node`, no app code),
+ * the snapshot binary starts in 39 ms vs the code cache's 27 ms and carries
+ * 13 MiB more RSS — deserializing effect's heap costs more than compiling
+ * it from cache.
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";

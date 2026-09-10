@@ -137,18 +137,14 @@ export interface Rules {
    * request's head onto the step before it, ending at what the branch holds
    * now. What makes one safe to accept is that this boundary *re-derives* every
    * merge: a step counts only if its tree is exactly what `Repository.mergeTree`
-   * produces for its two parents, so the chain's content is a pure function of
-   * revisions that were reviewed, and whoever built it is trusted with nothing.
+   * produces for its two parents, so whoever built the chain is trusted with
+   * nothing.
    *
-   * Off by default. It is a second way onto a protected branch, and one an
-   * operator should turn on knowingly rather than acquire in an upgrade — the
-   * same reason `requireProvenance` is off. Left off, the walk is never
-   * attempted and this costs a boolean read.
-   *
-   * What it buys is the composition itself: required checks on a candidate name
-   * the *candidate*, so what a queue tests is the combination being landed
-   * rather than each pull request alone — which is the only evidence that two
-   * individually green changes work together.
+   * Off by default, for the same reason `requireProvenance` is: a second way
+   * onto a protected branch should be turned on knowingly, not acquired in an
+   * upgrade. What it buys is that required checks on a candidate name the
+   * *candidate*, so a queue tests the combination being landed rather than
+   * each pull request alone.
    */
   readonly queueCandidates: boolean;
   /**
@@ -167,17 +163,13 @@ export interface Rules {
    *
    * The inbox is the one door an *unauthenticated* caller may write through:
    * `git-inbox: 1` on receive-pack mints `quarantine.submit` before any
-   * membership exists, which is the point — it is how the drive-by patch
-   * arrives without an account. web-of-trust.md §6 describes it as the front
-   * door a repository's self-attestation *names*, and it was reachable on
-   * every repository with a genesis whether or not anyone had named it: there
-   * was no rules field, no serve flag, and no way for a private repository to
-   * shut the only anonymous write it has.
+   * membership exists, which is how the drive-by patch arrives without an
+   * account. It was reachable on every repository with a genesis whether or
+   * not anyone had named it, with no rules field or serve flag to shut it.
    *
    * `true` by default, because that is what every repository predating this
-   * had and closing a door nobody asked to close is the same mistake as
-   * opening one. What it buys is the operator's answer to a question they
-   * could not previously be asked.
+   * field had, and closing a door nobody asked to close is the same mistake
+   * as opening one.
    */
   readonly inbox: boolean;
   /** Opt-in only; omitted and `null` both mean external reviews never count. */
@@ -1607,12 +1599,11 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // nothing at all. A rule that has to enumerate the safe cases is a rule
     // that will be wrong again.
     //
-    // The cost is the one the tombstone gate below already carries and is
-    // worth stating in the same breath: a history that is entirely honest and
-    // entirely old — a replica seeded from elsewhere, a client that has been
-    // offline — stops being *pushable* once one of its past participants is
-    // revoked. Replication is not gated here, so it still arrives by fetch;
-    // what it cannot do is arrive by push.
+    // The cost: a history that is entirely honest and entirely old — a replica
+    // seeded from elsewhere, a client that has been offline — stops being
+    // *pushable* once one of its past participants is revoked. Replication is
+    // not gated here, so it still arrives by fetch; what it cannot do is
+    // arrive by push.
     for (const signer of signed) {
       if (openWindow(trust.revoked.get(signer)) !== null) {
         return `${signer} has been revoked and may not add a ${kind ?? (social ? "statement" : "event")}`;
@@ -1630,14 +1621,12 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // against a stale head accepted — sending somebody else's payload to `gc`.
     // The boundary is where "now" is knowable, so it is where that is refused.
     //
-    // The cost is deliberate and worth stating: a pull request whose history
-    // already carries a once-valid tombstone stops being *pushable* to a host
-    // that does not hold it, once its signer's `hub.redact` is narrowed away.
-    // Replication is not gated here, so such a history still reaches a replica
-    // by fetch; what it cannot do is arrive by push. The alternative is to
-    // judge the tombstone by what its signer held at the head it declares,
-    // which is the fold's question — and the fold's question is exactly what
-    // the decoy attack above is built to answer wrongly.
+    // The cost: a pull request whose history already carries a once-valid
+    // tombstone stops being *pushable* to a host that does not hold it, once
+    // its signer's `hub.redact` is narrowed away. Replication still reaches a
+    // replica by fetch; what it cannot do is arrive by push. The alternative —
+    // judging the tombstone by what its signer held at the head it declares —
+    // is exactly what the decoy attack above is built to answer wrongly.
     // Asked of the bytes rather than of the decoded pull-request payload: a
     // session and a task write the same tombstone inside their own envelopes,
     // which `Event.decode` reads as nothing at all — so this gate covered
@@ -1925,9 +1914,9 @@ type Chain =
  * each reviewed for this branch. Whoever built the chain is authorized with
  * nothing; the boundary re-derives every claim it makes.
  *
- * The steps are checked cheap-first: a step's pull request and the branch's
- * rules are settled before any merge is recomputed, so a chain nobody approved
- * costs a fold rather than a tree walk per step.
+ * Steps are checked cheap-first: a step's pull request and the branch's rules
+ * are settled before any merge is recomputed, so a chain nobody approved costs
+ * a fold rather than a tree walk per step.
  *
  * Determinism is what makes the check meaningful, and it comes from both sides
  * calling one function: whoever builds a candidate and whoever verifies it both
@@ -1938,16 +1927,14 @@ type Chain =
  * What is constrained is a candidate's **content and its ancestry** — its tree,
  * its two parents, and the chain they form — and deliberately not its commit
  * header. The message, author and committer are whatever the builder wrote,
- * exactly as they are on any merge commit a member with `source.push` makes on
- * a branch of their own: they are not code, nothing downstream parses them (a
- * repository requiring provenance takes no candidates at all — see
- * `cli/queue.ts`), and pinning them would bake one builder's conventions into
- * the boundary. That last part is the point rather than an oversight: a
- * candidate is a shape, not a tool's output, so a person can build one by hand
- * and land it with no queue running at all, and two implementations can
- * interoperate. `cli/queue.ts` makes its own candidates a pure function of what
- * they merge — which is what lets a check bound to one runner's candidate name
- * another's — but that is a convention among runners, not a rule this enforces.
+ * exactly as on any merge commit a `source.push` holder makes on their own
+ * branch: nothing downstream parses them, and pinning them would bake one
+ * builder's conventions into the boundary. That is the point rather than an
+ * oversight — a candidate is a shape, not a tool's output, so a person can
+ * build one by hand with no queue running at all. `cli/queue.ts` makes its own
+ * candidates a pure function of what they merge, which is what lets a check
+ * bound to one runner's candidate name another's, but that is a convention
+ * among runners and not a rule this enforces.
  */
 const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
   readonly ref: string;

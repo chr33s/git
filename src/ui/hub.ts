@@ -391,9 +391,7 @@ export const hydrate = (id: string): void => {
             .filter((check) => detail.head !== null && check.head === detail.head)
             .map(mapCheck),
           commitCount: String(detail.commits),
-          // The Merge button states the server's judgment — approvals,
-          // required checks, threads, target movement — never a client-side
-          // reconstruction of branch policy from counts.
+          // Same server-judged Merge state as reviewCard() above.
           review:
             task.review.merged === true
               ? task.review

@@ -141,14 +141,13 @@ export const reconcile = Effect.fn("Replication.reconcile")(function* (ref: stri
     return { ref, ours, theirs, joined: null, diverged: false } satisfies Divergence;
   }
 
-  // The rules file is not append-only and is not a branch either: it is one
-  // blob the repository publishes about itself, and a replica that keeps its
-  // own copy keeps enforcing rules the source has already superseded — a
+  // The rules file is not append-only and not a branch either: it is one blob
+  // the repository publishes about itself, and a replica keeping its own copy
+  // would keep enforcing rules the source has already superseded — a
   // protected branch that was unprotected, or a required check that was
-  // dropped. It is fetched for exactly that reason, so it is taken as read
-  // rather than reported as a divergence nobody will act on. Writing it needs
-  // `policy.write` at the boundary; arriving by replication is the source
-  // saying what it now requires.
+  // dropped. So it is taken as read rather than reported as a divergence
+  // nobody will act on. Writing it needs `policy.write` at the boundary;
+  // arriving by replication is the source saying what it now requires.
   if (ref === Policy.RULES_REF) {
     yield* repository.setRef({ name: ref, to: theirs, expected: ours });
     return { ref, ours, theirs, joined: null, diverged: false } satisfies Divergence;

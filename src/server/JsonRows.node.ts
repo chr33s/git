@@ -5,13 +5,13 @@
  * different row types — a small list beside the repository, read once per
  * request and written by hand often enough that being readable matters — and
  * they had a copy each of the load-parse-revive and temp-and-rename halves.
- * The interesting part is the durability, which is worth having in one place:
- * `rename(2)` is atomic within a filesystem, so a reader sees the old list or
- * the new one and never a half-written file.
- * An exclusive `.lock` file spans each read-modify-write operation so that
- * separate hosts or CLI processes cannot overwrite an acknowledged edit.
- * Contention fails before reading; the caller can retry. A lock left by a
- * killed process requires manual removal after confirming its writer exited.
+ * The durability is worth having in one place: `rename(2)` is atomic within a
+ * filesystem, so a reader sees the old list or the new one and never a
+ * half-written file. An exclusive `.lock` file spans each read-modify-write
+ * operation so separate hosts or CLI processes cannot overwrite an
+ * acknowledged edit — contention fails before reading, and the caller can
+ * retry. A lock left by a killed process needs manual removal after
+ * confirming its writer exited.
  *
  * Its own `.node` module because it reaches for `node:fs`, and both callers
  * are imported by code that also builds for Workers.

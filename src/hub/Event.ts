@@ -138,12 +138,6 @@ export const prOf = (ref: string): string | null => {
 export const newId = Log.newId;
 
 /**
- * An object id as a payload spells one: `sha1:<hex>`.
- *
- * Qualified even though this version only writes SHA-1, because the point of
- * qualifying is that the payloads never have to change when it does not.
- */
-/**
  * A pull request's base branch as a full ref name.
  *
  * `base` is a string a client writes, and both spellings are natural — `main`
@@ -158,6 +152,12 @@ export const newId = Log.newId;
 export const branchRef = (value: string): string =>
   value.startsWith("refs/") ? value : `refs/heads/${value}`;
 
+/**
+ * An object id as a payload spells one: `sha1:<hex>`.
+ *
+ * Qualified even though this version only writes SHA-1, because the point of
+ * qualifying is that the payloads never have to change when it does not.
+ */
 export const qualify = (oid: Oid): string => `sha1:${oid}`;
 
 export const unqualify = (value: string): Oid | null => {
@@ -532,14 +532,6 @@ export interface Entry {
 }
 
 /**
- * Append an event to a pull request's history.
- *
- * The compare-and-swap is on the head the event was built against, so two
- * authors appending at once produce one winner and one retry rather than a
- * lost event. State-dependent callers pass an explicit expectation and must
- * revalidate their decision themselves after a conflict.
- */
-/**
  * Add one signed record to the end of an append-only hub ref.
  *
  * The ref is the caller's, not this module's: a pull request writes to
@@ -688,14 +680,6 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
         : error,
     ),
   );
-  // Bounded in *size* as well as in shape. Folding a pull request builds an
-  // ancestor set per commit, which is quadratic, and how many commits a pull
-  // request has is chosen by whoever may append to it — the lowest hub
-  // capability there is. On the protected-branch path that fold is
-  // synchronous and inside a worker with a fixed memory ceiling, so an
-  // unbounded one is a push that never returns rather than a push that is
-  // refused. The bound is far above any conversation: a pull request with
-  // more events than this is not one a person is having.
   const ordered = Dag.topological(parents);
 
   const events: Entry[] = [];
@@ -793,12 +777,6 @@ export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (hea
   return walked;
 });
 
-/**
- * Whether a commit belongs to a pull request's history.
- *
- * An event carries `event.json`; a join carries an empty tree. Anything else
- * is a commit from somewhere that is not the hub, and the walk stops there.
- */
 /** One record on a hub ref, decoded by whoever asked for the walk. */
 export interface WalkedRecord<A> {
   readonly commit: Oid;
@@ -892,6 +870,12 @@ export const walk = Effect.fn("hub.Event.walk")(function* <A>(
   return { records, parents, ordered, unreadable, walked: parents.size } satisfies Walk<A>;
 });
 
+/**
+ * Whether a commit belongs to a pull request's history.
+ *
+ * An event carries `event.json`; a join carries an empty tree. Anything else
+ * is a commit from somewhere that is not the hub, and the walk stops there.
+ */
 export const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
   const repository = yield* Repository;
   const info = yield* repository

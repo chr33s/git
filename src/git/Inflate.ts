@@ -319,10 +319,6 @@ const adler32 = (bytes: Uint8Array): number => {
 };
 
 /**
- * Inflate one complete zlib stream from the source, consuming exactly its
- * bytes: whatever was over-pulled from the final chunk is pushed back.
- */
-/**
  * The most bytes an inflate will produce before it gives up.
  *
  * A deflate stream expands by up to ~1000:1, so a few megabytes of pack can
@@ -332,6 +328,10 @@ const adler32 = (bytes: Uint8Array): number => {
  */
 export const MAX_INFLATED = 512 * 1024 * 1024;
 
+/**
+ * Inflate one complete zlib stream from the source, consuming exactly its
+ * bytes: whatever was over-pulled from the final chunk is pushed back.
+ */
 export const inflate = async (source: ByteSource, limit = MAX_INFLATED): Promise<Uint8Array> => {
   const reader = new Reader(source);
   try {

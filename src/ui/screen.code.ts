@@ -1095,15 +1095,13 @@ export class GpCode extends GitPlusElement {
   /**
    * Put the caret in the editable pane, once it exists.
    *
-   * The surface materializes through the package's own render queue, some
+   * The surface materializes through the package's own render queue some
    * frames after attach, and `focus()` before that is a silent no-op — so
-   * keep asking briefly. The loop ends once the caret is somewhere
-   * deliberate: in the pane means it worked, in a field means the user has
-   * already moved on, and yanking the caret back would be worse than typing
-   * one click later. (What has focus right after a toolbar click is the
-   * button itself, which is neither.) With a line, not bare: bare `focus()`
-   * moves element focus without placing a caret, and a contenteditable with
-   * no selection swallows keystrokes.
+   * keep asking briefly. The loop stops once focus lands somewhere
+   * deliberate: in the pane (worked), or in a field (the user moved on
+   * already — yanking the caret back would be worse). Focused with a line,
+   * not bare: bare `focus()` places no caret, and a contenteditable with no
+   * selection swallows keystrokes.
    */
   #focusEditor(): void {
     const session = this.#editSession;

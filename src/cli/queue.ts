@@ -368,39 +368,23 @@ const close = Command.make(
         repo,
         Effect.gen(function* () {
           const genesis = yield* identityOf(repo);
-          // Folding the queue is how every other verb finds it, and this is the
-          // one verb that must work when folding it no longer does: a ref past
-          // the ceiling is exactly the state closing exists to rescue, and a
-          // close that first insisted on reading the ref could never reach it.
-          // Appending needs no walk — only the ref's head — so a queue named by
-          // id is closed whether or not it can still be read, and only the
-          // branch sweep, which needs the target, is given up.
+          // Appending needs only the ref's head, not a walk, so this must still
+          // close a queue whose fold no longer succeeds (a ref past the
+          // ceiling) — only the branch sweep, which needs a full fold, is given
+          // up in that case.
           //
-          // Asked as "can this ref be read?" rather than by catching whatever
-          // `resolve` refused with. Every refusal it makes is an `Invalid`, so
-          // a catch took the rescue path for a *mistyped* id too — creating
-          // `refs/hub/queue/<typo>` on an undeletable namespace and reporting
-          // success, which is the hazard `resolve` exists to refuse — and for a
-          // `--target` that disagreed, and for a queue already closed. A
-          // repository that holds no such queue answers `exists: false` rather
-          // than failing, so only a ref this replica genuinely cannot walk
-          // reaches the rescue.
+          // Read as "can this ref be read?" rather than by catching whatever
+          // `resolve` refused with, since every one of its refusals is an
+          // `Invalid` — a catch would also rescue a *mistyped* id (creating
+          // `refs/hub/queue/<typo>` on an undeletable namespace) or a
+          // disagreeing `--target`, or a queue already closed. `StorageFailure`
+          // is excluded deliberately: it is a property of this replica, not of
+          // the history, and may succeed on retry, so a flaky read must not
+          // permanently spend the queue and skip its branch sweep.
           //
-          // And a `StorageFailure` is not that. The other two are properties of
-          // the history — past the ceiling, or a chain the store does not hold
-          // — and asking again gives the same answer; a store that failed to
-          // answer may answer next time. Taken as unreadable, one flaky read
-          // spent the queue permanently *and* skipped the branch sweep, and
-          // since every verb refuses a closed queue, nothing could ever
-          // re-derive the branch names it left behind — each published
-          // candidate pinned out of reach of `gc` for good. It is the same rule
-          // the pass follows for a fold it could not complete: a fact about
-          // this replica writes nothing.
-          //
-          // Kept and handed on rather than thrown away. The probe *is* the
-          // fold, and `resolve` wants the same one — taken twice, the command
-          // whose whole purpose is to rescue a ref approaching the ceiling was
-          // the one that walked it, and verified a signature per record, twice.
+          // The fold is kept and handed to `resolve` rather than redone: it is
+          // the same probe, and folding twice would walk the ref and verify
+          // every signature in it twice for one command.
           const folded =
             queue === ""
               ? null
@@ -419,25 +403,23 @@ const close = Command.make(
             return;
           }
           const state = yield* resolve({ queue, target, folded });
-          // The branches it published go with it: nothing will name them again,
-          // and each pins its candidate out of reach of collection. Everything
-          // this queue ever held, not only what is in it now — an entry that
-          // left had its branch deleted by the pass that settled it, but one
-          // removed by hand did not, and after the close nothing can name it.
+          // Everything this queue ever held, not just what remains in it, gets
+          // swept: an entry that left had its branch deleted by the pass that
+          // settled it, but one removed by hand did not, and after the close
+          // nothing can name it again.
           //
-          // Swept *before* the record, and that order is what makes a failed
-          // close retryable. The names come from the projection, and every verb
-          // refuses a closed queue — so a sweep interrupted after the record
-          // was a set of branches nothing could ever name again, orphaned for
-          // good. Interrupted before it, the queue is simply still open and the
-          // command run again does the whole job. The other order round is
-          // harmless: a pass writes its branch unconditionally, so branches
-          // swept from a queue whose close did not land come back.
+          // Swept before the record, so a failed close is retryable: every verb
+          // refuses a closed queue, so a sweep interrupted after the record
+          // would leave branches nothing could ever name again. Interrupted
+          // before it, the queue is simply still open and a retry does the
+          // whole job. Reversing the order is harmless the other way: a pass
+          // writes its branch unconditionally, so one swept from a queue whose
+          // close did not land comes back.
           //
           // A pass racing this close can still publish a branch after the
-          // sweep, which no verb will then delete. There is no compare-and-swap
-          // across refs to have instead, and it is the same race two `open`
-          // calls have; the residue is one ref rather than a wrong answer.
+          // sweep, which nothing will then delete — the same race two `open`
+          // calls have, with no compare-and-swap to prevent it; the residue is
+          // one stray ref, not a wrong answer.
           if (state.target !== null) {
             const repository = yield* Repository;
             const everyone = new Set([
@@ -873,27 +855,25 @@ const pass = Effect.fn("queue.pass")(function* (input: {
   /**
    * The hub refs this pass may append to, and where they stood before it did.
    *
-   * Landing goes through `receive`, so a mirror hears about the branch — but
-   * `pr.merged` and `queue.leave` are appended through `Event.appendTo`, which
-   * is a `setRef` and tells nobody. Forwarding one without the other is worse
-   * than forwarding neither: the mirror takes the code and keeps showing the
-   * pull requests that carried it as open, for ever.
+   * `pr.merged` and `queue.leave` append through `Event.appendTo` — a bare
+   * `setRef` that tells no mirror — unlike landing, which goes through
+   * `receive`; forwarding one without the other is worse than neither, since a
+   * mirror would take the code and keep showing its pull requests as open
+   * forever.
    *
-   * Read here rather than derived from what the pass turns out to write,
-   * because the writes are spread across every branch of it — a drop, a reset,
-   * a candidate, a landing — and a list assembled at each site is a list the
-   * next branch added here forgets to join. Which is also why it is read
-   * *above* the reset below rather than after it: a pass whose only hub write
-   * is that reset announced nothing at all, and one that wrote more announced a
-   * `from` the reset was already behind — a subscriber walking the range would
-   * step straight over the record saying the chain it holds is stale.
+   * Read here rather than derived from what the pass writes, since those
+   * writes are scattered across every branch of it (drop, reset, candidate,
+   * landing) and a list assembled per site would miss whatever the next branch
+   * added. Read above the reset below for the same reason: a pass whose only
+   * hub write is that reset must still announce it, and one that wrote more
+   * must announce a `from` already behind the reset, or a subscriber walking
+   * the range would skip past the record saying its chain is stale.
    *
-   * The candidate branches with them, and for the same reason the records are
-   * here at all. A `queue.candidate` names the branch it published, so a
-   * receiver taking the record without the ref holds a name for something it
-   * cannot resolve — and CI told to fetch it by a mirror finds nothing there.
-   * A branch this pass then *deletes* is announced as a deletion, which is what
-   * a settled entry is on both sides.
+   * Candidate branches are included too: a `queue.candidate` record names the
+   * branch it published, so a receiver taking the record without the ref holds
+   * a name it cannot resolve, and a mirror-fetching CI finds nothing there. A
+   * branch this pass deletes is announced as a deletion, since that is what a
+   * settled entry is on both sides.
    */
   const hubRefs = [
     Queue.refOf(state.queue),

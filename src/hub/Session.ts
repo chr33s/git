@@ -78,7 +78,6 @@ export const sessions = Effect.fn("hub.Session.sessions")(function* () {
 const envelope = {
   version: Schema.Literal(1),
   repo: Schema.String,
-  /** The session this event belongs to. */
   session: Schema.String,
   id: Schema.String,
   issuedAt: Schema.String,

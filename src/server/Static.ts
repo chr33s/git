@@ -37,11 +37,10 @@ export const mimeOf = (extension: string): string => {
  * `URL.pathname` keeps its percent-escapes, so the raw value is not the name
  * of any file: a built asset whose name contains an escaped character was
  * looked up under its escaped spelling and 404'd. Decoded here, once, and
- * before `normalize` — which is the only order that is also safe, because the
+ * before `normalize` — the only order that is also safe, since the
  * containment check below runs on the *resolved* result and so sees whatever
- * the decoding produced, `..` included. Decoding afterwards would be the
- * dangerous order and is what this function exists to make impossible to write
- * by accident.
+ * the decoding produced, `..` included. Decoding afterwards would reopen that
+ * hole.
  *
  * `null` for an escape sequence that is not one: a lone `%` is not a path.
  */
@@ -57,15 +56,14 @@ const decodedPath = (pathname: string): string | null => {
  * The file `pathname` names under `root`, or `null`.
  *
  * `null` for a directory, for anything missing, and for a path that climbs out
- * of `root` — the last checked after resolving rather than by looking for
- * `..`, because the encodings of `..` are not a list anybody finishes.
+ * of `root` — checked after resolving rather than by looking for `..`,
+ * because the encodings of `..` are not a list anybody finishes.
  *
- * Containment is checked twice, and the second one is the one that matters: a
+ * Containment is checked twice, and the second is the one that matters: a
  * lexical `resolve` does not follow symlinks, so a link inside the built UI
- * pointing anywhere at all satisfied the prefix test and was then read. The
- * file is known to exist by then, so `realpath` resolves rather than guesses —
- * this is the same guard `git/Work.node.ts` applies to a checkout, which had
- * the rule right while this one had it lexically.
+ * pointing anywhere at all would satisfy the prefix test and get read.
+ * `realpath` resolves rather than guesses, once the file is known to exist —
+ * the same guard `git/Work.node.ts` applies to a checkout.
  *
  * Copied out of node's Buffer rather than handed over: `readFile` returns a
  * view into a pooled allocation typed `ArrayBufferLike`, and `BodyInit` takes

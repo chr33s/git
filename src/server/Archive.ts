@@ -3,13 +3,12 @@
  *
  *   GET …/archive/<name>?ref=<ref>&path=<dir>
  *
- * The extension on `<name>` picks the format, the way `git archive --format`
- * is inferred from the output filename and the way every forge spells it.
+ * The extension on `<name>` picks the format, as with `git archive --format`.
  *
- * The result is a `Stream`, not a buffer: a repository's worth of blobs is
- * exactly the thing that must not be materialised at once, which is the same
- * reason `Repository.packOf` streams. Only the file *list* is held — paths and
- * oids, no content — and each blob is read as the consumer pulls it.
+ * The result is a `Stream`, not a buffer: a repository's worth of blobs must
+ * not be materialised at once (same reason `Repository.packOf` streams). Only
+ * the file *list* is held — paths and oids, no content — and each blob is
+ * read as the consumer pulls it.
  *
  * The writers are hand-rolled because this module has to load in a Worker: no
  * `node:zlib`, no archiver dependency. Gzip is `CompressionStream`, which both

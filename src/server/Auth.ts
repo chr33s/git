@@ -151,15 +151,6 @@ export class Nonces extends Context.Service<
 >()("server/Nonces") {}
 
 /**
- * One nonce store, as a value.
- *
- * `Layer.sync` would be a *description* of how to build one, and every
- * `Effect.provide` would run it again — a fresh `Map` per request, so the
- * nonce a challenge issued is unknown by the time the signed retry arrives and
- * native authentication can never succeed. The store has to outlive the
- * provide, so it is constructed here and handed over by `Layer.succeed`.
- */
-/**
  * A ceiling on the spent set.
  *
  * Reached only by genuinely authenticated requests, and the ceiling *refuses*

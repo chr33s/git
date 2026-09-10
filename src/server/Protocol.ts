@@ -152,15 +152,13 @@ const body = (request: Request): AsyncIterable<Uint8Array> => {
     /**
      * The writes run beside the reads, not before them.
      *
-     * Draining the transform into an array and yielding the array afterwards
-     * — which is what this did — is not backpressure at all: attaching a
-     * `data` handler puts the readable side in flowing mode, so zlib expands
-     * as fast as it can and every byte lands in memory first. Deflate reaches
-     * about 1000:1, so one 64 KiB request chunk becomes ~64 MiB and a few of
-     * them exhaust a 128 MiB Durable Object. Iterating the transform leaves
-     * it paused between reads, and then a full readable buffer stalls the
-     * transform, `write` returns false, and the whole pipe is bounded by the
-     * two high-water marks however compressible the body is.
+     * Draining the transform into an array first is not backpressure at all:
+     * a `data` handler puts the readable side in flowing mode, so zlib expands
+     * as fast as it can and every byte lands in memory first — deflate reaches
+     * about 1000:1, so one 64 KiB chunk becomes ~64 MiB and a few of them
+     * exhaust a 128 MiB Durable Object. Iterating the transform instead leaves
+     * it paused between reads, so a full readable buffer stalls it, `write`
+     * returns false, and the pipe stays bounded by the two high-water marks.
      */
     // The failure travels through `gunzip`, which the loop below is reading:
     // destroying it there is what turns a broken body into a thrown error at

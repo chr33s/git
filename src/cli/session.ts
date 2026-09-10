@@ -199,12 +199,10 @@ const show = Command.make(
                   : `no session has produced ${branch}`,
             });
           }
-          // A session this repository has never heard of is an error, not an
-          // empty document. `Session.project` answers for any id — it walks a
-          // ref that need not exist — so a typo, or a name that was never a
-          // session, printed a projection with nothing in it and exited zero,
-          // which reads as "this session did nothing" rather than "there is no
-          // such session".
+          // An unknown session is an error, not an empty document.
+          // `Session.project` answers for any id — it walks a ref that need
+          // not exist — so a typo would otherwise print an empty projection
+          // and exit zero, reading as "did nothing" instead of "no such session".
           yield* existingSession(id);
           return yield* Session.project(id);
         }),
@@ -409,14 +407,14 @@ const entryFor = (script: string, phase: "start" | "stop") => ({
 });
 
 /**
- * Remove one record's content, which is the only way back out of a prompt that
- * carried something it should not have.
+ * Remove one record's content — the way back out of a prompt that carried
+ * something it should not have.
  *
- * The scanner in front of `session open` is heuristic and says so, so the way
- * back has to exist. What this writes is a signed tombstone; the bytes go at
- * the next `gc`, which is the only pass that can tell whether the blob is
- * reachable from anywhere else — so the message says "at the next collection"
- * rather than reporting a removal that has not happened yet.
+ * The scanner in front of `session open` is heuristic and says so, so this
+ * way back has to exist. It writes a signed tombstone; the bytes go at the
+ * next `gc`, the only pass that can tell whether the blob is reachable from
+ * anywhere else — hence "at the next collection" rather than claiming a
+ * removal that hasn't happened yet.
  */
 const redact = Command.make(
   "redact",

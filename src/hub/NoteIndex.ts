@@ -206,13 +206,6 @@ export const refresh = Effect.fn("hub.NoteIndex.refresh")(function* () {
 });
 
 /**
- * The notes a query could be about, folded.
- *
- * With a current index only the matching notes are folded; without one the
- * answer is identical and costs the full walk. Nothing here writes, so a stale
- * index stays stale until a mutation refreshes it.
- */
-/**
  * Projections already folded, one entry per repository.
  *
  * The stored index makes a *scoped* read cheap; this makes a repeated one

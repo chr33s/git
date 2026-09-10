@@ -165,12 +165,12 @@ const load = async (): Promise<PrivateKey | null> => {
         }
       }
     }
-    // A record that exists but cannot be used is said out loud: continuing
-    // to a fresh key silently would strand every grant made to the old one.
+    // Said out loud rather than silently replaced: that would strand every
+    // grant made to the old key. A failed legacy migration may also have
+    // left this record before its writer opened — recover from the old
+    // files below before treating it as unusable.
     identityNote =
       "the stored identity could not be read; a fresh key was generated and needs granting";
-    // A failed legacy migration may have created this entry before its writer
-    // opened. Recover from the old files before replacing an unusable record.
   }
 
   // One-time migration from the two independently written files. When the
@@ -672,8 +672,7 @@ export const mergePull = async (input: {
   }
   if (!response.ok) {
     const failure: unknown = await response.json().catch((): undefined => undefined);
-    // SAFETY: every field is read optionally and defaulted; the shape is the
-    // same loose error body `ui/api.ts` decodes at its own boundary.
+    // SAFETY: same loose, optionally-read error body as append() above.
     const body_ = failure as { _tag?: string; message?: string; reason?: string } | undefined;
     throw new ApiError({
       tag: body_?._tag ?? "HttpError",

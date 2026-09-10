@@ -448,12 +448,12 @@ export class RepoStores extends Context.Service<
      * in between leaves a line saying this name reads through a parent. The
      * repository created here is a new one, and it inherits nothing.
      *
-     * How much that costs is the provider's own. The node store drops the
-     * link and the open handle, and the directory the `drop` already removed
-     * stays removed; the in-memory store keeps no such separation — the
-     * handle *is* the repository — so forgetting a name there ends it. What
-     * both owe, and what `delete` reads this for, is that no name but the one
-     * asked for is touched.
+     * How much that costs is the provider's own: the node store drops the
+     * link and the open handle, leaving the already-removed directory gone;
+     * the in-memory store has no such separation — the handle *is* the
+     * repository — so forgetting a name there ends it. Both owe the same
+     * promise `delete` reads this for: no name but the one asked for is
+     * touched.
      *
      * Fails for the same reason `drop` does: the node store writes what it
      * forgets, and `create` has already taken the name by the time this runs.
@@ -836,31 +836,28 @@ export const repoStoresNode = (root: string) =>
        * Point a name's fork link at `parent`, or at nothing, and tell the
        * parent it stops borrowing from.
        *
-       * Every change to `forks` goes through here, in one order, because the
-       * three callers had three orders between them and each lost something
-       * different. The order is: the parent being let go, then the file, then
-       * the map. The map is what a retry reads to decide whether there is
-       * anything left to do, so it moves last — a failure at either write
-       * leaves the map still describing the world as it was, and the same
-       * call put again does the same work. Written the other way round, a
-       * failed `unlend` became unreachable the moment the link left the map,
-       * which is a `borrowers` line no later call ever goes back for, and a
-       * parent its own `gc` refuses from then on.
+       * Every change to `forks` goes through here, in one order: the parent
+       * let go, then the file, then the map. The map is what a retry reads to
+       * decide what is left to do, so it moves last — a failure at either
+       * write leaves the map still describing the world as it was, and the
+       * same call retried does the same work. Written the other way round, a
+       * failed `unlend` becomes unreachable the moment the link leaves the
+       * map: a `borrowers` line no later call goes back for, and a parent its
+       * own `gc` refuses from then on.
        *
-       * `unlend` first, and against the map this is about to become, means a
-       * parent can be let go a moment before the link is. That is the safe
-       * direction: `gc` reads the child's own `alternates` as well as the
-       * parent's `borrowers`, so a fork that really does still read through
-       * this parent is still found by the scan.
+       * `unlend` before the map changes means a parent can be let go a moment
+       * before the link is — the safe direction, since `gc` also reads the
+       * child's own `alternates`, so a fork that still reads through this
+       * parent is still found by the scan.
        *
-       * One at a time, because the map is read at the start and written at the
-       * end and the file is rewritten whole in between. Two forks running
+       * One at a time, because the map is read at the start, written at the
+       * end, and the file rewritten whole in between. Two forks running
        * together would each serialize a snapshot taken before the other's
        * link existed, and the second write would drop the first — a fork that
        * survives in memory until the process ends and is gone after it, with
        * `dependents` no longer naming it and its parent's objects collectable
-       * out from under it. The lock is the file's, and the work under it is
-       * two small writes.
+       * out from under it. The lock is the file's; the work under it is two
+       * small writes.
        */
       const alone = async <A>(work: () => Promise<A>): Promise<A> => {
         await fs.mkdir(root, { recursive: true });
@@ -989,13 +986,11 @@ export const repoStoresNode = (root: string) =>
        * nothing should be in for long.
        *
        * The alternative — cache it, mark the name, and invalidate on the way
-       * back — is what this used to do. Getting it right took a walk up the
-       * fork links on every open and a walk back down on every restore, and
-       * two bugs on the way: a fork of a fork kept serving the pre-restore
-       * store because only the marked name was checked, and again because
-       * only the marked name was invalidated. Both were silently wrong
-       * answers about history. Not caching cannot be wrong, only slow, and
-       * only in the state where something is already broken.
+       * back — is what this used to do, and cost two bugs: a fork of a fork
+       * kept serving the pre-restore store because only the marked name was
+       * checked, and again because only the marked name was invalidated. Both
+       * were silently wrong answers about history. Not caching cannot be
+       * wrong, only slow, and only while something is already broken.
        */
       interface Opened {
         readonly stores: StoreInstances;
@@ -1658,12 +1653,8 @@ export const localNamespace = (
                 // the cause was transient, which the fork race is not: that one
                 // stands until the fork is deleted.
                 //
-                // Worth it against the other order. Revoking after the storage
-                // goes leaves a window where a live write token still resolves
-                // to a name whose row has not gone yet, and a push landing in it
-                // rebuilds the repository under a name about to be freed — for
-                // the next caller to create over, and clone somebody else's
-                // history out of.
+                // Worth it against the other order, which leaves the same
+                // rebuild window open with a live write token instead.
                 for (const token of (yield* tokens.list(name)).tokens) {
                   yield* tokens.revoke(name, token.id);
                 }
