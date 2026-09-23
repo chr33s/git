@@ -380,6 +380,81 @@ describe("Pack", () => {
         assert.match(error.reason, new RegExp(`more than the ${String(MAX_OBJECT_BYTES)}`));
       }),
     );
+
+    /**
+     * A delta's header size is only the size of its instructions. A bare 0x80
+     * is a copy of 64 KiB from offset 0, so each byte of delta can add 64 KiB
+     * to the result — and the result is what gets allocated.
+     */
+    const amplified = (copies: number) => {
+      const base = new Uint8Array(0x10000).fill(0x61);
+      const delta = Uint8Array.from([
+        ...sizeVarint(base.length),
+        ...sizeVarint(copies * 0x10000),
+        ...Array.from({ length: copies }, () => 0x80),
+      ]);
+      const baseEntry = concat([
+        Uint8Array.from(objectHeader(3, base.length)),
+        new Uint8Array(deflateSync(base)),
+      ]);
+      const deltaEntry = concat([
+        Uint8Array.from(objectHeader(6, delta.length)),
+        encodeOfsDistance(baseEntry.length),
+        new Uint8Array(deflateSync(delta)),
+      ]);
+      return buildPack([baseEntry, deltaEntry]);
+    };
+
+    it.effect("refuses a delta whose result is past the ceiling", () =>
+      Effect.promise(async () => {
+        const bytes = amplified(32);
+        assert.ok(bytes.length < 1024, `the delta pack is ${bytes.length} bytes`);
+        const ceiling = Layer.mergeAll(stores, maxObject(1024 * 1024));
+
+        const unpacked = await Effect.runPromise(
+          unpack(Stream.make(bytes)).pipe(Effect.flip, Effect.provide(ceiling)),
+        );
+        assert.equal(unpacked._tag, "PackCorrupt");
+        assert.match(unpacked.reason, /object 1: declares 2097152 bytes, more than the 1048576/);
+
+        // Retention walks the same pack by its own path, and must refuse it
+        // there too rather than build the object while indexing it.
+        const retained = await Effect.runPromise(
+          ingest(Stream.make(bytes), { retainAtLeast: 1 }).pipe(
+            Effect.flip,
+            Effect.provide(ceiling),
+          ),
+        );
+        assert.equal(retained._tag, "PackCorrupt");
+        assert.match(retained.reason, /declares 2097152 bytes/);
+
+        // Under the ceiling, the same shape is an ordinary object.
+        const oids = await Effect.runPromise(
+          unpack(Stream.make(amplified(8))).pipe(Effect.provide(ceiling)),
+        );
+        assert.equal(oids.length, 2);
+      }),
+    );
+
+    it.effect("refuses bytes after the trailer, as git index-pack does", () =>
+      Effect.promise(async () => {
+        const bytes = concat([
+          packOf([{ type: "blob", data: encoder.encode("payload") }]),
+          encoder.encode("JUNKJUNK"),
+        ]);
+        const error = await expectCorrupt(bytes);
+        assert.match(error.reason, /junk at the end/);
+
+        const retained = await Effect.runPromise(
+          ingest(Stream.make(bytes), { retainAtLeast: 1 }).pipe(
+            Effect.flip,
+            Effect.provide(stores),
+          ),
+        );
+        assert.equal(retained._tag, "PackCorrupt");
+        assert.match(retained.reason, /junk at the end/);
+      }),
+    );
   });
 });
 

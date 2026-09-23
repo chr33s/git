@@ -780,6 +780,24 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
     }
   });
 
+  // Two commands for one ref would each be judged against the value before
+  // the push and each applied, the second silently winning while both were
+  // reported `ok`. git refuses every command naming such a ref, and so does
+  // this: neither can be said to have been what the client meant.
+  const named = new Map<string, number>();
+  for (const update of updates) named.set(update.name, (named.get(update.name) ?? 0) + 1);
+  const duplicated = (update: RefUpdate) => named.get(update.name)! > 1;
+  for (const update of updates.filter(duplicated)) {
+    refused.push({
+      ref: update.name,
+      from: update.expected ?? null,
+      to: null,
+      ok: false,
+      reason: "multiple updates for ref not allowed",
+    });
+  }
+  updates.splice(0, updates.length, ...updates.filter((update) => !duplicated(update)));
+
   /**
    * Read the pack the client is sending and throw it away.
    *

@@ -261,13 +261,26 @@ export const project = Effect.fn("hub.NoteProjection.project")(function* (note: 
 
   // Pinning is projection metadata: §7.7 keeps it out of drift semantics, so
   // it never contests a judgment and the last one written simply wins.
-  let pinned = created.pinned;
-  for (const entry of accepted) {
-    if (entry.commit === creation.commit || !descends(entry, creation)) continue;
-    if (entry.payload.type === "note.pinned" || entry.payload.type === "note.unpinned") {
-      pinned = entry.payload.type === "note.pinned";
-    }
-  }
+  //
+  // "Last" is causal first: a pin that a later event descends from has been
+  // seen and answered, whatever the clocks say. Only among pins no other pin
+  // descends — concurrent ones, written on diverged replicas — does issue
+  // time decide, with the commit as the tie-break every replica computes the
+  // same way. Topological order alone put concurrent pins in object-id order,
+  // so an unpin issued an hour after a pin could lose to it.
+  const pins = accepted.filter(
+    (entry) =>
+      entry.commit !== creation.commit &&
+      descends(entry, creation) &&
+      (entry.payload.type === "note.pinned" || entry.payload.type === "note.unpinned"),
+  );
+  const latestPin = ending(
+    pins.filter(
+      (entry) => !pins.some((other) => other.commit !== entry.commit && descends(other, entry)),
+    ),
+  );
+  const pinned =
+    latestPin === undefined ? created.pinned : latestPin.payload.type === "note.pinned";
 
   const common = {
     id: note,

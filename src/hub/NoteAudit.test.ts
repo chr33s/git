@@ -399,6 +399,40 @@ describe("anchored notes over a range", () => {
     }).pipe(scenario),
   );
 
+  it.effect("follows a rename made before the range to the file the range edits", () =>
+    Effect.gen(function* () {
+      const baseline = yield* baselineOf("src/auth.ts", VERIFY, "function verify");
+      const other = "export const unrelated = 1;\n";
+      yield* commit({ "src/auth.ts": VERIFY, "src/other.ts": other }, "before\n");
+      // Renamed before `base`, so the stored path is absent on both sides of
+      // the range and never appears in what the range changed.
+      const base = yield* commit(
+        { "src/security/auth.ts": VERIFY, "src/other.ts": other },
+        "move\n",
+      );
+      const edited =
+        "export function verify(token: string): boolean {\n  return token.length > 5\n}\n";
+      const head = yield* commit(
+        { "src/security/auth.ts": edited, "src/other.ts": other },
+        "edit\n",
+      );
+      const note = noteOn({ path: "src/auth.ts", anchor: "function verify", baseline });
+
+      const ranged = yield* Audit.auditRange([note], base, head);
+      assert.deepEqual(
+        ranged.map((entry) => [entry.status, entry.path, entry.pathMovedFrom]),
+        [["content-changed", "src/security/auth.ts", "src/auth.ts"]],
+      );
+
+      // A range that edits only some other file leaves it alone.
+      const unrelated = yield* commit(
+        { "src/security/auth.ts": edited, "src/other.ts": "export const unrelated = 2;\n" },
+        "elsewhere\n",
+      );
+      assert.deepEqual(yield* Audit.auditRange([note], head, unrelated), []);
+    }).pipe(scenario),
+  );
+
   it.effect("scopes a query to a path or the directory beneath it", () =>
     Effect.gen(function* () {
       assert.equal(Audit.covers(undefined, "src/auth.ts"), true);

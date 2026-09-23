@@ -337,6 +337,54 @@ describe("receive-pack", () => {
     }).pipe(Effect.provide(live)),
   );
 
+  it.live("refuses every command naming a ref twice, as git does", () =>
+    Effect.gen(function* () {
+      const repository = yield* Repository;
+      const refs = yield* RefStore;
+
+      const one = yield* repository.commit({
+        branch: "main",
+        tree: EMPTY_TREE_OID,
+        message: "one",
+        author: alice,
+      });
+      const two = yield* repository.commit({
+        branch: "main",
+        tree: EMPTY_TREE_OID,
+        message: "two",
+        author: alice,
+      });
+      yield* repository.setRef({ name: "refs/heads/x", to: one });
+      yield* repository.setRef({ name: "refs/heads/gone", to: one });
+
+      // Both judged against the value before the push, both applied, the
+      // second silently winning — and each reported `ok`. Real git answers
+      // `ng` for both: "multiple updates for ref not allowed".
+      const response = yield* Protocol.receivePack(
+        push([
+          `${one} ${two} refs/heads/x\n`,
+          `${one} ${ZERO} refs/heads/x\n`,
+          `${one} ${ZERO} refs/heads/gone\n`,
+        ]),
+      );
+      const report = decoder.decode(
+        new Uint8Array(yield* Effect.promise(() => response.arrayBuffer())),
+      );
+
+      const lines = report.split("\n");
+      assert.equal(
+        lines.filter((line) =>
+          line.endsWith("ng refs/heads/x multiple updates for ref not allowed"),
+        ).length,
+        2,
+        report,
+      );
+      assert.ok(report.includes("ok refs/heads/gone"), report);
+      assert.equal(yield* refs.read("refs/heads/x"), one);
+      assert.equal(yield* refs.read("refs/heads/gone"), null);
+    }).pipe(Effect.provide(live)),
+  );
+
   it.live("reads the pack of a push it refuses, so the client sees the report", () =>
     Effect.gen(function* () {
       const repository = yield* Repository;

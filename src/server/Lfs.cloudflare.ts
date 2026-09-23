@@ -1,16 +1,20 @@
 /**
  * LFS objects in R2, beside the git objects.
  *
- * The upload streams straight into `bucket.put` — an LFS object is large by
- * definition and a Durable Object has 128 MiB, so buffering it is the failure
- * mode this whole design exists to avoid.
+ * An LFS object is large by definition and a Durable Object has 128 MiB, so
+ * the upload is never held whole. It cannot stream into `bucket.put` either:
+ * R2 refuses a stream whose length it is not told up front, and a chunked
+ * upload has none to tell. So it goes to R2 as a multipart upload, one
+ * `PART_BYTES` part resident at a time.
  *
  * Verification uses `crypto.DigestStream`, which is the Workers primitive for
- * hashing something you are not holding: the body is teed, one branch goes to
- * R2 and the other to the digest, and an object whose content does not match
- * the name it was given is deleted again rather than left to be served.
+ * hashing something you are not holding: every chunk is fed to the digest as
+ * it goes to R2. A multipart upload is not an object until it is completed,
+ * so one whose content does not match the name it was given is aborted and
+ * was never servable, and an already-verified object under that name is
+ * never touched.
  */
-import { bytesToHex } from "../git/Format.ts";
+import { bytesToHex, concatBytes } from "../git/Format.ts";
 import { Effect, Layer, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
@@ -20,6 +24,12 @@ export interface CloudflareLfsOptions {
   readonly bucket: R2Bucket;
   readonly repo: string;
 }
+
+/**
+ * One multipart part. R2 needs every part but the last to be the same size
+ * and at least 5 MiB; this is the memory one upload holds at a time.
+ */
+const PART_BYTES = 8 * 1024 * 1024;
 
 const hex = (buffer: ArrayBuffer): string => bytesToHex(new Uint8Array(buffer));
 
@@ -80,58 +90,73 @@ export const r2 = (options: CloudflareLfsOptions): Layer.Layer<LfsStore> =>
 
       write: (oid, body) =>
         Effect.gen(function* () {
-          // Staged under a temporary key, like the node backend's temp file:
-          // putting the upload at its final key first would let a mismatched
-          // PUT destroy an already-verified object. The name only becomes
-          // this content once the digest agrees.
-          const staged = `${key(oid)}.${crypto.randomUUID()}.tmp`;
-
           const written = yield* Effect.tryPromise({
             try: async () => {
-              const source = Stream.toReadableStream(body);
-              const [toBucket, toDigest] = source.tee();
-
               const digest = digestStream("SHA-256");
-              const hashing = toDigest.pipeTo(digest);
+              const hashing = digest.getWriter();
+              let upload: R2MultipartUpload | null = null;
+              const parts: R2UploadedPart[] = [];
+              let pending: Uint8Array[] = [];
+              let buffered = 0;
+              let size = 0;
 
-              const stored = await options.bucket.put(staged, toBucket);
-              await hashing;
+              /** One part, opening the upload on the first; the upload is returned. */
+              const send = async (
+                open: R2MultipartUpload | null,
+                bytes: Uint8Array,
+              ): Promise<R2MultipartUpload> => {
+                const started = open ?? (await options.bucket.createMultipartUpload(key(oid)));
+                parts.push(await started.uploadPart(parts.length + 1, bytes));
+                return started;
+              };
 
-              return { actual: hex(await digest.digest), size: stored?.size ?? 0 };
-            },
-            catch: failed("lfs.write", oid),
-          });
-
-          if (written.actual !== oid) {
-            // Never leave a mis-named object behind: the next download would
-            // serve it as though the hash had been checked.
-            yield* Effect.promise(() => options.bucket.delete(staged));
-            return yield* new Invalid({
-              field: "oid",
-              reason: `content hashes to ${written.actual}`,
-            });
-          }
-
-          // R2 has no rename, so the verified bytes are copied to the name
-          // they hash to and the staging key is dropped either way — a
-          // half-finished copy must not leave a full-size object behind, and
-          // a copy that found nothing must not report success to a client
-          // that will never upload it again.
-          yield* Effect.tryPromise({
-            try: async () => {
               try {
-                const object = await options.bucket.get(staged);
-                if (object === null) {
-                  throw new Error("the staged upload disappeared before it was stored");
+                for await (const chunk of Stream.toAsyncIterable(body)) {
+                  await hashing.write(chunk);
+                  size += chunk.length;
+                  pending.push(chunk);
+                  buffered += chunk.length;
+                  while (buffered >= PART_BYTES) {
+                    const joined = concatBytes(pending);
+                    upload = await send(upload, joined.subarray(0, PART_BYTES));
+                    pending = [joined.subarray(PART_BYTES)];
+                    buffered -= PART_BYTES;
+                  }
                 }
-                await options.bucket.put(key(oid), object.body);
-              } finally {
-                await options.bucket.delete(staged);
+                await hashing.close();
+                const actual = hex(await digest.digest);
+
+                if (actual !== oid) {
+                  // Nothing was ever visible under the key: a multipart
+                  // upload is not an object until it completes.
+                  await upload?.abort();
+                  return { actual, size };
+                }
+
+                const rest = concatBytes(pending);
+                if (upload === null) {
+                  await options.bucket.put(key(oid), rest);
+                } else {
+                  if (rest.length > 0) upload = await send(upload, rest);
+                  await upload.complete(parts);
+                }
+                return { actual, size };
+              } catch (error) {
+                // The parts already sent are billed storage until aborted,
+                // and the original failure is the one worth reporting.
+                await upload?.abort().catch(() => undefined);
+                throw error;
               }
             },
             catch: failed("lfs.write", oid),
           });
 
+          if (written.actual !== oid) {
+            return yield* new Invalid({
+              field: "oid",
+              reason: `content hashes to ${written.actual}`,
+            });
+          }
           return { oid, size: written.size };
         }),
     });

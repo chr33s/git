@@ -397,6 +397,67 @@ describe("anchored note projection", () => {
     }).pipe(scenario),
   );
 
+  it.effect("settles concurrent pins by issue time, and causal ones by the DAG", () =>
+    Effect.gen(function* () {
+      // Two replicas, neither having seen the other: one pins, one unpins.
+      // Whichever was issued later is the last word, on every replica —
+      // object ids, which decided it before, say nothing about when.
+      const concurrently = Effect.fn("test.concurrently")(function* (later: boolean) {
+        const { key, note } = yield* started();
+        const repository = yield* Repository;
+        const creation = yield* repository.readRef(Note.refOf(note));
+        assert.ok(creation !== null);
+        const context = yield* Note.context(REPO, note);
+        const at = (hour: number) => `2026-01-01T${String(hour).padStart(2, "0")}:00:00.000Z`;
+        const pin = yield* beside({
+          note,
+          parent: creation,
+          payload: {
+            ...context,
+            id: `${context.id}-p`,
+            type: "note.pinned",
+            issuedAt: at(later ? 13 : 12),
+          },
+          key,
+        });
+        const unpin = yield* beside({
+          note,
+          parent: creation,
+          payload: {
+            ...context,
+            id: `${context.id}-u`,
+            type: "note.unpinned",
+            issuedAt: at(later ? 12 : 13),
+          },
+          key,
+        });
+        yield* joined(note, [pin, unpin]);
+        const left = (yield* ready(note)).pinned;
+        yield* joined(note, [unpin, pin]);
+        assert.equal((yield* ready(note)).pinned, left, "the same answer whichever side is walked");
+        return { key, note, pinned: left };
+      });
+
+      assert.equal((yield* concurrently(true)).pinned, true);
+      const { key, note, pinned } = yield* concurrently(false);
+      assert.equal(pinned, false);
+
+      // A pin written after seeing both wins even with a clock behind them:
+      // it descends them, so it answered them.
+      const context = yield* Note.context(REPO, note);
+      const head = yield* (yield* Repository).readRef(Note.refOf(note));
+      assert.ok(head !== null);
+      const settled = yield* beside({
+        note,
+        parent: head,
+        payload: { ...context, type: "note.pinned", issuedAt: "2026-01-01T00:00:00.000Z" },
+        key,
+      });
+      yield* (yield* Repository).setRef({ name: Note.refOf(note), to: settled });
+      assert.equal((yield* ready(note)).pinned, true);
+    }).pipe(scenario),
+  );
+
   it.effect("carries a tombstone without letting it stand in for a judgment", () =>
     Effect.gen(function* () {
       const { key, note } = yield* started();

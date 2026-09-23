@@ -20,7 +20,7 @@
 import { Effect } from "effect";
 
 import { isBinary, lcs, splitLines } from "./Diff.ts";
-import { isGitlink, sameMode } from "./Format.ts";
+import { isGitlink, isSymlink, sameMode } from "./Format.ts";
 import type { ObjectNotFound, StorageFailure } from "./Error.ts";
 import type { Oid } from "./Store.ts";
 
@@ -362,7 +362,7 @@ export const mergeTrees = Effect.fn("Merge.mergeTrees")(function* (input: {
 
     // A symlink target is one value. Conflict preferences choose the target
     // whole; regular files below keep clean edits from both sides.
-    if ((mine.mode === "120000" || yours.mode === "120000") && strategy !== "recursive") {
+    if ((isSymlink(mine.mode) || isSymlink(yours.mode)) && strategy !== "recursive") {
       if (strategy === "theirs") changes.push(yield* taking(yours));
       continue;
     }

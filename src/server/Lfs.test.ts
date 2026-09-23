@@ -15,10 +15,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect } from "effect";
+import { Effect, Stream } from "effect";
+
+import { StorageFailure } from "../git/Error.ts";
 
 import { serve, type Server } from "../host/Node.ts";
-import { formatPointer, MEDIA_TYPE, parsePointer } from "./Lfs.ts";
+import { formatPointer, LfsStore, MEDIA_TYPE, parsePointer } from "./Lfs.ts";
+import { file } from "./Lfs.node.ts";
 
 const sha256 = (content: string): string => createHash("sha256").update(content).digest("hex");
 
@@ -170,6 +173,32 @@ describe("Git LFS", () => {
         parsePointer("version https://git-lfs.github.com/spec/v1\noid sha256:short\nsize 1\n"),
         null,
       );
+    }),
+  );
+
+  it.effect("leaves no partial file behind when an upload fails part-way", () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "lfs-abort-")));
+      const oid = sha256("never arrives");
+      // A client that sends some bytes and then drops the connection.
+      const body = Stream.make(new TextEncoder().encode("never")).pipe(
+        Stream.concat(
+          Stream.fail(new StorageFailure({ operation: "lfs.upload", path: oid, cause: "reset" })),
+        ),
+      );
+
+      const result = yield* LfsStore.use((store) => store.write(oid, body)).pipe(
+        Effect.provide(file(root)),
+        Effect.flip,
+      );
+      assert.equal(result._tag, "StorageFailure");
+
+      const left = yield* Effect.promise(() => fs.readdir(root, { recursive: true }));
+      assert.deepEqual(
+        left.filter((entry) => entry.endsWith(".tmp")),
+        [],
+      );
+      yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }));
     }),
   );
 });

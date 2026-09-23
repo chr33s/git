@@ -155,6 +155,8 @@ export const status = Effect.fn("Checkout.status")(function* () {
 
   const stagedChanges: Array<{ path: string; change: Change }> = [];
   for (const [path, entry] of staged) {
+    // Known to the index, nothing of it staged: git reports ` A`, not `A `.
+    if (entry.intentToAdd === true) continue;
     const committed = head.get(path);
     if (committed === undefined) stagedChanges.push({ path, change: "added" });
     else if (committed.oid !== entry.oid || !sameMode(committed.mode, entry.mode)) {
@@ -170,6 +172,13 @@ export const status = Effect.fn("Checkout.status")(function* () {
 
   // Ignore rules filter untracked discovery, never already indexed paths.
   for (const [path, entry] of staged) {
+    // Sparse checkout: what is on disk at this path is not git's business.
+    if (entry.skipWorktree === true) continue;
+    if (entry.intentToAdd === true) {
+      const present = (yield* work.stat(path)) !== null;
+      unstaged.push({ path, change: present ? "added" : "deleted" });
+      continue;
+    }
     if (entry.mode === 0o160000) {
       const gitlink = yield* work.gitlink(path);
       if (gitlink !== null && gitlink.oid !== entry.oid) {
@@ -219,7 +228,14 @@ export const add = Effect.fn("Checkout.add")(function* (paths: ReadonlyArray<str
   let entries = yield* index.load;
   const onDisk = yield* work.list(entries);
   const staged: string[] = [];
-  const candidates = [...new Set([...onDisk, ...entries.map((entry) => entry.path)])];
+  // Outside a sparse checkout's cone, `git add` leaves paths alone: the file
+  // is absent from disk by design, and staging that absence would delete it.
+  const sparse = new Set(
+    entries.filter((entry) => entry.skipWorktree === true).map((entry) => entry.path),
+  );
+  const candidates = [...new Set([...onDisk, ...entries.map((entry) => entry.path)])].filter(
+    (path) => !sparse.has(path),
+  );
 
   for (const requested of paths) {
     const normalized = requested === "." ? "" : yield* validatePath(requested);
@@ -354,9 +370,11 @@ export const move = Effect.fn("Checkout.move")(function* (from: string, to: stri
   yield* work.remove(source);
 
   // The moved bytes may differ from the staged blob: force the next status to hash them.
+  const moved = entryFor(target, entry.oid, blank(entry.mode));
   const next = addEntry(
     removeEntry(entries, source),
-    entryFor(target, entry.oid, blank(entry.mode)),
+    // Still nothing staged: moving an intent-to-add path moves the intent.
+    entry.intentToAdd === true ? { ...moved, intentToAdd: true } : moved,
   );
   yield* index.save(next);
 
@@ -488,6 +506,16 @@ export const checkout = Effect.fn("Checkout.checkout")(function* (
     : yield* repository.resolve(ref);
   if (tip === null) {
     return yield* new Invalid({ field: "target", reason: `unknown branch '${target}'` });
+  }
+
+  // Checkout rebuilds the index and the work tree from the target tree, so a
+  // sparse checkout would come out of it fully populated and no longer
+  // sparse. Refused, force or not, rather than undone without asking.
+  if ((yield* index.load).some((entry) => entry.skipWorktree === true)) {
+    return yield* new Invalid({
+      field: "index",
+      reason: "switching a sparse checkout (skip-worktree entries) is not supported; use git",
+    });
   }
 
   const commit = yield* repository.readCommit(tip);
@@ -659,10 +687,14 @@ export const commit = Effect.fn("Checkout.commit")(function* (input: {
   );
   const previous = yield* repository.resolve(branch);
 
+  // An intent-to-add entry has no content staged, and git writes no tree
+  // entry for it: committing one would record an empty file nobody staged.
+  const committed = entries.filter((entry) => entry.intentToAdd !== true);
+
   // The index already names every blob, so the tree is built from oids
   // rather than by reading the content back out to write it again.
   const tree = yield* repository.writePaths(
-    entries.map((entry) => ({
+    committed.map((entry) => ({
       path: entry.path,
       oid: entry.oid,
       mode: modeString(entry.mode),
@@ -671,7 +703,7 @@ export const commit = Effect.fn("Checkout.commit")(function* (input: {
 
   if (
     mergeParents.length === 0 &&
-    ((previous === null && entries.length === 0) ||
+    ((previous === null && committed.length === 0) ||
       (previous !== null && (yield* repository.readCommit(previous)).tree === tree))
   ) {
     return yield* new Invalid({ field: "index", reason: "nothing staged" });
@@ -689,5 +721,5 @@ export const commit = Effect.fn("Checkout.commit")(function* (input: {
     return committed;
   }).pipe(Effect.uninterruptible);
 
-  return { oid, tree, files: entries.length };
+  return { oid, tree, files: committed.length };
 }, withIndexLock);

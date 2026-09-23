@@ -143,6 +143,35 @@ describe.skipIf(!hasTar)("Archive through the system tar", () => {
     }),
   );
 
+  it.effect("reads a zero-padded mode as the mode it spells", () =>
+    Effect.promise(async () => {
+      // `0100755` and `0120000` are what git's fsck calls zeroPaddedFilemode,
+      // and reads anyway. Compared as strings, the script lost its executable
+      // bit and the link arrived as a file holding its target.
+      const bytes = await Effect.runPromise(
+        Effect.gen(function* () {
+          const git = yield* GitRepository.Repository;
+          const script = yield* git.writeBlob(encoder.encode("#!/bin/sh\necho hi\n"));
+          const target = yield* git.writeBlob(encoder.encode("run.sh"));
+          const tree = yield* git.writeTree([
+            { mode: "0100755", name: "run.sh", oid: script },
+            { mode: "0120000", name: "link", oid: target },
+          ]);
+          return join(yield* Stream.runCollect(yield* Archive.archive({ tree, format: "tar" })));
+        }).pipe(Effect.provide(repository)),
+      );
+      const { into, root } = await untar(bytes, "-xf");
+      try {
+        const script = await fs.stat(path.join(into, "run.sh"));
+        assert.equal(script.mode & 0o111, 0o111);
+        assert.ok((await fs.lstat(path.join(into, "link"))).isSymbolicLink());
+        assert.equal(await fs.readlink(path.join(into, "link")), "run.sh");
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
+
   it.effect("writes a tar.gz the system tar decompresses", () =>
     Effect.promise(async () => {
       const bytes = await collect("tar.gz");

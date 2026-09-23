@@ -17,7 +17,7 @@
 import { Effect, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, type StorageFailure, statusOf } from "../git/Error.ts";
-import { isGitlink, isTree } from "../git/Format.ts";
+import { isExecutable, isGitlink, isSymlink, isTree } from "../git/Format.ts";
 import { crc32 } from "../git/PackIndex.ts";
 import { Repository, treeAt, type TreeFile } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
@@ -276,7 +276,7 @@ const tarChunks = (
 
     // A symlink's blob *is* the target, so it travels in the header rather
     // than as content — a symlink entry has no content at all.
-    if (entry.mode === "120000") {
+    if (isSymlink(entry.mode)) {
       const target = decoder.decode(yield* repository.readBlob(entry.oid));
       return tarHeaders({
         name: entry.path,
@@ -292,7 +292,7 @@ const tarChunks = (
     return [
       ...tarHeaders({
         name: entry.path,
-        mode: entry.mode === "100755" ? 0o755 : 0o644,
+        mode: isExecutable(entry.mode) ? 0o755 : 0o644,
         size: data.length,
         typeflag: "0",
         link: "",
@@ -451,9 +451,9 @@ const zipStream = (
         const mode =
           entry.kind === "directory"
             ? 0o40755
-            : entry.mode === "120000"
+            : isSymlink(entry.mode)
               ? 0o120777
-              : entry.mode === "100755"
+              : isExecutable(entry.mode)
                 ? 0o100755
                 : 0o100644;
 

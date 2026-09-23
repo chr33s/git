@@ -11,7 +11,7 @@
  */
 import { Effect, Stream } from "effect";
 
-import { advertisement, requestPack } from "../client/Fetch.ts";
+import { advertisement, neededShallow, requestPack } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -188,7 +188,7 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
           ),
         );
         yield* repository.updateShallow({
-          add: [...remote.shallow, ...pack.shallow],
+          add: [...(yield* neededShallow(remote.shallow)), ...pack.shallow],
           remove: pack.unshallow,
         });
         return unpacked;

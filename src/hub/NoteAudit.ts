@@ -331,16 +331,30 @@ export const auditRange = Effect.fn("hub.NoteAudit.auditRange")(function* (
   head: Oid,
   query?: string,
 ) {
+  const repository = yield* Repository;
   const changed = yield* changedPaths(base, head);
   const source = yield* revision(head);
+  const baseTree = yield* treeAt(repository, base);
   const results: AuditResult[] = [];
   for (const note of notes) {
     if (!note.active) continue;
-    // The stored path, and it needs no relaxing for a rename: a range that
-    // renamed the note's file changed the old path too — it holds nothing at
-    // `head` — so a moved note is already in `changed` under the name the
-    // projection knows it by.
-    if (!changed.has(note.path)) continue;
+    if (!changed.has(note.path)) {
+      // Untouched and still there: nothing this range did can reach it.
+      if ((yield* repository.findPath(baseTree, note.path)) !== null) continue;
+      // Gone before `base` as well as at `head`: renamed by an earlier
+      // commit, so the stored path says nothing about this range and the
+      // renamed file might be exactly what it edits. Followed, and kept only
+      // when the file it landed on is one the range changed — drift that
+      // predates the range is not this change's to answer for.
+      const audited = yield* audit(note, source);
+      if (audited.pathMovedFrom === null || !changed.has(audited.path)) continue;
+      if (!covers(query, audited.path)) continue;
+      results.push(audited);
+      continue;
+    }
+    // A range that renamed the note's file changed the old path too — it holds
+    // nothing at `head` — so a note moved inside the range is here under the
+    // name the projection knows it by.
     const audited = yield* audit(note, source);
     if (!covers(query, audited.path)) continue;
     results.push(audited);
