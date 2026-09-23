@@ -1,14 +1,32 @@
-/*
+# Paths carry the `/hub` prefix the Worker serves this UI from. Cloudflare's
+# asset layer matches these rules against the incoming request path and never
+# strips a prefix, so `base` rewriting the manifest does not rewrite this file.
+#
+# Every path below also matches `/hub/*`, and the asset layer joins the values
+# of a header set by more than one matching rule. `! Cache-Control` detaches the
+# immutable one first, so the entry files revalidate instead of carrying both.
+
+/hub/*
   Cache-Control: public, max-age=31536000, immutable
 
-/index.html
+# The entry page is reached as `/hub/` — the asset layer's own spelling of it,
+# and what the Worker asks for on every deep link — as well as by file name.
+/hub/
+  ! Cache-Control
   Cache-Control: public, max-age=0, must-revalidate
 
-/main.js
+/hub/index.html
+  ! Cache-Control
   Cache-Control: public, max-age=0, must-revalidate
 
-/main.js.map
+/hub/main.js
+  ! Cache-Control
   Cache-Control: public, max-age=0, must-revalidate
 
-/main.css
+/hub/main.js.map
+  ! Cache-Control
+  Cache-Control: public, max-age=0, must-revalidate
+
+/hub/main.css
+  ! Cache-Control
   Cache-Control: public, max-age=0, must-revalidate

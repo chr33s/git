@@ -11,6 +11,21 @@
     <meta name="gp-repo" content="core" />
     <meta name="gp-api-base" content="" />
 
+    <!-- Addresses this UI used before it moved to `/hub`. Synchronous and
+         ahead of everything else: the bundle would otherwise boot on the
+         wrong route and paint a screen the link did not ask for. `replace`
+         rather than `assign` so Back still leaves the app. Delete this once
+         external `#/` links have aged out. -->
+    <script>
+      (function () {
+        var h = location.hash;
+        if (h.slice(0, 2) !== "#/") return;
+        var s = h.slice(2).split("/")[0];
+        if (["activity", "code", "tasks", "detail", "settings", "search"].indexOf(s) < 0) return;
+        location.replace("/hub/" + h.slice(2) + location.search);
+      })();
+    </script>
+
     <!-- Settle the palette before the first paint. Inline and synchronous on
          purpose: anything that waits for the bundle shows a white flash to
          every dark-mode reader first. `tokens.css` handles the no-choice case
@@ -32,7 +47,7 @@
     />
   </head>
   <body>
-    <gp-app></gp-app>
-    <script type="module" src="./main.ts"></script>
+    <div id="gp-app"></div>
+    <script type="module" src="/main.ts"></script>
   </body>
 </html>

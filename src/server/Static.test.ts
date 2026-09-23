@@ -2,6 +2,12 @@
  * Serving a directory to the public is one bug away from serving the disk, so
  * the escape cases are the ones pinned here: what a path that climbs out of
  * the root answers, and what a method that is not a read answers.
+ *
+ * The prefix is the other half. Everything the UI owns answers under `/hub`
+ * and everything else is the API's, so the two cases worth pinning are that a
+ * path outside the prefix is declined outright, and that a path inside it that
+ * names no file still gets the page — which is what makes a deep link survive
+ * a reload.
  */
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
@@ -75,7 +81,7 @@ describe("Static", () => {
       // client can send — and it has to name the file it means.
       assert.notEqual(await fileAt(root, "/a%20b.js"), null);
       assert.equal(
-        (await assetResponse(root, new Request("http://ui.test/a%20b.js")))?.headers.get(
+        (await assetResponse(root, new Request("http://ui.test/hub/a%20b.js")))?.headers.get(
           "content-type",
         ),
         "text/javascript",
@@ -84,6 +90,35 @@ describe("Static", () => {
       // refused rather than resolved afterwards — and a lone `%` is not a path.
       assert.equal(await fileAt(root, "/%2e%2e/secret.txt"), null);
       assert.equal(await fileAt(root, "/%"), null);
+    }),
+  );
+
+  it.effect("declines everything outside the prefix", () =>
+    Effect.promise(async () => {
+      const answer = async (path: string): Promise<Response | null> =>
+        await assetResponse(root, new Request(`http://host${path}`));
+      // The API's, whatever it looks like — including the file names the build
+      // actually emits, which used to answer from the origin root.
+      assert.equal(await answer("/"), null);
+      assert.equal(await answer("/index.html"), null);
+      assert.equal(await answer("/main.js"), null);
+      assert.equal(await answer("/core/info/refs"), null);
+      // Whole segments only: a repository may be called `hubbub`.
+      assert.equal(await answer("/hubbub/main.js"), null);
+    }),
+  );
+
+  it.effect("answers a client route with the page, address intact", () =>
+    Effect.promise(async () => {
+      const answer = await assetResponse(root, new Request("http://host/hub/code/src/Api.ts"));
+      assert.equal(answer?.headers.get("content-type"), "text/html");
+      assert.match((await answer?.text()) ?? "", /<title>git\+<\/title>/);
+      // A root with no build has no page to fall back to, and says so by
+      // declining rather than by answering an empty one.
+      assert.equal(
+        await assetResponse(join(outside, "nothing"), new Request("http://host/hub/x")),
+        null,
+      );
     }),
   );
 
@@ -97,9 +132,10 @@ describe("Static", () => {
   it.effect("types what it serves by extension", () =>
     Effect.promise(async () => {
       const typeOf = async (path: string): Promise<string | undefined> =>
-        (await assetResponse(root, new Request(`http://host${path}`)))?.headers.get(
+        (await assetResponse(root, new Request(`http://host/hub${path}`)))?.headers.get(
           "content-type",
         ) ?? undefined;
+      assert.equal(await typeOf(""), "text/html");
       assert.equal(await typeOf("/"), "text/html");
       assert.equal(await typeOf("/index.html"), "text/html");
       assert.equal(await typeOf("/main.js"), "text/javascript");
@@ -113,7 +149,7 @@ describe("Static", () => {
     Effect.promise(async () => {
       const answer = await assetResponse(
         root,
-        new Request("http://host/main.js", { method: "HEAD" }),
+        new Request("http://host/hub/main.js", { method: "HEAD" }),
       );
       assert.equal(answer?.headers.get("content-type"), "text/javascript");
       assert.equal(answer?.headers.get("content-length"), "21");

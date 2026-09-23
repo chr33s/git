@@ -54,22 +54,21 @@ a:hover {
  * arrives wrapped in its own custom element — and a `<gp-sidebar>` sitting
  * between `.gp-shell` and `.gp-sidebar` would be the flex item, leaving the
  * rail unable to stretch to the viewport and the explorer column unable to sit
- * beside the content. `display: contents` promotes each component's own
- * children to be the flex items, which is what the design's layout assumes.
+ * beside the content.
  *
- * `gp-app` keeps a box: it is the root, and `.gp-shell` inside it is what sets
- * the 100vh height.
+ * Only Code needs it now. Every other screen is one column, and the shell
+ * gives it that column directly; Code is two — an explorer beside the content
+ * — and a view returns one element, so its wrapper steps out of the way and
+ * lets its own children be the flex items.
+ *
+ * `#gp-app` keeps a box: it is the root, and `.gp-shell` inside it is what
+ * sets the 100vh height.
  */
-gp-app {
+#gp-app {
   display: block;
 }
 
-gp-sidebar,
-gp-activity,
-gp-code,
-gp-tasks,
-gp-detail,
-gp-settings {
+.gp-code {
   display: contents;
 }
 

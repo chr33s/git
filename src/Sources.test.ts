@@ -5,6 +5,24 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect } from "effect";
 
+/** The three fields these checks read out of a package manifest. */
+interface Manifest {
+  readonly version?: string;
+  readonly dependencies?: Readonly<Record<string, string>>;
+  readonly devDependencies?: Readonly<Record<string, string>>;
+  readonly peerDependencies?: Readonly<Record<string, string>>;
+}
+
+/**
+ * One manifest, read for those fields alone.
+ *
+ * SAFETY: the path always names a `package.json` this repository just
+ * resolved on disk, and every field below is optional — a manifest missing
+ * one yields `undefined` and the assertion that wanted it fails by name
+ * rather than throwing here.
+ */
+const manifestAt = (path: string): Manifest => JSON.parse(readFileSync(path, "utf8")) as Manifest;
+
 describe("the source tree", () => {
   it.effect("spells control characters rather than embedding them", () =>
     Effect.sync(() => {
@@ -28,6 +46,66 @@ describe("the source tree", () => {
 
       const offending = files.filter((path) => readFileSync(path).includes(0));
       assert.deepEqual(offending, [], "these files hold a raw control byte and are unsearchable");
+    }),
+  );
+
+  it.effect("resolves exactly one Vite, and one Foldkit peers against it", () =>
+    Effect.sync(() => {
+      // Foldkit's Vite plugin declares Vite as a peer, and Vite+ reaches its
+      // own through `@voidzero-dev/vite-plus-core` rather than declaring it.
+      // A second copy would give the plugin a different module registry from
+      // the one running the build: the dev server would hold two HMR graphs
+      // and the production build would silently drop the plugin's transform.
+      // Cheaper to assert than to diagnose, so it is asserted.
+      // Unbounded: a copy nested under a scoped package — the two above are
+      // both scoped — sits deeper than any fixed depth that would also be cheap
+      // to reason about, and the whole walk takes a fraction of a second.
+      const copies = execFileSync("find", [
+        "node_modules",
+        "(",
+        "-path",
+        "node_modules/vite/package.json",
+        "-o",
+        "-path",
+        "*/node_modules/vite/package.json",
+        ")",
+      ])
+        .toString()
+        .split("\n")
+        .filter((path) => path.length > 0);
+      assert.deepEqual(
+        copies,
+        ["node_modules/vite/package.json"],
+        "more than one Vite is installed",
+      );
+
+      assert.match(
+        manifestAt("node_modules/vite/package.json").version ?? "",
+        /^[78]\./,
+        "Vite is outside @foldkit/vite-plugin's peer range",
+      );
+
+      // The pair is pinned, not ranged: Foldkit peers on one exact Effect, so
+      // an Effect bump is a Foldkit bump and has to be made deliberately.
+      const own = manifestAt("package.json");
+      const declared = { ...own.dependencies, ...own.devDependencies };
+      for (const name of [
+        "foldkit",
+        "@foldkit/vite-plugin",
+        "@foldkit/devtools",
+        "@foldkit/oxlint-plugin",
+        "effect",
+      ]) {
+        const pin = declared[name];
+        assert.notEqual(pin, undefined, `${name} is not installed`);
+        assert.match(pin ?? "", /^\d/, `${name} is ranged rather than pinned: ${pin ?? ""}`);
+      }
+
+      assert.equal(
+        manifestAt("node_modules/foldkit/package.json").peerDependencies?.["effect"],
+        declared["effect"],
+        "Foldkit peers on an Effect this repository does not install",
+      );
     }),
   );
 });
