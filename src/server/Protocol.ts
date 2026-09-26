@@ -17,8 +17,6 @@
  * writer emits full objects) and plain `multi_ack`, which `_detailed`
  * supersedes.
  */
-import { createGunzip } from "node:zlib";
-
 import { concatBytes as concat } from "../git/Format.ts";
 import { Effect, Option, Schema, Stream } from "effect";
 
@@ -121,66 +119,30 @@ const text = (payload: Uint8Array): string => {
  * The request body as chunks. git compresses large negotiation bodies, and
  * announces it the standard way; a pack body is already deflated per object,
  * so pushes arrive identity-encoded.
+ *
+ * Gzip is `DecompressionStream`, which workerd and node both implement.
+ * `node:zlib` cannot be imported here: this module is the Worker handler.
+ * The reader pulls one chunk at a time. Draining the transform first is not
+ * backpressure — deflate reaches about 1000:1, so one 64 KiB chunk becomes
+ * ~64 MiB and a few of them exhaust a 128 MiB Durable Object. A rejected
+ * read is the corrupt-body failure; `step` turns it into `PackCorrupt`.
  */
 const body = (request: Request): AsyncIterable<Uint8Array> => {
   const raw = request.body;
   if (raw === null) return (async function* () {})();
   if (request.headers.get("content-encoding")?.includes("gzip") !== true) return raw;
 
+  const decoded = raw.pipeThrough(new DecompressionStream("gzip"));
   return (async function* () {
-    const gunzip = createGunzip();
-
-    // Backpressure waits on `drain` *or* on the failure that means `drain`
-    // will never arrive: corrupt input mid-write would otherwise hang the
-    // request until the platform times the whole slot out.
-    const drain = () =>
-      new Promise<void>((resolve, reject) => {
-        const settle = (error?: Error) => {
-          gunzip.off("drain", onDrain);
-          gunzip.off("error", onError);
-          gunzip.off("close", onDrain);
-          if (error === undefined) resolve();
-          else reject(error);
-        };
-        const onDrain = () => settle();
-        const onError = (error: Error) => settle(error);
-        gunzip.once("drain", onDrain);
-        gunzip.once("error", onError);
-        gunzip.once("close", onDrain);
-      });
-
-    /**
-     * The writes run beside the reads, not before them.
-     *
-     * Draining the transform into an array first is not backpressure at all:
-     * a `data` handler puts the readable side in flowing mode, so zlib expands
-     * as fast as it can and every byte lands in memory first — deflate reaches
-     * about 1000:1, so one 64 KiB chunk becomes ~64 MiB and a few of them
-     * exhaust a 128 MiB Durable Object. Iterating the transform instead leaves
-     * it paused between reads, so a full readable buffer stalls it, `write`
-     * returns false, and the pipe stays bounded by the two high-water marks.
-     */
-    // The failure travels through `gunzip`, which the loop below is reading:
-    // destroying it there is what turns a broken body into a thrown error at
-    // the consumer instead of a body that simply stops.
-    const pumped = (async () => {
-      try {
-        for await (const chunk of raw) {
-          if (!gunzip.write(chunk)) await drain();
-        }
-        gunzip.end();
-      } catch (error) {
-        gunzip.destroy(error instanceof Error ? error : new Error(String(error)));
-      }
-    })().catch(() => undefined);
-
+    const reader = decoded.getReader();
     try {
-      // SAFETY: a zlib transform is a readable stream, which node makes async
-      // iterable at runtime; only the bundled lib declarations omit it.
-      for await (const chunk of gunzip as AsyncIterable<Uint8Array>) yield chunk;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) return;
+        if (next.value.byteLength > 0) yield next.value;
+      }
     } finally {
-      gunzip.destroy();
-      await pumped;
+      reader.releaseLock();
     }
   })();
 };

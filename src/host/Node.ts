@@ -47,7 +47,7 @@ import * as Lfs from "../server/Lfs.ts";
 import * as Protocol from "../server/Protocol.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
 import { collects, routeOf, settledWithin, UI_HOME } from "../server/Route.ts";
-import { assetResponse } from "../server/Static.ts";
+import { assetResponse } from "../server/Static.node.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import { resolve as resolveConfiguration, type ServeConfig } from "./ServeConfig.ts";
 import { stores as writableStores } from "./NodeStorage.ts";
@@ -92,7 +92,7 @@ export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname" | "h
    * Directory of a built UI to serve from this origin, if any.
    *
    * The page and the API have to share an origin for the browser to let them
-   * talk; see `server/Static.ts`. Unset serves the git API alone, which is
+   * talk; see `server/Static.node.ts`. Unset serves the git API alone, which is
    * what a host with no interest in the browser half wants.
    */
   readonly ui?: string;

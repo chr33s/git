@@ -424,7 +424,7 @@ binding for what the manifest misses. `notFoundHandling` stays at its default;
 
 **Three hosts serve the UI, not one.** The Worker, `host/Node.ts` and
 `ui/dev.ts` all had to learn the prefix. The first two share it through
-`server/Static.ts`, which now strips the prefix and falls back to the entry
+`server/Static.node.ts`, which now strips the prefix and falls back to the entry
 page. The dev server cannot: it asks Vite first and serves the page on Vite's
 fallthrough, because a rule guessing which paths are modules gets
 `/hub/node_modules/...` wrong in one direction and `/hub/code/src/Api.ts` wrong

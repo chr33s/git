@@ -5,7 +5,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
-import { Effect, Exit } from "effect";
+import { ConfigProvider, Effect, Exit } from "effect";
 
 import type { RepoId } from "./Genesis.ts";
 import {
@@ -16,7 +16,7 @@ import {
   mismatchMessage,
   parseFile,
 } from "./KnownRepos.ts";
-import { defaultPath, file } from "./KnownRepos.node.ts";
+import { defaultPath, file, knownReposPath } from "./KnownRepos.node.ts";
 
 /** SAFETY: forty-three base64 characters after `SHA256:`, which is the shape. */
 const repoId = (seed: string): RepoId => `SHA256:${seed.repeat(43).slice(0, 43)}` as RepoId;
@@ -356,34 +356,31 @@ describe("KnownRepos", () => {
   });
 
   describe("the default location", () => {
-    it.effect("follows XDG_CONFIG_HOME when it is absolute", () =>
+    it.effect("follows an absolute XDG_CONFIG_HOME", () =>
       Effect.sync(() => {
-        const previous = process.env["XDG_CONFIG_HOME"];
-        process.env["XDG_CONFIG_HOME"] = "/xdg";
-        try {
-          assert.equal(defaultPath(), "/xdg/chr33s-git/known_repos");
-        } finally {
-          if (previous === undefined) delete process.env["XDG_CONFIG_HOME"];
-          else process.env["XDG_CONFIG_HOME"] = previous;
-        }
+        assert.equal(knownReposPath("/xdg", "/home/missing"), "/xdg/chr33s-git/known_repos");
       }),
     );
 
-    it.effect("ignores a relative XDG_CONFIG_HOME, as the spec says to", () =>
+    it.effect("ignores a relative or empty XDG_CONFIG_HOME, as the spec says to", () =>
       Effect.sync(() => {
-        const previous = process.env["XDG_CONFIG_HOME"];
-        process.env["XDG_CONFIG_HOME"] = "relative/path";
-        try {
-          const resolved = defaultPath();
-          assert.ok(
-            resolved === undefined || !resolved.startsWith("relative"),
-            `relative XDG_CONFIG_HOME must not be used: ${resolved}`,
-          );
-        } finally {
-          if (previous === undefined) delete process.env["XDG_CONFIG_HOME"];
-          else process.env["XDG_CONFIG_HOME"] = previous;
-        }
+        assert.equal(
+          knownReposPath("relative/path", "/home/user"),
+          "/home/user/.config/chr33s-git/known_repos",
+        );
+        assert.equal(knownReposPath("", "/home/user"), "/home/user/.config/chr33s-git/known_repos");
+        assert.equal(knownReposPath(undefined, undefined), undefined);
       }),
+    );
+
+    it.effect("reads XDG_CONFIG_HOME through Config", () =>
+      Effect.gen(function* () {
+        assert.equal(yield* defaultPath, "/xdg/chr33s-git/known_repos");
+      }).pipe(
+        Effect.provide(
+          ConfigProvider.layer(ConfigProvider.fromUnknown({ XDG_CONFIG_HOME: "/xdg" })),
+        ),
+      ),
     );
   });
 });

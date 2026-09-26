@@ -7,6 +7,8 @@
  * `src/ui/dev.ts` mounts Vite's middleware directly on the node host for
  * development. This is the third place that needed it, so it is the one place
  * it lives: `serve --ui` hands the finished bundle to the same origin too.
+ * Node-only — the Worker serves the same prefix from its asset binding, and
+ * must not import this file.
  *
  * Everything the UI owns lives under `UI_PREFIX`, and everything outside it
  * belongs to the API — so the split is one comparison rather than a list of

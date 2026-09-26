@@ -341,6 +341,17 @@ was made on says nothing true about the new one.
 
 ## Conventions
 
+### TypeScript
+
+`strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, and
+`noFallthroughCasesInSwitch` are on. `exactOptionalPropertyTypes` is not.
+`tsc --noEmit --exactOptionalPropertyTypes` reports 37 errors in 18 files
+(`TS2379`, `TS2412`, `TS2375`, `TS2345`). They are not one migration: some
+call sites pass explicit `undefined` to mean "no opinion" —
+`Remotes.of({ sync: undefined })` is the documented case — and others should
+omit the key. Widening every optional property to `T | undefined` would make
+the flag a no-op, so it stays off until those sites are split.
+
 ### Errors
 
 `Schema.TaggedError` classes in `src/git/Error.ts`, each carrying an
@@ -425,6 +436,24 @@ It is also 52x slower than `node:zlib`, so `PackStore` carries an optional
 pack _at rest_ can take that shortcut: `Pack.ts` reads a pack off the wire,
 where objects are back to back and the decoder has to report where each stream
 ended, and it keeps the portable one everywhere. The browser keeps it for both.
+Negotiation bodies are gzip'd the other way: `Protocol.ts` uses
+`DecompressionStream`, not `node:zlib`, because that module is the Worker
+handler and must not import a node builtin.
+
+Two platform modules are not named `*.node.ts`, on purpose. `git/Node.ts` is
+the filesystem backend the module map already names; the file is the adapter,
+and renaming it would only move imports. `git/Inflate.zlib.ts` is the
+pack-at-rest reader above — workerd provides `node:zlib`, and the wire path
+stays on `Inflate.ts`.
+
+`artifacts/Namespace.ts` still imports `node:fs`. The portable `Registry` and
+`Tokens` tags live in that file, and `Sqlite.ts` imports them, so the Worker
+graph sees the import even though the Durable Object path never calls the
+filesystem functions. Those calls stay inside `registryNode`, `tokensNode`,
+`repoStoresNode`, and `localNode`. Splitting the filesystem provider out is
+the remaining migration: the implementation is interleaved with the private
+helpers those tags close over, and the node tests import both from one module
+URL.
 
 Alchemy's Cloudflare bindings return effects requiring `RuntimeContext`. Do not
 thread it through port signatures: the typechecker will drag it into the CLI

@@ -55,12 +55,22 @@ const previewRoot = async (): Promise<string | undefined> => {
 };
 
 const configured = process.env["GIT_ROOT"];
-const preview = configured === undefined ? await previewRoot() : undefined;
-const repositories = configured ?? preview ?? process.cwd();
+const repositoriesFromEnv = configured === undefined || configured === "" ? undefined : configured;
+const preview = repositoriesFromEnv === undefined ? await previewRoot() : undefined;
+const repositories = repositoriesFromEnv ?? preview ?? process.cwd();
+
+/** `PORT` as a bind port, or the dev default. A bad value names the variable. */
+const portFrom = (raw: string | undefined): number => {
+  if (raw === undefined || raw === "") return 8000;
+  if (!/^\d+$/.test(raw)) throw new Error(`PORT: '${raw}' is not a port number`);
+  const port = Number(raw);
+  if (port > 65535) throw new Error(`PORT: '${raw}' is not a port number`);
+  return port;
+};
 
 const host = await serveHost({
   root: repositories,
-  port: Number(process.env["PORT"] ?? 8000),
+  port: portFrom(process.env["PORT"]),
   development: async (server) => {
     const vite = await createViteServer({
       configFile: join(root, "vite.config.ts"),

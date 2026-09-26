@@ -34,7 +34,7 @@ import * as GitRepository from "../git/Repository.ts";
 import * as HubTask from "../hub/Task.ts";
 import { serve as serveHost } from "../host/Node.ts";
 import * as Contract from "../server/ApiContract.ts";
-import { assetResponse } from "../server/Static.ts";
+import { assetResponse } from "../server/Static.node.ts";
 import { UI_HOME } from "../server/Route.ts";
 import { enableHubUnder } from "../testing/Hub.ts";
 import * as Certificate from "../trust/Certificate.ts";

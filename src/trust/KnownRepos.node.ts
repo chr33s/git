@@ -20,7 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { Effect, Layer } from "effect";
+import { Config, Effect, Layer, Option } from "effect";
 
 import { StorageFailure } from "../git/Error.ts";
 import { type KnownRepo, KnownRepos, parseFile, withEntry, withoutUrl } from "./KnownRepos.ts";
@@ -29,28 +29,48 @@ import { type KnownRepo, KnownRepos, parseFile, withEntry, withoutUrl } from "./
  * `$XDG_CONFIG_HOME/chr33s-git/known_repos`, falling back to `~/.config`.
  *
  * The same rules `bin.ts` applies to the compile cache: set-but-empty and
- * relative both mean "use the default", and a process with no resolvable home
- * — a container running as a bare uid — gets `undefined` rather than a throw,
- * because failing to find a home must not take down a command that was not
- * going to touch the file.
+ * relative both mean "use the default". A missing home — a container running
+ * as a bare uid — is `undefined` rather than a throw, because failing to find
+ * a home must not take down a command that was not going to touch the file.
  */
-export const defaultPath = (): string | undefined => {
-  const configured = process.env["XDG_CONFIG_HOME"];
+export const knownReposPath = (
+  configured: string | undefined,
+  home: string | undefined,
+): string | undefined => {
   const base =
-    configured !== undefined && path.isAbsolute(configured)
+    configured !== undefined && configured !== "" && path.isAbsolute(configured)
       ? configured
-      : (() => {
-          try {
-            return path.join(os.homedir(), ".config");
-          } catch {
-            return undefined;
-          }
-        })();
+      : home === undefined
+        ? undefined
+        : path.join(home, ".config");
 
   return base === undefined || !path.isAbsolute(base)
     ? undefined
     : path.join(base, "chr33s-git", "known_repos");
 };
+
+/**
+ * The conventional path for this process.
+ *
+ * `XDG_CONFIG_HOME` is read through `Config`, not `process.env`, so a test
+ * provider can substitute it and a malformed provider failure stays typed.
+ * Home is the platform call: it is not an environment variable.
+ */
+export const defaultPath: Effect.Effect<string | undefined, Config.ConfigError> = Effect.gen(
+  function* () {
+    const configured = Option.getOrUndefined(
+      yield* Config.option(Config.string("XDG_CONFIG_HOME")),
+    );
+    const home = yield* Effect.sync((): string | undefined => {
+      try {
+        return os.homedir();
+      } catch {
+        return undefined;
+      }
+    });
+    return knownReposPath(configured, home);
+  },
+);
 
 /** The file's own text, or `""` where there is no file yet. */
 const contentsOf = (location: string): string => {
@@ -139,10 +159,9 @@ export const file = (location: string): Layer.Layer<KnownRepos> =>
  * trusted" and refuses to record anything, rather than a layer that fails to
  * build: `hub status` should still run there, and say why.
  */
-export const layer: Layer.Layer<KnownRepos> = Layer.suspend(() => {
-  const location = defaultPath();
-  return location === undefined ? homeless : file(location);
-});
+export const layer: Layer.Layer<KnownRepos, Config.ConfigError> = Layer.unwrap(
+  Effect.map(defaultPath, (location) => (location === undefined ? homeless : file(location))),
+);
 
 const homeless: Layer.Layer<KnownRepos> = Layer.sync(KnownRepos, () => {
   const nowhere = (operation: string) =>

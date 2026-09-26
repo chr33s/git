@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 
 import { Effect } from "effect";
 
-import { assetResponse, built, fileAt, mimeOf } from "./Static.ts";
+import { assetResponse, built, fileAt, mimeOf } from "./Static.node.ts";
 
 describe("Static", () => {
   let root = "";
