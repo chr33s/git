@@ -382,9 +382,10 @@ writes objects to the store as they resolve, so an `OFS_DELTA` base is re-read
 by oid from storage and only the object being decoded is resident — no window,
 no second pass.
 
-Handlers that consume large bodies must be dispatched _before_ anything that
-would buffer them. In both hosts, LFS and `commit-pack` are tried ahead of the
-JSON API for exactly this reason.
+Handlers that consume large bodies must never sit behind anything that would
+buffer them. Every host mounts one `HttpRouter` (`server/Router.ts::handler`):
+it matches on the path alone, so LFS, `commit-pack` and the pack endpoints
+receive the body as the stream it arrived as, whatever else is registered.
 
 One object still has to be resident while it is decoded, and how large that is
 comes from the pack's own header — a number written by whoever sent it. So it
@@ -650,7 +651,7 @@ Recorded because the reasoning is worth more than the files would have been.
 
 **A provider-neutral `RepoHost` seam.** The plan was one `App` value naming the
 storage ports plus a host port supplying `stores`, `serialize` and
-`background`. What shipped is two concrete hosts sharing `Protocol.handle` and
+`background`. What shipped is two concrete hosts sharing `Router.layer` and
 `Api.layer` directly. The seam was unnecessary: the handlers already require
 nothing but `Repository`, so host-neutrality came free from the effect
 requirements and an extra service would only have restated it. If a third host

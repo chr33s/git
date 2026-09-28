@@ -529,8 +529,8 @@ const failure = (status: number, message: string): Response =>
   });
 
 /**
- * Route `GET …/archive/<name>`; `null` means "not an archive request", so a
- * host can try the next handler.
+ * Route `GET …/archive/<name>`; `null` means "not an archive request", which
+ * `server/Router.ts` answers 404.
  *
  * `prefix` overrides the directory every entry sits under inside the archive.
  * The default is `<name>` without its extension, which is what makes an

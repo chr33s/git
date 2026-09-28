@@ -416,8 +416,8 @@ const pack = Effect.fn("CommitPack.pack")(function* (request: Request) {
 
 /**
  * Route a commit-pack request whose repository the caller has already
- * resolved. `null` means "not a commit-pack request", so a host can try the
- * next handler — the same contract as `Lfs.handle`.
+ * resolved. `null` means "not a commit-pack request", which
+ * `server/Router.ts` answers 404 — the same contract as `Lfs.handle`.
  */
 export const handle = (request: Request): Effect.Effect<Response | null, never, Repository> =>
   Effect.suspend(() => {

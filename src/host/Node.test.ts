@@ -61,6 +61,19 @@ afterAll(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+describe("routing", () => {
+  it.effect("serves smart-HTTP for a name longer than the router's default parameter", () =>
+    Effect.promise(async () => {
+      // 101 characters: one past the 100 the router accepts unless told otherwise.
+      const response = await fetch(
+        `${server.url}/${"r".repeat(101)}/info/refs?service=git-upload-pack`,
+      );
+      assert.equal(response.status, 200);
+      await response.body?.cancel();
+    }),
+  );
+});
+
 describe("the per-repository gate", () => {
   it.effect("answers other requests while a response body goes unread", () =>
     Effect.promise(async () => {

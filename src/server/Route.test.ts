@@ -8,7 +8,7 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect } from "effect";
 
-import { normalize, reserved, routeOf, UI_PREFIX } from "./Route.ts";
+import { MAX_SEGMENT, normalize, readsStore, reserved, routeOf, UI_PREFIX } from "./Route.ts";
 
 describe("routeOf", () => {
   it.effect("reads the repository and the route behind it", () =>
@@ -35,6 +35,13 @@ describe("routeOf", () => {
       // The name is `my.git.repo`; only a trailing `.git` is transport sugar.
       assert.equal(routeOf("/my.git.repo")?.repo, "my.git.repo");
       assert.equal(routeOf("/my.git.repo.git")?.repo, "my.git.repo");
+    }),
+  );
+
+  it.effect("refuses a name no directory or route parameter could hold", () =>
+    Effect.sync(() => {
+      assert.equal(routeOf(`/${"a".repeat(MAX_SEGMENT)}`)?.repo, "a".repeat(MAX_SEGMENT));
+      assert.equal(routeOf(`/${"a".repeat(MAX_SEGMENT + 1)}`), null);
     }),
   );
 
@@ -110,6 +117,17 @@ describe("normalize", () => {
       );
       assert.equal(request.method, "POST");
       assert.equal(request.headers.get("content-type"), "application/x-git-receive-pack-request");
+    }),
+  );
+});
+
+describe("readsStore", () => {
+  it.effect("counts packs and archives, not LFS content", () =>
+    Effect.sync(() => {
+      assert.equal(readsStore(new Request("http://host/repo/git-upload-pack")), true);
+      assert.equal(readsStore(new Request("http://host/repo/archive/repo.tar")), true);
+      assert.equal(readsStore(new Request("http://host/repo/info/refs")), true);
+      assert.equal(readsStore(new Request("http://host/repo/info/lfs/objects/abc")), false);
     }),
   );
 });

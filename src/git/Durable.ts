@@ -12,7 +12,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { Context, Effect, Layer } from "effect";
-import { FetchHttpClient, HttpClient, HttpRouter } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 
 import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
@@ -20,19 +20,15 @@ import * as Api from "../server/Api.ts";
 import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
-import * as Archive from "../server/Archive.ts";
-import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
-import * as Lfs from "../server/Lfs.ts";
-import * as Protocol from "../server/Protocol.ts";
 import * as Remotes from "../server/Remotes.ts";
 import * as Sending from "../server/Sending.ts";
-import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
+import { collects, normalize, readsStore, routeOf, settledWithin } from "../server/Route.ts";
+import * as Router from "../server/Router.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
 import { stores } from "./Cloudflare.ts";
 import { collector } from "./Conformance.ts";
-import { type GitError, statusOf } from "./Error.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
 import { storeContract } from "./Store.contract.ts";
@@ -64,7 +60,7 @@ export class GitRepo extends DurableObject<TestEnv> {
   #remotes: Layer.Layer<Remotes.Remotes> | null = null;
   #nonceStore: Layer.Layer<Auth.Nonces> | null = null;
   /**
-   * The JSON API's router, built once per instance.
+   * This repository's router — JSON API and smart-HTTP — built once per instance.
    *
    * The requester is deliberately *not* in the graph it is built from: it
    * arrives as a per-request context instead. A router rebuilt per request
@@ -72,7 +68,7 @@ export class GitRepo extends DurableObject<TestEnv> {
    * closes, and one with the requester baked in would answer every later
    * request as whoever made the first.
    */
-  #api:
+  #handle:
     | ((request: Request, requester: Context.Context<Auth.Requester>) => Promise<Response>)
     | null = null;
 
@@ -212,30 +208,10 @@ export class GitRepo extends DurableObject<TestEnv> {
     );
   }
 
-  /**
-   * The only place a failure becomes a status code, and it does so from the
-   * error's own `httpApiStatus` annotation rather than a mapping table.
-   */
-  #respond(
-    repo: string,
-    requester: Layer.Layer<Auth.Requester>,
-    effect: Effect.Effect<Response, GitError, Repository>,
-  ): Promise<Response> {
-    return Effect.runPromise(
-      effect.pipe(
-        Effect.catch((error: GitError) =>
-          Effect.succeed(Response.json({ error: error._tag }, { status: statusOf(error) })),
-        ),
-        Effect.provide(Layer.mergeAll(this.#live(repo), requester, this.#openWrites())),
-        Effect.map((response) => this.#track(response)),
-      ),
-    );
-  }
-
   override async fetch(request: Request): Promise<Response> {
     const matched = routeOf(new URL(request.url).pathname);
-    if (matched === null) return Response.json({ error: "Invalid" }, { status: 400 });
-    const { repo, route } = matched;
+    if (matched === null) return Response.json({ _tag: "Invalid" }, { status: 400 });
+    const { repo } = matched;
     request = normalize(request, matched);
 
     // Auth runs here rather than at the edge because this is where the trust
@@ -264,90 +240,53 @@ export class GitRepo extends DurableObject<TestEnv> {
       ),
     );
     if (guarded.denied !== null) return guarded.denied;
-    // Who the requester is travels with the rest of the request as an
-    // argument, not as instance state: the `await` before a collection reopens
-    // the input gate, so a field would be whatever the *last* request through
-    // the door set it to.
-    const requester = Auth.requester(guarded.authenticated);
-
-    if (route === "conformance") return this.#conformance(repo);
-    if (route === "registry-conformance") return this.#registryConformance();
-
-    // LFS shares the `info/` prefix with the advertisement, so it is tried
-    // first; its bodies are the large ones.
-    if (route === "info" && matched.rest.includes("/lfs/")) {
-      return Effect.runPromise(
-        Lfs.handle(request).pipe(
-          Effect.map(
-            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-          ),
-          Effect.provide(Layer.mergeAll(lfsR2({ bucket: this.env.GIT_OBJECTS, repo }), requester)),
-        ),
-      );
-    }
-
-    // Also ahead of the API: the body is arbitrarily large and is read as a
-    // stream, so no handler that would buffer it may see the request first.
-    if (route === "commit-pack") {
-      return this.#respond(
-        repo,
-        requester,
-        CommitPack.handle(request).pipe(
-          Effect.map(
-            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-          ),
-        ),
-      );
-    }
-
-    if (route === "archive") {
-      return this.#respond(
-        repo,
-        requester,
-        Archive.handle(request).pipe(
-          Effect.map(
-            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-          ),
-        ),
-      );
-    }
-
-    // The smart-HTTP endpoints; everything else is the JSON API.
-    if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
-      return this.#respond(
-        repo,
-        requester,
-        Protocol.handle(request).pipe(
-          Effect.map(
-            (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-          ),
-        ),
-      );
-    }
-
-    // The `HttpApi` handler, built once per instance like the layer it wraps.
-    // Never disposed: its lifetime is the Durable Object's. `provideMerge`
-    // rather than `provide` — handler contexts are request-scoped, so the
-    // router looks for `Repository` among the app layer's outputs.
     // `gc` is the request that deletes objects a body may still be reading.
     if (collects(request)) await settledWithin(this.#delivering);
 
-    const api = (this.#api ??= (() => {
-      const router = HttpRouter.toWebHandler(
-        Api.layer(this.#remoteRegistry(repo), anchorSyntax).pipe(
-          Layer.provideMerge(this.#live(repo)),
-          Layer.provideMerge(this.#registry(repo)),
-          Layer.provideMerge(this.#openWrites()),
+    // Built once per instance like the layer it wraps. Never disposed: its
+    // lifetime is the Durable Object's. Who the requester is travels as the
+    // per-call context, not as instance state: the `await` above reopens the
+    // input gate, so a field would be whatever the *last* request through the
+    // door set it to.
+    this.#handle ??= Router.handler({
+      api: Api.layer(this.#remoteRegistry(repo), anchorSyntax),
+      services: this.#live(repo).pipe(
+        Layer.provideMerge(lfsR2({ bucket: this.env.GIT_OBJECTS, repo })),
+        Layer.provideMerge(this.#registry(repo)),
+        Layer.provideMerge(this.#openWrites()),
+      ),
+      routes: Layer.mergeAll(
+        HttpRouter.add(
+          "*",
+          "/:repo/conformance",
+          this.#reported(() => this.#conformance(repo)),
         ),
-        { disableLogger: true },
-      );
-      return (request: Request, requester: Context.Context<Auth.Requester>) =>
-        // SAFETY: the handler's generated declaration erases its remaining
-        // request-scoped service to `unknown`; this context contains exactly
-        // that `Requester` service and no value is inspected through the cast.
-        router.handler(request, requester as Context.Context<unknown>);
-    })());
-    return this.#track(await api(request, Auth.requesterContext(guarded.authenticated)));
+        HttpRouter.add(
+          "*",
+          "/:repo/registry-conformance",
+          this.#reported(() => this.#registryConformance()),
+        ),
+      ),
+    }).handle;
+    const response = await this.#handle(request, Auth.requesterContext(guarded.authenticated));
+    return readsStore(request) ? this.#track(response) : response;
+  }
+
+  /**
+   * A conformance run as a route, its failure as the reason.
+   *
+   * The harness reports whatever body comes back; a rejection surfaced as the
+   * router's empty 500 would leave it saying only "unexpected status".
+   */
+  #reported(run: () => Promise<Response>) {
+    return Effect.tryPromise(run).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(
+          Response.json({ _tag: "Failed", message: String(error.cause) }, { status: 500 }),
+        ),
+      ),
+      Effect.map(HttpServerResponse.raw),
+    );
   }
 
   /**
@@ -360,7 +299,7 @@ export class GitRepo extends DurableObject<TestEnv> {
    */
   async #conformance(repo: string): Promise<Response> {
     if (this.env.ENABLE_CONFORMANCE !== "1") {
-      return Response.json({ error: "NotFound" }, { status: 404 });
+      return Response.json({ _tag: "NotFound" }, { status: 404 });
     }
 
     const bucket = this.env.GIT_OBJECTS;
@@ -392,7 +331,7 @@ export class GitRepo extends DurableObject<TestEnv> {
    */
   async #registryConformance(): Promise<Response> {
     if (this.env.ENABLE_CONFORMANCE !== "1") {
-      return Response.json({ error: "NotFound" }, { status: 404 });
+      return Response.json({ _tag: "NotFound" }, { status: 404 });
     }
 
     const sql = this.ctx.storage.sql;

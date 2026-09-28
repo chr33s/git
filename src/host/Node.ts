@@ -1,5 +1,5 @@
 /**
- * Node host: `Protocol.handle` and `Api.layer` unchanged, behind `node:http`,
+ * Node host: `Api.layer` and `Router.layer` unchanged, behind `node:http`,
  * over a directory of repositories in git's on-disk layout.
  *
  *   GIT_ROOT=repos PORT=8080 node src/host/Node.ts
@@ -18,13 +18,10 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
 import { Context, Effect, Exit, Layer, Predicate, RcMap, Scope } from "effect";
-import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
 
-import { statusOf } from "../git/Error.ts";
 import { stores } from "../git/Node.ts";
 import * as Pack from "../git/Pack.ts";
 import * as GitRepository from "../git/Repository.ts";
-import type { Repository } from "../git/Repository.ts";
 import * as SocialLog from "../social/Log.ts";
 import { SocialWeb } from "../social/Projection.ts";
 import { readGenesis } from "../trust/Genesis.ts";
@@ -40,13 +37,10 @@ import * as Api from "../server/Api.ts";
 import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
 import * as Policy from "../server/Policy.ts";
-import * as Archive from "../server/Archive.ts";
-import * as CommitPack from "../server/CommitPack.ts";
 import { file as lfsFile } from "../server/Lfs.node.ts";
-import * as Lfs from "../server/Lfs.ts";
-import * as Protocol from "../server/Protocol.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
-import { collects, routeOf, settledWithin, UI_HOME } from "../server/Route.ts";
+import { collects, readsStore, routeOf, settledWithin, UI_HOME } from "../server/Route.ts";
+import * as Router from "../server/Router.ts";
 import { assetResponse } from "../server/Static.node.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import { resolve as resolveConfiguration, type ServeConfig } from "./ServeConfig.ts";
@@ -233,14 +227,12 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   };
 
   interface RepoState {
-    readonly layer: Layer.Layer<Repository>;
-    readonly lfs: Layer.Layer<Lfs.LfsStore>;
-    readonly api: (
+    readonly handle: (
       request: Request,
       requester: Context.Context<Auth.Requester>,
     ) => Promise<Response>;
     /** Closes the router's scope — the layers it built are finalized here. */
-    readonly disposeApi: () => Promise<void>;
+    readonly dispose: () => Promise<void>;
     /** The input-gate stand-in: requests to one repo run strictly in order. */
     gate: Promise<unknown>;
     /**
@@ -477,40 +469,21 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     );
 
     // Built once while this repository has a request in flight, not once per
-    // call. The requester stays *out* of the graph and arrives as a per-request
-    // context instead, which is what `toWebHandler`'s second argument is for:
-    // a router built per call rebuilds the whole API handler tree and opens a
-    // `Scope` nobody ever closes, and one built with the requester baked in
-    // would answer every later request as whoever made the first.
-    const router = HttpRouter.toWebHandler(
-      Api.layer(remotes, anchorSyntax).pipe(
-        Layer.provideMerge(layer),
+    // call; see `Router.handler`.
+    const router = Router.handler({
+      api: Api.layer(remotes, anchorSyntax),
+      services: layer.pipe(
+        Layer.provideMerge(lfsFile(path.join(options.root, repo, "lfs"))),
         Layer.provideMerge(subscribers),
         Layer.provideMerge(openWrites),
       ),
-      {
-        disableLogger: true,
-        middleware: (effect) =>
-          Effect.gen(function* () {
-            const request = yield* HttpServerRequest.HttpServerRequest;
-            // SAFETY: this router is invoked only with web Requests below.
-            // Layer construction may finish after that request was aborted,
-            // before the web handler registered its abort listener.
-            if ((request.source as Request).signal.aborted) return yield* Effect.interrupt;
-            return yield* effect;
-          }),
-      },
-    );
+      // The federation view and this machine's object budget are the
+      // protocol's alone; the JSON API has never read either.
+      protocol: Layer.merge(federation, objectSize),
+    });
 
     return {
-      layer,
-      lfs: lfsFile(path.join(options.root, repo, "lfs")),
-      api: (request: Request, requester: Context.Context<Auth.Requester>) =>
-        // SAFETY: the handler's generated declaration erases its remaining
-        // request-scoped service to `unknown`; this context contains exactly
-        // that `Requester` service and no value is inspected through the cast.
-        router.handler(request, requester as Context.Context<unknown>),
-      disposeApi: router.dispose,
+      ...router,
       gate: Promise.resolve(),
       delivering: new Set(),
     };
@@ -531,7 +504,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
               // repository it holds. Release is housekeeping; it says so and
               // carries on.
               Effect.promise(() =>
-                state.disposeApi().catch((cause: unknown) => {
+                state.dispose().catch((cause: unknown) => {
                   console.error(`could not release ${repo}: ${String(cause)}`);
                 }),
               ),
@@ -570,11 +543,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         RcMap.get(repos, repo).pipe(Effect.provideService(Scope.Scope, held)),
       );
 
-      // Two shapes of the same fact. The protocol and bulk paths build their own
-      // effect per request and take a layer; the API router is built once and
-      // takes a context per call, which is what keeps it memoisable.
-      const requester = Auth.requester(authenticated);
-      const asked = Auth.requesterContext(authenticated);
+      const requester = Auth.requesterContext(authenticated);
 
       // Outside the gate, deliberately: a collection waits on bodies that finish
       // at their clients' pace, and waiting for them with the gate held would
@@ -590,47 +559,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         // because by here the queue is short.
         if (collects(request)) await settledWithin(state.delivering, 2_000);
 
-        // LFS first: it shares the `info/` prefix with the advertisement, and
-        // its bodies are the large ones, so it must not be behind a handler
-        // that would read them.
-        const lfs = await Effect.runPromise(
-          Lfs.handle(request).pipe(Effect.provide(Layer.mergeAll(state.lfs, requester))),
-          { signal: request.signal },
-        );
-        if (lfs !== null) return lfs;
-
-        // Also ahead of the API: a bulk commit body is arbitrarily large and is
-        // consumed as a stream, so nothing that would buffer it may see it first.
-        const bulk = await Effect.runPromise(
-          CommitPack.handle(request).pipe(
-            Effect.provide(
-              Layer.mergeAll(state.layer, requester, openWrites, federation, objectSize),
-            ),
-          ),
-          { signal: request.signal },
-        );
-        if (bulk !== null) return bulk;
-
-        const exported = await Effect.runPromise(
-          Archive.handle(request).pipe(Effect.provide(state.layer)),
-          { signal: request.signal },
-        );
-        if (exported !== null) return exported;
-
-        const matched = await Effect.runPromise(
-          Protocol.handle(request).pipe(
-            Effect.catch((error) =>
-              Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
-            ),
-            Effect.provide(
-              Layer.mergeAll(state.layer, requester, openWrites, federation, objectSize),
-            ),
-          ),
-          { signal: request.signal },
-        );
-        if (matched !== null) return matched;
-        request.signal.throwIfAborted();
-        return await state.api(request, asked);
+        return await state.handle(request, requester);
       };
 
       const answered = state.gate.then(answer, answer).finally(() => {
@@ -646,7 +575,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       const response = await answered;
       const delivery = deliver(response);
       // Registered before it is awaited, so a `gc` that arrives mid-body sees it.
-      state.delivering.add(delivery);
+      if (readsStore(request)) state.delivering.add(delivery);
       try {
         await delivery;
       } finally {

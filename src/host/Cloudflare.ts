@@ -2,7 +2,7 @@
  * Cloudflare host: the repository as an alchemy-native Durable Object.
  *
  * `git/Durable.ts` is the same server under wrangler's test harness — one DO
- * per repository, `Protocol.handle` and `Api.layer` inside it. The difference
+ * per repository, `Api.layer` and `Router.layer` inside it. The difference
  * is where the bindings come from: there, `wrangler.test.json` plus a
  * generated `Env` interface; here, the R2 bucket is a value (`objects.ts`'s
  * `Objects`) and the binding, its type and the migration all follow from it.
@@ -17,29 +17,24 @@ import { Config, Context, Effect, Layer } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
-  HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/unstable/http";
 
 import { stores } from "../git/Cloudflare.ts";
-import { type GitError, statusOf } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
 import * as Api from "../server/Api.ts";
 import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
-import * as Archive from "../server/Archive.ts";
-import * as CommitPack from "../server/CommitPack.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
-import * as LfsCore from "../server/Lfs.ts";
 import * as Policy from "../server/Policy.ts";
-import * as Protocol from "../server/Protocol.ts";
 import * as Snapshot from "../server/Snapshot.ts";
 import * as SnapshotPublisher from "../server/SnapshotPublisher.ts";
-import { collects, normalize, routeOf, settledWithin } from "../server/Route.ts";
+import { collects, normalize, readsStore, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
+import * as Router from "../server/Router.ts";
 import * as Sending from "../server/Sending.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
@@ -200,7 +195,7 @@ export default Repo.make(
       const awaitDelivery = (repo: string) => settledWithin(delivering.get(repo) ?? nothing);
 
       /**
-       * The JSON API's router, one per repository.
+       * The repository's router — JSON API and smart-HTTP — one per repository.
        *
        * Memoised for the same reason `live` is, and possible for the same
        * reason: the requester is kept *out* of the graph and arrives as a
@@ -213,22 +208,17 @@ export default Repo.make(
         (request: Request, requester: Context.Context<Auth.Requester>) => Promise<Response>
       >();
 
-      const api = (repo: string) => {
+      const handlerOf = (repo: string) => {
         const existing = routers.get(repo);
         if (existing !== undefined) return existing;
-        const router = HttpRouter.toWebHandler(
-          Api.layer(remotes(repo), anchorSyntax).pipe(
-            Layer.provideMerge(live(repo)),
+        const built = Router.handler({
+          api: Api.layer(remotes(repo), anchorSyntax),
+          services: live(repo).pipe(
+            Layer.provideMerge(lfsR2({ bucket: r2, repo })),
             Layer.provideMerge(subscribers(repo)),
             Layer.provideMerge(openWrites),
           ),
-          { disableLogger: true },
-        );
-        const built = (request: Request, requester: Context.Context<Auth.Requester>) =>
-          // SAFETY: the handler's generated declaration erases its remaining
-          // request-scoped service to `unknown`; this context contains exactly
-          // that `Requester` service and no value is inspected through the cast.
-          router.handler(request, requester as Context.Context<unknown>);
+        }).handle;
         routers.set(repo, built);
         return built;
       };
@@ -274,9 +264,9 @@ export default Repo.make(
         Effect.gen(function* () {
           const matched = routeOf(new URL(request.url).pathname);
           if (matched === null) {
-            return Response.json({ error: "Invalid" }, { status: 400 });
+            return Response.json({ _tag: "Invalid" }, { status: 400 });
           }
-          const { repo, route } = matched;
+          const { repo } = matched;
           request = normalize(request, matched);
 
           // Auth runs here because this is where the trust state is: the
@@ -301,7 +291,14 @@ export default Repo.make(
             })),
           );
           if (guarded.denied !== null) return guarded.denied;
-          const response = yield* route_(request, repo, route, matched, guarded.authenticated);
+          const response = yield* Effect.promise(async () => {
+            if (collects(request)) await awaitDelivery(repo);
+            const response = await handlerOf(repo)(
+              request,
+              Auth.requesterContext(guarded.authenticated),
+            );
+            return readsStore(request) ? track(repo, response) : response;
+          });
           // Reads never move refs; anything else may have, and the snapshot
           // the stateless read path serves from must be current before this
           // response acknowledges the change.
@@ -309,78 +306,6 @@ export default Repo.make(
             yield* republish(repo);
           }
           return response;
-        });
-
-      const route_ = (
-        request: Request,
-        repo: string,
-        route: string,
-        matched: { readonly rest: string },
-        authenticated: Auth.Authenticated,
-      ): Effect.Effect<Response> =>
-        Effect.suspend(() => {
-          // Two shapes of the same fact: the protocol paths build an effect
-          // per request and take a layer, the memoised router takes a context.
-          const requester = Auth.requester(authenticated);
-          // LFS shares the `info/` prefix with the advertisement, so it is
-          // tried first; its bodies are the large ones.
-          if (route === "info" && matched.rest.includes("/lfs/")) {
-            return LfsCore.handle(request).pipe(
-              Effect.map(
-                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-              ),
-              Effect.provide(Layer.mergeAll(lfsR2({ bucket: r2, repo }), requester)),
-            );
-          }
-
-          // Also ahead of the JSON API: a bulk commit body is arbitrarily
-          // large and is read as a stream, so nothing that would buffer it
-          // may see the request first. Both hosts dispatch it here.
-          if (route === "commit-pack") {
-            return CommitPack.handle(request).pipe(
-              Effect.map(
-                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-              ),
-              // With the requester: `commit-pack` writes a ref and so crosses
-              // the policy boundary, which has to know who is asking.
-              Effect.provide(Layer.mergeAll(live(repo), requester, openWrites)),
-              Effect.map((response) => track(repo, response)),
-            );
-          }
-
-          if (route === "archive") {
-            return Archive.handle(request).pipe(
-              Effect.map(
-                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-              ),
-              Effect.catch((error: GitError) =>
-                Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
-              ),
-              Effect.provide(live(repo)),
-              // An archive reads a blob per entry as the client consumes it,
-              // which is the same lazy body a pack is.
-              Effect.map((response) => track(repo, response)),
-            );
-          }
-
-          if (route === "info" || route === "git-upload-pack" || route === "git-receive-pack") {
-            return Protocol.handle(request).pipe(
-              Effect.map(
-                (response) => response ?? Response.json({ error: "NotFound" }, { status: 404 }),
-              ),
-              Effect.catch((error: GitError) =>
-                Effect.succeed(Response.json({ _tag: error._tag }, { status: statusOf(error) })),
-              ),
-              Effect.provide(Layer.mergeAll(live(repo), requester, openWrites)),
-              // The pack is the body that outlives its handler.
-              Effect.map((response) => track(repo, response)),
-            );
-          }
-
-          return Effect.promise(async () => {
-            if (collects(request)) await awaitDelivery(repo);
-            return track(repo, await api(repo)(request, Auth.requesterContext(authenticated)));
-          });
         });
 
       return {

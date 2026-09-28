@@ -16,6 +16,16 @@
 const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
+ * The longest path segment a name may be.
+ *
+ * A file name's limit on every filesystem node serves from, so a repository
+ * directory can always be created. The router matches a name as one path
+ * parameter and is configured with this same bound (`server/Router.ts`), so
+ * a name this function accepts is one a route can match.
+ */
+export const MAX_SEGMENT = 255;
+
+/**
  * Names the origin has already spent.
  *
  * The browser UI serves from `/hub/...` (`UI_PREFIX`), so a repository called
@@ -54,7 +64,14 @@ export const routeOf = (pathname: string): Route | null => {
 
   // Only the trailing `.git` is a suffix; `my.git.repo` keeps its name.
   const repo = first.endsWith(".git") ? first.slice(0, -4) : first;
-  if (!REPO_NAME.test(repo) || repo.includes("..") || reserved(repo)) return null;
+  if (
+    first.length > MAX_SEGMENT ||
+    !REPO_NAME.test(repo) ||
+    repo.includes("..") ||
+    reserved(repo)
+  ) {
+    return null;
+  }
 
   return { repo, route: segments[1] ?? "", rest: segments.slice(1).join("/") };
 };
@@ -71,6 +88,18 @@ export const collects = (request: Request): boolean => {
   if (request.method !== "POST") return false;
   const segments = new URL(request.url).pathname.split("/").filter((segment) => segment !== "");
   return segments.at(-1) === "gc";
+};
+
+/**
+ * Whether this request's body reads the object store.
+ *
+ * What collection waits for: a pack or an archive reads objects as the client
+ * consumes it. LFS content lives beside the store under `lfs/`, and `gc` never
+ * deletes it, so a slow LFS download is nothing collection has to wait out.
+ */
+export const readsStore = (request: Request): boolean => {
+  const segments = new URL(request.url).pathname.split("/").filter((segment) => segment !== "");
+  return !(segments[1] === "info" && segments[2] === "lfs");
 };
 
 /**

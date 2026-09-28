@@ -1040,7 +1040,8 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
 /**
  * Route a request whose repository is already resolved — the caller scoped
  * the `Repository` layer, so the path prefix in front of these suffixes is
- * its business. `null` means "not a protocol request".
+ * its business. `null` means "not a protocol request", which
+ * `server/Router.ts` answers 404.
  */
 export const handle = (request: Request): Effect.Effect<Response | null, GitError, Repository> =>
   Effect.suspend(() => {
