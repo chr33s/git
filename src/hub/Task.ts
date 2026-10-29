@@ -62,7 +62,6 @@ export const tasks = Effect.fn("hub.Task.tasks")(function* () {
 const envelope = {
   version: Schema.Literal(1),
   repo: Schema.String,
-  /** The task this event belongs to. */
   task: Schema.String,
   id: Schema.String,
   issuedAt: Schema.String,

@@ -25,10 +25,20 @@ export class ThemeChangeEvent extends CustomEvent<Theme> {
 
 const KEY = "gp-theme";
 
-/** The stored choice, or `null` when the user has not made one. */
+/**
+ * The stored choice, or `null` when the user has not made one.
+ *
+ * Guarded the way `index.html`'s inline script guards the same key: a private
+ * window refuses storage outright, and a browser with no remembered choice and
+ * a browser that will not say are the same thing to every caller here.
+ */
 export const stored = (): Theme | null => {
-  const value = localStorage.getItem(KEY);
-  return value === "light" || value === "dark" ? value : null;
+  try {
+    const value = localStorage.getItem(KEY);
+    return value === "light" || value === "dark" ? value : null;
+  } catch {
+    return null;
+  }
 };
 
 /** What the page is actually showing right now. */
@@ -38,10 +48,22 @@ export const current = (): Theme => {
   return globalThis.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 };
 
-/** Pin a palette: stamps the root so `tokens.css` switches, and remembers it. */
+/**
+ * Pin a palette: stamps the root so `tokens.css` switches, and remembers it.
+ *
+ * The stamp is the part that must happen; remembering it is the part that may
+ * fail. A refused write — a full origin quota on a page that clones whole
+ * repositories into OPFS — is a page that forgets the palette between
+ * sessions, not a reason to end the one it is in: this runs inside a Command,
+ * and a Command that throws crashes the application terminally.
+ */
 export const apply = (theme: Theme): void => {
   document.documentElement.dataset["theme"] = theme;
-  localStorage.setItem(KEY, theme);
+  try {
+    localStorage.setItem(KEY, theme);
+  } catch {
+    // See above: the palette is applied, only the memory of it is lost.
+  }
 };
 
 /**

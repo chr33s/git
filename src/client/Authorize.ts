@@ -51,6 +51,9 @@ export const repoOf = (response: Response): string | null =>
  * Only a 401 is retried, and only when the caller can sign: repeated
  * refusals and malformed challenges come back as the response they are, so
  * a key the repository has not granted sees the refusal rather than a loop.
+ *
+ * Raw `fetch`, not Effect `HttpClient`: this is the browser transport shared
+ * with `Fetch.ts`, and that client cannot take the unstable HTTP modules.
  */
 export const fetchAuthorized = async (
   url: string,

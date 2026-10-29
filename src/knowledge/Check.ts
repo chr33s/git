@@ -23,6 +23,7 @@
  * snapshot is evidence that a page is unchanged (§6.4) — nothing here opens a
  * socket or runs anything a Concept names.
  */
+import { compareUtf8 } from "../text.ts";
 import { Effect, Predicate } from "effect";
 
 import { type Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
@@ -30,16 +31,12 @@ import { isGitlink, isTree } from "../git/Format.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
 import { Repository } from "../git/Repository.ts";
 import { TRUST_LOG } from "../git/Refspec.ts";
-import { isOid, type Oid } from "../git/Store.ts";
+import { type Oid } from "../git/Store.ts";
 import * as Pack from "../context/Pack.ts";
-import * as Event from "../hub/Event.ts";
-import * as Session from "../hub/Session.ts";
-import * as Tombstone from "../hub/Tombstone.ts";
-import { trustReach } from "../hub/Projection.ts";
 import type { Projection } from "../trust/Projection.ts";
-import * as Record from "../trust/Record.ts";
-import * as Verify from "../trust/Verify.ts";
 import * as Concept from "./Concept.ts";
+import * as Provenance from "./Provenance.ts";
+import type { Citation, CitationState, Judge } from "./Provenance.ts";
 
 /** This checker's own version, recorded in every report and cache stamp. */
 export const CHECKER_VERSION = "knowledge-check/1";
@@ -60,20 +57,7 @@ export type Structure =
   | { readonly state: "invalid"; readonly reason: string }
   | { readonly state: "unsupported-profile"; readonly reason: string };
 
-export type CitationState =
-  | "accepted"
-  | "invalid"
-  | "unavailable"
-  | "redacted"
-  | "unsupported-record";
-
-export interface Citation {
-  readonly record: string;
-  readonly state: CitationState;
-  readonly reason?: string;
-  /** The session the accepted record belongs to; display metadata only. */
-  readonly session?: string;
-}
+export type { Citation, CitationState } from "./Provenance.ts";
 
 export type DependencyState = "unchanged" | "changed" | "missing" | "unknown";
 
@@ -165,6 +149,10 @@ export interface Report {
 
 export interface Input {
   readonly view: Pack.View;
+  readonly sessionHeads?: ReadonlyMap<string, Oid> | undefined;
+  /** Shared evaluator over the same captured heads; exposes which refs were read. */
+  readonly provenance?: Judge | undefined;
+  readonly trustHead?: Oid | null | undefined;
   /** `| undefined` throughout, so a caller can pass its own optionals through. */
   readonly bundle?: string | undefined;
   /** A Concept id or repository-relative path; absent checks the bundle. */
@@ -203,211 +191,6 @@ export interface Input {
 const { diagnostic } = Concept;
 
 // -- citations ------------------------------------------------------------------
-
-/** What one check run has learned about a session ref, walked once. */
-interface Held {
-  /** Every record commit on the ref, decodable or not. */
-  readonly onRef: ReadonlySet<Oid>;
-  /** What the ref's counted tombstones have removed. */
-  readonly removals: ReadonlySet<string>;
-}
-
-interface Judge {
-  readonly repo: string | null;
-  readonly trust: Projection | null;
-  readonly reach: ReturnType<typeof trustReach>;
-  /**
-   * Session refs this run has walked, by id, or `null` for one it does not hold.
-   *
-   * A citation asked "is this record on the ref it claims?" with a fresh
-   * ancestry walk each time, and then walked the same ref again for its
-   * tombstones — per citation, across every Concept in the bundle. One walk
-   * answers both for every citation naming that session.
-   */
-  readonly sessions: Map<string, Held | null>;
-}
-
-/** One session ref, walked once per check run. */
-const heldOf = Effect.fn("knowledge.Check.heldOf")(function* (session: string, judge: Judge) {
-  const known = judge.sessions.get(session);
-  if (known !== undefined) return known;
-  const walked = yield* Session.entries(session);
-  const held: Held | null =
-    walked.head === null
-      ? null
-      : {
-          onRef: new Set<Oid>([
-            walked.head,
-            ...walked.events.map((event) => event.commit),
-            ...walked.unreadable,
-          ]),
-          // `Tombstone.removals` is the one fold every reader takes; without
-          // membership nothing counts, and the citation has already come back
-          // `unavailable` before this is asked.
-          removals:
-            judge.repo === null
-              ? new Set<string>()
-              : yield* Tombstone.removals(walked.events, judge.repo, judge.trust),
-        };
-  judge.sessions.set(session, held);
-  return held;
-});
-
-/**
- * One canonical record citation, judged under the trust state as it stands.
- *
- * Existence in the object database is not acceptance (§6.2): the record has to
- * decode as a session record, name *this* repository, sit on the session ref
- * it claims, carry a signature that verifies, and its signer has to hold
- * `hub.session` under the membership the caller supplied. A source-only clone
- * that has never fetched the session refs reports `unavailable` — it does not
- * fabricate acceptance, and it does not go and fetch them.
- */
-const checkCitation = Effect.fn("knowledge.Check.checkCitation")(function* (
-  reference: string,
-  judge: Judge,
-): Effect.fn.Return<Citation, Invalid | ObjectNotFound | StorageFailure, Repository> {
-  const repository = yield* Repository;
-  const oid = unqualify(reference);
-  if (oid === null) {
-    return {
-      record: reference,
-      state: "unsupported-record",
-      reason: "a citation must name a qualified record commit oid",
-    };
-  }
-
-  const object = yield* repository
-    .readObject(oid)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  if (object === null) {
-    return {
-      record: qualify(oid),
-      state: "unavailable",
-      reason: "this replica does not hold the cited record",
-    };
-  }
-  if (object.type !== "commit") {
-    return {
-      record: qualify(oid),
-      state: "unsupported-record",
-      reason: `the citation names a ${object.type}, which is not a record`,
-    };
-  }
-
-  const record = yield* Record.read(oid, Event.RECORD).pipe(
-    Effect.catchTags({
-      ObjectNotFound: () => Effect.succeed(null),
-      Invalid: () => Effect.succeed(null),
-    }),
-  );
-  if (record === null) {
-    return {
-      record: qualify(oid),
-      state: "unavailable",
-      reason: "the record carries no readable payload",
-    };
-  }
-
-  const payload = yield* Session.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
-  if (payload === null) {
-    return {
-      record: qualify(oid),
-      state: "invalid",
-      reason: "the payload is not a readable session record",
-    };
-  }
-
-  if (judge.repo === null) {
-    return {
-      record: qualify(oid),
-      state: "unavailable",
-      reason: "this repository has no genesis, so a record's binding cannot be checked",
-    };
-  }
-  if (payload.repo !== judge.repo) {
-    return {
-      record: qualify(oid),
-      state: "invalid",
-      reason: `the record names repository ${payload.repo}`,
-      session: payload.session,
-    };
-  }
-
-  // The ref it claims has to actually hold it. A signed object that merely
-  // exists in the object database — pushed in, fetched in, or left behind by a
-  // dropped ref — is not a record of this repository's session log.
-  const held = yield* heldOf(payload.session, judge);
-  if (held === null) {
-    return {
-      record: qualify(oid),
-      state: "unavailable",
-      reason: `this replica holds no ${Session.refOf(payload.session)}`,
-      session: payload.session,
-    };
-  }
-  if (!held.onRef.has(oid)) {
-    return {
-      record: qualify(oid),
-      state: "invalid",
-      reason: `the record is not on ${Session.refOf(payload.session)}`,
-      session: payload.session,
-    };
-  }
-
-  if (judge.trust === null) {
-    return {
-      record: qualify(oid),
-      state: "unavailable",
-      reason: "no trust projection was supplied, so provenance cannot be judged",
-      session: payload.session,
-    };
-  }
-
-  // A counted redaction outranks the bytes. §6.2: current revocations and
-  // tombstones decide, not the presence of a payload.
-  if (held.removals.has(qualify(oid)) || held.removals.has(oid)) {
-    return {
-      record: qualify(oid),
-      state: "redacted",
-      reason: "a counted tombstone names this record",
-      session: payload.session,
-    };
-  }
-
-  const dated = Date.parse(payload.issuedAt);
-  if (Number.isNaN(dated)) {
-    return {
-      record: qualify(oid),
-      state: "invalid",
-      reason: `the record is dated '${payload.issuedAt}', which is not a date`,
-      session: payload.session,
-    };
-  }
-
-  const decision = yield* Verify.authorize({
-    projection: judge.trust,
-    bytes: record.payload,
-    signatures: record.signatures,
-    capability: payload.type === "event.redacted" ? "hub.redact" : "hub.session",
-    made: {
-      at: new Date(dated),
-      // A declared head that is not an oid is not a head. `Verify.Made` takes
-      // one or nothing, and a malformed string must not become a floor.
-      trustHead: payload.trustHead !== null && isOid(payload.trustHead) ? payload.trustHead : null,
-    },
-    seen: judge.reach.ancestry,
-    contains: judge.reach.contains,
-  });
-  return decision.ok
-    ? { record: qualify(oid), state: "accepted", session: payload.session }
-    : {
-        record: qualify(oid),
-        state: "invalid",
-        reason: decision.reason,
-        session: payload.session,
-      };
-});
 
 // -- repository dependencies ----------------------------------------------------
 
@@ -631,7 +414,7 @@ const checkConcept = Effect.fn("knowledge.Check.checkConcept")(function* (input:
 
   const citations: Array<Citation> = [];
   for (const reference of concept.cites.slice(0, input.limits.citations)) {
-    const checked = yield* checkCitation(reference, input.judge);
+    const checked = yield* Provenance.evaluate(reference, input.judge);
     citations.push(checked);
     if (checked.state !== "accepted") {
       diagnostics.push(
@@ -709,7 +492,7 @@ const checkConcept = Effect.fn("knowledge.Check.checkConcept")(function* (input:
 
   const verificationRecords: Array<Verification> = [];
   for (const reference of concept.verificationRecords.slice(0, input.limits.citations)) {
-    const checked = yield* checkCitation(reference, input.judge);
+    const checked = yield* Provenance.evaluate(reference, input.judge);
     verificationRecords.push({
       record: checked.record,
       state: checked.state,
@@ -826,7 +609,7 @@ export const list = Effect.fn("knowledge.Check.list")(function* (
   const files: ReadonlyArray<Listed> = listed ?? (yield* repository.listFiles(tree));
   return files
     .filter((file) => !isGitlink(file.mode) && Concept.isConceptPath(bundle, file.path))
-    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+    .sort((left, right) => compareUtf8(left.path, right.path));
 });
 
 /** One file of a listed tree, as `Repository.listFiles` names it. */
@@ -882,7 +665,8 @@ export const check = Effect.fn("knowledge.Check.check")(function* (
   const tree = unqualify(input.view.tree);
   const diagnostics: Array<Concept.Diagnostic> = [];
   const evaluatedAt = input.evaluationTime.toISOString();
-  const trustHead = yield* repository.resolve(TRUST_LOG);
+  const trustHead =
+    input.trustHead === undefined ? yield* repository.resolve(TRUST_LOG) : input.trustHead;
   const stamp = stampOf({
     view: input.view,
     bundle,
@@ -985,12 +769,14 @@ export const check = Effect.fn("knowledge.Check.check")(function* (
     }
   }
 
-  const judge: Judge = {
-    repo: input.repo ?? null,
-    trust: input.trust ?? null,
-    reach: trustReach(),
-    sessions: new Map(),
-  };
+  const judge =
+    input.provenance ??
+    Provenance.judge(
+      input.repo ?? null,
+      input.trust?.head === trustHead && input.trust.repoId === input.repo ? input.trust : null,
+      input.sessionHeads ?? new Map(yield* repository.refs),
+      input.evaluationTime,
+    );
 
   const concepts: Array<Checked> = [];
   const limited = selected.length > limits.concepts;

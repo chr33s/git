@@ -280,18 +280,54 @@ class Source {
     }
   }
 
-  /** The 20-byte trailer: SHA-1 of everything before it. */
-  async trailer(): Promise<void> {
+  /**
+   * The 20-byte trailer: SHA-1 of everything before it, and the end of the
+   * input. Returned, because it is the pack's name: whatever follows it is
+   * refused, as `git index-pack` refuses it, rather than kept as part of a
+   * pack its checksum does not cover.
+   */
+  async trailer(): Promise<Uint8Array> {
     const expected = this.#hash.digestHex();
-    const actual = bytesToHex(await this.#gather(20));
+    const trailer = await this.#gather(20);
+    const actual = bytesToHex(trailer);
     if (actual !== expected) {
       throw new PackCorrupt({
         reason: `checksum mismatch: pack says ${actual}, content hashes to ${expected}`,
         offset: this.offset,
       });
     }
+    if ((await this.#next()) !== null) {
+      throw new PackCorrupt({ reason: "pack has junk at the end", offset: this.offset + 20 });
+    }
+    return trailer;
   }
 }
+
+/**
+ * The size a delta says its result will be, or `null` when the delta is too
+ * short to say — `applyDelta` reports that one in its own words.
+ *
+ * `oversized` judges an object's declared size before inflating it, but for a
+ * delta that is only the size of the instructions: each copy of up to 64 KiB
+ * costs a few bytes, so a delta of a few kilobytes can describe an object of
+ * gigabytes, and `applyDelta` allocates the declared size in one piece. So the
+ * result is judged by the same ceiling, before the base is even read.
+ */
+const deltaTarget = (delta: Uint8Array): number | null => {
+  let position = 0;
+  const varint = (): number | null => {
+    let value = 0;
+    for (let shift = 0; shift <= MAX_SIZE_SHIFT; shift += 7) {
+      const byte = delta[position++];
+      if (byte === undefined) return null;
+      value += (byte & 0x7f) * 2 ** shift;
+      if ((byte & 0x80) === 0) return value;
+    }
+    // Longer than any size a pack can name; `oversized` refuses it as such.
+    return Number.POSITIVE_INFINITY;
+  };
+  return varint() === null ? null : varint();
+};
 
 /**
  * Apply a git delta (the payload of an ofs-delta or ref-delta object) to its
@@ -637,6 +673,9 @@ export const unpack = Effect.fn("Pack.unpack")(function* <E>(input: Stream.Strea
     if (header.kind === "full") {
       object = { type: header.type, data };
     } else {
+      const target = deltaTarget(data);
+      const outgrown = target === null ? null : oversized(index, target, ceiling, start);
+      if (outgrown !== null) return yield* outgrown;
       const baseOid = header.kind === "ref" ? header.base : oidAt.get(start - header.distance);
       if (baseOid === undefined) {
         return yield* new PackCorrupt({
@@ -807,9 +846,13 @@ const retain = (
           offset: start,
         });
       }
+      if (header.kind !== "full") {
+        const target = deltaTarget(data);
+        const outgrown = target === null ? null : oversized(index, target, ceiling, start);
+        if (outgrown !== null) return yield* outgrown;
+      }
     }
-    yield* step(() => source.trailer());
-    const trailer = bytes.subarray(bytes.length - 20);
+    const trailer = yield* step(() => source.trailer());
 
     const context = yield* Effect.context<never>();
     const pack = bufferSource(bytes);

@@ -26,7 +26,14 @@
 import { Effect, Schema } from "effect";
 
 import { Invalid } from "../git/Error.ts";
-import type { CommitInfo, Signature, TreeEntry } from "../git/Format.ts";
+import {
+  encodeCommit,
+  encodeTree,
+  hashObject,
+  type CommitInfo,
+  type Signature,
+  type TreeEntry,
+} from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 
@@ -72,6 +79,36 @@ export const encodePayload = (text: string): Uint8Array => encoder.encode(`${tex
 
 export const encodeSignatures = (armored: ReadonlyArray<string>): Uint8Array =>
   encoder.encode(`${JSON.stringify(armored, null, 2)}\n`);
+
+/** Compute a prepared record identity without restoring blobs removed by redaction. */
+export const identify = Effect.fn("trust.Record.identify")(function* (input: {
+  readonly name: string;
+  readonly payload: Uint8Array;
+  readonly signatures: ReadonlyArray<string>;
+  readonly parents: ReadonlyArray<Oid>;
+  readonly message: string;
+  readonly at: Date;
+}) {
+  const payload = yield* hashObject({ type: "blob", data: input.payload });
+  const signatures = yield* hashObject({ type: "blob", data: encodeSignatures(input.signatures) });
+  const tree = yield* hashObject({
+    type: "tree",
+    data: encodeTree([
+      { mode: BLOB_MODE, name: `${input.name}.json`, oid: payload },
+      { mode: BLOB_MODE, name: `${input.name}.sig`, oid: signatures },
+    ]),
+  });
+  return yield* hashObject({
+    type: "commit",
+    data: encodeCommit({
+      tree,
+      parents: input.parents,
+      message: input.message,
+      author: identityAt(input.at),
+      committer: identityAt(input.at),
+    }),
+  });
+});
 
 /**
  * Write one record and return the commit that holds it.

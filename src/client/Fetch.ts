@@ -371,6 +371,36 @@ const localRepository = (stores: FetchStores): Layer.Layer<Repository> =>
   );
 
 /**
+ * Which of a remote's own shallow roots this repository now needs.
+ *
+ * A remote's advertisement lists every boundary *it* has, and most of them
+ * say nothing about this repository: one whose commit never arrived bounds
+ * nothing here, and one whose parents are already held — a full clone
+ * fetching from a shallow mirror of itself — would cut history this
+ * repository actually has, stopping `log`, `merge-base` and every ancestry
+ * check there. A root is adopted only where the fetch left its commit
+ * present and a parent missing, which is what `git fetch --update-shallow`
+ * adds; `git`'s default is to refuse such refs instead.
+ */
+export const neededShallow = Effect.fn("Fetch.neededShallow")(function* (
+  roots: ReadonlyArray<Oid>,
+) {
+  const repository = yield* Repository;
+  const needed: Oid[] = [];
+  for (const root of new Set(roots)) {
+    if (!(yield* repository.contains(root))) continue;
+    const { parents } = yield* repository.readCommit(root);
+    for (const parent of parents) {
+      if (!(yield* repository.contains(parent))) {
+        needed.push(root);
+        break;
+      }
+    }
+  }
+  return needed;
+});
+
+/**
  * The commits to offer as `have`, newest first.
  *
  * Newest first is what makes 32 lines usually enough: a shared base sits near
@@ -770,8 +800,11 @@ export const fetchRepository = Effect.fn("Fetch.fetchRepository")(function* (opt
       yield* Pack.unpack(
         Stream.fromAsyncIterable(packBody, (cause) => unreachable(String(cause))),
       ).pipe(Effect.provideService(ObjectStoreTag, stores.objects));
+      const adopted = yield* neededShallow(advertised.shallow).pipe(
+        Effect.provide(localRepository(stores)),
+      );
       yield* stores.refs.updateShallow({
-        add: [...advertised.shallow, ...packBody.shallow],
+        add: [...adopted, ...packBody.shallow],
         remove: packBody.unshallow,
       });
     }),

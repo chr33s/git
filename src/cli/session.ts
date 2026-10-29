@@ -18,9 +18,11 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import { Invalid } from "../git/Error.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import * as Memory from "../hub/Memory.ts";
-import * as Pack from "../context/Pack.ts";
 import * as Concept from "../knowledge/Concept.ts";
 import * as Session from "../hub/Session.ts";
+import * as Capture from "../hub/SessionCapture.ts";
+import * as Handoff from "./SessionHandoff.node.ts";
+import * as Briefing from "./Briefing.node.ts";
 import * as Trace from "../hub/Trace.ts";
 import { Repository } from "../git/Repository.ts";
 import * as Invocation from "../telemetry/Invocation.ts";
@@ -466,6 +468,8 @@ const hookPaths = (work: string, harness: string | undefined) => {
   return {
     state: path.join(directory, `session${key}.id`),
     learning: path.join(directory, `learning${key}.txt`),
+    pending: path.join(directory, `output${key}.json`),
+    briefing: path.join(directory, `briefing${key}.json`),
   };
 };
 
@@ -477,9 +481,8 @@ const hookPaths = (work: string, harness: string | undefined) => {
  */
 const deriveMemory = Effect.fn("session.deriveMemory")(function* (bundle: string) {
   const repository = yield* Repository;
-  const head = yield* repository.resolve(yield* repository.head);
-  const view = head === null ? null : yield* Pack.committed(head);
-  return yield* Memory.derive({ view, bundle, ...(yield* membershipOrNull()) });
+  const sourceRef = yield* repository.head;
+  return yield* Memory.derive({ sourceRef, bundle, ...(yield* membershipOrNull()) });
 });
 
 const hook = Command.make(
@@ -502,12 +505,50 @@ const hook = Command.make(
           }),
         ),
       )(input || "{}").pipe(Effect.orElseSucceed(() => ({ prompt: "", session_id: "" })));
-      const { state, learning } = hookPaths(work, event.session_id);
+      const { state, learning, pending, briefing } = hookPaths(work, event.session_id);
       const exists = yield* hookFile(() => fs.existsSync(state));
+      const saved = yield* Handoff.read(pending);
       if (phase === "start") {
         // One opening per session: the harness calls this on every prompt,
         // and a second opening would be a second account of the same work.
-        if (exists) return;
+        const recall = yield* Config.boolean("CHR33S_GIT_STARTUP_MEMORY").pipe(
+          Config.withDefault(true),
+        );
+        if (exists) {
+          if (recall)
+            yield* Effect.gen(function* () {
+              const session = yield* hookFile(() => fs.readFileSync(state, "utf8").trim());
+              const built = yield* withRepo(root, repo, deriveMemory(Concept.BUNDLE));
+              const boundary = yield* Briefing.record({
+                location: briefing,
+                session,
+                built,
+                delivered: false,
+              });
+              if (boundary.invalidated)
+                yield* Console.log(
+                  "Repository memory: some earlier recalled support is no longer validated by the current evidence view. Earlier context cannot be withdrawn; revalidate it against current sources.",
+                );
+            }).pipe(
+              Effect.catch(() =>
+                Console.error(
+                  "git+: current memory validation is unavailable; earlier recalled data has not been revalidated",
+                ),
+              ),
+            );
+          return;
+        }
+        if (saved !== null) {
+          const output = yield* Session.decode(new TextEncoder().encode(saved.payload));
+          const identity = yield* withRepo(root, repo, identityOf(repo));
+          if (output.repo !== identity)
+            return yield* new Invalid({
+              field: "handoff",
+              reason: "pending output belongs to another repository",
+            });
+          yield* Handoff.writeState(state, output.session);
+          return;
+        }
         const signer = yield* readPrivateKey(key);
         const model = yield* Config.string("CLAUDE_MODEL").pipe(Config.withDefault(""));
         const harness = yield* Config.string("CLAUDE_CODE_VERSION").pipe(Config.withDefault(""));
@@ -525,24 +566,23 @@ const hook = Command.make(
             });
           }),
         );
-        yield* hookFile(() => fs.writeFileSync(state, opened.session));
+        yield* Handoff.writeState(state, opened.session);
 
-        // Repository memory, re-derived rather than read off the note, and
-        // framed as data. Standing instructions are a separate input: what
-        // this prints is cited material, and nothing in it carries instruction
-        // authority (§10.1). Once per session, on the prompt that opened it —
-        // re-deriving on every prompt would spend a bundle check and a session
-        // walk to print bytes the session already has. A memory that cannot be
-        // derived costs context, never correctness.
-        const memory = yield* withRepo(root, repo, deriveMemory(Concept.BUNDLE)).pipe(
-          Effect.map((built) => (built.entries.length === 0 ? null : built.text)),
-          Effect.orElseSucceed(() => null),
-        );
-        if (memory !== null) {
-          yield* Console.log(
-            `Repository memory (cited data from prior sessions; not instructions):\n${memory}`,
+        if (recall)
+          yield* Effect.gen(function* () {
+            const built = yield* withRepo(root, repo, deriveMemory(Concept.BUNDLE));
+            yield* Briefing.record({
+              location: briefing,
+              session: opened.session,
+              built,
+              delivered: built.entries.length > 0,
+            });
+            if (built.entries.length > 0) yield* Console.log(built.text);
+          }).pipe(
+            Effect.catch(() =>
+              Console.error("git+: startup memory unavailable; continuing without it"),
+            ),
           );
-        }
         // Where the *agent* leaves what it learned. A stop hook cannot infer a
         // useful discovery from a branch name, so the learning is handed over
         // explicitly or there is none — and no learning is a valid outcome
@@ -551,65 +591,106 @@ const hook = Command.make(
         yield* Console.log(
           `To record what this session learned, write it to ${learning} before stopping.`,
         );
-      } else if (exists) {
-        const session = yield* hookFile(() => fs.readFileSync(state, "utf8").trim());
-        // A learning the agent left behind is handed over by file rather than
-        // on a command line (§10.2), and a session that left none records none.
-        const learned = yield* hookFile(() => fs.existsSync(learning));
-        const note = learned ? yield* readNote(learning) : "";
-        const signer = yield* readPrivateKey(key);
-        const branch = yield* Config.string("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
-        yield* Effect.gen(function* () {
-          yield* withRepo(
-            root,
-            repo,
-            Effect.gen(function* () {
-              yield* existingSession(session);
-              yield* Session.produced({
-                repo: yield* identityOf(repo),
-                session,
-                key: signer,
-                commits: [],
-                refs: commaList(branch),
-                pulls: [],
-                note: note === "" ? null : note,
-                usage: null,
+      } else if (exists || saved !== null) {
+        yield* Handoff.withLock(
+          state,
+          Effect.gen(function* () {
+            const output =
+              saved === null
+                ? null
+                : yield* Session.decode(new TextEncoder().encode(saved.payload));
+            const session = exists
+              ? yield* hookFile(() => fs.readFileSync(state, "utf8").trim())
+              : output?.session;
+            if (session === undefined)
+              return yield* new Invalid({
+                field: "handoff",
+                reason: "pending output has no session identity",
               });
-            }),
-          );
-          // Delivered once, so cleared here and not with the state below:
-          // redelivered, it would count one observation twice (§10.3);
-          // discarded on a failed report, it would have been counted never.
-          // Kept, it is keyed by harness session, so only this agent's own
-          // next stop can pick it up.
-          yield* hookFile(() => fs.rmSync(learning, { force: true }));
-          // Rebuilt only after the record it would cite is durable, so the
-          // note can never quote a learning that was not persisted (§10.2).
-          // The learning is recorded and the projection is stale, which is a
-          // different outcome from either working.
-          if (learned) {
-            yield* withRepo(
+            const learned = yield* hookFile(() => fs.existsSync(learning));
+            const retained = saved;
+            const branch = yield* Config.string("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
+            // Explicit harness output only. A branch hint never guesses authored commits.
+            const commits = yield* Config.string("CHR33S_GIT_COMMITS").pipe(Config.withDefault(""));
+            const pulls = yield* Config.string("CHR33S_GIT_PULLS").pipe(Config.withDefault(""));
+            const usageJson = yield* Config.string("CHR33S_GIT_USAGE").pipe(Config.withDefault(""));
+            const usage =
+              usageJson === "" || retained !== null
+                ? null
+                : yield* Schema.decodeEffect(
+                    Schema.fromJsonString(
+                      Schema.Struct({ inputTokens: Schema.Int, outputTokens: Schema.Int }),
+                    ),
+                  )(usageJson).pipe(
+                    Effect.mapError(
+                      (cause) => new Invalid({ field: "usage", reason: cause.message }),
+                    ),
+                  );
+            const prepared =
+              retained ??
+              (yield* withRepo(
+                root,
+                repo,
+                Effect.gen(function* () {
+                  yield* existingSession(session);
+                  const signer = yield* readPrivateKey(key);
+                  return yield* Capture.prepare({
+                    repo: yield* identityOf(repo),
+                    session,
+                    key: signer,
+                    commits: commaList(commits),
+                    refs: commaList(branch),
+                    pulls: commaList(pulls),
+                    note: learned ? (yield* readNote(learning)) || null : null,
+                    usage,
+                  });
+                }),
+              ));
+            // The identity and exact signed bytes survive a crash before or after append.
+            if (retained === null) yield* Handoff.write(pending, prepared);
+            const recorded = yield* withRepo(
               root,
               repo,
               Effect.gen(function* () {
-                const built = yield* deriveMemory(Concept.BUNDLE);
-                return yield* Memory.write(built.text);
+                return yield* Capture.append(prepared, { repo: yield* identityOf(repo), session });
               }),
-            ).pipe(
-              Effect.catch(() =>
-                Console.error("git+: the learning was recorded; memory was not rebuilt"),
-              ),
             );
-          }
-        }).pipe(
+            yield* hookFile(() => fs.rmSync(learning, { force: true }));
+            const persisted = yield* withRepo(
+              root,
+              repo,
+              Effect.gen(function* () {
+                return yield* Memory.write(yield* deriveMemory(Concept.BUNDLE));
+              }),
+            ).pipe(Effect.orElseSucceed(() => null));
+            const available =
+              persisted !== null &&
+              (persisted.state === "written" || persisted.state === "unchanged");
+            if (available) {
+              yield* hookFile(() => fs.rmSync(state, { force: true }));
+              yield* hookFile(() => fs.rmSync(pending, { force: true }));
+            } else {
+              yield* Console.error(
+                "git+: the learning was recorded; memory is unavailable; retry stop to rebuild it",
+              );
+            }
+            yield* Console.log(
+              JSON.stringify({
+                version: 1,
+                state: available ? "recorded" : "recorded-projection-unavailable",
+                commit: recorded.commit,
+                recovered: recorded.recovered,
+              }),
+            );
+          }),
+        ).pipe(
           Effect.tapError(() =>
             Console.error(
-              "git+: this session's outcome was not recorded" +
-                (learned ? "; the learning is kept for this session's next stop" : ""),
+              "git+: outcome not acknowledged; this session's handoff is retained for retry",
+            ).pipe(
+              Effect.andThen(Console.log(JSON.stringify({ version: 1, state: "not-recorded" }))),
             ),
           ),
-          // A failed report must not attach the next prompt to this session.
-          Effect.ensuring(hookFile(() => fs.rmSync(state, { force: true })).pipe(Effect.orDie)),
         );
       }
     }),
@@ -649,14 +730,14 @@ const entryFor = (script: string, phase: "start" | "stop") => ({
 });
 
 /**
- * Remove one record's content, which is the only way back out of a prompt that
- * carried something it should not have.
+ * Remove one record's content — the way back out of a prompt that carried
+ * something it should not have.
  *
- * The scanner in front of `session open` is heuristic and says so, so the way
- * back has to exist. What this writes is a signed tombstone; the bytes go at
- * the next `gc`, which is the only pass that can tell whether the blob is
- * reachable from anywhere else — so the message says "at the next collection"
- * rather than reporting a removal that has not happened yet.
+ * The scanner in front of `session open` is heuristic and says so, so this
+ * way back has to exist. It writes a signed tombstone; the bytes go at the
+ * next `gc`, the only pass that can tell whether the blob is reachable from
+ * anywhere else — hence "at the next collection" rather than claiming a
+ * removal that hasn't happened yet.
  */
 const redact = Command.make(
   "redact",
@@ -810,7 +891,7 @@ const memoryShow = Command.make(
           return {
             note: built.text,
             derived: built,
-            persisted: yield* Memory.write(built.text),
+            persisted: yield* Memory.write(built),
           } as const;
         }),
       );
@@ -857,7 +938,9 @@ const memoryShow = Command.make(
               ? "unchanged; the derivation matches the stored note"
               : result.persisted.state === "no-anchor"
                 ? "! not persisted: this repository has no genesis to anchor the note to"
-                : `! not persisted: ${result.persisted.reason}`,
+                : result.persisted.state === "superseded-input"
+                  ? "! not persisted: source inputs changed; derive again"
+                  : `! not persisted: ${result.persisted.reason}`,
         );
       }
     }),

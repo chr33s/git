@@ -59,11 +59,10 @@ export const file = (root: string): Layer.Layer<LfsStore> =>
           );
         }),
 
-      write: (oid, body) =>
-        Effect.gen(function* () {
-          const target = locate(root, oid);
-          const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-
+      write: (oid, body) => {
+        const target = locate(root, oid);
+        const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+        return Effect.gen(function* () {
           const written = yield* Effect.tryPromise({
             try: async () => {
               await fsp.mkdir(path.dirname(target), { recursive: true });
@@ -95,7 +94,6 @@ export const file = (root: string): Layer.Layer<LfsStore> =>
           });
 
           if (written.actual !== oid) {
-            yield* Effect.promise(() => fsp.rm(temporary, { force: true }));
             return yield* new Invalid({
               field: "oid",
               reason: `content hashes to ${written.actual}`,
@@ -107,6 +105,15 @@ export const file = (root: string): Layer.Layer<LfsStore> =>
             catch: failed("lfs.write", oid),
           });
           return { oid, size: written.size };
-        }),
+        }).pipe(
+          // Whatever stopped the upload short of the rename — a mismatch, a
+          // client that hung up, a full disk, an interruption — its partial
+          // file must not outlive it: nothing else ever collects these. After
+          // a rename there is nothing here, and `force` makes that a no-op.
+          Effect.ensuring(
+            Effect.tryPromise(() => fsp.rm(temporary, { force: true })).pipe(Effect.ignore),
+          ),
+        );
+      },
     });
   });

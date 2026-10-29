@@ -24,6 +24,7 @@ export const CAPABILITIES = [
   "hub.session",
   "hub.trace",
   "hub.task",
+  "hub.note",
   "hub.queue",
   "social.write",
   "member.invite",

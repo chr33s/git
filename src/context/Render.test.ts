@@ -11,12 +11,26 @@
  * from now.
  */
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { describe, it } from "@effect/vitest";
 
 import { Effect, Result } from "effect";
 
 import { bytesToHex } from "../git/Format.ts";
 import * as Render from "./Render.ts";
+
+it.effect("hashes only the supplied bytes, including pooled Node Buffer views", () =>
+  Effect.gen(function* () {
+    const expected = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const pooled = Buffer.from("prefixabcsuffix");
+    assert.equal(yield* Render.sha256(pooled.subarray(6, 9)), expected);
+    assert.equal(yield* Render.sha256(new TextEncoder().encode("abc")), expected);
+    assert.equal(
+      yield* Render.sha256(pooled.subarray(6, 6)),
+      "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+  }),
+);
 
 const u32 = (value: number): Uint8Array => {
   const out = new Uint8Array(4);

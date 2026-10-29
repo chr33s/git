@@ -527,14 +527,6 @@ export interface Entry {
 }
 
 /**
- * Append an event to a pull request's history.
- *
- * The compare-and-swap is on the head the event was built against, so two
- * authors appending at once produce one winner and one retry rather than a
- * lost event. State-dependent callers pass an explicit expectation and must
- * revalidate their decision themselves after a conflict.
- */
-/**
  * Add one signed record to the end of an append-only hub ref.
  *
  * The ref is the caller's, not this module's: a pull request writes to
@@ -684,14 +676,6 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
         : error,
     ),
   );
-  // Bounded in *size* as well as in shape. Folding a pull request builds an
-  // ancestor set per commit, which is quadratic, and how many commits a pull
-  // request has is chosen by whoever may append to it — the lowest hub
-  // capability there is. On the protected-branch path that fold is
-  // synchronous and inside a worker with a fixed memory ceiling, so an
-  // unbounded one is a push that never returns rather than a push that is
-  // refused. The bound is far above any conversation: a pull request with
-  // more events than this is not one a person is having.
   const ordered = Dag.topological(parents);
 
   const events: Entry[] = [];
@@ -789,12 +773,6 @@ export const withinCeiling = Effect.fn("hub.Event.withinCeiling")(function* (hea
   return walked;
 });
 
-/**
- * Whether a commit belongs to a pull request's history.
- *
- * An event carries `event.json`; a join carries an empty tree. Anything else
- * is a commit from somewhere that is not the hub, and the walk stops there.
- */
 /** One record on a hub ref, decoded by whoever asked for the walk. */
 export interface WalkedRecord<A> {
   readonly commit: Oid;
@@ -807,6 +785,8 @@ export interface Walk<A> {
   readonly records: ReadonlyArray<WalkedRecord<A>>;
   /** Full walked ancestry, including joins, for causal projection decisions. */
   readonly parents: Dag.Parents;
+  /** The walked commits in topological order, joins included. */
+  readonly ordered: ReadonlyArray<Oid>;
   /** Commits carrying a record this replica could not read or decode. */
   readonly unreadable: ReadonlyArray<Oid>;
   /**
@@ -837,18 +817,26 @@ export interface Walk<A> {
 export const walk = Effect.fn("hub.Event.walk")(function* <A>(
   ref: string,
   decodeOne: (bytes: Uint8Array) => Effect.Effect<A, Invalid>,
+  capturedHead?: Oid | null,
 ) {
   const repository = yield* Repository;
-  const head = yield* repository.resolve(ref);
+  const head = capturedHead === undefined ? yield* repository.resolve(ref) : capturedHead;
   if (head === null) {
-    return { records: [], parents: new Map(), unreadable: [], walked: 0 } satisfies Walk<A>;
+    return {
+      records: [],
+      parents: emptyParents,
+      ordered: emptyOrder,
+      unreadable: [],
+      walked: 0,
+    } satisfies Walk<A>;
   }
 
   const parents = yield* Dag.reachable(head, null, isHubCommit, yield* ceilingOf());
+  const ordered = Dag.topological(parents);
   const records: Array<WalkedRecord<A>> = [];
   const unreadable: Array<Oid> = [];
 
-  for (const commit of Dag.topological(parents)) {
+  for (const commit of ordered) {
     if (!(yield* Record.carries(commit, RECORD))) continue;
     // A redaction deletes the payload and leaves the tree entry naming it, so
     // the read fails where every other event's succeeds. That absence is what
@@ -876,9 +864,15 @@ export const walk = Effect.fn("hub.Event.walk")(function* <A>(
     });
   }
 
-  return { records, parents, unreadable, walked: parents.size } satisfies Walk<A>;
+  return { records, parents, ordered, unreadable, walked: parents.size } satisfies Walk<A>;
 });
 
+/**
+ * Whether a commit belongs to a pull request's history.
+ *
+ * An event carries `event.json`; a join carries an empty tree. Anything else
+ * is a commit from somewhere that is not the hub, and the walk stops there.
+ */
 export const isHubCommit = Effect.fn("hub.Event.isHubCommit")(function* (commit: Oid) {
   const repository = yield* Repository;
   const info = yield* repository

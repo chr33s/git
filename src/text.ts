@@ -91,3 +91,17 @@ export const terms = (task: string): ReadonlyArray<string> => {
   }
   return [...seen].slice(0, 16);
 };
+
+/** UTF-8 byte order, including astral characters that UTF-16 string comparison orders differently. */
+export const compareUtf8 = (left: string, right: string): number => {
+  if (left === right) return 0;
+  const encoder = new TextEncoder();
+  const a = encoder.encode(left);
+  const b = encoder.encode(right);
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    const difference = a[index]! - b[index]!;
+    if (difference !== 0) return difference;
+  }
+  // Distinct malformed surrogate strings can encode to the same replacement bytes.
+  return a.length - b.length || (left < right ? -1 : 1);
+};

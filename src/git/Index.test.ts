@@ -212,7 +212,8 @@ describe.skipIf(!hasGit)("Index interop with git", () => {
 
   const init = async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "git-index-"));
-    // index.version pins what `git add` writes; this codec only speaks v2.
+    // index.version pins what `git add` writes: v2 unless an entry needs v3's
+    // extended flags. v4's path compression is not spoken here.
     git(root, "-c", "init.defaultBranch=main", "init", "-q", ".");
     git(root, "config", "index.version", "2");
     return root;
@@ -326,6 +327,53 @@ describe.skipIf(!hasGit)("Index interop with git", () => {
           [...ours.subarray(0, ours.length - 20)],
           [...bytes.subarray(0, ours.length - 20)],
         );
+      } finally {
+        await fs.rm(root, { force: true, recursive: true });
+      }
+    }),
+  );
+
+  it.effect("reads and writes version 3's intent-to-add and skip-worktree flags", () =>
+    Effect.promise(async () => {
+      const root = await init();
+      try {
+        for (const name of ["kept.txt", "sparse.txt", "planned.txt"]) {
+          await fs.writeFile(path.join(root, name), `${name}\n`);
+        }
+        git(root, "add", "kept.txt", "sparse.txt");
+        git(root, "add", "-N", "planned.txt");
+        git(root, "update-index", "--skip-worktree", "sparse.txt");
+
+        const bytes = new Uint8Array(await fs.readFile(path.join(root, ".git", "index")));
+        assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint32(4), 3);
+        const decoded = expectSuccess(decodeIndex(bytes));
+        assert.equal(findEntry(decoded, "planned.txt")?.intentToAdd, true);
+        assert.equal(findEntry(decoded, "sparse.txt")?.skipWorktree, true);
+        assert.equal(findEntry(decoded, "kept.txt")?.intentToAdd, undefined);
+
+        // Byte for byte, up to the extensions git appends after the entries.
+        const ours = encodeIndex(decoded);
+        assert.deepEqual(
+          [...ours.subarray(0, ours.length - 20)],
+          [...bytes.subarray(0, ours.length - 20)],
+        );
+
+        // And what we write, git reads back with the same meaning: `S` is
+        // skip-worktree in `ls-files -t -v`, and ` A` is intent-to-add.
+        await fs.writeFile(path.join(root, ".git", "index"), ours);
+        assert.match(git(root, "ls-files", "-t", "-v", "sparse.txt"), /^S sparse\.txt$/);
+        // Untrimmed: the leading space is the whole difference from `A `.
+        const porcelain = execFileSync("git", ["status", "--porcelain", "planned.txt"], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        assert.equal(porcelain, " A planned.txt\n");
+
+        // Neither flag set: back to version 2, as git itself does.
+        const plain = encodeIndex(
+          decoded.map((found) => ({ ...found, intentToAdd: false, skipWorktree: false })),
+        );
+        assert.equal(new DataView(plain.buffer).getUint32(4), 2);
       } finally {
         await fs.rm(root, { force: true, recursive: true });
       }

@@ -37,6 +37,21 @@ They share the same Git object store, repository identity, signed membership, an
 - `.gitplus/knowledge/` is an OKF-compatible Markdown corpus with optional Git+ signed citations and structured Git evidence. Repository Memory is a small, regenerable session-start projection.
 - Retrieved content, knowledge, OTel attributes, and editorial verification remain data unless repository policy grants them authority.
 
+### Documentation map
+
+Choose the document for the job rather than reading the design set front to back:
+
+| If you want to…                                                              | Start here                                               |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------- |
+| install, run, or discover CLI commands                                       | [`docs/cli.md`](docs/cli.md) and `git+ <command> --help` |
+| understand repository identity, membership, PRs, reviews, checks, or policy  | [`docs/hub.md`](docs/hub.md)                             |
+| grant agents access or record agent sessions, tasks, and wake rules          | [`docs/agents.md`](docs/agents.md)                       |
+| operate or reason about the merge queue                                      | [`docs/queue.md`](docs/queue.md)                         |
+| record and audit code-anchored constraints, or read them before editing      | [`docs/notes.md`](docs/notes.md)                         |
+| configure validated agent recall, maintenance, and draft knowledge proposals | [`docs/proactive-memory.md`](docs/proactive-memory.md)   |
+| understand social identity, introductions, federation, and discovery         | [`docs/web-of-trust.md`](docs/web-of-trust.md)           |
+| change the implementation or add a backend/surface                           | [`docs/internals.md`](docs/internals.md)                 |
+
 ---
 
 ## Quick start
@@ -248,6 +263,24 @@ The UI in `src/ui/` covers repository browsing, commits, tasks, pull requests, s
 The Flight Recorder groups audit history by session and Invocation, so users do not have to reconstruct Context Exposure and telemetry records themselves. Concurrent trace branches stay visible as causal lanes instead of being flattened by timestamp.
 
 ```bash
+# Claim a pending task from the hub DAG
+git+ task claim --id="task-102" --ttl="15m"
+
+# Execute task work, post status attestation, and release claim
+git+ task resolve --id="task-102" --status="completed"
+```
+
+---
+
+## Web Interface
+
+The web interface in `src/ui/` provides a lightweight file browser, commit viewer, task manager, and pull request inspector, built as one [Foldkit](https://github.com/foldkit/foldkit) application over Effect.
+
+```bash
+# Development mode: watch UI and bind embedded API server on :8000
+GIT_ROOT=./repos npm run dev:ui
+
+# Build production bundle and serve statically
 npm run build:ui
 git+ serve --root ./repos --ui
 ```

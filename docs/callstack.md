@@ -127,24 +127,23 @@ stateFor(repo)
 
 The gate serializes handlers for one repository so object writes and ref compare-and-swap updates cannot interleave with another request.
 
-### Node dispatch order
+### Node dispatch
 
-Large streaming bodies are deliberately tested before the JSON API:
+Every host mounts one `HttpRouter` per repository: `Api.layer` (the JSON API, an `HttpApi`) merged with `server/Router.ts::layer` (the raw-body routes). Matching is on the path alone and never reads a body, so no ordering rule protects the streaming handlers.
 
 ```text
 dispatch(...)
   -> wait for in-flight response bodies if this request collects objects
   -> per-repository gate
-     -> Lfs.handle(request)
-        -> matched? return
-     -> CommitPack.handle(request)
-        -> matched? return
-     -> Archive.handle(request)
-        -> matched? return
-     -> Protocol.handle(request)
-        -> matched? return
-     -> state.api(request, requesterContext)
-        -> Api.layer(...)
+     -> state.handle(request, requesterContext)
+        -> HttpRouter
+           -> *    /:repo/info/lfs/objects/*   Lfs.handle
+           -> GET  /:repo/info/refs            Protocol.handle
+           -> POST /:repo/git-upload-pack      Protocol.handle
+           -> POST /:repo/git-receive-pack     Protocol.handle
+           -> *    /:repo/commit-pack          CommitPack.handle
+           -> *    /:repo/archive/:name        Archive.handle
+           -> otherwise                        Api.layer(...)
 ```
 
 The response body is delivered outside the serialization gate. Active streaming bodies are tracked separately so `gc` does not delete objects that an upload-pack/archive response is still reading.
@@ -367,12 +366,7 @@ GitRepo.fetch(request)
      -> #live(repo)
         -> GitRepository.layer
         -> git/Cloudflare.ts stores({ bucket, repo, storage })
-  -> route dispatch
-     -> Lfs.handle
-     -> CommitPack.handle
-     -> Archive.handle
-     -> Protocol.handle
-     -> cached Api.layer router
+  -> cached HttpRouter (Api.layer + Router.layer + conformance routes)
 ```
 
 The Durable Object input gate supplies the per-repository serialization that the Node host implements with its promise chain.

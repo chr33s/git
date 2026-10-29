@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "kind": "retrospective-fixed-source-diagnosis-and-candidate-edit-pilot",
+  "taskVariantCombinations": 8,
+  "conditions": 3,
+  "modelInvocations": 24,
+  "model": "claude-opus-5-5",
+  "client": "Claude CLI 2.1.311",
+  "budget": {
+    "wallTimeMs": 120000,
+    "inputTokens": 64000,
+    "outputTokens": 4000,
+    "toolCalls": 0,
+    "corrections": 0
+  },
+  "fixtureEvidence": "Synthetic signed sessions and native PRs replay selected historical patches. No claim of original agent authorship or human preference. Fixture curator proposes drafts via the real publisher; benchmark setup explicitly reviews predetermined lessons into stable fixture source, outside the maintenance worker.",
+  "verification": "Model edits apply uniquely to frozen source. Affected historical suites execute in isolated complete source archives. Editor suites required exact historical dependencies, restored equally across all editor candidates. Every affected suite passed.",
+  "qualityReview": "Six protocol candidates rejected after test passes for retained dead code and unchecked casts/any. This is a disclosed posthoc maintainability endpoint; original model prompt did not include complete repository instructions.",
+  "diagnosisTiming": "Host-measured elapsed time to the completed first response, treated as an upper bound after reviewer support assessment. No streaming first-diagnosis timing.",
+  "exploration": "All source was supplied, and model tools were disabled. Repeated source-inspection actions are zero by design; broader agent investigation savings are unmeasured.",
+  "reviewCorrections": "No edits or feedback iterations were applied to model responses. Six reviewer rejections are retained separately. Correction effort after rejection is unmeasured.",
+  "knowledgeExposure": "Unsupported/stale supplied claims count one preregistered lesson entry per controlled invalidation, not individual clauses or population prevalence.",
+  "maintenanceTiming": "Combined deterministic maintenance, draft publication, and fixture-curation preparation time. It excludes constructing the synthetic source/session history and does not measure an autonomous semantic-curator model.",
+  "correctionLatency": "Elapsed host time from a completed controlled invalidation to the sampled next context revalidation. Sequential fixture preparation affects it; no production SLA or cross-condition causal comparison is inferred.",
+  "cost": "CLI-reported list-price estimates, not a verified bill. Authentication probe excluded from task total; its CLI estimate was USD 0.000372.",
+  "limitations": [
+    "Known-fix lessons overlap the historical tasks, so this measures reuse, not unseen-task generalization.",
+    "One repetition, five task scopes from three fix commits, three controlled variants, fixed source packets, and no model tools limit external validity.",
+    "Conditions have equal task-result acceptance in this sample. Observed latency/token differences do not establish a general productivity improvement.",
+    "Fixture-reviewed curation is not evidence that autonomous semantic curation is accurate or cost-effective.",
+    "The retained measured-runtime snapshot precedes final authorization/cursor/native-report/equivalence guards, UTF-8 canonical ordering, and delivered-support tracking fixes; those later changes have separate correctness tests. No new-version timing claim is made.",
+    "Do not expand autonomous curation on the basis of this pilot."
+  ],
+  "historicalTaskScopes": 5,
+  "historicalFixCommits": 3,
+  "baseline": "Pinned main existing Memory.read API supplied manually as context. Main default session-start hook supplies no memory; this pilot does not compare that default workflow.",
+  "curatedSupport": "Fixture review adds direct original-output citations and declared blob dependencies alongside generated report citations. Report citations do not transitively validate underlying PR evidence. Controlled curated invalidation depends on these explicit added supports.",
+  "startupTiming": "Context read or derive operation only; excludes complete hook/process startup. Baseline subprocess overhead is retained separately."
+}

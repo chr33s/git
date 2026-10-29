@@ -3,13 +3,12 @@
  *
  *   GET …/archive/<name>?ref=<ref>&path=<dir>
  *
- * The extension on `<name>` picks the format, the way `git archive --format`
- * is inferred from the output filename and the way every forge spells it.
+ * The extension on `<name>` picks the format, as with `git archive --format`.
  *
- * The result is a `Stream`, not a buffer: a repository's worth of blobs is
- * exactly the thing that must not be materialised at once, which is the same
- * reason `Repository.packOf` streams. Only the file *list* is held — paths and
- * oids, no content — and each blob is read as the consumer pulls it.
+ * The result is a `Stream`, not a buffer: a repository's worth of blobs must
+ * not be materialised at once (same reason `Repository.packOf` streams). Only
+ * the file *list* is held — paths and oids, no content — and each blob is
+ * read as the consumer pulls it.
  *
  * The writers are hand-rolled because this module has to load in a Worker: no
  * `node:zlib`, no archiver dependency. Gzip is `CompressionStream`, which both
@@ -18,7 +17,7 @@
 import { Effect, Stream } from "effect";
 
 import { Invalid, ObjectNotFound, type StorageFailure, statusOf } from "../git/Error.ts";
-import { isGitlink, isTree } from "../git/Format.ts";
+import { isExecutable, isGitlink, isSymlink, isTree } from "../git/Format.ts";
 import { crc32 } from "../git/PackIndex.ts";
 import { Repository, treeAt, type TreeFile } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
@@ -277,7 +276,7 @@ const tarChunks = (
 
     // A symlink's blob *is* the target, so it travels in the header rather
     // than as content — a symlink entry has no content at all.
-    if (entry.mode === "120000") {
+    if (isSymlink(entry.mode)) {
       const target = decoder.decode(yield* repository.readBlob(entry.oid));
       return tarHeaders({
         name: entry.path,
@@ -293,7 +292,7 @@ const tarChunks = (
     return [
       ...tarHeaders({
         name: entry.path,
-        mode: entry.mode === "100755" ? 0o755 : 0o644,
+        mode: isExecutable(entry.mode) ? 0o755 : 0o644,
         size: data.length,
         typeflag: "0",
         link: "",
@@ -452,9 +451,9 @@ const zipStream = (
         const mode =
           entry.kind === "directory"
             ? 0o40755
-            : entry.mode === "120000"
+            : isSymlink(entry.mode)
               ? 0o120777
-              : entry.mode === "100755"
+              : isExecutable(entry.mode)
                 ? 0o100755
                 : 0o100644;
 
@@ -530,8 +529,8 @@ const failure = (status: number, message: string): Response =>
   });
 
 /**
- * Route `GET …/archive/<name>`; `null` means "not an archive request", so a
- * host can try the next handler.
+ * Route `GET …/archive/<name>`; `null` means "not an archive request", which
+ * `server/Router.ts` answers 404.
  *
  * `prefix` overrides the directory every entry sits under inside the archive.
  * The default is `<name>` without its extension, which is what makes an

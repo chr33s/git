@@ -32,7 +32,7 @@ import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import * as Pack from "../context/Pack.ts";
 import type { Projection } from "../trust/Projection.ts";
-import { terms } from "../text.ts";
+import { compareUtf8, terms } from "../text.ts";
 import * as Check from "./Check.ts";
 import * as Concept from "./Concept.ts";
 
@@ -288,11 +288,7 @@ export const search = Effect.fn("knowledge.Recall.search")(function* (
       right.matches - left.matches ||
       // Byte order on the path, so two hosts rank equal candidates the same
       // way and produce the same pack bytes.
-      (left.checked.path < right.checked.path
-        ? -1
-        : left.checked.path > right.checked.path
-          ? 1
-          : 0),
+      compareUtf8(left.checked.path, right.checked.path),
   );
 
   const limit = options.maxGroups ?? MAX_GROUPS;

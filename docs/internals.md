@@ -22,73 +22,79 @@ repo sets `save-exact=true` deliberately.
 
 | package                 | version         | why it matters                                               |
 | ----------------------- | --------------- | ------------------------------------------------------------ |
-| `effect`                | `4.0.0-rc.111`  | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
-| `alchemy`               | `2.0.0-beta.74` | Workers stack as effects                                     |
-| `@effect/platform-node` | `4.0.0-rc.111`  | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
-| `@effect/tsgo`          | `0.36.5`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
+| `effect`                | `4.0.0-rc.112`  | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
+| `alchemy`               | `2.0.0-beta.76` | Workers stack as effects                                     |
+| `@effect/platform-node` | `4.0.0-rc.112`  | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
+| `@effect/tsgo`          | `0.43.0`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
 | `typescript`            | `7.0.2`         | TypeScript-Go                                                |
 
 `alchemy` is behind a `patch-package` patch. Oxlint `typeCheck` and `tsc` both
 run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).
+Foldkit's `@foldkit/oxlint-plugin` is loaded the same way, scoped to the UI's
+TEA files (`src/ui/app*.ts`, views, mounts, `element.base-wc.ts`).
 
 ## Module map
 
-| module                        | what it is                                                           |
-| ----------------------------- | -------------------------------------------------------------------- |
-| `src/git/Error.ts`            | tagged errors with `httpApiStatus` annotations                       |
-| `src/git/Store.ts`            | `ObjectStore` / `RefStore` ports                                     |
-| `src/git/Format.ts`           | the pure/effectful seam — framing, commit and tree codecs, hashing   |
-| `src/git/Repository.ts`       | the domain service                                                   |
-| `src/git/Memory.ts`           | in-memory backend                                                    |
-| `src/git/Node.ts`             | filesystem backend, git's own on-disk layout                         |
-| `src/git/Cloudflare.ts`       | R2 + Durable Object SQLite backend                                   |
-| `src/adapters/Opfs.ts`        | browser (OPFS) backend — same loose-object layout                    |
-| `src/git/Durable.ts`          | the Worker entry: one Durable Object per repository                  |
-| `src/git/Pack.ts`             | streaming packfile transport, platform-neutral, git-interop-tested   |
-| `src/git/PackFile.ts`         | random access into a pack at rest, via `PackIndex.ts`'s `.idx` codec |
-| `src/git/Packed.ts`           | `PackStore` port; decorates an `ObjectStore` with packed reads       |
-| `src/git/Inflate.ts`          | pull-based zlib inflate — exact stream boundaries, no `node:*`       |
-| `src/git/Inflate.zlib.ts`     | the same, on `node:zlib`, for reading packs at rest on node/workerd  |
-| `src/git/Diff.ts`             | unified diff, byte-identical to `git diff --no-index`                |
-| `src/git/Merge.ts`            | three-way merge, byte-identical to `git merge-file --diff3`          |
-| `src/git/Index.ts`            | git's own `DIRC` v2 index codec                                      |
-| `src/git/Work.ts`             | `WorkTree` / `IndexStore` ports; `Checkout.ts` is the porcelain      |
-| `src/git/Rebase.ts`           | replay: cherry-pick, and rebase as a sequence of them                |
-| `src/git/Bisect.ts`           | which commit first broke it, as a function of the good/bad marks     |
-| `src/git/History.ts`          | `git log -- <path>`, history simplification included                 |
-| `src/server/Protocol.ts`      | git smart-HTTP: advertisement, upload-pack, receive-pack, v0 and v2  |
-| `src/server/Api.ts`           | JSON API as one `HttpApi` declaration; the client derives from it    |
-| `src/server/Route.ts`         | URL → repository name, in one place; strips the `.git` suffix        |
-| `src/server/Auth.ts`          | scoped tokens: guard on both surfaces, HMAC or revocable verifiers   |
-| `src/server/Webhooks.ts`      | signed push delivery: `Schedule` retry, backgrounded, per-subscriber |
-| `src/server/Lfs.ts`           | Git LFS batch API and transfer, per-platform streaming digest        |
-| `src/server/Archive.ts`       | tree → tar / tar.gz / zip, streamed                                  |
-| `src/server/CommitPack.ts`    | NDJSON bulk commit, parsed as a stream                               |
-| `src/server/Remotes.ts`       | named remotes; `Remotes.node.ts` is the JSON-file store              |
-| `src/host/Node.ts`            | node host: the same handlers behind `node:http`, self-hostable       |
-| `src/host/Cloudflare.ts`      | the Workers host                                                     |
-| `src/client/Fetch.ts`         | smart-HTTP fetch client: `lsRemote`, clone, incremental fetch        |
-| `src/client/Push.ts`          | smart-HTTP push client                                               |
-| `src/client/Client.ts`        | browser client: derived JSON client, clone, local `Repository`       |
-| `src/cli/bin.ts`              | `bin`: node's compile cache on, then `main.ts`                       |
-| `src/cli/main.ts`             | CLI: porcelain, hub, social, queue, session, task, wake              |
-| `src/cli/sea.build.ts`        | `npm run build:sea` — the CLI as one node SEA binary (node 26+)      |
-| `src/crypto/SshSignature.ts`  | SSH sign / verify                                                    |
-| `src/trust/`                  | genesis, trust log, certificates, PrincipalID, known_repos           |
-| `src/hub/`                    | event DAGs: PRs, sessions, tasks, queue, redaction, memory           |
-| `src/hub/Trace.ts`            | `refs/hub/trace/*`: audit records no policy fold ever reads          |
-| `src/context/Pack.ts`         | Repository Views, and the evidence a Context Pack resolves from them |
-| `src/context/Render.ts`       | `git+context-render/v1` framing and its SHA-256 commitment           |
-| `src/context/Exposure.ts`     | the signed record binding pack, render and retained view             |
-| `src/context/Select.ts`       | the default, replaceable selector behind `git+ context for`          |
-| `src/telemetry/Records.ts`    | the runtime trace records: invocation, tool, workspace, health       |
-| `src/telemetry/Semconv.ts`    | OTel GenAI in, stable Git+ facts out; renames, never reinterprets    |
-| `src/telemetry/Invocation.ts` | the joined Invocation a person reads, with coverage and lanes        |
-| `src/social/`                 | identity-repo social log, introduction, inbox, external review       |
-| `src/artifacts/Namespace.ts`  | local Cloudflare Artifacts provider over alchemy's binding tag       |
-| `src/artifacts/Sqlite.ts`     | the provider's registry + tokens on Durable Object SQLite            |
-| `src/alchemy.run.ts`          | deployment stack: bucket, DO and Worker as values, not config        |
-| `src/git/Store.contract.ts`   | one storage contract suite, run against all four backends            |
+| module                                                                                     | what it is                                                                                            |
+| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `src/git/Error.ts`                                                                         | tagged errors with `httpApiStatus` annotations                                                        |
+| `src/git/Store.ts`                                                                         | `ObjectStore` / `RefStore` ports                                                                      |
+| `src/git/Format.ts`                                                                        | the pure/effectful seam — framing, commit and tree codecs, hashing                                    |
+| `src/git/Repository.ts`                                                                    | the domain service                                                                                    |
+| `src/git/Memory.ts`                                                                        | in-memory backend                                                                                     |
+| `src/git/Node.ts`                                                                          | filesystem backend, git's own on-disk layout                                                          |
+| `src/git/Cloudflare.ts`                                                                    | R2 + Durable Object SQLite backend                                                                    |
+| `src/adapters/Opfs.ts`                                                                     | browser (OPFS) backend — same loose-object layout                                                     |
+| `src/git/Durable.ts`                                                                       | the Worker entry: one Durable Object per repository                                                   |
+| `src/git/Pack.ts`                                                                          | streaming packfile transport, platform-neutral, git-interop-tested                                    |
+| `src/git/PackFile.ts`                                                                      | random access into a pack at rest, via `PackIndex.ts`'s `.idx` codec                                  |
+| `src/git/Packed.ts`                                                                        | `PackStore` port; decorates an `ObjectStore` with packed reads                                        |
+| `src/git/Inflate.ts`                                                                       | pull-based zlib inflate — exact stream boundaries, no `node:*`                                        |
+| `src/git/Inflate.zlib.ts`                                                                  | the same, on `node:zlib`, for reading packs at rest on node/workerd                                   |
+| `src/git/Diff.ts`                                                                          | unified diff, byte-identical to `git diff --no-index`                                                 |
+| `src/git/Merge.ts`                                                                         | three-way merge, byte-identical to `git merge-file --diff3`                                           |
+| `src/git/Index.ts`                                                                         | git's own `DIRC` v2 index codec                                                                       |
+| `src/git/Work.ts`                                                                          | `WorkTree` / `IndexStore` ports; `Checkout.ts` is the porcelain                                       |
+| `src/git/Rebase.ts`                                                                        | replay: cherry-pick, and rebase as a sequence of them                                                 |
+| `src/git/Bisect.ts`                                                                        | which commit first broke it, as a function of the good/bad marks                                      |
+| `src/git/History.ts`                                                                       | `git log -- <path>`, history simplification included                                                  |
+| `src/server/Protocol.ts`                                                                   | git smart-HTTP: advertisement, upload-pack, receive-pack, v0 and v2                                   |
+| `src/server/Api.ts`                                                                        | JSON API as one `HttpApi` declaration; the client derives from it                                     |
+| `src/server/Route.ts`                                                                      | URL → repository name, in one place; strips the `.git` suffix                                         |
+| `src/server/Auth.ts`                                                                       | scoped tokens: guard on both surfaces, HMAC or revocable verifiers                                    |
+| `src/server/Webhooks.ts`                                                                   | signed push delivery: `Schedule` retry, backgrounded, per-subscriber                                  |
+| `src/server/Lfs.ts`                                                                        | Git LFS batch API and transfer, per-platform streaming digest                                         |
+| `src/server/Archive.ts`                                                                    | tree → tar / tar.gz / zip, streamed                                                                   |
+| `src/server/CommitPack.ts`                                                                 | NDJSON bulk commit, parsed as a stream                                                                |
+| `src/server/Remotes.ts`                                                                    | named remotes; `Remotes.node.ts` is the JSON-file store                                               |
+| `src/host/Node.ts`                                                                         | node host: the same handlers behind `node:http`, self-hostable                                        |
+| `src/host/Cloudflare.ts`                                                                   | the Workers host                                                                                      |
+| `src/client/Fetch.ts`                                                                      | smart-HTTP fetch client: `lsRemote`, clone, incremental fetch                                         |
+| `src/client/Push.ts`                                                                       | smart-HTTP push client                                                                                |
+| `src/client/Client.ts`                                                                     | browser client: derived JSON client, clone, local `Repository`                                        |
+| `src/cli/bin.ts`                                                                           | `bin`: node's compile cache on, then `main.ts`                                                        |
+| `src/cli/main.ts`                                                                          | CLI: porcelain, hub, social, queue, session, task, wake                                               |
+| `src/cli/sea.build.ts`                                                                     | `npm run build:sea` — the CLI as one node SEA binary (node 26+)                                       |
+| `src/crypto/SshSignature.ts`                                                               | SSH sign / verify                                                                                     |
+| `src/trust/`                                                                               | genesis, trust log, certificates, PrincipalID, known_repos                                            |
+| `src/hub/`                                                                                 | event DAGs: PRs, sessions, tasks, queue, redaction, memory                                            |
+| `src/hub/Memory.ts`, `MemoryInput.ts`, `src/knowledge/Provenance.ts`                       | bounded recall, canonical input manifests, captured-head citation validation                          |
+| `src/knowledge/`                                                                           | evidence checks, native outcomes, bounded maintenance, typed assistance and guarded draft publication |
+| `src/cli/Briefing.node.ts`, `SessionHandoff.node.ts`                                       | delivered-support commitments and durable capture replay                                              |
+| `src/knowledge/Journal.node.ts`, `MaintenanceTimer.node.ts`, `src/host/LocalLease.node.ts` | resumable local jobs, quiet-time scheduling and OS-owned process leases                               |
+| `src/hub/Trace.ts`                                                                         | `refs/hub/trace/*`: audit records no policy fold ever reads                                           |
+| `src/context/Pack.ts`                                                                      | Repository Views, and the evidence a Context Pack resolves from them                                  |
+| `src/context/Render.ts`                                                                    | `git+context-render/v1` framing and its SHA-256 commitment                                            |
+| `src/context/Exposure.ts`                                                                  | the signed record binding pack, render and retained view                                              |
+| `src/context/Select.ts`                                                                    | the default, replaceable selector behind `git+ context for`                                           |
+| `src/telemetry/Records.ts`                                                                 | the runtime trace records: invocation, tool, workspace, health                                        |
+| `src/telemetry/Semconv.ts`                                                                 | OTel GenAI in, stable Git+ facts out; renames, never reinterprets                                     |
+| `src/telemetry/Invocation.ts`                                                              | the joined Invocation a person reads, with coverage and lanes                                         |
+| `src/social/`                                                                              | identity-repo social log, introduction, inbox, external review                                        |
+| `src/artifacts/Namespace.ts`                                                               | local Cloudflare Artifacts provider over alchemy's binding tag                                        |
+| `src/artifacts/Sqlite.ts`                                                                  | the provider's registry + tokens on Durable Object SQLite                                             |
+| `src/alchemy.run.ts`                                                                       | deployment stack: bucket, DO and Worker as values, not config                                         |
+| `src/git/Store.contract.ts`                                                                | one storage contract suite, run against all four backends                                             |
 
 **Do not reach past the domain.** An early version had `Api.ts` and
 `Protocol.ts` doing `yield* RefStore` directly. It compiles — and it makes
@@ -132,6 +138,30 @@ code were structural rather than stylistic, and they are the whole argument:
 Effect addresses 1–3 directly; the port split addresses 4. Alchemy addresses a
 smaller, separate problem: three sources of truth (`wrangler.json`, the
 generated types, and a hand-written binding lookup) for one binding.
+
+### Maintained-memory boundaries
+
+[Maintained agent memory](proactive-memory.md) owns the invariant, manifest,
+publication, and recovery contracts. Keep deterministic derivation in the portable
+core and scheduling, leases, durable job files, runner processes, and credentials
+in Node adapters. Reuse the shared session provenance evaluator for direct
+observations and Concept citations. Host-local journals and derived caches are
+operational state; Git source and accepted signed records remain the evidence.
+
+Changes to this workflow must preserve main's latest-production recency, explicit
+anchored-note lifecycle, current-use invalidation, and captured destination CAS
+expectations. Validate model output through typed host code and existing domain
+operations. New event namespaces/wire formats, dependencies, live infrastructure
+adapters, retention guarantees, ranking policy, or automatic lifecycle actions
+need a separate reviewed scope decision.
+
+Keep the [acceptance audit](proactive-memory.md#acceptance-audit) tied to executable
+behavior and real Git interoperability. Validate the installed hook's reuse across
+sessions, quiet-day scheduling, interrupted-job recovery, and evidenced draft
+publication. Publish fixed-corpus results and limitations before expanding autonomous
+curation; correctness is a gate and productivity is measured, without a promised
+percentage improvement. Optimize scans/retrieval only when measurements identify a
+bottleneck, retaining disposable, input-validated caches.
 
 ### One Durable Object per repository
 
@@ -347,6 +377,17 @@ was made on says nothing true about the new one.
 
 ## Conventions
 
+### TypeScript
+
+`strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, and
+`noFallthroughCasesInSwitch` are on. `exactOptionalPropertyTypes` is not.
+`tsc --noEmit --exactOptionalPropertyTypes` reports 37 errors in 18 files
+(`TS2379`, `TS2412`, `TS2375`, `TS2345`). They are not one migration: some
+call sites pass explicit `undefined` to mean "no opinion" —
+`Remotes.of({ sync: undefined })` is the documented case — and others should
+omit the key. Widening every optional property to `T | undefined` would make
+the flag a no-op, so it stays off until those sites are split.
+
 ### Errors
 
 `Schema.TaggedError` classes in `src/git/Error.ts`, each carrying an
@@ -377,9 +418,10 @@ writes objects to the store as they resolve, so an `OFS_DELTA` base is re-read
 by oid from storage and only the object being decoded is resident — no window,
 no second pass.
 
-Handlers that consume large bodies must be dispatched _before_ anything that
-would buffer them. In both hosts, LFS and `commit-pack` are tried ahead of the
-JSON API for exactly this reason.
+Handlers that consume large bodies must never sit behind anything that would
+buffer them. Every host mounts one `HttpRouter` (`server/Router.ts::handler`):
+it matches on the path alone, so LFS, `commit-pack` and the pack endpoints
+receive the body as the stream it arrived as, whatever else is registered.
 
 One object still has to be resident while it is decoded, and how large that is
 comes from the pack's own header — a number written by whoever sent it. So it
@@ -431,6 +473,24 @@ It is also 52x slower than `node:zlib`, so `PackStore` carries an optional
 pack _at rest_ can take that shortcut: `Pack.ts` reads a pack off the wire,
 where objects are back to back and the decoder has to report where each stream
 ended, and it keeps the portable one everywhere. The browser keeps it for both.
+Negotiation bodies are gzip'd the other way: `Protocol.ts` uses
+`DecompressionStream`, not `node:zlib`, because that module is the Worker
+handler and must not import a node builtin.
+
+Two platform modules are not named `*.node.ts`, on purpose. `git/Node.ts` is
+the filesystem backend the module map already names; the file is the adapter,
+and renaming it would only move imports. `git/Inflate.zlib.ts` is the
+pack-at-rest reader above — workerd provides `node:zlib`, and the wire path
+stays on `Inflate.ts`.
+
+`artifacts/Namespace.ts` still imports `node:fs`. The portable `Registry` and
+`Tokens` tags live in that file, and `Sqlite.ts` imports them, so the Worker
+graph sees the import even though the Durable Object path never calls the
+filesystem functions. Those calls stay inside `registryNode`, `tokensNode`,
+`repoStoresNode`, and `localNode`. Splitting the filesystem provider out is
+the remaining migration: the implementation is interleaved with the private
+helpers those tags close over, and the node tests import both from one module
+URL.
 
 Alchemy's Cloudflare bindings return effects requiring `RuntimeContext`. Do not
 thread it through port signatures: the typechecker will drag it into the CLI
@@ -717,7 +777,7 @@ Recorded because the reasoning is worth more than the files would have been.
 
 **A provider-neutral `RepoHost` seam.** The plan was one `App` value naming the
 storage ports plus a host port supplying `stores`, `serialize` and
-`background`. What shipped is two concrete hosts sharing `Protocol.handle` and
+`background`. What shipped is two concrete hosts sharing `Router.layer` and
 `Api.layer` directly. The seam was unnecessary: the handlers already require
 nothing but `Repository`, so host-neutrality came free from the effect
 requirements and an extra service would only have restated it. If a third host

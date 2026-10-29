@@ -224,7 +224,7 @@ export const formatPublicKey = (key: PublicKey): string => {
  */
 export const fingerprint = (key: PublicKey): Effect.Effect<Fingerprint> =>
   Effect.promise(async () => {
-    const digest = await crypto.subtle.digest("SHA-256", key.blob.slice().buffer);
+    const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(key.blob).buffer);
     // SAFETY: a SHA-256 digest is thirty-two bytes, whose base64 is
     // forty-four characters ending in one `=` — exactly the forty-three
     // characters `isFingerprint` names once the padding is dropped.
@@ -349,7 +349,7 @@ export const decodeArmored = (armored: string): Result.Result<Signature, Invalid
 // -- verify / sign --------------------------------------------------------------
 
 const digest = (algorithm: HashAlgorithm, message: Uint8Array): Promise<ArrayBuffer> =>
-  crypto.subtle.digest(webCryptoHash(algorithm), message.slice().buffer);
+  crypto.subtle.digest(webCryptoHash(algorithm), new Uint8Array(message).buffer);
 
 /**
  * The Ed25519 point as a Web Crypto key.
@@ -361,9 +361,13 @@ const digest = (algorithm: HashAlgorithm, message: Uint8Array): Promise<ArrayBuf
  */
 const importPoint = async (point: Uint8Array): Promise<CryptoKey | null> => {
   try {
-    return await crypto.subtle.importKey("raw", point.slice().buffer, { name: "Ed25519" }, false, [
-      "verify",
-    ]);
+    return await crypto.subtle.importKey(
+      "raw",
+      new Uint8Array(point).buffer,
+      { name: "Ed25519" },
+      false,
+      ["verify"],
+    );
   } catch {
     return null;
   }
@@ -434,7 +438,9 @@ const preimage = async (
   const application = new Uint8Array(
     await crypto.subtle.digest("SHA-256", encoder.encode(key.application ?? "").buffer),
   );
-  const dataDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", data.slice().buffer));
+  const dataDigest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new Uint8Array(data).buffer),
+  );
   const middle = new Uint8Array(5);
   const view = new DataView(middle.buffer);
   view.setUint8(0, inner.flags);
@@ -483,8 +489,8 @@ export const verify = Effect.fn("SshSignature.verify")(function* (
     return crypto.subtle.verify(
       { name: "Ed25519" },
       key,
-      inner.success.raw.slice().buffer,
-      covered.slice().buffer,
+      new Uint8Array(inner.success.raw).buffer,
+      new Uint8Array(covered).buffer,
     );
   });
 
@@ -546,7 +552,7 @@ export const sign = Effect.fn("SshSignature.sign")(function* (
     const pkcs8 = concatBytes([PKCS8_ED25519_PREFIX, key.seed]);
     const signer = await crypto.subtle.importKey(
       "pkcs8",
-      pkcs8.slice().buffer,
+      new Uint8Array(pkcs8).buffer,
       { name: "Ed25519" },
       false,
       ["sign"],
@@ -554,7 +560,7 @@ export const sign = Effect.fn("SshSignature.sign")(function* (
     const messageDigest = new Uint8Array(await digest("sha512", message));
     const data = signedData(namespace, "sha512", messageDigest);
     const raw = new Uint8Array(
-      await crypto.subtle.sign({ name: "Ed25519" }, signer, data.slice().buffer),
+      await crypto.subtle.sign({ name: "Ed25519" }, signer, new Uint8Array(data).buffer),
     );
     return encodeArmored({
       publicKey: key.publicKey,
@@ -719,7 +725,7 @@ export const fromSeed = Effect.fn("SshSignature.fromSeed")(function* (
       const pkcs8 = concatBytes([PKCS8_ED25519_PREFIX, seed]);
       const imported = await crypto.subtle.importKey(
         "pkcs8",
-        pkcs8.slice().buffer,
+        new Uint8Array(pkcs8).buffer,
         { name: "Ed25519" },
         true,
         ["sign"],

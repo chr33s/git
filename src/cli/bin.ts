@@ -2,29 +2,27 @@
 /**
  * `bin` entry.
  *
- * Nothing but a compile cache and a call into `main.ts`. Running the CLI from
- * source compiles ~380 files on every invocation — effect, its CLI, and this
- * repository — which is most of what `npx git+ --version` spends its
- * time on. `enableCompileCache` hands V8's compiled output to a cache keyed by
- * node version and architecture, so every run after the first reads it back:
- * 513 ms to 359 ms for `--version`, measured on node 26.7.0.
+ * Nothing but a compile cache and a call into `main.ts`. Running from source
+ * compiles ~380 files every invocation — effect, its CLI, this repository —
+ * most of what `npx git+ --version` spends its time on. `enableCompileCache`
+ * caches V8's compiled output keyed by node version and architecture, so
+ * later runs read it back: 513 ms to 359 ms for `--version` on node 26.7.0.
  *
- * The import is dynamic on purpose. A static `import` is hoisted above this
- * file's own statements, so `main.ts` and everything under it would compile
- * before the cache was on and none of it would be stored — which is also why
- * the single executable cannot do this to itself, and carries a build-time
- * code cache instead (`sea.build.ts`).
+ * The import is dynamic on purpose: a static `import` hoists above this
+ * file's own statements, so `main.ts` would compile before the cache was on
+ * and store nothing — which is also why the single executable can't do this
+ * to itself, and carries a build-time code cache instead (`sea.build.ts`).
  *
- * The directory is named rather than defaulted. Left to itself node puts the
- * cache under the temp directory, which on a shared machine is a directory
- * anyone can create first: V8 does not treat a code cache as untrusted input,
- * so a planted blob with a matching key is arbitrary code in this process, on
- * every later run. A cache that belongs to one account cannot be planted by
- * another, and it survives a `/tmp` sweep, which the default does not.
+ * The directory is named rather than defaulted. Node's default puts the
+ * cache under the temp directory, which on a shared machine anyone can
+ * create first — V8 treats a code cache as trusted, so a planted blob with a
+ * matching key is arbitrary code on every later run. A cache scoped to this
+ * account can't be planted by another, and survives a `/tmp` sweep the
+ * default does not.
  *
- * `NODE_COMPILE_CACHE` wins when it is set — node reads it before this file
- * runs, and there is nothing to add. The first run is slower either way,
- * because it writes what the rest read.
+ * `NODE_COMPILE_CACHE` wins when set — node reads it before this file runs,
+ * so there's nothing to add. Either way the first run is slower: it writes
+ * what later runs read.
  */
 import { enableCompileCache } from "node:module";
 import * as os from "node:os";

@@ -447,6 +447,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   genesis: Genesis,
   trust: TrustProjection,
   pr: string,
+  evaluatedAt: Date = new Date(),
 ) {
   const walked = yield* Event.entries(pr);
   const byCommit = new Map(walked.events.map((entry) => [entry.commit, entry]));
@@ -482,10 +483,10 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     if (!signers.some((signer) => holdsRedact(trust, signer))) continue;
     named.add(target);
   }
-  if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named);
+  if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named, evaluatedAt);
 
-  const claimed = yield* fold(genesis, trust, pr, walked, named);
-  const settled = yield* fold(genesis, trust, pr, walked, claimed.redacted);
+  const claimed = yield* fold(genesis, trust, pr, walked, named, evaluatedAt);
+  const settled = yield* fold(genesis, trust, pr, walked, claimed.redacted, evaluatedAt);
   // The set that governed the second pass, not the one the second pass
   // recomputed: what `gc` deletes and what the fold read as absent have to be
   // the same set, or the next fold reads something this one did not.
@@ -509,6 +510,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
    * and this is that decision, handed in.
    */
   skip: ReadonlySet<Oid>,
+  evaluatedAt: Date,
 ) {
   const { events, parents } = walked;
   /** Events by commit, since a tombstone resolves its target by one. */
@@ -629,6 +631,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
 
       const authorized = yield* Verify.authorize({
         projection: trust,
+        evaluatedAt,
         bytes: entry.bytes,
         signatures: entry.signatures,
         capability: Event.capabilityFor(payload),
@@ -883,6 +886,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     const judge = (permanent: boolean) =>
       Verify.authorize({
         projection: trust,
+        evaluatedAt,
         bytes: entry.bytes,
         signatures: entry.signatures,
         signed,
@@ -971,6 +975,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     const alsoHolds = (capability: string) =>
       Verify.authorize({
         projection: trust,
+        evaluatedAt,
         bytes: entry.bytes,
         signatures: entry.signatures,
         signed,

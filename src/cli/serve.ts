@@ -6,7 +6,7 @@ import { Command, Flag } from "effect/unstable/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { parseHosts, resolve } from "../host/ServeConfig.ts";
-import * as Static from "../server/Static.ts";
+import * as Static from "../server/Static.node.ts";
 
 /** The bundle is beside this source when run from a checkout or package. */
 const defaultUiDir = path.join(import.meta.dirname, "..", "..", "dist", "ui");

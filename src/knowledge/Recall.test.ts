@@ -108,7 +108,7 @@ describe("task-specific recall", () => {
           const derived = yield* Memory.derive({
             view,
             evaluationTime: NOW,
-            limits: { bytes: 400 },
+            limits: { bytes: 800 },
           });
           assert.equal(derived.text.includes("quota"), false);
           assert.equal(derived.omitted > 0, true);

@@ -21,6 +21,7 @@ import { Repository } from "../git/Repository.ts";
 import * as Pack from "../context/Pack.ts";
 import * as Check from "../knowledge/Check.ts";
 import * as Concept from "../knowledge/Concept.ts";
+import { maintainCommand } from "./knowledge-maintain.ts";
 import {
   membershipOrNull,
   mustResolve,
@@ -216,9 +217,12 @@ const check = Command.make(
 );
 
 export const knowledgeCommand = Command.make("knowledge", {}, () =>
-  Console.log("Usage: git+ knowledge check [<concept>]"),
+  Console.log("Usage: git+ knowledge check [<concept>] | maintain"),
 ).pipe(
   Command.withSubcommands([
+    maintainCommand.pipe(
+      Command.withDescription("Maintain repository knowledge with bounded local jobs"),
+    ),
     check.pipe(
       Command.withDescription(
         "Check a Concept bundle's structure, provenance, dependencies and freshness",

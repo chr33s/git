@@ -178,18 +178,18 @@ const init = Command.make(
             yield* Effect.forEach(signers, (signer) => signGenesis(genesis, signer)),
           );
 
-          // A genesis alone makes a repository nobody can use. Root authority
+          // A genesis alone makes a repository nobody can use: root authority
           // is the power to *change* membership, not membership itself, so
           // without this first grant every push — the root holder's included —
           // is refused for a key that is not a member, while reads stay open
-          // because a repository with no members reads as one with no policy.
+          // because no members reads as no policy.
           //
-          // Only for a one-of-one repository, and that restraint is the point.
+          // Only for a one-of-one repository — that restraint is the point.
           // `repo.admin` carries `member.invite`, so handing it to one key of
-          // a two-of-two quorum would let that key grant anything on its own
-          // — turning the quorum the operator asked for into a formality that
-          // survives only on root changes. Where the choice actually costs
-          // something, they make it themselves.
+          // a two-of-two quorum would let that key grant anything on its own,
+          // turning the asked-for quorum into a formality that only survives
+          // root changes. Where the choice actually costs something, the
+          // operator makes it themselves.
           if (threshold !== 1) return null;
 
           const payload = yield* Certificate.grant({
@@ -491,15 +491,13 @@ const standing = Effect.fn("hub.standing")(function* (subject: Fingerprint) {
 /**
  * What this key may do here, and what its push will be judged by.
  *
- * The answer a client otherwise learns by being refused. Membership says what
- * the repository has granted; the branch rules say what a granted push still
- * has to satisfy — and a caller that reads both before it works branches
- * correctly and opens the pull request the rules ask for, instead of
- * discovering each rule one refusal at a time. That is a poor trade for
- * anybody and a bad one for an agent, which pays for the discovery in context
- * and tokens.
+ * The answer a client would otherwise learn by being refused. Membership
+ * says what the repository has granted; branch rules say what a granted
+ * push still has to satisfy — reading both up front lets a caller branch
+ * correctly the first time instead of discovering each rule one refusal at
+ * a time, which costs an agent real context and tokens.
  *
- * Read-only: it moves nothing, invents no capability, and answers out of the
+ * Read-only: it moves nothing, invents no capability, and answers from the
  * same projection and rules document the boundary itself reads.
  */
 const whoami = Command.make(
@@ -840,11 +838,16 @@ const enable = Command.make(
 /**
  * Stop synchronizing a repository's hub state, and keep its source.
  *
- * The spec writes this as removing the fetch refspecs `hub enable` added to
- * `[remote "origin"]`. This client keeps no per-remote configuration — every
- * fetch names its refspecs — so what `enable` durably leaves behind is the
- * pinned identity and the refs it fetched, and removing "only the refspecs
- * git+ manages" is removing only the refs it manages.
+ * The spec describes this as removing the fetch refspecs `hub enable` added
+ * under `[remote "origin"]`. This client keeps no per-remote config — every
+ * fetch names its own refspecs — so what durably remains to remove is the
+ * pinned identity and the refs `enable` fetched: `HUB_FETCH`'s namespaces,
+ * `enable`'s scratch ref, and nothing else. Listing namespaces by hand
+ * instead once left `refs/meta/policy` behind — an origin's branch rules
+ * outliving the identity that set them, with nobody left holding
+ * `policy.write`. The presented-genesis scratch ref is this command's to
+ * clean up too, since it pins the identity of a repository the user just
+ * stopped synchronizing with.
  *
  * Which is `HUB_MANAGED` — the fetch defaults plus `refs/hub/*`, so a trace
  * or session ref somebody named explicitly with `--refs` is cleaned up too —
@@ -909,16 +912,16 @@ const disable = Command.make(
 
         const refs = yield* RefStore;
         const held = yield* refs.list("refs/");
-        // Everything `hub enable` fetched, *except* the identity document.
-        // `refs/meta/trust/*` matches the genesis, and removing it is the one
-        // deletion here that fails open rather than closed: a directory this
-        // client disabled may also be one a server has been pointed at — a
-        // mirror is exactly that, and it passes the pin check above because a
-        // mirror's identity is the origin's — and a served repository with no
-        // genesis reads as not hub-enabled, so it answers every request
-        // anonymously, writably where the host was started `--open`. Losing
-        // the log and the events leaves a repository nobody is a member of,
-        // which refuses; losing the genesis leaves one with no members to be.
+        // Everything `hub enable` fetched except the identity document.
+        // Removing `refs/meta/trust/*` (matching the genesis) is the one
+        // deletion here that fails open rather than closed: a disabled
+        // directory may also be one a server points at — a mirror, whose
+        // identity is the origin's, so it passes the pin check above — and a
+        // served repository with no genesis reads as not hub-enabled,
+        // answering every request anonymously, writably if the host was
+        // started `--open`. Losing the log leaves a repository nobody is a
+        // member of, which refuses; losing the genesis leaves one with no
+        // members to be.
         const managed = held
           .map(([name]) => name)
           .filter(

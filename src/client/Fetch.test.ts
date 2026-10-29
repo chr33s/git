@@ -617,6 +617,92 @@ describe.skipIf(!hasHttpBackend)("Fetch, negotiating with git-http-backend", () 
     }),
   );
 
+  it.live("adopts a shallow mirror's boundary only where its history is missing", () =>
+    Effect.promise(async () => {
+      const origin = path.join(backendRoot, "mirrored-origin.git");
+      const mirror = path.join(backendRoot, "shallow-mirror.git");
+      await git(backendRoot, "init", "--quiet", "--bare", origin);
+      fastImport(
+        origin,
+        [1, 2, 3]
+          .map((mark) =>
+            importCommit({
+              branch: "refs/heads/main",
+              mark,
+              message: `commit ${mark}`,
+              from: mark === 1 ? undefined : mark - 1,
+              files: [{ path: "file", content: String(mark) }],
+            }),
+          )
+          .join(""),
+      );
+      // A depth-1 mirror of the origin, which then moves on by one commit:
+      // it advertises its own boundary at commit 3.
+      await git(
+        backendRoot,
+        "clone",
+        "--quiet",
+        "--bare",
+        "--depth",
+        "1",
+        `file://${origin}`,
+        mirror,
+      );
+      const three = (
+        await git(backendRoot, "--git-dir", mirror, "rev-parse", "main")
+      ).stdout.trim();
+      const tree = (
+        await git(backendRoot, "--git-dir", mirror, "rev-parse", "main^{tree}")
+      ).stdout.trim();
+      const four = (
+        await git(
+          backendRoot,
+          "--git-dir",
+          mirror,
+          "commit-tree",
+          tree,
+          "-p",
+          three,
+          "-m",
+          "commit 4",
+        )
+      ).stdout.trim();
+      await git(backendRoot, "--git-dir", mirror, "update-ref", "refs/heads/main", four);
+
+      const fetchFrom = (target: string, repo: string) =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            yield* fetchRepository({
+              url: `${backend.url}/${repo}`,
+              stores: { objects: yield* ObjectStore, refs: yield* RefStore },
+            });
+          }).pipe(Effect.provide(stores(target))),
+        );
+      const count = async (target: string) =>
+        (await git(backendRoot, "--git-dir", target, "rev-list", "--count", "main")).stdout.trim();
+      const shallowOf = async (target: string) =>
+        (await fs.readFile(path.join(target, "shallow"), "utf8").catch(() => "")).trim();
+
+      // A full copy of the origin already holds commit 3's parents: the
+      // mirror's boundary would cut history that is here.
+      const full = path.join(backendRoot, "full-target.git");
+      await git(backendRoot, "init", "--quiet", "--bare", full);
+      await fetchFrom(full, "mirrored-origin.git");
+      await fetchFrom(full, "shallow-mirror.git");
+      assert.equal(await shallowOf(full), "");
+      assert.equal(await count(full), "4");
+
+      // An empty target holds nothing below commit 3, so there it is the
+      // boundary — the one `git fetch --update-shallow` records.
+      const empty = path.join(backendRoot, "empty-target.git");
+      await git(backendRoot, "init", "--quiet", "--bare", empty);
+      await fetchFrom(empty, "shallow-mirror.git");
+      assert.equal(await shallowOf(empty), three);
+      assert.equal(await count(empty), "2");
+      await git(backendRoot, "--git-dir", empty, "fsck", "--strict");
+    }),
+  );
+
   it.effect("fetches incrementally from stock upload-pack", () =>
     Effect.promise(async () => {
       const bare = path.join(backendRoot, "origin.git");

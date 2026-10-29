@@ -314,3 +314,38 @@ describe("durability", () => {
     }),
   );
 });
+
+describe("LFS on R2", () => {
+  // One part, and more than one: an object over `PART_BYTES` goes to R2 as a
+  // multipart upload, anything smaller as a single put.
+  it.effect.each([4096, 500_000])("stores a %i-line upload under its digest", (size) =>
+    Effect.promise(async () => {
+      const repo = repoName();
+      const content = new TextEncoder().encode("large file stand-in\n".repeat(size));
+      const oid = Buffer.from(await crypto.subtle.digest("SHA-256", content)).toString("hex");
+
+      const put = await harness.fetch(`/${repo}/info/lfs/objects/${oid}`, {
+        method: "PUT",
+        body: content,
+      });
+      assert.equal(put.status, 200, await put.text());
+
+      const got = await harness.fetch(`/${repo}/info/lfs/objects/${oid}`);
+      assert.equal(got.status, 200);
+      assert.deepEqual(new Uint8Array(await got.arrayBuffer()), content);
+    }),
+  );
+
+  it.effect("refuses an upload that does not hash to its name, keeping nothing", () =>
+    Effect.promise(async () => {
+      const repo = repoName();
+      const oid = "0".repeat(64);
+      const put = await harness.fetch(`/${repo}/info/lfs/objects/${oid}`, {
+        method: "PUT",
+        body: new TextEncoder().encode("not the content that name promises"),
+      });
+      assert.equal(put.status, 422);
+      assert.equal((await harness.fetch(`/${repo}/info/lfs/objects/${oid}`)).status, 404);
+    }),
+  );
+});

@@ -73,12 +73,8 @@ export const parseHosts = (raw: string): Result.Result<ReadonlyArray<string>, st
 /**
  * Environment values and defaults for fields not selected explicitly.
  *
- * `GIT_HOSTS` comes back as the raw string rather than a parsed list, and that
- * is what makes `--hosts` able to override it. Parsed here, a malformed
- * environment value failed the whole read — so an operator whose `GIT_HOSTS`
- * held a pasted URL could not start the server *even by naming the hosts
- * explicitly on the command line*, which is the precedence this module's own
- * docstring promises. Now the value is only parsed if it is going to be used.
+ * `GIT_HOSTS` comes back as the raw string rather than a parsed list, so
+ * `merge` can decide whether to parse it — see that function for why.
  */
 export const configuration = Effect.fn("host.ServeConfig.configuration")(function* (
   overrides: Partial<ServeConfig> = {},

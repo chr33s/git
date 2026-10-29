@@ -15,10 +15,6 @@
    */
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    // Vite's Oxc transform reads this project config. Lit supports this legacy
-    // transform, while browsers cannot parse the standard decorator syntax.
-    "experimentalDecorators": true,
-    "useDefineForClassFields": false,
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": ["node"]
   },

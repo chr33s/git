@@ -11,7 +11,7 @@
  */
 import { Effect, Stream } from "effect";
 
-import { advertisement, requestPack } from "../client/Fetch.ts";
+import { advertisement, neededShallow, requestPack } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -188,7 +188,7 @@ export const fetchFrom = Effect.fn("Sync.fetchFrom")(function* (input: {
           ),
         );
         yield* repository.updateShallow({
-          add: [...remote.shallow, ...pack.shallow],
+          add: [...(yield* neededShallow(remote.shallow)), ...pack.shallow],
           remove: pack.unshallow,
         });
         return unpacked;
@@ -237,12 +237,12 @@ export const pull = Effect.fn("Sync.pull")(function* (input: {
 }) {
   const repository = yield* Repository;
 
-  // The same normalization the policy gate applied, and then a check that the
-  // two agree. Stripping only a `refs/heads/` prefix meant `refs/tags/x` was
-  // *judged* as `refs/tags/x` and *written* as `refs/heads/refs/tags/x` — so a
-  // `source.push` holder could create a ref inside a fully protected
-  // `refs/heads/*` namespace without the protected-branch rules ever seeing
-  // it. A pull moves a branch; anything else is a request this cannot serve.
+  // Same normalization the policy gate applied, checked for agreement:
+  // stripping only a `refs/heads/` prefix meant `refs/tags/x` was *judged*
+  // as `refs/tags/x` but *written* as `refs/heads/refs/tags/x`, letting a
+  // `source.push` holder create a ref inside protected `refs/heads/*`
+  // without the protected-branch rules seeing it. A pull moves a branch;
+  // anything else is a request this cannot serve.
   const branch =
     input.branch === "HEAD" || input.branch.startsWith("refs/")
       ? input.branch

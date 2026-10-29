@@ -142,7 +142,7 @@ export const encodeDocument = (document: GenesisDocument): Uint8Array =>
 /** `SHA256:<unpadded base64>` over the stored bytes. */
 export const repoIdOf = (bytes: Uint8Array): Effect.Effect<RepoId> =>
   Effect.promise(async () => {
-    const hash = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+    const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer);
     let binary = "";
     for (const byte of new Uint8Array(hash)) binary += String.fromCharCode(byte);
     // SAFETY: a SHA-256 digest is thirty-two bytes, whose base64 is
@@ -345,21 +345,6 @@ export const writeGenesis = Effect.fn("Genesis.write")(function* (
   return commit;
 });
 
-/**
- * The repository's identity, or `null` when it has none.
- *
- * `null` rather than a failure because "this repository is not hub-enabled" is
- * an ordinary answer — every stock git repository gives it, and the client
- * asks precisely to find out.
- */
-/**
- * Read the genesis, distinguishing "there is none" from "we could not tell".
- *
- * `null` means the ref does not exist — an ordinary git repository, and an
- * ordinary answer. Every other outcome is a failure, and callers must treat it
- * as one: a storage fault read as "not hub-enabled" would serve a private
- * repository to anybody, which is the worst possible way to fail.
- */
 /**
  * Genesis documents already read, by the commit they were read from.
  *

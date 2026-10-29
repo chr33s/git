@@ -17,8 +17,6 @@
  * writer emits full objects) and plain `multi_ack`, which `_detailed`
  * supersedes.
  */
-import { createGunzip } from "node:zlib";
-
 import { concatBytes as concat } from "../git/Format.ts";
 import { Effect, Option, Schema, Stream } from "effect";
 
@@ -121,68 +119,30 @@ const text = (payload: Uint8Array): string => {
  * The request body as chunks. git compresses large negotiation bodies, and
  * announces it the standard way; a pack body is already deflated per object,
  * so pushes arrive identity-encoded.
+ *
+ * Gzip is `DecompressionStream`, which workerd and node both implement.
+ * `node:zlib` cannot be imported here: this module is the Worker handler.
+ * The reader pulls one chunk at a time. Draining the transform first is not
+ * backpressure — deflate reaches about 1000:1, so one 64 KiB chunk becomes
+ * ~64 MiB and a few of them exhaust a 128 MiB Durable Object. A rejected
+ * read is the corrupt-body failure; `step` turns it into `PackCorrupt`.
  */
 const body = (request: Request): AsyncIterable<Uint8Array> => {
   const raw = request.body;
   if (raw === null) return (async function* () {})();
   if (request.headers.get("content-encoding")?.includes("gzip") !== true) return raw;
 
+  const decoded = raw.pipeThrough(new DecompressionStream("gzip"));
   return (async function* () {
-    const gunzip = createGunzip();
-
-    // Backpressure waits on `drain` *or* on the failure that means `drain`
-    // will never arrive: corrupt input mid-write would otherwise hang the
-    // request until the platform times the whole slot out.
-    const drain = () =>
-      new Promise<void>((resolve, reject) => {
-        const settle = (error?: Error) => {
-          gunzip.off("drain", onDrain);
-          gunzip.off("error", onError);
-          gunzip.off("close", onDrain);
-          if (error === undefined) resolve();
-          else reject(error);
-        };
-        const onDrain = () => settle();
-        const onError = (error: Error) => settle(error);
-        gunzip.once("drain", onDrain);
-        gunzip.once("error", onError);
-        gunzip.once("close", onDrain);
-      });
-
-    /**
-     * The writes run beside the reads, not before them.
-     *
-     * Draining the transform into an array and yielding the array afterwards
-     * — which is what this did — is not backpressure at all: attaching a
-     * `data` handler puts the readable side in flowing mode, so zlib expands
-     * as fast as it can and every byte lands in memory first. Deflate reaches
-     * about 1000:1, so one 64 KiB request chunk becomes ~64 MiB and a few of
-     * them exhaust a 128 MiB Durable Object. Iterating the transform leaves
-     * it paused between reads, and then a full readable buffer stalls the
-     * transform, `write` returns false, and the whole pipe is bounded by the
-     * two high-water marks however compressible the body is.
-     */
-    // The failure travels through `gunzip`, which the loop below is reading:
-    // destroying it there is what turns a broken body into a thrown error at
-    // the consumer instead of a body that simply stops.
-    const pumped = (async () => {
-      try {
-        for await (const chunk of raw) {
-          if (!gunzip.write(chunk)) await drain();
-        }
-        gunzip.end();
-      } catch (error) {
-        gunzip.destroy(error instanceof Error ? error : new Error(String(error)));
-      }
-    })().catch(() => undefined);
-
+    const reader = decoded.getReader();
     try {
-      // SAFETY: a zlib transform is a readable stream, which node makes async
-      // iterable at runtime; only the bundled lib declarations omit it.
-      for await (const chunk of gunzip as AsyncIterable<Uint8Array>) yield chunk;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) return;
+        if (next.value.byteLength > 0) yield next.value;
+      }
     } finally {
-      gunzip.destroy();
-      await pumped;
+      reader.releaseLock();
     }
   })();
 };
@@ -782,6 +742,24 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
     }
   });
 
+  // Two commands for one ref would each be judged against the value before
+  // the push and each applied, the second silently winning while both were
+  // reported `ok`. git refuses every command naming such a ref, and so does
+  // this: neither can be said to have been what the client meant.
+  const named = new Map<string, number>();
+  for (const update of updates) named.set(update.name, (named.get(update.name) ?? 0) + 1);
+  const duplicated = (update: RefUpdate) => named.get(update.name)! > 1;
+  for (const update of updates.filter(duplicated)) {
+    refused.push({
+      ref: update.name,
+      from: update.expected ?? null,
+      to: null,
+      ok: false,
+      reason: "multiple updates for ref not allowed",
+    });
+  }
+  updates.splice(0, updates.length, ...updates.filter((update) => !duplicated(update)));
+
   /**
    * Read the pack the client is sending and throw it away.
    *
@@ -1062,7 +1040,8 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
 /**
  * Route a request whose repository is already resolved — the caller scoped
  * the `Repository` layer, so the path prefix in front of these suffixes is
- * its business. `null` means "not a protocol request".
+ * its business. `null` means "not a protocol request", which
+ * `server/Router.ts` answers 404.
  */
 export const handle = (request: Request): Effect.Effect<Response | null, GitError, Repository> =>
   Effect.suspend(() => {

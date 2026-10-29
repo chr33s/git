@@ -22,6 +22,7 @@ import { Effect, Layer } from "effect";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
+import * as Session from "../hub/Session.ts";
 import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
@@ -558,7 +559,7 @@ describe("cli session", () => {
 
       // A report that does not land keeps the learning for the next stop of
       // the same harness session: discarded, it would have been counted never
-      // (§10.3). The state still clears, so the next prompt opens afresh.
+      // (§10.3). The state remains for a retry against the same session.
       await fs.writeFile(state, `${id}\n`);
       // Over the record cap, which `produce` refuses before writing anything.
       await fs.writeFile(learning, `gotcha: ${"kept until it is recorded ".repeat(12_000)}\n`);
@@ -569,9 +570,59 @@ describe("cli session", () => {
           stdio: ["pipe", "pipe", "pipe"],
         }),
       );
-      assert.equal(fsSync.existsSync(state), false);
+      assert.equal(
+        fsSync.existsSync(state),
+        true,
+        "an unrecorded handoff retains its session identity",
+      );
       assert.equal(fsSync.existsSync(learning), true, "an unrecorded learning is not discarded");
     }),
+  );
+
+  it.live(
+    "recovers an accepted handoff after cache failure and supplies it through the installed next-session hook",
+    () =>
+      Effect.promise(async () => {
+        const work = path.join(root, "handoff-work");
+        await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
+        const script = path.join(work, ".chr33s", "session.sh");
+        const invoke = (phase: string, harness: string) =>
+          execFileSync("/bin/sh", [script, phase], {
+            input: JSON.stringify({ session_id: harness, prompt: "work" }),
+            encoding: "utf8",
+          });
+        const suffix = createHash("sha256").update("handoff-a").digest("hex");
+        const state = path.join(work, ".chr33s", `session.${suffix}.id`);
+        const pending = path.join(work, ".chr33s", `output.${suffix}.json`);
+        const learning = path.join(work, ".chr33s", `learning.${suffix}.txt`);
+        invoke("start", "handoff-a");
+        const session = (await fs.readFile(state, "utf8")).trim();
+        await fs.writeFile(learning, "gotcha: use the durable handoff fixture");
+        const lock = path.join(project, "refs", "notes", "hub", "memory.lock");
+        await fs.mkdir(path.dirname(lock), { recursive: true });
+        await fs.writeFile(lock, "another writer");
+        const first = JSON.parse(invoke("stop", "handoff-a"));
+        assert.equal(first.state, "recorded-projection-unavailable");
+        assert.ok(fsSync.existsSync(pending));
+        assert.ok(fsSync.existsSync(state));
+        assert.equal(fsSync.existsSync(learning), false);
+        const retained = JSON.parse(await fs.readFile(pending, "utf8"));
+        assert.equal(retained.commit, `sha1:${first.commit}`);
+        await fs.rm(lock);
+        const retry = JSON.parse(invoke("stop", "handoff-a"));
+        assert.equal(retry.state, "recorded");
+        assert.equal(retry.recovered, true);
+        assert.equal(retry.commit, first.commit);
+        assert.equal(fsSync.existsSync(pending), false);
+        const projection = await inRepository(project, Session.project(session));
+        assert.deepEqual(projection.notes, ["gotcha: use the durable handoff fixture"]);
+        // The installed UserPromptSubmit command's stdout is the harness's added context.
+        const context = invoke("start", "handoff-b");
+        assert.match(context, /Reference data from prior work/u);
+        assert.match(context, /gotcha: use the durable handoff fixture/u);
+        assert.ok(context.includes(`sha1:${first.commit}`));
+        assert.equal(invoke("start", "handoff-b"), "", "one briefing per active session state");
+      }),
   );
 
   it.live("keeps overlapping harness sessions separate in one checkout", () =>

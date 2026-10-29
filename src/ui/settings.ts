@@ -1,0 +1,154 @@
+/**
+ * What the Settings screen can ask the repository to do.
+ *
+ * One union rather than sixteen Messages: every administrative action has the
+ * same shape — do a thing, say in one line what happened, reload what changed —
+ * so the Message that carries them is one, and this says which.
+ *
+ * Its own module so the Message union and the Command that runs it can both
+ * name it without importing each other.
+ */
+import { Schema as FoldkitSchema } from "foldkit";
+import { Schema } from "effect";
+
+const HEADS = "refs/heads/";
+const TAGS = "refs/tags/";
+
+/** `refs/heads/main` → `main`; a tag likewise. Names, not paths, on screen. */
+export const short = (name: string): string => {
+  if (name.startsWith(HEADS)) return name.slice(HEADS.length);
+  return name.startsWith(TAGS) ? name.slice(TAGS.length) : name;
+};
+
+/** The full ref a branch name stands for. */
+export const headRef = (branch: string): string => `${HEADS}${branch}`;
+
+/** Comma-separated input, as the list the policy endpoint wants. */
+export const list = (value: string): readonly string[] =>
+  value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+
+export const AdminAction = FoldkitSchema.defineTaggedUnion({
+  DeleteBranch: { name: Schema.String },
+  ResetBranch: { ref: Schema.String, to: Schema.String },
+  DeleteTag: { name: Schema.String },
+  CreateTag: { name: Schema.String, target: Schema.String, message: Schema.String },
+  FetchRemote: { name: Schema.String },
+  PushRemote: { name: Schema.String, branch: Schema.String },
+  PullRemote: { name: Schema.String, branch: Schema.String },
+  DeleteRemote: { name: Schema.String },
+  AddRemote: { name: Schema.String, url: Schema.String, credential: Schema.String },
+  DeleteWebhook: { id: Schema.String },
+  AddWebhook: { url: Schema.String, secret: Schema.String },
+  Fsck: {},
+  PreviewGc: {},
+  Gc: {},
+  ShowReflog: { branch: Schema.String },
+  WritePolicy: {
+    protectedRefs: Schema.String,
+    approvals: Schema.String,
+    checks: Schema.String,
+    requirePullRequest: Schema.Boolean,
+    requireResolvedThreads: Schema.Boolean,
+  },
+});
+export type AdminAction = typeof AdminAction.Type;
+
+/**
+ * An action as it should be sent, or `null` when a required field is blank.
+ *
+ * The typed names, targets and URLs are trimmed — a pasted `v1.0.0 `, a URL
+ * with a trailing newline — and a tag message of only spaces is no message, so
+ * the tag stays lightweight. `required` on the inputs lets whitespace through,
+ * so the blank check is here. Credentials and secrets are sent as typed.
+ */
+export const submitted = (action: AdminAction): AdminAction | null =>
+  AdminAction.match(action, {
+    ResetBranch: ({ ref, to }) =>
+      ref === "" || to.trim() === "" ? null : AdminAction.ResetBranch({ ref, to: to.trim() }),
+    CreateTag: ({ name, target, message }) =>
+      name.trim() === "" || target === "" || target === headRef("")
+        ? null
+        : AdminAction.CreateTag({ name: name.trim(), target, message: message.trim() }),
+    AddRemote: ({ name, url, credential }) =>
+      name.trim() === "" || url.trim() === ""
+        ? null
+        : AdminAction.AddRemote({ name: name.trim(), url: url.trim(), credential }),
+    AddWebhook: ({ url, secret }) =>
+      url.trim() === "" || secret === ""
+        ? null
+        : AdminAction.AddWebhook({ url: url.trim(), secret }),
+    DeleteBranch: () => action,
+    DeleteTag: () => action,
+    FetchRemote: () => action,
+    PushRemote: () => action,
+    PullRemote: () => action,
+    DeleteRemote: () => action,
+    DeleteWebhook: () => action,
+    Fsck: () => action,
+    PreviewGc: () => action,
+    Gc: () => action,
+    ShowReflog: () => action,
+    WritePolicy: () => action,
+  });
+
+/**
+ * Which form an action consumed, or `""` for the ones that fill in nothing.
+ *
+ * Separate from `cardOf` because a card holds more than one action: Fetch,
+ * Push, Pull and Delete report into the Remotes card without ever reading its
+ * Add form, and emptying it on their answer would take a half-typed remote —
+ * credential and all — away from a reader who only wanted to check a row.
+ */
+export const filledBy = (action: AdminAction): string =>
+  AdminAction.match(action, {
+    ResetBranch: () => "branches",
+    CreateTag: () => "tags",
+    AddRemote: () => "remotes",
+    AddWebhook: () => "webhooks",
+    DeleteBranch: () => "",
+    DeleteTag: () => "",
+    FetchRemote: () => "",
+    PushRemote: () => "",
+    PullRemote: () => "",
+    DeleteRemote: () => "",
+    DeleteWebhook: () => "",
+    Fsck: () => "",
+    PreviewGc: () => "",
+    Gc: () => "",
+    ShowReflog: () => "",
+    WritePolicy: () => "",
+  });
+
+/** Which card an action reports into. */
+export const cardOf = (action: AdminAction): string =>
+  AdminAction.match(action, {
+    DeleteBranch: () => "branches",
+    ResetBranch: () => "branches",
+    DeleteTag: () => "tags",
+    CreateTag: () => "tags",
+    FetchRemote: () => "remotes",
+    PushRemote: () => "remotes",
+    PullRemote: () => "remotes",
+    DeleteRemote: () => "remotes",
+    AddRemote: () => "remotes",
+    DeleteWebhook: () => "webhooks",
+    AddWebhook: () => "webhooks",
+    Fsck: () => "maintenance",
+    PreviewGc: () => "maintenance",
+    Gc: () => "maintenance",
+    ShowReflog: () => "maintenance",
+    WritePolicy: () => "policy",
+  });
+
+/**
+ * A typed number, as the count the policy endpoint wants.
+ *
+ * Beside `list` because it answers the same question for the other kind of
+ * box, and shared with the card that reads one back: a form can then ask
+ * whether what is typed still *means* what the repository answered, rather
+ * than whether it is spelled the same way.
+ */
+export const count = (value: string): number => Math.max(0, Number.parseInt(value, 10) || 0);

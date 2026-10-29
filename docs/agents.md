@@ -1225,102 +1225,68 @@ the trust graph verifies.
 
 ### 22. Memory
 
-Session records capture learnings one session at a time; nothing else
-compounds them. Repository memory is the aggregation, and this is **built**
-(`session memory --distill`): a distillation of the
-notes `session.produced` carries across the fleet — what agents have learned
-about this repository, the machine-maintained sibling of a hand-written
-`CLAUDE.md`.
+Sessions retain explicit observations in signed `session.produced` records.
+The installed harness hook accepts an explicit learning file and explicit
+output links; it does not infer authorship from a branch's commits. A durable
+handoff records the prepared output before append. Retry reconciles that
+record before repeating any side effect, including when cache rebuilding fails.
 
-Memory is a **projection cache, not a record**: derived, regenerable,
-disposable, stored in the notes tier (hub §22), never required for
-reconstruction, and citing the session records it derives from. Agents
-read it at session start beside their pinned instructions (§5); a stale
-or absent memory costs context, never correctness.
-
-Because every future session reads it, memory is the highest-value
-injection target in the system. The §8 rule applies doubly — memory is
-data, cited not obeyed — and regeneration from the signed records it
-cites is the audit path when its content is doubted.
-
-It is **rebuilt rather than merged**, which the sketch left open and the
-implementation settled: the sessions are the record, so regenerating costs
-a walk and buys the two properties that matter — a view that cannot drift
-from what it cites, and one where anything whose source was redacted
-simply stops appearing. Nothing is signed, because what it says is not
-evidence of anything the sessions do not already say.
-
-#### The loop
+Repository memory is a disposable projection attached to the genesis commit:
 
 ```text
-session.closed / task.closed / decision.resolved /
-pr.merged / a redaction tombstone
-      → hook (§19) wakes the distiller
-      → distiller reads records since its cursor
-      → merges new learnings into memory: dedupes,
-        drops entries whose citations were redacted,
-        evicts stale entries to stay under the cap
-      → writes the note, signed, advances the cursor
-
-new session
-      → session-start hook reads memory beside the
-        pinned instructions (§5), framed as data (§8)
+refs/notes/hub/memory → note on refs/meta/trust/genesis
 ```
 
-The distiller is an agent job like any other — a member key, woken by the
-same hooks as everything else, summarizing with a model. It signs the
-memory it writes, but the signature is provenance for _who distilled_,
-not authority for the content: verification of memory is citation
-checking, never signature checking.
+Every automatic exposure derives current eligible data again. The note's
+stored text and stamp cannot authorize themselves. Shared provenance checks
+bind observations and declared Concept citations to this repository, captured
+session heads, valid signatures, authorization, and counted tombstones.
+Uncited authored Concepts retain their existing eligibility rules without
+acquiring provenance verification. Frequency counts distinct eligible sessions;
+recency follows the latest eligible production event, including resumed work.
 
-#### Storage and shape
+The complete startup block has a default 16,384-byte UTF-8 budget, including
+framing, citations, coverage, and its projection fingerprint. It is supplied as
+reference data alongside pinned instructions. It cannot change permissions or
+standing instructions. `CHR33S_GIT_STARTUP_MEMORY=false` disables startup recall
+independently of capture and maintenance. Repeated prompts revalidate previously
+supplied support and report invalidation; they do not repeat the original block.
 
-Memory lives in the notes tier as one note attached to the genesis
-commit — the one object every replica of this repository is guaranteed to
-share, which gives the cache a stable anchor without inventing a ref
-class:
+`session memory --distill` rebuilds the cache deterministically. A prepared
+write retains the destination expectation captured before discovery, detects
+observed source/trust changes, and updates through CAS. Equivalent results
+before a temporal boundary need no new cache commit. Ref enumeration and CAS
+provide no atomic snapshot across every ref; the next automatic exposure
+revalidates the captured view.
 
-```text
-refs/notes/hub/memory  →  note on refs/meta/trust/genesis
-```
+Maintenance is separate from cache rebuilding. `knowledge maintain request`
+durably enqueues work; `run` checks a bounded pass; `show` inspects the retained
+job. An operator-owned timer invokes `run` directly with a fresh evaluation
+instant even when refs are quiet. Wake rules use exact refs or the dispatcher's
+single-asterisk prefix patterns, such as `refs/hub/session/*`. Supported events
+include `session.produced`, `task.closed`, `decision.resolved`, `pr.merged`,
+`pr.closed`, and `event.redacted`. Maintenance bookkeeping does not trigger
+another curation cycle.
 
-The note is a bounded document — small enough to ride into a context
-window whole (this implementation caps it at 16 KiB) — of entries that
-each carry their own audit trail:
+The deterministic worker reports evidence, dependency, temporal, and provenance
+states separately from semantic judgments. An optional operator-configured
+stdio runner can interpret selected bounded evidence. Its identity is an
+execution label. Typed validation constrains its output to scoped draft Concepts;
+Concept/model text cannot execute commands, change policy, or promote knowledge.
 
-```markdown
-# Repository memory · distilled 2026-08-17 · 41 sessions
+`run --propose` prepares a local `refs/heads/agent-memory/<identity>` branch only
+when validated changes exist. A retained report commit has its own signed
+session output; generated drafts cite that report-output record. A separate
+null-note output attests the final Concept commit, keeping the citation graph
+acyclic. Both source commits pass current source policy, including required
+Session provenance. Draft lessons and maintenance outputs stay absent from
+normal recall until ordinary reviewed workflows change their lifecycle.
+Equivalent attempts reuse interpretation and history rather than adding support.
 
-- convention: tests colocate as *.test.ts beside sources;
-  workerd integration tests read wrangler.test.json
-  [7 observations; sessions 0198f2aa…, 0197e1b3…]
-- setup: npm ci applies dependency patches without touching the checkout;
-  npm run setup regenerates build metadata and local Wrangler types
-  [session 0198c4d1…; decision 0198d2e4…]
-- friction: build:sea needs node 26+; check first
-  [3 observations]
-```
-
-An entry without citations is invalid — the distiller MUST NOT write one,
-and a reader treats one as noise. The kinds worth distilling are few:
-_convention_ (how this repository does things), _gotcha_ (what bit an
-agent), _decision_ (a human's answer worth not re-asking — §21), and
-_friction_ (where sessions burned time). Everything else belongs in the
-session records themselves.
-
-#### Forgetting is a feature
-
-The size cap forces eviction, and eviction is the point: a convention
-three refactors old should age out, and the eviction rule is mechanical —
-fewest observations, oldest last-seen first. Because notes commits have
-their own history, yesterday's memory remains inspectable after today's
-rewrite; because a redaction tombstone reaches the distiller through the
-same hooks as everything else, a redacted session's lessons leave memory
-on the next distillation rather than surviving their source.
-
-The verbs are plumbing like the rest (§15): `memory show` prints the
-note, `memory distill` runs one pass by hand, and the wake rule
-`refs/hub/** → distiller` makes by-hand the exception.
+See [maintained agent memory](proactive-memory.md) for the scope, invariants,
+input manifests, configuration, recovery, limits, and validation results. Exclusion from current recall does not erase
+historical copies or text already supplied to a running context. Replicas can
+lag; semantic findings remain limited to examined evidence.
 
 ---
 

@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "id": "chr33s-git-history-memory-v1",
+  "baselineRuntime": "ed6551276a698b84f0b7e7e6e287fa866fb9bb2c",
+  "comparisonConditions": ["current-main", "integrated-recall", "recall-with-reviewed-curation"],
+  "replayKind": "retrospective-known-fixes",
+  "limitations": [
+    "Reference fixes and learned lessons overlap these historical tasks; this measures reuse of recorded knowledge, not generalization to unseen tasks.",
+    "Synthetic evidence invalidation variants are controls, not additional independent historical tasks.",
+    "Model and resource configuration must be fixed before recording any comparison run."
+  ],
+  "comparisonConfiguration": null,
+  "conditions": {
+    "sourceSnapshot": "Each task uses the same historical base commit under all three conditions.",
+    "standingInstructions": "Identical pinned instructions and task prompt in all three conditions.",
+    "knowledge": "Use equivalent source observations under all conditions; only the configured recall/curation implementation changes. Reviewed curation is supplied through the ordinary Concept lifecycle; draft Concepts remain ineligible.",
+    "isolation": "Fresh model conversation and isolated checkout per run; no access to another condition’s response or reference fix.",
+    "order": "Rotate condition order by task index; retain actual order and configuration digest.",
+    "budget": "Identical wall-time, input, output, tool and correction budgets, fixed before execution. Do not spend a saved budget on additional work in one condition.",
+    "review": "Score against retained task-specific criteria and actual executable results. Self-reported success is not accepted-task evidence."
+  },
+  "metrics": [
+    "repeatedExploratoryWork",
+    "timeToSupportedDiagnosisMs",
+    "acceptedTaskResult",
+    "reviewerCorrections",
+    "unsupportedClaimsSupplied",
+    "staleClaimsSupplied",
+    "correctionLatencyMs",
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "startupLatencyMs",
+    "maintenanceRuntimeMs",
+    "conflicts",
+    "incompleteJobs"
+  ],
+  "missingMetric": "null with an explicit reason; missing usage is never zero",
+  "cases": [
+    {
+      "id": "H01-color-environment",
+      "category": "recurring-environment-failure",
+      "base": "a501a3f6343e00270924b8339f9e45edaa252048",
+      "referenceFix": "759308886f32a98c66526478915074c86e94cd87",
+      "paths": [
+        "src/cli/GitCompat.inspection.interop.test.ts",
+        "src/cli/GitCompat.maintenance.interop.test.ts"
+      ],
+      "prompt": "Git compatibility tests compare stderr byte for byte. A developer terminal or CI run sets FORCE_COLOR; otherwise equivalent commands now emit an extra warning. Diagnose the cause and propose the smallest fixture-level correction.",
+      "acceptance": [
+        "Identify the interaction of inherited FORCE_COLOR and NO_COLOR.",
+        "Control the color environment consistently in subprocess-backed fixtures.",
+        "Keep the underlying command behavior and exact stderr assertions meaningful."
+      ],
+      "variants": ["normal", "support-tombstoned-before-start"]
+    },
+    {
+      "id": "H02-unknown-session",
+      "category": "rare-useful-knowledge",
+      "base": "a501a3f6343e00270924b8339f9e45edaa252048",
+      "referenceFix": "759308886f32a98c66526478915074c86e94cd87",
+      "paths": ["src/cli/session.ts", "src/cli/session.test.ts"],
+      "prompt": "A typo in a session identifier makes session show print an empty projection and exit successfully. Distinguish an absent session from a valid session that recorded no work, preserving valid empty-session behavior.",
+      "acceptance": [
+        "Check whether the session log actually exists rather than relying on an empty projection.",
+        "Report a missing session as an error.",
+        "Preserve inspection of existing sessions and cover the absent identifier."
+      ],
+      "variants": ["normal"]
+    },
+    {
+      "id": "H03-editor-upgrade",
+      "category": "changed-dependency",
+      "base": "f63de6c5300dfc505b91917c9900c020a623661f",
+      "referenceFix": "5d240f7b6611e92adcef7c2f4ed099df39045bc7",
+      "paths": ["src/ui/screen.code.ts", "package.json"],
+      "prompt": "After the @pierre/diffs upgrade, edit() does not attach to the file viewer and the browser snapshot waits for an editor that never appears. Diagnose the dependency contract change and repair construction and typing together.",
+      "acceptance": [
+        "Recognize that the Editor type parameter is the component kind, not an undefined extension type.",
+        "Construct the file editor with the file component kind.",
+        "Keep the field type and construction consistent; verify the affected interaction."
+      ],
+      "variants": ["normal", "dependency-changed-after-briefing"]
+    },
+    {
+      "id": "H04-upload-reclaim",
+      "category": "recurring-async-failure",
+      "base": "f63de6c5300dfc505b91917c9900c020a623661f",
+      "referenceFix": "5d240f7b6611e92adcef7c2f4ed099df39045bc7",
+      "paths": ["src/client/Upload.browser.interop.test.ts"],
+      "prompt": "The upload recovery test sometimes still sees a held OPFS file immediately after page.close() resolves. Repair the test around the actual ownership and cleanup contract without hiding a permanently unreclaimable file.",
+      "acceptance": [
+        "Recognize that browser Web Lock and pending writable cleanup can lag page.close().",
+        "Use bounded eventual-reclaim verification.",
+        "Still fail when reclamation does not occur before the deadline."
+      ],
+      "variants": ["normal"]
+    },
+    {
+      "id": "H05-portable-gzip",
+      "category": "invalidated-evidence",
+      "base": "8f68efeb128231ee5599c857ebf5b9f178fd7b7d",
+      "referenceFix": "8fc8ecc6e7c7b572e69d82ef857db878999e968d",
+      "paths": ["src/server/Protocol.ts"],
+      "prompt": "The shared smart-HTTP handler imports node:zlib, which prevents its Worker runtime from loading. Preserve gzip request support, bounded pull-based consumption, and corrupt-body failure behavior while restoring portability.",
+      "acceptance": [
+        "Remove the Node-only dependency from the shared handler.",
+        "Use a runtime-portable streaming decompressor.",
+        "Preserve backpressure rather than draining expanded data into a buffer.",
+        "Retain corrupt-stream failure and reader cleanup."
+      ],
+      "variants": ["normal", "support-compromised-before-start"]
+    }
+  ]
+}

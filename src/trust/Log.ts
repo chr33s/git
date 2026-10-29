@@ -211,18 +211,6 @@ export const join = Effect.fn("trust.Log.join")(function* (heads: ReadonlyArray<
 });
 
 /**
- * Every record in the log, oldest first, parents before children.
- *
- * Concurrent records — neither an ancestor of the other — are ordered by their
- * commit oid. Any total order over a partial one is arbitrary; what matters is
- * that every replica picks the *same* arbitrary one, so two hosts folding the
- * same history reach the same state.
- *
- * The whole log is read into memory. Membership changes are the rarest events
- * a repository has, and the alternative — a projection that streams — buys
- * nothing until a repository has more grants than commits.
- */
-/**
  * Whether a commit belongs to the trust log.
  *
  * The genesis bounds the chain where it is supposed to end; this bounds one

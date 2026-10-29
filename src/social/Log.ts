@@ -125,14 +125,13 @@ export const entries = AppendOnly.entriesOf(LOG);
 /**
  * One commit's ancestry, memoised per fold.
  *
- * The memo is the caller's rather than this function's, and it is keyed only
- * by commit: a `Parents` map is fixed for the fold that built it, so within
- * one fold a commit's ancestry cannot change, and between folds nothing is
- * shared. Without one, every question about ancestry re-walked the whole DAG
- * from scratch — and the two callers below ask on the order of one question
- * per commit, which made a fold of a log near its 16,384-record ceiling walk
- * that DAG tens of thousands of times. The host re-folds every sibling's log
- * after every mutating request.
+ * The memo is the caller's, keyed only by commit: a `Parents` map is fixed
+ * for the fold that built it, so ancestry can't change within a fold, and
+ * nothing is shared between folds. Without it, the two callers below — each
+ * asking roughly one question per commit — re-walked the whole DAG from
+ * scratch each time, which for a log near its 16,384-record ceiling meant
+ * tens of thousands of walks per fold, and the host re-folds every sibling's
+ * log on every mutating request.
  */
 type Ancestry = Map<Oid, ReadonlySet<Oid>>;
 
@@ -179,9 +178,8 @@ const winners = (
   for (const candidates of byId.values()) {
     const first = candidates[0];
     if (first === undefined) continue;
-    // Nothing to rank against. Ranking is what makes this walk the DAG, and an
-    // id claimed once — which is nearly every id — has one candidate that wins
-    // by being the only one.
+    // An id claimed once — nearly every id — wins by being the only candidate,
+    // with no need to rank (and walk the DAG) at all.
     if (candidates.length === 1) {
       selected.add(first.commit);
       continue;

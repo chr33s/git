@@ -114,6 +114,9 @@ export const isGitlink = (mode: string): boolean => Number.parseInt(mode, 8) ===
  */
 export const isSymlink = (mode: string): boolean => Number.parseInt(mode, 8) === 0o120000;
 
+/** An executable file, which an archive or checkout marks as one. */
+export const isExecutable = (mode: string): boolean => Number.parseInt(mode, 8) === 0o100755;
+
 /** The modes a non-directory entry may carry, spelled as git spells them. */
 const FILE_MODES = new Set<number>([0o100644, 0o100755, 0o120000, 0o160000]);
 

@@ -183,10 +183,10 @@ describe("two-session learning and recall", () => {
             repo,
             trust,
             evaluationTime: NOW,
-            limits: { bytes: 260 },
+            limits: { bytes: 900 },
           });
           assert.equal(startup.text.includes("production policy fixture"), false);
-          yield* Memory.write(startup.text);
+          yield* Memory.write(startup);
 
           // -- session B: retrieve it anyway, and hand it over ----------------
           const sessionB = Session.newId();
@@ -378,7 +378,7 @@ describe("two-session learning and recall", () => {
           // A note written while the discovery was still good.
           const before = yield* Memory.derive({ view, repo, trust, evaluationTime: NOW });
           assert.equal(before.text.includes("production policy fixture"), true);
-          yield* Memory.write(before.text);
+          yield* Memory.write(before);
 
           const walked = yield* Session.entries(session);
           const target = walked.events.find((entry) => entry.commit === discovery)!;

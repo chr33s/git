@@ -24,7 +24,7 @@ import { isGitlink } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Recall from "../knowledge/Recall.ts";
-import { terms } from "../text.ts";
+import { compareUtf8, terms } from "../text.ts";
 import type { Projection } from "../trust/Projection.ts";
 import * as Pack from "./Pack.ts";
 
@@ -226,9 +226,9 @@ const candidates = Effect.fn("context.Select.candidates")(function* (
         // host's ICU build, so two hosts ranked equal candidates differently
         // and produced different pack bytes — and a pack's bytes are its
         // identity. `Format.encodeTree` compares bytes for the same reason.
-        (left.path < right.path ? -1 : left.path > right.path ? 1 : 0),
+        compareUtf8(left.path, right.path),
     );
-  return { ranked, skipped: [...skipped].sort(), truncated } as const;
+  return { ranked, skipped: [...skipped].sort(compareUtf8), truncated } as const;
 });
 
 /**
@@ -572,7 +572,7 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   // other one.
   const gitlinks = files
     .filter((file) => isGitlink(file.mode))
-    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+    .sort((left, right) => compareUtf8(left.path, right.path));
   const decoder = new TextDecoder();
   const mentions: Array<string> = [];
   for (const item of gitlinks.length === 0 ? [] : items) {
@@ -615,12 +615,10 @@ export const select = Effect.fn("context.Select.select")(function* (options: Opt
   }
 
   const omissions: Array<Pack.Omission> = [...named];
-  for (const [reason, count] of [...counted].sort(([left], [right]) =>
-    left < right ? -1 : left > right ? 1 : 0,
-  )) {
+  for (const [reason, count] of [...counted].sort(([left], [right]) => compareUtf8(left, right))) {
     omissions.push({ reason, count });
   }
-  for (const reason of [...unbounded].sort()) omissions.push({ reason });
+  for (const reason of [...unbounded].sort(compareUtf8)) omissions.push({ reason });
 
   const pack: Pack.Pack = {
     version: Pack.VERSION,

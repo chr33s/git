@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
@@ -448,3 +450,12 @@ describe("Genesis", () => {
     );
   });
 });
+
+it.effect("repository identity hashes only the exact supplied byte view", () =>
+  Effect.gen(function* () {
+    const body = Buffer.from("prefixgenesissuffix").subarray(6, 13);
+    const expected = `SHA256:${createHash("sha256").update(body).digest("base64").replace(/=+$/u, "")}`;
+    assert.equal(yield* repoIdOf(body), expected);
+    assert.equal(yield* repoIdOf(new Uint8Array(body)), expected);
+  }),
+);

@@ -64,6 +64,7 @@ import * as Records from "../telemetry/Records.ts";
 import * as Session from "./Session.ts";
 import * as Claim from "./Claim.ts";
 import * as Trace from "./Trace.ts";
+import * as Note from "./Note.ts";
 import * as Task from "./Task.ts";
 import * as Tombstone from "./Tombstone.ts";
 
@@ -137,6 +138,7 @@ const recordRefs = Effect.fn("hub.Redaction.recordRefs")(function* () {
     // prompt from the account of the work and left it in the account of the
     // runtime.
     ...(yield* Trace.traces()).map(Trace.refOf),
+    ...(yield* Note.notes()).map(Note.refOf),
   ];
 });
 
@@ -206,7 +208,13 @@ const tombstonesOn = Effect.fn("hub.Redaction.tombstonesOn")(function* (ref: str
   if (head === null) return { found, commits, complete: true } as const;
 
   const kind =
-    Session.sessionOf(ref) !== null ? "session" : Trace.traceOf(ref) !== null ? "trace" : "task";
+    Session.sessionOf(ref) !== null
+      ? "session"
+      : Trace.traceOf(ref) !== null
+        ? "trace"
+        : Note.noteOf(ref) !== null
+          ? "note"
+          : "task";
   // Each namespace's own ceiling. Trace refs are deliberately bounded higher
   // than a pull request's fold (docs/telemetry.md §13), so asking `Event`'s
   // made every tombstone on a trace ref longer than 4096 records vanish: the
@@ -327,6 +335,12 @@ const tombstonesOn = Effect.fn("hub.Redaction.tombstonesOn")(function* (ref: str
       if (payload?.type === Tombstone.TAG) {
         named = payload.targetCommit;
         bound = Claim.bound(payload, { repo, session: Session.sessionOf(ref) ?? "" });
+      }
+    } else if (kind === "note") {
+      const payload = yield* Note.decode(record.payload).pipe(Effect.orElseSucceed(() => null));
+      if (payload?.type === Tombstone.TAG) {
+        named = payload.targetCommit;
+        bound = payload.repo === repo && payload.note === Note.noteOf(ref);
       }
     } else if (kind === "trace") {
       const payload = yield* Records.decode(record.payload).pipe(Effect.orElseSucceed(() => null));

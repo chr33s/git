@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "kind": "preregistered-retrospective-fixture-lessons",
+  "limitations": "These statements are fixture interpretations of known reference fixes, not newly discovered independent historical observations or human preference evidence.",
+  "lessons": {
+    "H01-color-environment": "Git-compatible subprocess tests must pin FORCE_COLOR='0' alongside NO_COLOR='1', because an inherited FORCE_COLOR makes Node emit a warning that breaks byte-exact stderr checks.",
+    "H02-unknown-session": "Session.project can return an empty projection for a nonexistent id. Validate the session ref or head before treating session show as success; existing empty sessions remain inspectable.",
+    "H03-editor-upgrade": "In @pierre/diffs 1.4.1 the Editor generic identifies the component kind. File viewers require Editor<'file'> and new Editor('file'); Editor<undefined> can prevent attachment.",
+    "H04-upload-reclaim": "page.close() can resolve before browser Web Locks and OPFS writable cleanup. Test eventual stale-upload reclamation with bounded polling and a hard deadline, rather than assuming the next upload reclaims immediately.",
+    "H05-portable-gzip": "The shared smart-HTTP handler must work in Workers and Node. Use DecompressionStream('gzip') and pull its reader chunk by chunk. node:zlib prevents Worker loading; buffering expanded gzip can exhaust a Durable Object. Release the reader on exit and preserve corrupt-stream failures."
+  }
+}

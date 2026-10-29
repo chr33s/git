@@ -656,7 +656,6 @@ export const layer = Layer.effect(
       return (yield* refs.shallow).has(oid) ? { ...commit, parents: [] } : commit;
     });
 
-    /** An annotated tag's target: the `object <oid>` header line. */
     const readTreeEntries = (oid: Oid) =>
       oid === EMPTY_TREE_OID
         ? Effect.succeed<ReadonlyArray<TreeEntry>>([])

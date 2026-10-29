@@ -235,7 +235,7 @@ const upload = (
 
 /**
  * Route an LFS request whose repository the caller has already resolved.
- * `null` means "not an LFS request", so a host can try the next handler.
+ * `null` means "not an LFS request", which `server/Router.ts` answers 404.
  */
 export const handle = (
   request: Request,

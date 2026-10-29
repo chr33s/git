@@ -44,6 +44,7 @@ import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
 import * as Trace from "../hub/Trace.ts";
 import * as Task from "../hub/Task.ts";
+import * as Note from "../hub/Note.ts";
 import * as Queue from "../hub/Queue.ts";
 import * as SocialLog from "../social/Log.ts";
 import * as Inbox from "../social/Inbox.ts";
@@ -137,18 +138,14 @@ export interface Rules {
    * request's head onto the step before it, ending at what the branch holds
    * now. What makes one safe to accept is that this boundary *re-derives* every
    * merge: a step counts only if its tree is exactly what `Repository.mergeTree`
-   * produces for its two parents, so the chain's content is a pure function of
-   * revisions that were reviewed, and whoever built it is trusted with nothing.
+   * produces for its two parents, so whoever built the chain is trusted with
+   * nothing.
    *
-   * Off by default. It is a second way onto a protected branch, and one an
-   * operator should turn on knowingly rather than acquire in an upgrade — the
-   * same reason `requireProvenance` is off. Left off, the walk is never
-   * attempted and this costs a boolean read.
-   *
-   * What it buys is the composition itself: required checks on a candidate name
-   * the *candidate*, so what a queue tests is the combination being landed
-   * rather than each pull request alone — which is the only evidence that two
-   * individually green changes work together.
+   * Off by default, for the same reason `requireProvenance` is: a second way
+   * onto a protected branch should be turned on knowingly, not acquired in an
+   * upgrade. What it buys is that required checks on a candidate name the
+   * *candidate*, so a queue tests the combination being landed rather than
+   * each pull request alone.
    */
   readonly queueCandidates: boolean;
   /**
@@ -167,17 +164,13 @@ export interface Rules {
    *
    * The inbox is the one door an *unauthenticated* caller may write through:
    * `git-inbox: 1` on receive-pack mints `quarantine.submit` before any
-   * membership exists, which is the point — it is how the drive-by patch
-   * arrives without an account. web-of-trust.md §6 describes it as the front
-   * door a repository's self-attestation *names*, and it was reachable on
-   * every repository with a genesis whether or not anyone had named it: there
-   * was no rules field, no serve flag, and no way for a private repository to
-   * shut the only anonymous write it has.
+   * membership exists, which is how the drive-by patch arrives without an
+   * account. It was reachable on every repository with a genesis whether or
+   * not anyone had named it, with no rules field or serve flag to shut it.
    *
    * `true` by default, because that is what every repository predating this
-   * had and closing a door nobody asked to close is the same mistake as
-   * opening one. What it buys is the operator's answer to a question they
-   * could not previously be asked.
+   * field had, and closing a door nobody asked to close is the same mistake
+   * as opening one.
    */
   readonly inbox: boolean;
   /** Opt-in only; omitted and `null` both mean external reviews never count. */
@@ -1048,15 +1041,17 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
         ? { exact: ["social.write"] }
         : Task.taskOf(name) !== null
           ? { exact: ["hub.task", "hub.redact"] }
-          : Session.sessionOf(name) !== null
-            ? { exact: ["hub.session", "hub.redact"] }
+          : Note.noteOf(name) !== null
+            ? { exact: ["hub.note", "hub.redact"] }
             : Trace.traceOf(name) !== null
               ? { exact: ["hub.trace", "hub.redact"] }
-              : Queue.queueOf(name) !== null
-                ? { exact: ["hub.queue"] }
-                : name.startsWith("refs/hub/")
-                  ? { prefix: "hub." }
-                  : { prefix: "member." };
+              : Session.sessionOf(name) !== null
+                ? { exact: ["hub.session", "hub.redact"] }
+                : Queue.queueOf(name) !== null
+                  ? { exact: ["hub.queue"] }
+                  : name.startsWith("refs/hub/")
+                    ? { prefix: "hub." }
+                    : { prefix: "member." };
     const charge = needed(update.name);
     const passes =
       "exact" in charge
@@ -1195,11 +1190,12 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     Session.sessionOf(update.name) === null &&
     Trace.traceOf(update.name) === null &&
     Task.taskOf(update.name) === null &&
+    Note.noteOf(update.name) === null &&
     Queue.queueOf(update.name) === null
   ) {
     return refused(
       update.name,
-      `${update.name} does not name a pull request, session, trace, task or queue`,
+      `${update.name} does not name a pull request, session, trace, task, note or queue`,
     );
   }
 
@@ -1238,16 +1234,20 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // let a fleet's ordinary week exhaust what a repository's pull requests
     // are allowed, and a session ref is exactly as undeletable as a pull
     // request's.
-    const classOf = (name: string): "sessions" | "traces" | "tasks" | "queues" | "pull requests" =>
+    const classOf = (
+      name: string,
+    ): "sessions" | "traces" | "tasks" | "notes" | "queues" | "pull requests" =>
       Session.sessionOf(name) !== null
         ? "sessions"
         : Trace.traceOf(name) !== null
           ? "traces"
           : Task.taskOf(name) !== null
             ? "tasks"
-            : Queue.queueOf(name) !== null
-              ? "queues"
-              : "pull requests";
+            : Note.noteOf(name) !== null
+              ? "notes"
+              : Queue.queueOf(name) !== null
+                ? "queues"
+                : "pull requests";
 
     const kind = classOf(update.name);
     const held =
@@ -1257,9 +1257,11 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
           ? yield* Trace.traces()
           : kind === "tasks"
             ? yield* Task.tasks()
-            : kind === "queues"
-              ? yield* Queue.queues()
-              : yield* Event.pullRequests();
+            : kind === "notes"
+              ? yield* Note.notes()
+              : kind === "queues"
+                ? yield* Queue.queues()
+                : yield* Event.pullRequests();
     const opened = [...opening].filter((name) => classOf(name) === kind).length;
     const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
@@ -1549,6 +1551,39 @@ const alreadyHeld = Effect.fn("Policy.alreadyHeld")(function* (name: string, cur
  *
  * Only what the push adds is walked, so an ordinary push reads one commit.
  */
+/**
+ * What an event calls itself, read by whichever namespace owns the ref.
+ *
+ * Every namespace, not the two that had been noticed. The chain here decoded
+ * social statements and sent everything else to `Event.decode` — which cannot
+ * read a task or a session, so both came back `null` and the refusal degraded
+ * to "may not add a event" for exactly the records a reader would most want
+ * named.
+ *
+ * Early returns rather than one conditional expression, and that is not a
+ * style choice: an `Effect` whose success type is the union of several payload
+ * unions is more than inference follows, and it gives up by widening — which
+ * is how `Redaction.excluded` came to have `unknown` for its errors and its
+ * context. Each branch here yields its own concrete type and leaves.
+ */
+const kindOf = Effect.fn("Policy.kindOf")(function* (
+  ref: string,
+  payload: Uint8Array,
+  social: boolean,
+) {
+  const named = <A extends { readonly type: string }>(decoded: Effect.Effect<A, Invalid>) =>
+    decoded.pipe(
+      Effect.map((event) => event.type),
+      Effect.orElseSucceed(() => null),
+    );
+
+  if (social) return yield* named(Statement.decode(payload));
+  if (Note.noteOf(ref) !== null) return yield* named(Note.decode(payload));
+  if (Task.taskOf(ref) !== null) return yield* named(Task.decode(payload));
+  if (Session.sessionOf(ref) !== null) return yield* named(Session.decode(payload));
+  return yield* named(Event.decode(payload));
+});
+
 const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
   ref: string,
   to: Oid,
@@ -1591,15 +1626,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     );
     if (record === null) continue;
     const signed = yield* Verify.signers(record.payload, record.signatures);
-    const kind = social
-      ? yield* Statement.decode(record.payload).pipe(
-          Effect.map((payload) => payload.type),
-          Effect.orElseSucceed(() => null),
-        )
-      : yield* Event.decode(record.payload).pipe(
-          Effect.map((payload) => payload.type),
-          Effect.orElseSucceed(() => null),
-        );
+    const kind = yield* kindOf(ref, record.payload, social);
 
     // Every event, without an exemption list. Three attempts at one — first
     // "grants authority", then "moves authority", then a list of families —
@@ -1611,12 +1638,11 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // nothing at all. A rule that has to enumerate the safe cases is a rule
     // that will be wrong again.
     //
-    // The cost is the one the tombstone gate below already carries and is
-    // worth stating in the same breath: a history that is entirely honest and
-    // entirely old — a replica seeded from elsewhere, a client that has been
-    // offline — stops being *pushable* once one of its past participants is
-    // revoked. Replication is not gated here, so it still arrives by fetch;
-    // what it cannot do is arrive by push.
+    // The cost: a history that is entirely honest and entirely old — a replica
+    // seeded from elsewhere, a client that has been offline — stops being
+    // *pushable* once one of its past participants is revoked. Replication is
+    // not gated here, so it still arrives by fetch; what it cannot do is
+    // arrive by push.
     for (const signer of signed) {
       if (openWindow(trust.revoked.get(signer)) !== null) {
         return `${signer} has been revoked and may not add ${kind === null ? (social ? "a statement" : "an event") : `a ${kind}`}`;
@@ -1634,14 +1660,12 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // against a stale head accepted — sending somebody else's payload to `gc`.
     // The boundary is where "now" is knowable, so it is where that is refused.
     //
-    // The cost is deliberate and worth stating: a pull request whose history
-    // already carries a once-valid tombstone stops being *pushable* to a host
-    // that does not hold it, once its signer's `hub.redact` is narrowed away.
-    // Replication is not gated here, so such a history still reaches a replica
-    // by fetch; what it cannot do is arrive by push. The alternative is to
-    // judge the tombstone by what its signer held at the head it declares,
-    // which is the fold's question — and the fold's question is exactly what
-    // the decoy attack above is built to answer wrongly.
+    // The cost: a pull request whose history already carries a once-valid
+    // tombstone stops being *pushable* to a host that does not hold it, once
+    // its signer's `hub.redact` is narrowed away. Replication still reaches a
+    // replica by fetch; what it cannot do is arrive by push. The alternative —
+    // judging the tombstone by what its signer held at the head it declares —
+    // is exactly what the decoy attack above is built to answer wrongly.
     // Asked of the bytes rather than of the decoded pull-request payload: a
     // session and a task write the same tombstone inside their own envelopes,
     // which `Event.decode` reads as nothing at all — so this gate covered
@@ -1929,9 +1953,9 @@ type Chain =
  * each reviewed for this branch. Whoever built the chain is authorized with
  * nothing; the boundary re-derives every claim it makes.
  *
- * The steps are checked cheap-first: a step's pull request and the branch's
- * rules are settled before any merge is recomputed, so a chain nobody approved
- * costs a fold rather than a tree walk per step.
+ * Steps are checked cheap-first: a step's pull request and the branch's rules
+ * are settled before any merge is recomputed, so a chain nobody approved costs
+ * a fold rather than a tree walk per step.
  *
  * Determinism is what makes the check meaningful, and it comes from both sides
  * calling one function: whoever builds a candidate and whoever verifies it both
@@ -1942,16 +1966,14 @@ type Chain =
  * What is constrained is a candidate's **content and its ancestry** — its tree,
  * its two parents, and the chain they form — and deliberately not its commit
  * header. The message, author and committer are whatever the builder wrote,
- * exactly as they are on any merge commit a member with `source.push` makes on
- * a branch of their own: they are not code, nothing downstream parses them (a
- * repository requiring provenance takes no candidates at all — see
- * `cli/queue.ts`), and pinning them would bake one builder's conventions into
- * the boundary. That last part is the point rather than an oversight: a
- * candidate is a shape, not a tool's output, so a person can build one by hand
- * and land it with no queue running at all, and two implementations can
- * interoperate. `cli/queue.ts` makes its own candidates a pure function of what
- * they merge — which is what lets a check bound to one runner's candidate name
- * another's — but that is a convention among runners, not a rule this enforces.
+ * exactly as on any merge commit a `source.push` holder makes on their own
+ * branch: nothing downstream parses them, and pinning them would bake one
+ * builder's conventions into the boundary. That is the point rather than an
+ * oversight — a candidate is a shape, not a tool's output, so a person can
+ * build one by hand with no queue running at all. `cli/queue.ts` makes its own
+ * candidates a pure function of what they merge, which is what lets a check
+ * bound to one runner's candidate name another's, but that is a convention
+ * among runners and not a rule this enforces.
  */
 const candidateChain = Effect.fn("Policy.candidateChain")(function* (input: {
   readonly ref: string;

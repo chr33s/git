@@ -1,0 +1,164 @@
+/**
+ * Serving the built UI from the same origin as the API.
+ *
+ * The browser half calls `/{repo}/...` with no scheme or host, so the page and
+ * the API have to answer on one origin — that is not a convenience, it is the
+ * only arrangement a browser permits. The deployed Worker gives them one, and
+ * `src/ui/dev.ts` mounts Vite's middleware directly on the node host for
+ * development. This is the third place that needed it, so it is the one place
+ * it lives: `serve --ui` hands the finished bundle to the same origin too.
+ * Node-only — the Worker serves the same prefix from its asset binding, and
+ * must not import this file.
+ *
+ * Everything the UI owns lives under `UI_PREFIX`, and everything outside it
+ * belongs to the API — so the split is one comparison rather than a list of
+ * routes to maintain. Under the prefix a path either names a built file or it
+ * names a client route, and a client route is answered with the entry page,
+ * because the bundle reads `location.pathname` and renders from there. That is
+ * the same shape the deployed Worker takes, where Cloudflare's asset manifest
+ * carries the prefix and `worker.ts` serves the page for what it misses.
+ */
+import { readFile, realpath, stat } from "node:fs/promises";
+import { extname, join, normalize, resolve, sep } from "node:path";
+
+import { UI_PREFIX } from "./Route.ts";
+
+/** The extensions the built UI actually emits; anything else is a byte stream. */
+export const mimeOf = (extension: string): string => {
+  switch (extension) {
+    case ".css":
+      return "text/css";
+    case ".html":
+      return "text/html";
+    case ".js":
+      return "text/javascript";
+    case ".map":
+      return "application/json";
+    default:
+      return "application/octet-stream";
+  }
+};
+
+/**
+ * A URL path as a filesystem path, or `null` when it is not one.
+ *
+ * `URL.pathname` keeps its percent-escapes, so the raw value is not the name
+ * of any file: a built asset whose name contains an escaped character was
+ * looked up under its escaped spelling and 404'd. Decoded here, once, and
+ * before `normalize` — the only order that is also safe, since the
+ * containment check below runs on the *resolved* result and so sees whatever
+ * the decoding produced, `..` included. Decoding afterwards would reopen that
+ * hole.
+ *
+ * `null` for an escape sequence that is not one: a lone `%` is not a path.
+ */
+const decodedPath = (pathname: string): string | null => {
+  try {
+    return decodeURIComponent(pathname === "/" ? "/index.html" : pathname);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * This request's path inside the UI's directory, or `null` when it is not the
+ * UI's at all.
+ *
+ * `/hub/main.js` reads as `/main.js`; `/hub` and `/hub/` read as the root.
+ * `/hubbub` is *not* under the prefix — the comparison is on whole segments,
+ * because a repository is free to be called that.
+ */
+const underPrefix = (pathname: string): string | null => {
+  if (pathname === UI_PREFIX) return "/";
+  if (!pathname.startsWith(`${UI_PREFIX}/`)) return null;
+  return pathname.slice(UI_PREFIX.length);
+};
+
+/**
+ * The file `pathname` names under `root`, or `null`.
+ *
+ * `null` for a directory, for anything missing, and for a path that climbs out
+ * of `root` — checked after resolving rather than by looking for `..`,
+ * because the encodings of `..` are not a list anybody finishes.
+ *
+ * Containment is checked twice, and the second is the one that matters: a
+ * lexical `resolve` does not follow symlinks, so a link inside the built UI
+ * pointing anywhere at all would satisfy the prefix test and get read.
+ * `realpath` resolves rather than guesses, once the file is known to exist —
+ * the same guard `git/Work.node.ts` applies to a checkout.
+ *
+ * Copied out of node's Buffer rather than handed over: `readFile` returns a
+ * view into a pooled allocation typed `ArrayBufferLike`, and `BodyInit` takes
+ * a view over a plain `ArrayBuffer`.
+ */
+export const fileAt = async (
+  root: string,
+  pathname: string,
+): Promise<Uint8Array<ArrayBuffer> | null> => {
+  const decoded = decodedPath(pathname);
+  if (decoded === null) return null;
+  const within = normalize(decoded);
+  const full = resolve(join(root, within));
+  const base = resolve(root);
+  const contains = (candidate: string): boolean =>
+    candidate === base || candidate.startsWith(base + sep);
+  if (!contains(full)) return null;
+
+  const found = await stat(full).catch(() => null);
+  if (found === null || !found.isFile()) return null;
+
+  // The root is resolved too: a served directory that is itself reached
+  // through a link would otherwise fail its own containment test.
+  const real = await realpath(full).catch(() => null);
+  const anchor = await realpath(base).catch(() => base);
+  if (real === null) return null;
+  if (real !== anchor && !real.startsWith(anchor + sep)) return null;
+
+  const read = await readFile(real);
+  const bytes = new Uint8Array(new ArrayBuffer(read.byteLength));
+  bytes.set(read);
+  return bytes;
+};
+
+/**
+ * The built UI's answer for this request, or `null` to let the API have it.
+ *
+ * Only GET and HEAD: everything else is a mutation, and a mutation belongs to
+ * the API whatever its path looks like. A HEAD keeps the headers and drops the
+ * body, which is what makes it a HEAD.
+ */
+export const assetResponse = async (root: string, request: Request): Promise<Response | null> => {
+  if (request.method !== "GET" && request.method !== "HEAD") return null;
+
+  const { pathname } = new URL(request.url);
+  const within = underPrefix(pathname);
+  if (within === null) return null;
+
+  // A client route matched no file. It is still the UI's, so it gets the UI's
+  // page — with its own address left in the bar, which is the whole point of
+  // the deep link. `index.html` is looked up rather than assumed present: a
+  // root with no build falls through and the caller answers as it would have.
+  const found = await fileAt(root, within);
+  const served = found === null ? "/index.html" : within;
+  const bytes = found ?? (await fileAt(root, served));
+  if (bytes === null) return null;
+
+  // The decoded name, so an escaped extension picks the same type the lookup
+  // just used rather than falling through to `application/octet-stream`. A
+  // client route carries no extension of its own and was answered with the
+  // page, so it is typed as the page rather than as a byte stream.
+  const headers = {
+    "content-type": mimeOf(extname(decodedPath(served) ?? served)),
+    "content-length": String(bytes.byteLength),
+  };
+  return new Response(request.method === "HEAD" ? null : bytes, { headers });
+};
+
+/**
+ * Whether `root` holds a built UI.
+ *
+ * Asked once at startup so `--ui` can refuse with the command that fixes it,
+ * rather than serving a port that answers 404 for the page and nothing else.
+ */
+export const built = async (root: string): Promise<boolean> =>
+  (await stat(join(root, "index.html")).catch(() => null))?.isFile() === true;

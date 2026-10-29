@@ -201,7 +201,7 @@ export const frame = (segments: ReadonlyArray<Segment>): Result.Result<Uint8Arra
 /** The SHA-256 of exact bytes, qualified the way a payload spells a digest. */
 export const sha256 = Effect.fn("context.Render.sha256")(function* (bytes: Uint8Array) {
   const digested = yield* Effect.promise(() =>
-    crypto.subtle.digest("SHA-256", bytes.slice().buffer),
+    crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer),
   );
   return `sha256:${bytesToHex(new Uint8Array(digested))}`;
 });
