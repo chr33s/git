@@ -2,8 +2,7 @@
  * Interop: stock `git` against an *authenticated* node host.
  *
  * The evaluation's compatibility warning, made executable: git sends the
- * token as the HTTP Basic password, so a clone URL like
- * `http://token@host/repo` must work, an anonymous clone must fail with 401,
+ * token as the HTTP Basic password, an anonymous clone must fail with 401,
  * and a read-scoped token must be able to fetch but not push.
  *
  * Skipped when `git` is not on PATH.
@@ -26,14 +25,37 @@ import { enableHubUnder, grantMemberUnder } from "../testing/Hub.ts";
 import { hasGit } from "../testing/Git.ts";
 
 const execFileAsync = promisify(execFile);
-const git = async (cwd: string, ...args: string[]): Promise<string> => {
+const run = async (cwd: string, args: string[], env: Record<string, string> = {}) => {
   const result = await execFileAsync(
     "git",
     ["-c", "user.name=Test", "-c", "user.email=test@example.com", ...args],
-    { cwd, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+    { cwd, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env } },
   );
   return result.stdout;
 };
+const git = (cwd: string, ...args: string[]): Promise<string> => run(cwd, args);
+
+/**
+ * `git` presenting `token` as the Basic password through a credential helper,
+ * the way a stored credential arrives. Not `http://<token>@host/…`: git 2.56.0
+ * with a curl that strips credentials from the effective URL (curl 8.23, and
+ * distro backports) mistakes that for a redirect and drops the URL credential
+ * after the first request (fixed upstream in git/git@76524c2604).
+ */
+const gitAs =
+  (token: string) =>
+  (cwd: string, ...args: string[]): Promise<string> =>
+    run(
+      cwd,
+      [
+        "-c",
+        "credential.helper=",
+        "-c",
+        'credential.helper=!f() { echo username=git; echo "password=$GIT_AUTH_TOKEN"; }; f',
+        ...args,
+      ],
+      { GIT_AUTH_TOKEN: token },
+    );
 
 const author = {
   name: "Alice",
@@ -48,15 +70,7 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
   let readToken: string;
   let writeToken: string;
 
-  /**
-   * `http://<credential>@host/…` — the credential as the Basic username,
-   * which is how `git` presents one from a URL.
-   */
-  const remote = (credential: string | null, repo: string) => {
-    const url = new URL(server.url);
-    if (credential !== null) url.username = credential;
-    return `${url.href}${repo}`;
-  };
+  const remote = (repo: string) => `${new URL(server.url).href}${repo}`;
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-auth-interop-"));
@@ -101,7 +115,7 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
       // With prompts disabled, git surfaces the 401 challenge as a refusal to
       // ask for credentials — that refusal is the rejection.
       await assert.rejects(
-        git(root, "clone", "--quiet", remote(null, "authed"), work),
+        git(root, "clone", "--quiet", remote("authed"), work),
         /Authentication failed|401|terminal prompts disabled/,
       );
     }),
@@ -110,25 +124,30 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
   it.effect("clones with a read token, but cannot push with it", () =>
     Effect.promise(async () => {
       const work = path.join(root, "work-read");
-      await git(root, "clone", "--quiet", remote(readToken, "authed"), work);
+      const reader = gitAs(readToken);
+      await reader(root, "clone", "--quiet", remote("authed"), work);
       assert.equal(await fs.readFile(path.join(work, "g.txt"), "utf8"), "guarded\n");
 
       await fs.writeFile(path.join(work, "nope.txt"), "denied\n");
       await git(work, "add", ".");
       await git(work, "commit", "--quiet", "-m", "denied");
-      await assert.rejects(git(work, "push", "--quiet", "origin", "main"), /403|denied|forbidden/i);
+      await assert.rejects(
+        reader(work, "push", "--quiet", "origin", "main"),
+        /403|denied|forbidden/i,
+      );
     }),
   );
 
   it.effect("pushes with a write token", () =>
     Effect.promise(async () => {
       const work = path.join(root, "work-write");
-      await git(root, "clone", "--quiet", remote(writeToken, "authed"), work);
+      const writer = gitAs(writeToken);
+      await writer(root, "clone", "--quiet", remote("authed"), work);
 
       await fs.writeFile(path.join(work, "ok.txt"), "allowed\n");
       await git(work, "add", ".");
       await git(work, "commit", "--quiet", "-m", "allowed");
-      await git(work, "push", "--quiet", "origin", "main");
+      await writer(work, "push", "--quiet", "origin", "main");
 
       const pushed = (await git(work, "rev-parse", "HEAD")).trim();
       const serverMain = await Effect.runPromise(
