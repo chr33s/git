@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { Config, Effect, Layer, Result } from "effect";
+import { Config, Context, Effect, Layer, Result } from "effect";
 import { Argument, Flag } from "effect/unstable/cli";
 
 import {
@@ -22,10 +22,31 @@ import { Invalid } from "../git/Error.ts";
 import type { Signature } from "../git/Format.ts";
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
+import * as RedactionCache from "../hub/Redaction.node.ts";
 import { Repository } from "../git/Repository.ts";
+import { MergeState } from "../git/MergeState.ts";
+import { IndexStore, WorkTree } from "../git/Work.ts";
+import { workspace } from "../git/Work.node.ts";
 import * as AfterPush from "../server/AfterPush.node.ts";
 import { isOid } from "../git/Store.ts";
 import { readGenesis } from "../trust/Genesis.ts";
+import { project as projectTrust, type Projection } from "../trust/Projection.ts";
+import { GitInvocation } from "./GitCompat.ts";
+import { discoverRepository } from "./GitCompat.node.ts";
+
+/**
+ * A comma-separated flag value as the list it names.
+ *
+ * Trimmed and with empties dropped, so `a, b` and `a,,b` and a trailing comma
+ * all read as the same two entries — and an empty flag is an empty list rather
+ * than a list holding one empty string, which is what `"".split(",")` gives and
+ * what every hand-rolled copy of this had to remember to guard.
+ */
+export const commaList = (value: string): ReadonlyArray<string> =>
+  value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
 
 export const rootFlag = Flag.string("root").pipe(
   Flag.withDefault("."),
@@ -131,6 +152,22 @@ export const mustBeEnabled = Effect.fn("cli.mustBeEnabled")(function* (repo: str
   return stored;
 });
 
+/**
+ * The repository's identity and membership, where it has them.
+ *
+ * The tolerant half of `mustBeEnabled`: a repository with no genesis can still
+ * check portable source Concepts and select source evidence — that is §18's
+ * compatibility promise — and cannot judge signed provenance, which the
+ * report says rather than papers over. One definition, because the null
+ * policy is the whole content of the difference from `mustBeEnabled`.
+ */
+export const membershipOrNull = Effect.fn("cli.membershipOrNull")(function* () {
+  const stored = yield* readGenesis();
+  if (stored === null) return { repo: null, trust: null } as const;
+  const trust: Projection = yield* projectTrust(stored.genesis);
+  return { repo: stored.genesis.repoId, trust } as const;
+});
+
 export const withRepo = <A, E>(
   root: string,
   repo: string,
@@ -147,6 +184,12 @@ export const withRepo = <A, E>(
         GitRepository.layer.pipe(
           Layer.provideMerge(hooks),
           Layer.provide(stores(path.join(root, repo))),
+          // Kept beside the repository, because every verb here is its own
+          // process and an in-process answer would never be read a second
+          // time. See `hub/Redaction.node.beside` for why it is a file rather
+          // than a ref, and docs/telemetry.md §13.1 for what it costs when
+          // nothing is kept.
+          Layer.provideMerge(RedactionCache.beside(path.join(root, repo))),
         ),
       ),
     );
@@ -236,3 +279,161 @@ export const readPublicKey = Effect.fn("cli.readPublicKey")(function* (location:
     ? yield* new Invalid({ field: "key", reason: `${location}: ${parsed.failure.reason}` })
     : formatPublicKey(parsed.success);
 });
+
+/**
+ * A checkout, rather than one of the bare repositories under `--root`.
+ *
+ * The working-tree commands are the only ones that need files on disk, so
+ * they take `--work` — a directory whose repository is `.git` inside it,
+ * which is the layout `git` itself uses and the reason the two can be
+ * pointed at the same directory.
+ */
+export const workFlag = Flag.string("work").pipe(
+  Flag.optional,
+  Flag.withDescription("Explicit checkout selector for extension commands"),
+);
+
+/** The checkout a working-tree command runs in, and where its paths are relative to. */
+export class WorkPaths extends Context.Service<
+  WorkPaths,
+  { readonly root: string; readonly base: string }
+>()("cli/WorkPaths") {}
+
+/** A path argument as the checkout knows it: relative to its root, `/`-separated. */
+export const workPath = Effect.fn("cli.workPath")(function* (value: string) {
+  const paths = yield* WorkPaths;
+  return (
+    path.relative(paths.root, path.resolve(paths.base, value)).split(path.sep).join("/") || "."
+  );
+});
+
+export const withWork = <A, E>(
+  work: { readonly _tag: "None" } | { readonly _tag: "Some"; readonly value: string },
+  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore | MergeState | WorkPaths>,
+  options?: {
+    /**
+     * Refuse a `--work` that disagrees with `--work-tree` or `GIT_WORK_TREE`
+     * rather than letting the latter win. For the working-tree verbs the two
+     * are a repository and a checkout, and naming both is how git itself is
+     * driven; for a verb that signs an account of one checkout, a selector
+     * that lost in silence meant a signed exposure over whichever won, with
+     * nothing to say the operator had named the other.
+     */
+    readonly oneCheckout?: boolean;
+  },
+) =>
+  Effect.gen(function* () {
+    const invocation = yield* GitInvocation;
+    if (invocation.bare) {
+      return yield* new Invalid({
+        field: "bare",
+        reason: "this command requires a work tree",
+      });
+    }
+    if (
+      options?.oneCheckout === true &&
+      work._tag === "Some" &&
+      invocation.workTree !== undefined &&
+      path.resolve(invocation.workTree) !== path.resolve(invocation.cwd, work.value)
+    ) {
+      return yield* new Invalid({
+        field: "work",
+        reason: `--work names '${path.resolve(invocation.cwd, work.value)}' but --work-tree or GIT_WORK_TREE names '${invocation.workTree}'; name one checkout`,
+      });
+    }
+    // `--work` is the extension's checkout selector: it chooses a repository
+    // to discover. An explicit `--work-tree` or `GIT_WORK_TREE` already names
+    // the checkout, and an explicit Git directory already selects its
+    // metadata separately — so the selector fills in only what is unnamed.
+    let selected = invocation;
+    if (invocation.workTree === undefined && work._tag === "Some") {
+      const location = path.resolve(invocation.cwd, work.value);
+      selected =
+        invocation.gitDir === undefined
+          ? { ...invocation, cwd: location }
+          : { ...invocation, workTree: location };
+    }
+    const found = yield* discoverRepository(selected);
+    if (found === null || found.workTree === null) {
+      return yield* new Invalid({
+        field: "repository",
+        reason: "not a Git work tree",
+      });
+    }
+    // Paths are relative to where the command was run when that is inside
+    // the checkout, and to the checkout itself otherwise.
+    const relative = path.relative(found.workTree, invocation.cwd);
+    const base =
+      relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+        ? found.workTree
+        : invocation.cwd;
+    return yield* effect.pipe(
+      Effect.provideService(WorkPaths, { root: found.workTree, base }),
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provide(GitRepository.hooksNoop),
+          Layer.provide(stores(found.gitDir)),
+          Layer.provideMerge(workspace(found.workTree, found.gitDir)),
+          Layer.provideMerge(RedactionCache.beside(found.gitDir)),
+        ),
+      ),
+    );
+  });
+
+/**
+ * The repository a repo-scoped audit command should act on.
+ *
+ * The current checkout by default, an explicit bare repository under `--root`
+ * when one is named (docs/telemetry.md §17, docs/context-pack.md §13). Two
+ * paths rather than one because the two callers are genuinely different: a
+ * person standing in a project has a `.git` to find, and a server
+ * administering a directory of bare repositories has a name and no checkout.
+ *
+ * Hooks are noop on the discovery path. Nothing an audit verb does lands a ref
+ * through `receive`, which is the only thing the chain runs for, so building
+ * the delivery machinery here would be paying for a notification nobody sends.
+ */
+export const withDiscovered = <A, E>(
+  root: string,
+  repo: string,
+  effect: Effect.Effect<A, E, Repository | GitRepository.Hooks>,
+): Effect.Effect<A, E | Invalid, GitInvocation> => {
+  if (repo !== "") return withRepo(root, repo, effect, { notify: false });
+
+  return Effect.gen(function* () {
+    // `--root` names a directory of bare repositories, and on its own it names
+    // no repository at all. Ignored, a server script passing `--root /var/git`
+    // — the shape every other verb in this CLI takes — audited whatever
+    // checkout the process happened to be standing in and exited zero. Wrong
+    // repository, right-looking answer.
+    if (root !== "." && root !== "") {
+      return yield* new Invalid({
+        field: "repo",
+        reason: "--root names a directory of repositories; name one in it with --repo",
+      });
+    }
+
+    const found = yield* discoverRepository(yield* GitInvocation);
+    if (found === null) {
+      return yield* new Invalid({
+        field: "repository",
+        reason: "not a Git repository; name one with --repo, or run this inside a checkout",
+      });
+    }
+    return yield* effect.pipe(
+      Effect.provide(
+        GitRepository.layer.pipe(
+          Layer.provideMerge(GitRepository.hooksNoop),
+          Layer.provide(stores(found.gitDir)),
+          Layer.provideMerge(RedactionCache.beside(found.gitDir)),
+        ),
+      ),
+    );
+  });
+};
+
+/** Selects a bare repository under `--root`; empty means the current checkout. */
+export const repoFlag = Flag.string("repo").pipe(
+  Flag.withDefault(""),
+  Flag.withDescription("A bare repository under --root, instead of the current checkout"),
+);

@@ -42,6 +42,7 @@ import {
 import * as Event from "../hub/Event.ts";
 import * as Tombstone from "../hub/Tombstone.ts";
 import * as Session from "../hub/Session.ts";
+import * as Trace from "../hub/Trace.ts";
 import * as Task from "../hub/Task.ts";
 import * as Note from "../hub/Note.ts";
 import * as Queue from "../hub/Queue.ts";
@@ -1028,6 +1029,13 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
     // every field a queue record carries is an identifier, an object id or a
     // ref name, so the namespace has no tombstone to admit a redactor for. See
     // `hub/Queue.ts`.
+    //
+    // A trace ref admits a redactor for the reason a session does, and more
+    // urgently: a retained render holds the task string verbatim and the exact
+    // bytes of every exposed file, so a credential that leaked into a prompt
+    // is in this namespace as well as in the session's. `Records.RecordRedacted`
+    // is what a redactor may write here, and `Redaction.recordRefs` walks
+    // these refs so the tombstone is honoured at the next collection.
     const needed = (name: string): { exact: ReadonlyArray<string> } | { prefix: string } =>
       name === Refspec.SOCIAL_LOG
         ? { exact: ["social.write"] }
@@ -1035,13 +1043,15 @@ export const evaluate = Effect.fn("Policy.evaluate")(function* (input: {
           ? { exact: ["hub.task", "hub.redact"] }
           : Note.noteOf(name) !== null
             ? { exact: ["hub.note", "hub.redact"] }
-            : Session.sessionOf(name) !== null
-              ? { exact: ["hub.session", "hub.redact"] }
-              : Queue.queueOf(name) !== null
-                ? { exact: ["hub.queue"] }
-                : name.startsWith("refs/hub/")
-                  ? { prefix: "hub." }
-                  : { prefix: "member." };
+            : Trace.traceOf(name) !== null
+              ? { exact: ["hub.trace", "hub.redact"] }
+              : Session.sessionOf(name) !== null
+                ? { exact: ["hub.session", "hub.redact"] }
+                : Queue.queueOf(name) !== null
+                  ? { exact: ["hub.queue"] }
+                  : name.startsWith("refs/hub/")
+                    ? { prefix: "hub." }
+                    : { prefix: "member." };
     const charge = needed(update.name);
     const passes =
       "exact" in charge
@@ -1178,13 +1188,14 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     update.name.startsWith("refs/hub/") &&
     Event.prOf(update.name) === null &&
     Session.sessionOf(update.name) === null &&
+    Trace.traceOf(update.name) === null &&
     Task.taskOf(update.name) === null &&
     Note.noteOf(update.name) === null &&
     Queue.queueOf(update.name) === null
   ) {
     return refused(
       update.name,
-      `${update.name} does not name a pull request, session, task, note or queue`,
+      `${update.name} does not name a pull request, session, trace, task, note or queue`,
     );
   }
 
@@ -1223,28 +1234,34 @@ const namespaceRules = Effect.fn("Policy.namespaceRules")(function* (
     // let a fleet's ordinary week exhaust what a repository's pull requests
     // are allowed, and a session ref is exactly as undeletable as a pull
     // request's.
-    const classOf = (name: string): "sessions" | "tasks" | "notes" | "queues" | "pull requests" =>
+    const classOf = (
+      name: string,
+    ): "sessions" | "traces" | "tasks" | "notes" | "queues" | "pull requests" =>
       Session.sessionOf(name) !== null
         ? "sessions"
-        : Task.taskOf(name) !== null
-          ? "tasks"
-          : Note.noteOf(name) !== null
-            ? "notes"
-            : Queue.queueOf(name) !== null
-              ? "queues"
-              : "pull requests";
+        : Trace.traceOf(name) !== null
+          ? "traces"
+          : Task.taskOf(name) !== null
+            ? "tasks"
+            : Note.noteOf(name) !== null
+              ? "notes"
+              : Queue.queueOf(name) !== null
+                ? "queues"
+                : "pull requests";
 
     const kind = classOf(update.name);
     const held =
       kind === "sessions"
         ? yield* Session.sessions()
-        : kind === "tasks"
-          ? yield* Task.tasks()
-          : kind === "notes"
-            ? yield* Note.notes()
-            : kind === "queues"
-              ? yield* Queue.queues()
-              : yield* Event.pullRequests();
+        : kind === "traces"
+          ? yield* Trace.traces()
+          : kind === "tasks"
+            ? yield* Task.tasks()
+            : kind === "notes"
+              ? yield* Note.notes()
+              : kind === "queues"
+                ? yield* Queue.queues()
+                : yield* Event.pullRequests();
     const opened = [...opening].filter((name) => classOf(name) === kind).length;
     const count = held.length + opened;
     if (count >= (yield* Event.populationOf())) {
@@ -1387,6 +1404,24 @@ const HUB_NAMESPACE: LogNamespace = {
   holds: "events",
 };
 
+/**
+ * Trace refs, bounded on their own terms.
+ *
+ * docs/telemetry.md §13: trace storage must not inherit the policy-critical
+ * session fold's budget. Nothing folds this namespace — the boundary walks it
+ * once to check containment and grafting, which is linear — so holding it to
+ * the pull-request ceiling would refuse honest audit history for a cost that
+ * namespace does not impose.
+ */
+const TRACE_NAMESPACE: LogNamespace = {
+  isCommit: Event.isHubCommit,
+  withinCeiling: Trace.withinCeiling,
+  ceilingOf: Trace.ceilingOf,
+  record: Event.RECORD,
+  anchored: false,
+  holds: "records",
+};
+
 const TRUST_NAMESPACE: LogNamespace = {
   isCommit: Log.isTrustCommit,
   withinCeiling: Log.withinCeiling,
@@ -1409,16 +1444,20 @@ const SOCIAL_NAMESPACE: LogNamespace = {
  * Which append-only namespace a ref belongs to, or `null` for an ordinary ref.
  *
  * The one place the ref-name spellings are read. `Refspec.isAppendOnly` names
- * exactly these three, so a ref it accepts always answers here.
+ * exactly these, so a ref it accepts always answers here. Trace refs are asked
+ * about first: they are hub refs by name and are bounded separately, so the
+ * broader `refs/hub/` test would swallow them.
  */
 const namespaceOf = (ref: string): LogNamespace | null =>
-  ref.startsWith("refs/hub/")
-    ? HUB_NAMESPACE
-    : ref === Refspec.SOCIAL_LOG
-      ? SOCIAL_NAMESPACE
-      : ref === Refspec.TRUST_LOG
-        ? TRUST_NAMESPACE
-        : null;
+  Trace.traceOf(ref) !== null
+    ? TRACE_NAMESPACE
+    : ref.startsWith("refs/hub/")
+      ? HUB_NAMESPACE
+      : ref === Refspec.SOCIAL_LOG
+        ? SOCIAL_NAMESPACE
+        : ref === Refspec.TRUST_LOG
+          ? TRUST_NAMESPACE
+          : null;
 
 /**
  * Why an append-only ref may not hold this value, or `null`.
@@ -1606,7 +1645,7 @@ const signedByRevoked = Effect.fn("Policy.signedByRevoked")(function* (
     // arrive by push.
     for (const signer of signed) {
       if (openWindow(trust.revoked.get(signer)) !== null) {
-        return `${signer} has been revoked and may not add a ${kind ?? (social ? "statement" : "event")}`;
+        return `${signer} has been revoked and may not add ${kind === null ? (social ? "a statement" : "an event") : `a ${kind}`}`;
       }
     }
 

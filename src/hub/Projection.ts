@@ -308,15 +308,22 @@ const byEventId = <A extends { readonly id: string; readonly commit: Oid }>(
 const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
 
 /**
- * "Is this trust-log commit at least as new as that one?", memoised per fold.
+ * One walk of the trust log, shared by everything that asks about it.
  *
+ * "Is this trust-log commit at least as new as that one?", memoised per fold.
  * `Log.ancestry` walks the log — a `readCommit` and a `findPath` per commit —
- * and the monotonicity check below asks about the same few heads over and over,
- * once per ancestor per event, on the write path. The answers are a pure
+ * and the monotonicity check below asks about the same few heads over and
+ * over, once per ancestor per event, on the write path. The answers are a pure
  * function of the log, which does not move while a projection is being built,
  * so one walk per distinct head is all that is ever needed.
+ *
+ * Exported because the audit path needs it for the reason a fold does:
+ * `Verify.authorize` walks the whole log per call unless it is handed a memo,
+ * so judging a session's records one at a time was O(records × trust log). The
+ * log does not move while a projection or an audit is being built, which is
+ * what makes one memo per command sound.
  */
-const trustReach = () => {
+export const trustReach = () => {
   const walked = new Map<
     Oid,
     Exit.Exit<ReadonlySet<Oid>, Invalid | ObjectNotFound | StorageFailure>
@@ -440,6 +447,7 @@ export const project = Effect.fn("hub.Projection.project")(function* (
   genesis: Genesis,
   trust: TrustProjection,
   pr: string,
+  evaluatedAt: Date = new Date(),
 ) {
   const walked = yield* Event.entries(pr);
   const byCommit = new Map(walked.events.map((entry) => [entry.commit, entry]));
@@ -475,10 +483,10 @@ export const project = Effect.fn("hub.Projection.project")(function* (
     if (!signers.some((signer) => holdsRedact(trust, signer))) continue;
     named.add(target);
   }
-  if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named);
+  if (named.size === 0) return yield* fold(genesis, trust, pr, walked, named, evaluatedAt);
 
-  const claimed = yield* fold(genesis, trust, pr, walked, named);
-  const settled = yield* fold(genesis, trust, pr, walked, claimed.redacted);
+  const claimed = yield* fold(genesis, trust, pr, walked, named, evaluatedAt);
+  const settled = yield* fold(genesis, trust, pr, walked, claimed.redacted, evaluatedAt);
   // The set that governed the second pass, not the one the second pass
   // recomputed: what `gc` deletes and what the fold read as absent have to be
   // the same set, or the next fold reads something this one did not.
@@ -502,6 +510,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
    * and this is that decision, handed in.
    */
   skip: ReadonlySet<Oid>,
+  evaluatedAt: Date,
 ) {
   const { events, parents } = walked;
   /** Events by commit, since a tombstone resolves its target by one. */
@@ -622,6 +631,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
 
       const authorized = yield* Verify.authorize({
         projection: trust,
+        evaluatedAt,
         bytes: entry.bytes,
         signatures: entry.signatures,
         capability: Event.capabilityFor(payload),
@@ -876,6 +886,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     const judge = (permanent: boolean) =>
       Verify.authorize({
         projection: trust,
+        evaluatedAt,
         bytes: entry.bytes,
         signatures: entry.signatures,
         signed,
@@ -964,6 +975,7 @@ const fold = Effect.fn("hub.Projection.fold")(function* (
     const alsoHolds = (capability: string) =>
       Verify.authorize({
         projection: trust,
+        evaluatedAt,
         bytes: entry.bytes,
         signatures: entry.signatures,
         signed,
@@ -1491,5 +1503,3 @@ export const checksPassedAt = (
 /** Whether every named check has succeeded against the current head. */
 export const checksPassed = (pullRequest: PullRequest, required: ReadonlyArray<string>): boolean =>
   checksPassedAt(pullRequest, required, pullRequest.head);
-
-export type ProjectionError = Invalid | ObjectNotFound | StorageFailure;

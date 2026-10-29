@@ -132,10 +132,12 @@ export const LoadFileAt = Command.define("LoadFileAt", {
       const { clientFromDocument } = yield* Effect.tryPromise(async () => await import("./api.ts"));
       const client = Repository.reading(clientFromDocument());
       const content = yield* Effect.tryPromise(async () => await client.file(oid, path));
-      return AppMessage.SucceededLoadFileAt({ oid, path, content });
+      return AppMessage.SucceededLoadFileAt({ oid, tip: null, path, content });
     }).pipe(
       Effect.catch((cause) =>
-        Effect.succeed(AppMessage.FailedLoadFileAt({ oid, path, reason: reasonOf(cause) })),
+        Effect.succeed(
+          AppMessage.FailedLoadFileAt({ oid, tip: null, path, reason: reasonOf(cause) }),
+        ),
       ),
     ),
 });
@@ -150,10 +152,12 @@ export const LoadFile = Command.define("LoadFile", {
       const { clientFromDocument } = yield* Effect.tryPromise(async () => await import("./api.ts"));
       const client = Repository.reading(clientFromDocument());
       const content = yield* Effect.tryPromise(async () => await client.file(tip, path));
-      return AppMessage.SucceededLoadFileAt({ oid: "", path, content });
+      return AppMessage.SucceededLoadFileAt({ oid: "", tip, path, content });
     }).pipe(
       Effect.catch((cause) =>
-        Effect.succeed(AppMessage.FailedLoadFileAt({ oid: "", path, reason: reasonOf(cause) })),
+        Effect.succeed(
+          AppMessage.FailedLoadFileAt({ oid: "", tip, path, reason: reasonOf(cause) }),
+        ),
       ),
     ),
 });

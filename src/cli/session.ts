@@ -18,19 +18,28 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import { Invalid } from "../git/Error.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import * as Memory from "../hub/Memory.ts";
-import { Repository } from "../git/Repository.ts";
+import * as Concept from "../knowledge/Concept.ts";
 import * as Session from "../hub/Session.ts";
-import { readPrivateKey, repoArgument, rootFlag, withRepo } from "./shared.ts";
+import * as Capture from "../hub/SessionCapture.ts";
+import * as Handoff from "./SessionHandoff.node.ts";
+import * as Briefing from "./Briefing.node.ts";
+import * as Trace from "../hub/Trace.ts";
+import { Repository } from "../git/Repository.ts";
+import * as Invocation from "../telemetry/Invocation.ts";
+import * as Audit from "./audit.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
+import {
+  membershipOrNull,
+  readPrivateKey,
+  repoArgument,
+  repoFlag,
+  rootFlag,
+  withDiscovered,
+  withRepo,
+  commaList,
+} from "./shared.ts";
 
 /** Comma-separated list flags, which is how a hook passes several of a thing. */
-const listOf = (value: string): ReadonlyArray<string> =>
-  value === ""
-    ? []
-    : value
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter((entry) => entry !== "");
-
 /**
  * The repository's own identity, which every record is bound to.
  *
@@ -47,6 +56,46 @@ const identityOf = Effect.fn("session.identityOf")(function* (repo: string) {
     });
   }
   return stored.genesis.repoId;
+});
+
+/**
+ * The repository's identity and its membership, for an audit that judges both.
+ *
+ * Built once per command rather than per record: the projection audits every
+ * exposure a session holds, and rebuilding the trust walk for each of them
+ * would make a long run's audit quadratic in the trust log.
+ */
+const membership = Effect.fn("session.membership")(function* () {
+  const stored = yield* readGenesis();
+  if (stored === null) {
+    return yield* new Invalid({
+      field: "repo",
+      reason: "this repository has no genesis, so its trace cannot be judged",
+    });
+  }
+  return { repo: stored.genesis.repoId, trust: yield* projectTrust(stored.genesis) };
+});
+
+/**
+ * A learning from a file, or from stdin.
+ *
+ * The same bounded validation the `--note` path gets — `Session.issue` scans
+ * it for secrets and holds it to `MAX_PAYLOAD` — reached by a route that keeps
+ * multiline or sensitive text out of process arguments (§10.2). Trailing
+ * whitespace goes because an editor added it, not because this is rewriting
+ * what somebody wrote.
+ */
+const readNote = Effect.fn("session.readNote")(function* (location: string) {
+  const contents = yield* Effect.try({
+    try: () => fs.readFileSync(location === "-" ? 0 : location, "utf8"),
+    catch: () =>
+      new Invalid({
+        field: "note-file",
+        reason:
+          location === "-" ? "cannot read the learning from stdin" : `cannot read ${location}`,
+      }),
+  });
+  return contents.trim();
 });
 
 const keyFlag = Flag.string("key").pipe(
@@ -133,12 +182,29 @@ const produce = Command.make(
       Flag.withDefault(""),
       Flag.withDescription("What was decided or learned, distilled"),
     ),
+    noteFile: Flag.string("note-file").pipe(
+      Flag.withDefault(""),
+      Flag.withDescription("Read the learning from a file, or from - for stdin"),
+    ),
     inputTokens: Flag.integer("input-tokens").pipe(Flag.withDefault(0)),
     outputTokens: Flag.integer("output-tokens").pipe(Flag.withDefault(0)),
     repo: repoArgument,
   },
-  ({ commit, inputTokens, key, note, outputTokens, pull, ref, repo, root, session }) =>
+  ({ commit, inputTokens, key, note, noteFile, outputTokens, pull, ref, repo, root, session }) =>
     Effect.gen(function* () {
+      // Two ways to say one thing is two ways to say two different things.
+      // Refused rather than resolved by precedence, so a hook that passes both
+      // learns which one this command would have dropped (§10.2).
+      if (note !== "" && noteFile !== "") {
+        return yield* new Invalid({
+          field: "note",
+          reason: "--note and --note-file both say what was learned; pass one",
+        });
+      }
+      // A learning is prose somebody wrote, and prose on a command line is
+      // prose in a shell history and in `ps`. The file path is a local adapter
+      // input — never a path a Concept or a hub event supplied (§10.2).
+      const learned = noteFile === "" ? note : yield* readNote(noteFile);
       const signer = yield* readPrivateKey(key);
       const written = yield* withRepo(
         root,
@@ -150,10 +216,10 @@ const produce = Command.make(
             repo: identity,
             session,
             key: signer,
-            commits: listOf(commit),
-            refs: listOf(ref),
-            pulls: listOf(pull),
-            note: note === "" ? null : note,
+            commits: commaList(commit),
+            refs: commaList(ref),
+            pulls: commaList(pull),
+            note: learned === "" ? null : learned,
             // Absent rather than zero: a harness that does not report usage
             // and one that used nothing are different facts.
             usage: inputTokens === 0 && outputTokens === 0 ? null : { inputTokens, outputTokens },
@@ -164,26 +230,62 @@ const produce = Command.make(
     }),
 );
 
+/**
+ * `git+ session show [<session>] [--audit]` — the audit read path.
+ *
+ * The one verb in this group whose repository is a flag rather than a
+ * positional, and the reason is the shape docs/telemetry.md §15 and §17 ask
+ * for: `git+ session show <session> --audit` from inside a checkout. Two
+ * optional positionals cannot express that — one value would fill the first —
+ * so the session keeps the positional and `--repo` selects a bare repository
+ * for server and administration use.
+ *
+ * `--audit` joins the policy-visible session projection with its
+ * policy-invisible Invocation history. They stay two refs and one answer: a
+ * reader should not have to know that a run's account and its runtime trace
+ * live in different namespaces for different reasons.
+ */
 const show = Command.make(
   "show",
   {
     root: rootFlag,
+    repo: repoFlag,
     branch: Flag.string("branch").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Show the session that last produced this ref instead of an id"),
     ),
-    repo: repoArgument,
+    audit: Flag.boolean("audit").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Join the run's Invocations, context exposures and capture health"),
+    ),
+    json: Flag.boolean("json").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("The joined projection as JSON rather than the Invocation layout"),
+    ),
     session: Argument.string("session").pipe(Argument.optional),
   },
-  ({ branch, repo, root, session }) =>
+  ({ audit, branch, json, repo, root, session }) =>
     Effect.gen(function* () {
-      const projection = yield* withRepo(
+      const projection = yield* withDiscovered(
         root,
         repo,
         Effect.gen(function* () {
           // A branch, because that is the question an agent has on checkout:
           // "put me back in context for this" rather than "for this id", which
           // it holds only if it opened the session itself.
+          // Refused rather than resolved. This verb's repository moved from a
+          // positional to `--repo`, so the old `session show <repo> --branch=x`
+          // now parses `<repo>` as the session — which `--branch` then
+          // discards — and `--repo ""` quietly reads the current checkout
+          // instead. Wrong repository, no error. Naming both is ambiguous
+          // whichever way it was meant, so it is an error either way.
+          if (branch !== "" && session._tag === "Some") {
+            return yield* new Invalid({
+              field: "session",
+              reason: `name a session or --branch, not both; --repo selects the repository`,
+            });
+          }
+
           const id =
             branch === ""
               ? session._tag === "Some"
@@ -196,18 +298,77 @@ const show = Command.make(
               reason:
                 branch === ""
                   ? "name a session, or pass --branch to look one up"
-                  : `no session has produced ${branch}`,
+                  : (yield* Session.sessions()).length > 0
+                    ? `no session has produced ${branch}`
+                    : `this repository holds no session refs; fetch them with \`git+ hub enable --refs 'refs/hub/session/*'\``,
             });
           }
-          // An unknown session is an error, not an empty document.
-          // `Session.project` answers for any id — it walks a ref that need
-          // not exist — so a typo would otherwise print an empty projection
-          // and exit zero, reading as "did nothing" instead of "no such session".
-          yield* existingSession(id);
-          return yield* Session.project(id);
+
+          // A session this repository has never heard of is an error, not an
+          // empty document. `isSessionId` cannot help — it accepts any legal
+          // ref component, which a repository name is — so the old spelling,
+          // where this argument named the repository, went straight through
+          // the `--branch` guard above: `git+ session show <repo>` resolved
+          // whichever checkout the process was standing in, projected a
+          // session named after the repository, printed `exists: false` and
+          // exited zero. Existence is what actually separates the two.
+          //
+          // Either ref counts. `context for --session S` and `trace record`
+          // write only the trace ref, so a run with a full runtime account and
+          // no record of the work it was doing is an ordinary thing to ask
+          // about — and `--audit` is how you ask.
+          const repository = yield* Repository;
+          const known =
+            (yield* repository.resolve(Session.refOf(id))) !== null ||
+            (yield* repository.resolve(Trace.refOf(id))) !== null;
+          if (!known) {
+            // And say which of the two it is. `hub enable` does not fetch
+            // `refs/hub/session/*` — agents.md §10 makes it opt-in, so that a
+            // replica can hold review state without the provenance firehose —
+            // and a clone that took the default has no session refs at all,
+            // where "no session 'X'" reads as a typo rather than as a
+            // configuration.
+            const any = (yield* Session.sessions()).length > 0;
+            return yield* new Invalid({
+              field: "session",
+              reason: any
+                ? `this repository has no session '${id}'; --repo selects the repository`
+                : `this repository holds no session refs; fetch them with \`git+ hub enable --refs 'refs/hub/session/*'\``,
+            });
+          }
+
+          const projected = yield* Session.project(id);
+          if (!audit) return { session: projected, audit: null } as const;
+
+          // The trace ref is read only when it is asked for. It is the large,
+          // policy-invisible half, and a `session show` that folded it every
+          // time would make the cheap question pay for the expensive one.
+          const { repo: identity, trust } = yield* membership();
+          return {
+            session: projected,
+            audit: yield* Invocation.project({ session: id, repo: identity, trust }),
+          } as const;
         }),
       );
-      yield* Console.log(JSON.stringify(projection, null, 2));
+
+      // The session projection stays JSON whether or not `--audit` was asked
+      // for: its reader is a harness hook, and a hook that had to parse prose
+      // is a hook that breaks on the next wording change. The audit view is
+      // the human-facing one, so it renders unless a machine asks otherwise.
+      if (projection.audit === null || json) {
+        return yield* Console.log(
+          JSON.stringify(
+            projection.audit === null
+              ? projection.session
+              : { ...projection.session, audit: projection.audit },
+            null,
+            2,
+          ),
+        );
+      }
+      for (const line of Audit.renderAll(projection.audit, projection.session)) {
+        yield* Console.log(line);
+      }
     }),
 );
 
@@ -237,7 +398,7 @@ const ask = Command.make(
             session,
             key: signer,
             question,
-            options: listOf(option),
+            options: commaList(option),
           });
         }),
       );
@@ -293,6 +454,37 @@ const hookFile = <A>(operation: () => A) =>
     catch: (cause) => new Invalid({ field: "work", reason: `session hook: ${String(cause)}` }),
   });
 
+/**
+ * Where a harness session's pending report and its learning live.
+ *
+ * Keyed by the harness's own session, hashed: two agents in one checkout must
+ * not consume each other's pending report, or hand over each other's learning
+ * (docs/context-pack.knowledge.md §10.3). The legacy names stay for callers
+ * without a harness id.
+ */
+const hookPaths = (work: string, harness: string | undefined) => {
+  const key = harness ? `.${createHash("sha256").update(harness).digest("hex")}` : "";
+  const directory = path.resolve(work, ".chr33s");
+  return {
+    state: path.join(directory, `session${key}.id`),
+    learning: path.join(directory, `learning${key}.txt`),
+    pending: path.join(directory, `output${key}.json`),
+    briefing: path.join(directory, `briefing${key}.json`),
+  };
+};
+
+/**
+ * The memory derived over the committed view HEAD names, where there is one.
+ *
+ * Concepts are ordinary source files, and a repository with no commits has no
+ * Concepts — only session learnings.
+ */
+const deriveMemory = Effect.fn("session.deriveMemory")(function* (bundle: string) {
+  const repository = yield* Repository;
+  const sourceRef = yield* repository.head;
+  return yield* Memory.derive({ sourceRef, bundle, ...(yield* membershipOrNull()) });
+});
+
 const hook = Command.make(
   "hook",
   {
@@ -313,18 +505,50 @@ const hook = Command.make(
           }),
         ),
       )(input || "{}").pipe(Effect.orElseSucceed(() => ({ prompt: "", session_id: "" })));
-      // Harnesses sharing a checkout must not consume each other's pending
-      // report. Keep the legacy filename for callers without a harness id.
-      const state = path.resolve(
-        work,
-        ".chr33s",
-        event.session_id
-          ? `session.${createHash("sha256").update(event.session_id).digest("hex")}.id`
-          : "session.id",
-      );
+      const { state, learning, pending, briefing } = hookPaths(work, event.session_id);
       const exists = yield* hookFile(() => fs.existsSync(state));
+      const saved = yield* Handoff.read(pending);
       if (phase === "start") {
-        if (exists) return;
+        // One opening per session: the harness calls this on every prompt,
+        // and a second opening would be a second account of the same work.
+        const recall = yield* Config.boolean("CHR33S_GIT_STARTUP_MEMORY").pipe(
+          Config.withDefault(true),
+        );
+        if (exists) {
+          if (recall)
+            yield* Effect.gen(function* () {
+              const session = yield* hookFile(() => fs.readFileSync(state, "utf8").trim());
+              const built = yield* withRepo(root, repo, deriveMemory(Concept.BUNDLE));
+              const boundary = yield* Briefing.record({
+                location: briefing,
+                session,
+                built,
+                delivered: false,
+              });
+              if (boundary.invalidated)
+                yield* Console.log(
+                  "Repository memory: some earlier recalled support is no longer validated by the current evidence view. Earlier context cannot be withdrawn; revalidate it against current sources.",
+                );
+            }).pipe(
+              Effect.catch(() =>
+                Console.error(
+                  "git+: current memory validation is unavailable; earlier recalled data has not been revalidated",
+                ),
+              ),
+            );
+          return;
+        }
+        if (saved !== null) {
+          const output = yield* Session.decode(new TextEncoder().encode(saved.payload));
+          const identity = yield* withRepo(root, repo, identityOf(repo));
+          if (output.repo !== identity)
+            return yield* new Invalid({
+              field: "handoff",
+              reason: "pending output belongs to another repository",
+            });
+          yield* Handoff.writeState(state, output.session);
+          return;
+        }
         const signer = yield* readPrivateKey(key);
         const model = yield* Config.string("CLAUDE_MODEL").pipe(Config.withDefault(""));
         const harness = yield* Config.string("CLAUDE_CODE_VERSION").pipe(Config.withDefault(""));
@@ -342,32 +566,131 @@ const hook = Command.make(
             });
           }),
         );
-        yield* hookFile(() => fs.writeFileSync(state, opened.session));
-      } else if (exists) {
-        yield* Effect.gen(function* () {
-          const session = yield* hookFile(() => fs.readFileSync(state, "utf8").trim());
-          const signer = yield* readPrivateKey(key);
-          const branch = yield* Config.string("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
-          yield* withRepo(
-            root,
-            repo,
-            Effect.gen(function* () {
-              yield* existingSession(session);
-              yield* Session.produced({
-                repo: yield* identityOf(repo),
-                session,
-                key: signer,
-                commits: [],
-                refs: listOf(branch),
-                pulls: [],
-                note: null,
-                usage: null,
-              });
-            }),
+        yield* Handoff.writeState(state, opened.session);
+
+        if (recall)
+          yield* Effect.gen(function* () {
+            const built = yield* withRepo(root, repo, deriveMemory(Concept.BUNDLE));
+            yield* Briefing.record({
+              location: briefing,
+              session: opened.session,
+              built,
+              delivered: built.entries.length > 0,
+            });
+            if (built.entries.length > 0) yield* Console.log(built.text);
+          }).pipe(
+            Effect.catch(() =>
+              Console.error("git+: startup memory unavailable; continuing without it"),
+            ),
           );
-        }).pipe(
-          // A failed report must not attach the next prompt to this session.
-          Effect.ensuring(hookFile(() => fs.rmSync(state, { force: true })).pipe(Effect.orDie)),
+        // Where the *agent* leaves what it learned. A stop hook cannot infer a
+        // useful discovery from a branch name, so the learning is handed over
+        // explicitly or there is none — and no learning is a valid outcome
+        // (§10.2). Said here because the path is keyed by a hash the agent
+        // cannot guess.
+        yield* Console.log(
+          `To record what this session learned, write it to ${learning} before stopping.`,
+        );
+      } else if (exists || saved !== null) {
+        yield* Handoff.withLock(
+          state,
+          Effect.gen(function* () {
+            const output =
+              saved === null
+                ? null
+                : yield* Session.decode(new TextEncoder().encode(saved.payload));
+            const session = exists
+              ? yield* hookFile(() => fs.readFileSync(state, "utf8").trim())
+              : output?.session;
+            if (session === undefined)
+              return yield* new Invalid({
+                field: "handoff",
+                reason: "pending output has no session identity",
+              });
+            const learned = yield* hookFile(() => fs.existsSync(learning));
+            const retained = saved;
+            const branch = yield* Config.string("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
+            // Explicit harness output only. A branch hint never guesses authored commits.
+            const commits = yield* Config.string("CHR33S_GIT_COMMITS").pipe(Config.withDefault(""));
+            const pulls = yield* Config.string("CHR33S_GIT_PULLS").pipe(Config.withDefault(""));
+            const usageJson = yield* Config.string("CHR33S_GIT_USAGE").pipe(Config.withDefault(""));
+            const usage =
+              usageJson === "" || retained !== null
+                ? null
+                : yield* Schema.decodeEffect(
+                    Schema.fromJsonString(
+                      Schema.Struct({ inputTokens: Schema.Int, outputTokens: Schema.Int }),
+                    ),
+                  )(usageJson).pipe(
+                    Effect.mapError(
+                      (cause) => new Invalid({ field: "usage", reason: cause.message }),
+                    ),
+                  );
+            const prepared =
+              retained ??
+              (yield* withRepo(
+                root,
+                repo,
+                Effect.gen(function* () {
+                  yield* existingSession(session);
+                  const signer = yield* readPrivateKey(key);
+                  return yield* Capture.prepare({
+                    repo: yield* identityOf(repo),
+                    session,
+                    key: signer,
+                    commits: commaList(commits),
+                    refs: commaList(branch),
+                    pulls: commaList(pulls),
+                    note: learned ? (yield* readNote(learning)) || null : null,
+                    usage,
+                  });
+                }),
+              ));
+            // The identity and exact signed bytes survive a crash before or after append.
+            if (retained === null) yield* Handoff.write(pending, prepared);
+            const recorded = yield* withRepo(
+              root,
+              repo,
+              Effect.gen(function* () {
+                return yield* Capture.append(prepared, { repo: yield* identityOf(repo), session });
+              }),
+            );
+            yield* hookFile(() => fs.rmSync(learning, { force: true }));
+            const persisted = yield* withRepo(
+              root,
+              repo,
+              Effect.gen(function* () {
+                return yield* Memory.write(yield* deriveMemory(Concept.BUNDLE));
+              }),
+            ).pipe(Effect.orElseSucceed(() => null));
+            const available =
+              persisted !== null &&
+              (persisted.state === "written" || persisted.state === "unchanged");
+            if (available) {
+              yield* hookFile(() => fs.rmSync(state, { force: true }));
+              yield* hookFile(() => fs.rmSync(pending, { force: true }));
+            } else {
+              yield* Console.error(
+                "git+: the learning was recorded; memory is unavailable; retry stop to rebuild it",
+              );
+            }
+            yield* Console.log(
+              JSON.stringify({
+                version: 1,
+                state: available ? "recorded" : "recorded-projection-unavailable",
+                commit: recorded.commit,
+                recovered: recorded.recovered,
+              }),
+            );
+          }),
+        ).pipe(
+          Effect.tapError(() =>
+            Console.error(
+              "git+: outcome not acknowledged; this session's handoff is retained for retry",
+            ).pipe(
+              Effect.andThen(Console.log(JSON.stringify({ version: 1, state: "not-recorded" }))),
+            ),
+          ),
         );
       }
     }),
@@ -515,36 +838,111 @@ const enable = Command.make(
       yield* Console.log(`Recording sessions for ${repo}:`);
       yield* Console.log(`  ${script}`);
       yield* Console.log(`  ${settings}`);
+      // The learning handoff is explicit by design: the component that can
+      // judge the work is the one that supplies it (§10.2).
+      yield* Console.log("");
+      yield* Console.log(
+        `To record a durable learning, write one line of it to ${path.join(directory, "learning.<session>.txt")} before the session ends.`,
+      );
     }),
 );
 
+/**
+ * `git+ session memory [--distill]` — what this repository has learned.
+ *
+ * Two read paths on purpose (§12.4). A plain read shows the note as it stands,
+ * labelled as the historical cache it is; `--distill` re-derives from the
+ * Concepts and session records that are eligible *now* and persists the
+ * result. Automatic harness injection uses the derivation, never the note's
+ * raw text — a note can come from another branch, another host, or from before
+ * a redaction, and its stamp is unsigned (§8.4).
+ */
 const memoryShow = Command.make(
   "memory",
   {
     root: rootFlag,
     distill: Flag.boolean("distill").pipe(
       Flag.withDefault(false),
-      Flag.withDescription("Rebuild it from the sessions first"),
+      Flag.withDescription("Rebuild it from the current Concepts and session records, and persist"),
+    ),
+    derive: Flag.boolean("derive").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Print the validated projection without persisting it"),
+    ),
+    bundle: Flag.string("bundle").pipe(
+      Flag.withDefault(Concept.BUNDLE),
+      Flag.withDescription("Repository-relative Concept bundle root"),
     ),
     repo: repoArgument,
   },
-  ({ distill, repo, root }) =>
+  ({ bundle, derive, distill, repo, root }) =>
     Effect.gen(function* () {
-      const note = yield* withRepo(
+      const result = yield* withRepo(
         root,
         repo,
         Effect.gen(function* () {
-          if (!distill) return yield* Memory.read();
-          // Rebuilt rather than merged: the sessions are the record, and a
-          // view of them that could drift from what it cites would be worse
-          // than no view at all.
-          const fresh = yield* Memory.distill();
-          const text = Memory.render(fresh.entries, fresh.sessions);
-          yield* Memory.write(text);
-          return text;
+          if (!distill && !derive) {
+            const note = yield* Memory.read();
+            return { note, derived: null, persisted: null } as const;
+          }
+
+          const built = yield* deriveMemory(bundle);
+          if (!distill) return { note: built.text, derived: built, persisted: null } as const;
+          return {
+            note: built.text,
+            derived: built,
+            persisted: yield* Memory.write(built),
+          } as const;
         }),
       );
-      yield* Console.log(note ?? "no memory yet; run with --distill");
+
+      if (result.note === null) {
+        return yield* Console.log("no memory yet; run with --distill");
+      }
+      // An empty projection is no memory. Printed as the note, its heading and
+      // stamp would be framed as cited data by the hook that pipes stdout into
+      // a prompt, on every session of a repository with nothing to recall.
+      yield* Console.log(
+        result.derived !== null && result.derived.entries.length === 0
+          ? "no memory yet; nothing eligible to recall"
+          : result.note,
+      );
+
+      // Everything below is the account of the derivation, on stderr so the
+      // note itself stays the whole of stdout for a hook that pipes it.
+      const derived = result.derived;
+      if (derived === null) {
+        return yield* Console.error(
+          "! this is the stored note, which is a historical cache; --derive revalidates it",
+        );
+      }
+      if (!derived.complete) {
+        yield* Console.error("! partial: not every candidate could be collected");
+      }
+      if (derived.omitted > 0) {
+        yield* Console.error(`! ${derived.omitted} eligible entr(ies) did not fit the budget`);
+      }
+      for (const candidate of derived.excluded) {
+        yield* Console.error(
+          `! excluded ${candidate.entry.source?.path ?? candidate.entry.text}: ${candidate.reasons.join(", ")}`,
+        );
+      }
+      if (result.persisted !== null) {
+        // Which of the three, because "written", "identical, so nothing was
+        // written" and "somebody else moved the ref" are three outcomes a
+        // caller acts on differently (§8.3).
+        yield* Console.error(
+          result.persisted.state === "written"
+            ? `note ${result.persisted.commit}`
+            : result.persisted.state === "unchanged"
+              ? "unchanged; the derivation matches the stored note"
+              : result.persisted.state === "no-anchor"
+                ? "! not persisted: this repository has no genesis to anchor the note to"
+                : result.persisted.state === "superseded-input"
+                  ? "! not persisted: source inputs changed; derive again"
+                  : `! not persisted: ${result.persisted.reason}`,
+        );
+      }
     }),
 );
 

@@ -22,6 +22,7 @@ export const CAPABILITIES = [
   "hub.merge",
   "hub.redact",
   "hub.session",
+  "hub.trace",
   "hub.task",
   "hub.note",
   "hub.queue",

@@ -15,8 +15,8 @@ import * as Candidate from "../hub/NoteCandidate.ts";
 import * as Index from "../hub/NoteIndex.ts";
 import * as Notes from "../hub/NoteProjection.ts";
 import { readGenesis } from "../trust/Genesis.ts";
-import { mustResolve, readPrivateKey } from "./shared.ts";
-import { withWork, workFlag } from "./work.ts";
+import { membershipOrNull, mustResolve, readPrivateKey, withWork, workFlag } from "./shared.ts";
+import * as Pack from "../context/Pack.ts";
 
 const keyFlag = Flag.string("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
@@ -233,13 +233,11 @@ const check = Command.make(
         // a required check stops being read.
         const changed = touched ? yield* touchedPaths() : null;
         const source = yield* Audit.workTree();
-        // A range answers renames from its own diff, so the extra listing that
-        // lets a moved note match a scoped query is only worth its walk on the
-        // work-tree read.
-        const notes = yield* Index.select(
-          query,
-          ranged ? undefined : yield* Audit.present(source, query),
-        );
+        // Let range auditing follow renames before filtering resolved paths.
+        // The work-tree selection instead includes anchors missing at source.
+        const notes = yield* ranged
+          ? Index.select()
+          : Index.select(query, yield* Audit.present(source, query));
         const results =
           base._tag === "Some" && head._tag === "Some"
             ? yield* Audit.auditRange(
@@ -512,7 +510,10 @@ export const whyCommand = Command.make(
         const selected = yield* Index.select(query, yield* Audit.present(source, query));
         const scoped = query === undefined ? selected.filter((note) => note.pinned) : selected;
         const notes = yield* Audit.auditAll(scoped, source, query);
-        const memory = (yield* Memory.distill()).entries;
+        const repository = yield* Repository;
+        const base = yield* repository.resolve(yield* repository.head);
+        const view = base === null ? null : yield* Pack.capture(base);
+        const memory = (yield* Memory.derive({ view, ...(yield* membershipOrNull()) })).entries;
         if (json) {
           yield* Console.log(
             JSON.stringify(

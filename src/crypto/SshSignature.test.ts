@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { describe, it } from "@effect/vitest";
 
 import { Effect, Result } from "effect";
@@ -399,3 +400,22 @@ describe("SshSignature", () => {
     );
   });
 });
+
+it.effect(
+  "signatures and fingerprints bind the same bytes in Uint8Array and pooled Buffer views",
+  () =>
+    Effect.gen(function* () {
+      const key = rfcKey();
+      const message = encoder.encode("bounded message");
+      const buffer = Buffer.from("prefixbounded messagesuffix").subarray(6, 21);
+      const ordinary = yield* sign(key, message, NAMESPACE);
+      assert.equal(yield* sign(key, buffer, NAMESPACE), ordinary);
+      assert.notEqual(yield* verify(ordinary, buffer, NAMESPACE), null);
+      const wrapped = {
+        ...key.publicKey,
+        blob: Buffer.from(key.publicKey.blob),
+        point: Buffer.from(key.publicKey.point),
+      };
+      assert.equal(yield* fingerprint(wrapped), yield* fingerprint(key.publicKey));
+    }),
+);

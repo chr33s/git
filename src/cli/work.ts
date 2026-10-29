@@ -5,94 +5,13 @@
  * checkout rather than one of the bare repositories under `--root`.
  * Descriptions stay at the registration site in `main.ts`.
  */
-import * as path from "node:path";
-
-import { Console, Context, Effect, Layer } from "effect";
+import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import * as Checkout from "../git/Checkout.ts";
 import { quoteListPath } from "../git/Diff.ts";
-import { Invalid } from "../git/Error.ts";
-import { MergeState } from "../git/MergeState.ts";
-import { stores } from "../git/Node.ts";
-import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
-import { IndexStore, WorkTree } from "../git/Work.ts";
-import { workspace } from "../git/Work.node.ts";
-import { GitInvocation } from "./GitCompat.ts";
-import { discoverRepository } from "./GitCompat.node.ts";
-import { cliSignature, mustResolve } from "./shared.ts";
-
-/**
- * A checkout, rather than one of the bare repositories under `--root`.
- *
- * The working-tree commands are the only ones that need files on disk, so
- * they take `--work` — a directory whose repository is `.git` inside it,
- * which is the layout `git` itself uses and the reason the two can be
- * pointed at the same directory.
- */
-export const workFlag = Flag.string("work").pipe(
-  Flag.optional,
-  Flag.withDescription("Explicit checkout selector for extension commands"),
-);
-
-class WorkPaths extends Context.Service<
-  WorkPaths,
-  { readonly root: string; readonly base: string }
->()("cli/WorkPaths") {}
-
-const workPath = Effect.fn("cli.workPath")(function* (value: string) {
-  const paths = yield* WorkPaths;
-  return (
-    path.relative(paths.root, path.resolve(paths.base, value)).split(path.sep).join("/") || "."
-  );
-});
-
-export const withWork = <A, E>(
-  work: { readonly _tag: "None" } | { readonly _tag: "Some"; readonly value: string },
-  effect: Effect.Effect<A, E, Repository | WorkTree | IndexStore | MergeState | WorkPaths>,
-) =>
-  Effect.gen(function* () {
-    const invocation = yield* GitInvocation;
-    if (invocation.bare) {
-      return yield* new Invalid({
-        field: "bare",
-        reason: "this command requires a work tree",
-      });
-    }
-    let selected = invocation;
-    if (invocation.workTree === undefined && work._tag === "Some") {
-      const location = path.resolve(invocation.cwd, work.value);
-      // The extension's checkout selector chooses a repository to discover;
-      // an explicit Git directory already selects its metadata separately.
-      selected =
-        invocation.gitDir === undefined
-          ? { ...invocation, cwd: location }
-          : { ...invocation, workTree: location };
-    }
-    const found = yield* discoverRepository(selected);
-    if (found === null || found.workTree === null) {
-      return yield* new Invalid({
-        field: "repository",
-        reason: "not a Git work tree",
-      });
-    }
-    const relative = path.relative(found.workTree, invocation.cwd);
-    const base =
-      relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
-        ? found.workTree
-        : invocation.cwd;
-    return yield* effect.pipe(
-      Effect.provideService(WorkPaths, { root: found.workTree, base }),
-      Effect.provide(
-        GitRepository.layer.pipe(
-          Layer.provide(GitRepository.hooksNoop),
-          Layer.provide(stores(found.gitDir)),
-          Layer.provideMerge(workspace(found.workTree, found.gitDir)),
-        ),
-      ),
-    );
-  });
+import { cliSignature, mustResolve, withWork, workFlag, workPath } from "./shared.ts";
 
 /**
  * `git status --porcelain`, deliberately.

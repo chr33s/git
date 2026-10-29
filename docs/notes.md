@@ -1616,3 +1616,7 @@ retire
 rather than silently converting changed code into a new truth.
 
 That explicit judgment boundary is the core invariant of the feature.
+
+## Relationship to proactive memory
+
+[Proactive memory](proactive-memory.md) may recall eligible notes and check their captured evidence during bounded maintenance. These checks report evidence availability and drift; they do not confirm, replace, retire, or rewrite an anchored note. Those lifecycle judgments remain explicit user operations. Semantic curation produces authored draft Concepts; it does not turn observations into anchored constraints. See the [memory invariants](proactive-memory.md#invariants) and [publication lifecycle](proactive-memory.md#outcome-assistance-and-draft-publication) for the authority boundary. Session-start memory is reference context and does not implement the task-aware `why` workflow proposed above.

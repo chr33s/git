@@ -71,6 +71,9 @@ const PREFIXES = [
   "npm_",
 ];
 
+/** What a token prefix may not follow: the inside of a word. */
+const WORD = /[\p{L}\p{N}_]/u;
+
 /** A credential inside a URL: `scheme://user:secret@host`. */
 const CREDENTIALED_URI = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:([^\s/@]{4,})@/gi;
 
@@ -98,7 +101,27 @@ const DENSE = /\b[A-Za-z0-9+/_=-]{32,}\b/g;
  * are configuration, and configuration belongs in `refs/meta/policy` where
  * every replica applies the same rules.
  */
-export const scan = (text: string): ReadonlyArray<Finding> => {
+/**
+ * Whether the value being scanned is an identifier somebody else minted.
+ *
+ * Every pattern rule still applies — a `ghp_` prefix is a token wherever it is
+ * put — but the entropy rule does not, because an opaque base62 id of
+ * thirty-two characters is indistinguishable from a token by entropy alone.
+ * Scanned as prose, an OTel trace id or a provider's conversation id refused
+ * the whole record, with no override and nothing written, and it did so for
+ * some providers and not others: hex- and UUID-shaped ids stay under the
+ * threshold and base62 ones do not.
+ *
+ * Named here rather than in either caller so both hold the same line.
+ * `telemetry/Records.record` and `context/Exposure.expose` each write to an
+ * append-only ref that this version cannot rewind, and each had its own idea
+ * of which fields this covers.
+ */
+export interface Reading {
+  readonly opaque?: boolean;
+}
+
+export const scan = (text: string, reading: Reading = {}): ReadonlyArray<Finding> => {
   const found: Array<Finding> = [];
   const seen = new Set<string>();
 
@@ -115,6 +138,13 @@ export const scan = (text: string): ReadonlyArray<Finding> => {
     // the key beside it. Nothing else covers a 20-character token: `DENSE`
     // wants 32, and `NAMED_SECRET` wants a `key=` in front.
     for (let at = text.indexOf(prefix); at >= 0; at = text.indexOf(prefix, at + 1)) {
+      // At the start of a word only. A provider mints its prefix at the front
+      // of a token, never inside one — and inside ordinary words is exactly
+      // where `sk-` and `npm_` turn up: `risk-assessment-tool`,
+      // `disk-usage-report`, `my_npm_helper`. Scanned unanchored, a tool
+      // record naming any of those was refused as carrying a token, with no
+      // override, on the write path of every telemetry record.
+      if (at > 0 && WORD.test(text[at - 1] ?? "")) continue;
       const rest = text.slice(at).split(/[\s"',;]/)[0] ?? prefix;
       // The prefix alone is a word — `sk-` appears in prose — so it counts
       // only with a body behind it long enough to be the token it announces.
@@ -135,7 +165,7 @@ export const scan = (text: string): ReadonlyArray<Finding> => {
     }
   }
   for (const [match] of text.matchAll(DENSE)) {
-    if (entropy(match) > 4.5) note("high-entropy string", match);
+    if (reading.opaque !== true && entropy(match) > 4.5) note("high-entropy string", match);
   }
 
   return found;

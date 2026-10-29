@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -21,18 +22,38 @@ import { Effect, Layer } from "effect";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
 import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
+import * as Session from "../hub/Session.ts";
 import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "bin.ts");
 
-const cli = async (args: ReadonlyArray<string>): Promise<string> => {
-  const result = await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" });
+const cli = async (args: ReadonlyArray<string>, cwd?: string): Promise<string> => {
+  const result = await execFileAsync(process.execPath, [entry, ...args], { cwd, encoding: "utf8" });
   return `${result.stdout}${result.stderr}`;
 };
 
-const failing = (args: ReadonlyArray<string>): Promise<string> =>
-  cli(args).then(
+/**
+ * The note itself, without the derivation's account of itself.
+ *
+ * `cli` concatenates stdout and stderr; the note is stdout, and every notice
+ * about budgets, exclusions and persistence goes to stderr so a hook can pipe
+ * one without parsing the other.
+ */
+const noteIn = (output: string): string =>
+  output
+    .split("\n")
+    .filter(
+      (line) =>
+        !line.startsWith("!") &&
+        !line.startsWith("note ") &&
+        line !== "unchanged; the derivation matches the stored note",
+    )
+    .join("\n")
+    .trim();
+
+const failing = (args: ReadonlyArray<string>, cwd?: string): Promise<string> =>
+  cli(args, cwd).then(
     () => "",
     (error: { stdout?: string; stderr?: string }) => `${error.stdout ?? ""}${error.stderr ?? ""}`,
   );
@@ -190,8 +211,20 @@ describe("cli session", () => {
 
       // What a second agent reads. The sandbox that held the transcript is gone;
       // this is what the repository kept.
-      const shown = JSON.parse(await cli(["session", "show", "--root", root, "project", session]));
+      const shown = JSON.parse(
+        await cli(["session", "show", "--root", root, "--repo", "project", session]),
+      );
       assert.equal(shown.session, session);
+
+      // And the old spelling, where this argument named the repository. The
+      // `--branch` guard catches the two-argument form; this one went through,
+      // resolving whichever checkout the process was standing in, projecting a
+      // session named after the repository, printing `exists: false` and
+      // exiting zero — the silent misread the move to `--repo` was supposed to
+      // prevent.
+      const misread = await failing(["session", "show", "project"], path.join(root, "project"));
+      assert.match(misread, /has no session 'project'/);
+
       assert.equal(shown.agent.kind, "claude-code");
       assert.equal(shown.agent.model, "claude-fable-5");
       assert.deepEqual(
@@ -214,6 +247,7 @@ describe("cli session", () => {
         "show",
         "--root",
         root,
+        "--repo",
         "project",
         "0192f000-0000-7000-8000-0000000000ff",
       ]);
@@ -239,7 +273,16 @@ describe("cli session", () => {
       ]);
 
       const shown = JSON.parse(
-        await cli(["session", "show", "--root", root, "--branch", "refs/heads/topic", "project"]),
+        await cli([
+          "session",
+          "show",
+          "--root",
+          root,
+          "--repo",
+          "project",
+          "--branch",
+          "refs/heads/topic",
+        ]),
       );
       assert.equal(shown.session, first);
       assert.deepEqual(
@@ -252,11 +295,42 @@ describe("cli session", () => {
         "show",
         "--root",
         root,
+        "--repo",
+        "project",
         "--branch",
         "refs/heads/nowhere",
-        "project",
       ]);
       assert.match(missing, /no session has produced/);
+
+      // The old shape, where the repository was a positional. It now parses as
+      // a session, `--branch` discards it, and `--root` on its own names no
+      // repository — so without a check this read whatever checkout the
+      // process was standing in and answered for the wrong repository.
+      const positional = await failing([
+        "session",
+        "show",
+        "--root",
+        root,
+        "project",
+        "--branch",
+        "refs/heads/topic",
+      ]);
+      assert.match(positional, /--root names a directory of repositories/);
+
+      // And a session and a branch together are ambiguous whichever way they
+      // were meant, so that is refused on its own terms.
+      const ambiguous = await failing([
+        "session",
+        "show",
+        "--root",
+        root,
+        "--repo",
+        "project",
+        "0192f000-0000-7000-8000-000000000001",
+        "--branch",
+        "refs/heads/topic",
+      ]);
+      assert.match(ambiguous, /name a session or --branch, not both/);
     }),
   );
 
@@ -279,7 +353,9 @@ describe("cli session", () => {
           "project",
         ]);
       const show = async (branch: string) =>
-        JSON.parse(await cli(["session", "show", "--root", root, "--branch", branch, "project"]));
+        JSON.parse(
+          await cli(["session", "show", "--root", root, "--branch", branch, "--repo", "project"]),
+        );
       await produce(first);
       await produce(second);
       assert.equal((await show("refs/heads/topic")).session, second);
@@ -340,7 +416,7 @@ describe("cli session", () => {
       ).trim();
 
       const blocked = JSON.parse(
-        await cli(["session", "show", "--root", root, "project", session]),
+        await cli(["session", "show", "--root", root, "--repo", "project", session]),
       );
       assert.equal(blocked.decisions.length, 1);
       assert.equal(blocked.decisions[0].id, decision);
@@ -364,7 +440,7 @@ describe("cli session", () => {
       ]);
 
       const answered = JSON.parse(
-        await cli(["session", "show", "--root", root, "project", session]),
+        await cli(["session", "show", "--root", root, "--repo", "project", session]),
       );
       assert.equal(answered.decisions[0].chose, "alias");
     }),
@@ -420,12 +496,23 @@ describe("cli session", () => {
       // synchronous form takes `input` — the async one leaves the pipe open and
       // the script waits on it forever.
       execFileSync("/bin/sh", [script, "start"], {
-        input: JSON.stringify({ prompt: "fix the flaky test" }),
+        input: JSON.stringify({ session_id: "harness-a", prompt: "fix the flaky test" }),
         encoding: "utf8",
       });
 
-      const id = (await fs.readFile(path.join(work, ".chr33s", "session.id"), "utf8")).trim();
-      const shown = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+      // Keyed by the harness's own session: two agents in one checkout must
+      // not share a state file, or the second reports against the first's id.
+      const keyed = (name: string, harness: string, extension: string) =>
+        path.join(
+          work,
+          ".chr33s",
+          `${name}.${createHash("sha256").update(harness).digest("hex")}.${extension}`,
+        );
+      const state = keyed("session", "harness-a", "id");
+      const id = (await fs.readFile(state, "utf8")).trim();
+      const shown = JSON.parse(
+        await cli(["session", "show", "--root", root, "--repo", "project", id]),
+      );
       assert.deepEqual(
         shown.prompts.map((entry: { prompt: string }) => entry.prompt),
         ["fix the flaky test"],
@@ -433,26 +520,109 @@ describe("cli session", () => {
 
       // A second start is the same session, not a second account of it.
       execFileSync("/bin/sh", [script, "start"], {
-        input: JSON.stringify({ prompt: "and again" }),
+        input: JSON.stringify({ session_id: "harness-a", prompt: "and again" }),
         encoding: "utf8",
       });
-      assert.equal(
-        (await fs.readFile(path.join(work, ".chr33s", "session.id"), "utf8")).trim(),
-        id,
-        "one opening per session",
-      );
+      assert.equal((await fs.readFile(state, "utf8")).trim(), id, "one opening per session");
+
+      // A concurrent harness session opens its own, and reports its own.
+      execFileSync("/bin/sh", [script, "start"], {
+        input: JSON.stringify({ session_id: "harness-b", prompt: "something else" }),
+        encoding: "utf8",
+      });
+      const other = (await fs.readFile(keyed("session", "harness-b", "id"), "utf8")).trim();
+      assert.notEqual(other, id, "concurrent harness sessions do not share an id");
 
       // Stopping reports what it produced and clears the state, so the next
       // prompt opens a new session rather than appending to a finished one.
+      // A learning the agent left behind is handed over by file rather than on
+      // a command line, and a session that left none records none.
+      await fs.writeFile(
+        keyed("learning", "harness-a", "txt"),
+        "gotcha: the flaky test needs the production fixture\n",
+      );
       execFileSync("/bin/sh", [script, "stop"], {
-        input: "{}",
+        input: JSON.stringify({ session_id: "harness-a" }),
         encoding: "utf8",
         env: { ...process.env, CHR33S_GIT_BRANCH: "refs/heads/topic" },
       });
-      const after = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+      const after = JSON.parse(
+        await cli(["session", "show", "--root", root, "--repo", "project", id]),
+      );
       assert.deepEqual(after.refs, ["refs/heads/topic"]);
-      assert.equal(fsSync.existsSync(path.join(work, ".chr33s", "session.id")), false);
+      assert.deepEqual(after.notes, ["gotcha: the flaky test needs the production fixture"]);
+      assert.equal(fsSync.existsSync(state), false);
+      // The learning goes with the state: redelivering it would count one
+      // observation twice.
+      const learning = keyed("learning", "harness-a", "txt");
+      assert.equal(fsSync.existsSync(learning), false);
+
+      // A report that does not land keeps the learning for the next stop of
+      // the same harness session: discarded, it would have been counted never
+      // (§10.3). The state remains for a retry against the same session.
+      await fs.writeFile(state, `${id}\n`);
+      // Over the record cap, which `produce` refuses before writing anything.
+      await fs.writeFile(learning, `gotcha: ${"kept until it is recorded ".repeat(12_000)}\n`);
+      assert.throws(() =>
+        execFileSync("/bin/sh", [script, "stop"], {
+          input: JSON.stringify({ session_id: "harness-a" }),
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }),
+      );
+      assert.equal(
+        fsSync.existsSync(state),
+        true,
+        "an unrecorded handoff retains its session identity",
+      );
+      assert.equal(fsSync.existsSync(learning), true, "an unrecorded learning is not discarded");
     }),
+  );
+
+  it.live(
+    "recovers an accepted handoff after cache failure and supplies it through the installed next-session hook",
+    () =>
+      Effect.promise(async () => {
+        const work = path.join(root, "handoff-work");
+        await cli(["session", "enable", "--root", root, "--key", key, "--work", work, "project"]);
+        const script = path.join(work, ".chr33s", "session.sh");
+        const invoke = (phase: string, harness: string) =>
+          execFileSync("/bin/sh", [script, phase], {
+            input: JSON.stringify({ session_id: harness, prompt: "work" }),
+            encoding: "utf8",
+          });
+        const suffix = createHash("sha256").update("handoff-a").digest("hex");
+        const state = path.join(work, ".chr33s", `session.${suffix}.id`);
+        const pending = path.join(work, ".chr33s", `output.${suffix}.json`);
+        const learning = path.join(work, ".chr33s", `learning.${suffix}.txt`);
+        invoke("start", "handoff-a");
+        const session = (await fs.readFile(state, "utf8")).trim();
+        await fs.writeFile(learning, "gotcha: use the durable handoff fixture");
+        const lock = path.join(project, "refs", "notes", "hub", "memory.lock");
+        await fs.mkdir(path.dirname(lock), { recursive: true });
+        await fs.writeFile(lock, "another writer");
+        const first = JSON.parse(invoke("stop", "handoff-a"));
+        assert.equal(first.state, "recorded-projection-unavailable");
+        assert.ok(fsSync.existsSync(pending));
+        assert.ok(fsSync.existsSync(state));
+        assert.equal(fsSync.existsSync(learning), false);
+        const retained = JSON.parse(await fs.readFile(pending, "utf8"));
+        assert.equal(retained.commit, `sha1:${first.commit}`);
+        await fs.rm(lock);
+        const retry = JSON.parse(invoke("stop", "handoff-a"));
+        assert.equal(retry.state, "recorded");
+        assert.equal(retry.recovered, true);
+        assert.equal(retry.commit, first.commit);
+        assert.equal(fsSync.existsSync(pending), false);
+        const projection = await inRepository(project, Session.project(session));
+        assert.deepEqual(projection.notes, ["gotcha: use the durable handoff fixture"]);
+        // The installed UserPromptSubmit command's stdout is the harness's added context.
+        const context = invoke("start", "handoff-b");
+        assert.match(context, /Reference data from prior work/u);
+        assert.match(context, /gotcha: use the durable handoff fixture/u);
+        assert.ok(context.includes(`sha1:${first.commit}`));
+        assert.equal(invoke("start", "handoff-b"), "", "one briefing per active session state");
+      }),
   );
 
   it.live("keeps overlapping harness sessions separate in one checkout", () =>
@@ -486,7 +656,9 @@ describe("cli session", () => {
       invoke("stop", "harness-b", "", "refs/heads/second");
       invoke("stop", "harness-a", "", "refs/heads/first");
       for (const id of ids) {
-        const shown = JSON.parse(await cli(["session", "show", "--root", root, "project", id]));
+        const shown = JSON.parse(
+          await cli(["session", "show", "--root", root, "--repo", "project", id]),
+        );
         assert.equal(shown.prompts.length, 1);
         const prompt = shown.prompts[0].prompt;
         assert.ok(["first session's work", "second session's work"].includes(prompt));
@@ -522,7 +694,9 @@ describe("cli session", () => {
         return session;
       };
 
-      await note("gotcha: run npm install before typecheck; postinstall applies patches");
+      const first = await note(
+        "gotcha: run npm install before typecheck; postinstall applies patches",
+      );
       await note("gotcha: run npm install before typecheck; postinstall applies patches");
       const only = await note("convention: tests colocate as *.test.ts beside sources");
 
@@ -538,12 +712,19 @@ describe("cli session", () => {
         `what was seen more often comes first: ${memory}`,
       );
 
-      // Cited, so a reader can check it against the record rather than trust it.
-      assert.ok(memory.includes(only), `entries name the sessions they came from: ${memory}`);
+      // Cited, so a reader can check it against the record rather than trust
+      // it — in the entries themselves, not only in the stamp line, which
+      // names the newest session whatever the entries cite.
+      const entries = noteIn(memory);
+      assert.ok(entries.includes(first), `entries name the sessions they came from: ${memory}`);
+      assert.ok(entries.includes(only), `entries name the sessions they came from: ${memory}`);
 
-      // Read back without distilling: it is a note now, not a computation.
+      // Read back without distilling: it is a note now, not a computation —
+      // and it says so, because a stored note can come from another branch or
+      // from before a redaction (§8.4).
       const stored = await cli(["session", "memory", "--root", root, "project"]);
-      assert.equal(stored.trim(), memory.trim());
+      assert.match(stored, /historical cache/);
+      assert.equal(noteIn(stored), noteIn(memory));
     }),
   );
 

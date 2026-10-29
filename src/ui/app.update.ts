@@ -1171,9 +1171,9 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    SucceededLoadFileAt: ({ oid, path, content }) => {
+    SucceededLoadFileAt: ({ oid, tip, path, content }) => {
       const view = viewOf(model);
-      if (view.selected !== path || !answersRevision(model, oid)) return { model };
+      if (view.selected !== path || !answersRevision(model, oid, tip)) return { model };
       return {
         model: {
           ...model,
@@ -1187,9 +1187,9 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    FailedLoadFileAt: ({ oid, path, reason }) => {
+    FailedLoadFileAt: ({ oid, tip, path, reason }) => {
       const view = viewOf(model);
-      if (view.selected !== path || !answersRevision(model, oid)) return { model };
+      if (view.selected !== path || !answersRevision(model, oid, tip)) return { model };
       return {
         model: {
           ...model,
@@ -1900,11 +1900,13 @@ const answersOpen = (model: Model, id: string): boolean =>
  * interrupt by Command *name*, so neither supersedes the other: clicking
  * "Back to tip" while a history read is out leaves both in flight. The path
  * alone cannot tell them apart — they are the same file — so the answer
- * carries its revision, empty for the tip, and only the one that matches what
+ * carries its revision and requested live tip, and only the one that matches what
  * the click already recorded may paint.
  */
-const answersRevision = (model: Model, oid: string): boolean =>
-  (oid === "" ? null : oid) === model.codeScreen.at;
+const answersRevision = (model: Model, oid: string, tip: string | null): boolean =>
+  oid === ""
+    ? model.codeScreen.at === null && tip !== null && tip === viewOf(model).tip
+    : model.codeScreen.at === oid && tip === null;
 
 /**
  * Whether a history answer belongs to the panel that is open.

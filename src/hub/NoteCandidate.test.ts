@@ -10,12 +10,15 @@ import { describe, it } from "@effect/vitest";
 
 import { Effect, Layer } from "effect";
 
-import { generate, type PrivateKey } from "../crypto/SshSignature.ts";
+import { formatPublicKey, generate, type PrivateKey } from "../crypto/SshSignature.ts";
 import { stores } from "../git/Memory.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Note from "./Note.ts";
+import * as Certificate from "../trust/Certificate.ts";
+import * as Log from "../trust/Log.ts";
+import { create, readGenesis, signGenesis, writeGenesis } from "../trust/Genesis.ts";
 import * as Candidate from "./NoteCandidate.ts";
 import * as Session from "./Session.ts";
 
@@ -55,14 +58,32 @@ const worked = Effect.fn("test.worked")(function* (input: {
   readonly note: string | null;
   readonly commits: ReadonlyArray<string>;
 }) {
+  const stored = yield* readGenesis();
+  let repo = stored?.genesis.repoId;
+  if (stored === null) {
+    const genesis = yield* create([formatPublicKey(input.key.publicKey)], 1);
+    yield* writeGenesis(genesis, [yield* signGenesis(genesis, input.key)]);
+    yield* Log.issue(
+      yield* Certificate.grant({
+        repo: genesis.repoId,
+        publicKey: formatPublicKey(input.key.publicKey),
+        capabilities: ["hub.session", "hub.redact"],
+        id: Log.newId(),
+      }),
+      [input.key],
+    );
+    repo = genesis.repoId;
+  }
+  assert.notEqual(repo, undefined);
+  if (repo === undefined) throw new Error("fixture has no repository identity");
   const { session } = yield* Session.open({
-    repo: REPO,
+    repo,
     agent: { kind: "claude", model: "opus", harness: "cli" },
     prompt: "fix the path handling",
     key: input.key,
   });
   yield* Session.produced({
-    repo: REPO,
+    repo,
     session,
     commits: input.commits,
     note: input.note,
@@ -78,6 +99,49 @@ const noteRefs = Effect.fn("test.noteRefs")(function* () {
 });
 
 describe("candidate constraints", () => {
+  it.effect("excludes redacted observations and their commit links before collection", () =>
+    Effect.gen(function* () {
+      const key = yield* generate("agent@example.com");
+      const base = yield* committed({ "secret.ts": "withdrawn\n" }, null);
+      const head = yield* committed({ "secret.ts": "withdrawn\n", "safe.ts": "safe\n" }, base);
+      const session = yield* worked({
+        key,
+        note: "gotcha: withdrawn observation",
+        commits: [base],
+      });
+      const stored = yield* readGenesis();
+      assert.ok(stored);
+      const walked = yield* Session.entries(session);
+      const target = walked.events.find((entry) => entry.payload.type === "session.produced");
+      assert.ok(target);
+      yield* Session.produced({
+        repo: stored.genesis.repoId,
+        session,
+        key,
+        commits: [head],
+        note: "gotcha: surviving observation",
+      });
+      yield* Session.redact({
+        repo: stored.genesis.repoId,
+        session,
+        key,
+        target: target.payload.id,
+        reason: "withdrawn",
+      });
+      assert.ok(
+        (yield* Session.entries(session)).events.some(
+          (entry) =>
+            entry.commit === target.commit &&
+            entry.payload.type === "session.produced" &&
+            entry.payload.note === "gotcha: withdrawn observation",
+        ),
+      );
+      assert.deepEqual(yield* Candidate.candidates(), [
+        { kind: "gotcha", text: "surviving observation", session, paths: ["safe.ts"] },
+      ]);
+    }).pipe(scenario),
+  );
+
   it.effect("suggests an uncaptured observation against the files its session changed", () =>
     Effect.gen(function* () {
       const key = yield* generate("agent@example.com");

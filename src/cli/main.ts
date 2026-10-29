@@ -48,8 +48,10 @@ import { mintDelegation } from "../server/Auth.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { GitInvocation } from "./GitCompat.ts";
 import { parseInvocation, runCoreCompatibility } from "./GitCompat.node.ts";
+import { contextCommand } from "./context.ts";
 import { hubCommand } from "./hub.ts";
 import { idCommand } from "./id.ts";
+import { knowledgeCommand } from "./knowledge.ts";
 import { noteCommand, whyCommand } from "./note.ts";
 import * as replay from "./replay.ts";
 import {
@@ -61,6 +63,7 @@ import {
   resolveRev,
   rootFlag,
   withRepo,
+  commaList,
 } from "./shared.ts";
 import { sessionCommand } from "./session.ts";
 import { serveCommand } from "./serve.ts";
@@ -68,6 +71,7 @@ import { fetchCommand, pullCommand } from "./transport.ts";
 import { queueCommand } from "./queue.ts";
 import { socialCommand } from "./social.ts";
 import { taskCommand } from "./task.ts";
+import { traceCommand } from "./trace.ts";
 import { prCommand } from "./pr.ts";
 import { wakeCommand } from "./wake.ts";
 import * as work from "./work.ts";
@@ -218,7 +222,7 @@ const credential = Command.make(
           return yield* mintDelegation({
             key: signer,
             repo: stored.genesis.repoId,
-            capabilities: capability.split(",").map((value) => value.trim()),
+            capabilities: commaList(capability),
             ttlSeconds: ttl,
           });
         }),
@@ -375,7 +379,7 @@ const credentialHelper = Command.make(
           return yield* mintDelegation({
             key: signer,
             repo: stored.genesis.repoId,
-            capabilities: capability.split(",").map((value) => value.trim()),
+            capabilities: commaList(capability),
             audience,
             ttlSeconds: ttl,
           });
@@ -1093,6 +1097,7 @@ const git = Command.make("git+").pipe(
     replay.cherryPickCommand.pipe(Command.withDescription("Replay one commit onto another")),
     clone.pipe(Command.withDescription("Clone a repository over smart HTTP")),
     work.commitCommand.pipe(Command.withDescription("Commit what is staged")),
+    contextCommand.pipe(Command.withDescription("Git-native context packs, renders and exposures")),
     diff.pipe(Command.withDescription("Unified diff between two revisions")),
     files.pipe(Command.withDescription("List the files a revision's tree holds")),
     fetchCommand.pipe(
@@ -1105,6 +1110,9 @@ const git = Command.make("git+").pipe(
     idCommand.pipe(Command.withDescription("Stable principal identity and device rotation")),
     history.pipe(Command.withDescription("Commits that changed one path")),
     init.pipe(Command.withDescription("Create an empty bare repository")),
+    knowledgeCommand.pipe(
+      Command.withDescription("Knowledge Concepts: check structure, provenance and freshness"),
+    ),
     log.pipe(Command.withDescription("Commit history, newest first")),
     merge.pipe(Command.withDescription("Three-way merge two revisions")),
     noteCommand.pipe(Command.withDescription("Code-anchored repository constraints")),
@@ -1138,6 +1146,9 @@ const git = Command.make("git+").pipe(
     socialCommand.pipe(Command.withDescription("Social graph: follows, vouches and discovery")),
     tag.pipe(Command.withDescription("List, create or delete tags")),
     taskCommand.pipe(Command.withDescription("What needs doing, and who is on it")),
+    traceCommand.pipe(
+      Command.withDescription("Append signed runtime telemetry to a session's audit trace"),
+    ),
     queueCommand.pipe(Command.withDescription("Land approved pull requests as one tested batch")),
     wakeCommand,
     webhookCommand.pipe(

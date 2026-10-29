@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "file": "artifacts.tar.gz",
+  "sha256": "386f74e4c423ff4c2325fff46bd9d93982f1bf70e4113513148e4ca88697a830",
+  "bytes": 2023185,
+  "contains": "Frozen plan, corpus, exact input/output bytes, provider telemetry, sample/review/verification artifacts, strict-fsck-checked synthetic Git bundles, and measured runtime source."
+}

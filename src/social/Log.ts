@@ -380,5 +380,3 @@ export const verified = Effect.fn("social.Log.verified")(function* (
 export const contains = AppendOnly.containsOf(LOG);
 
 export const ancestry = AppendOnly.ancestryOf(LOG);
-
-export type LogError = Invalid | ObjectNotFound | StorageFailure;

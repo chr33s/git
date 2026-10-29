@@ -1,0 +1,983 @@
+{
+  "version": 1,
+  "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+  "reviews": [
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:eb8f3c8223ac5db2988c91a013c98d3e07cf40e0c2a40188b32a630e6b890e27",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H01-color-environment",
+        "testsPassed": true,
+        "passedTests": 13,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:eb8f3c8223ac5db2988c91a013c98d3e07cf40e0c2a40188b32a630e6b890e27",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "eb8f3c8223ac5db2988c91a013c98d3e07cf40e0c2a40188b32a630e6b890e27.answer.txt",
+          "eb8f3c8223ac5db2988c91a013c98d3e07cf40e0c2a40188b32a630e6b890e27.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:7c105198f365894ca223cd33bf36342b2687030541d5a894d4cdf84205fff3dd",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H01-color-environment",
+        "testsPassed": true,
+        "passedTests": 13,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:7c105198f365894ca223cd33bf36342b2687030541d5a894d4cdf84205fff3dd",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "7c105198f365894ca223cd33bf36342b2687030541d5a894d4cdf84205fff3dd.answer.txt",
+          "7c105198f365894ca223cd33bf36342b2687030541d5a894d4cdf84205fff3dd.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:34a807089518ad653a8e285bca44eac8bca52825a90f5d3775609c87d685abff",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H01-color-environment",
+        "testsPassed": true,
+        "passedTests": 13,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:34a807089518ad653a8e285bca44eac8bca52825a90f5d3775609c87d685abff",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "34a807089518ad653a8e285bca44eac8bca52825a90f5d3775609c87d685abff.answer.txt",
+          "34a807089518ad653a8e285bca44eac8bca52825a90f5d3775609c87d685abff.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:caaaf85d446631e2e0f823fe3db0c31818dfdb8622f006cf0ce9aa466957594d",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H01-color-environment",
+        "testsPassed": true,
+        "passedTests": 13,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:caaaf85d446631e2e0f823fe3db0c31818dfdb8622f006cf0ce9aa466957594d",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "caaaf85d446631e2e0f823fe3db0c31818dfdb8622f006cf0ce9aa466957594d.answer.txt",
+          "caaaf85d446631e2e0f823fe3db0c31818dfdb8622f006cf0ce9aa466957594d.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 1,
+      "staleClaimsSupplied": 1,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:4902cb48fc4c2b93d0ef6090c7ba125770d68bd7e5574cafdb2d25e1c99d4ca0",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H01-color-environment",
+        "testsPassed": true,
+        "passedTests": 13,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:4902cb48fc4c2b93d0ef6090c7ba125770d68bd7e5574cafdb2d25e1c99d4ca0",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "4902cb48fc4c2b93d0ef6090c7ba125770d68bd7e5574cafdb2d25e1c99d4ca0.answer.txt",
+          "4902cb48fc4c2b93d0ef6090c7ba125770d68bd7e5574cafdb2d25e1c99d4ca0.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:6e296edb836efa35d2cbae0bd6fb3489550bbec91cd521d4c0eb7aa9756c3e4a",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H01-color-environment",
+        "testsPassed": true,
+        "passedTests": 13,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:6e296edb836efa35d2cbae0bd6fb3489550bbec91cd521d4c0eb7aa9756c3e4a",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "6e296edb836efa35d2cbae0bd6fb3489550bbec91cd521d4c0eb7aa9756c3e4a.answer.txt",
+          "6e296edb836efa35d2cbae0bd6fb3489550bbec91cd521d4c0eb7aa9756c3e4a.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:904f53a146b983eb0c07c7394c7b8becde62e430826744a8f33f30628cd085cd",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H02-unknown-session",
+        "testsPassed": true,
+        "passedTests": 9,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:904f53a146b983eb0c07c7394c7b8becde62e430826744a8f33f30628cd085cd",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "904f53a146b983eb0c07c7394c7b8becde62e430826744a8f33f30628cd085cd.answer.txt",
+          "904f53a146b983eb0c07c7394c7b8becde62e430826744a8f33f30628cd085cd.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:0f0140cbf44d34b4beb76a656a5521977352dba542c3f6cf6a334cc4d693d1cd",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H02-unknown-session",
+        "testsPassed": true,
+        "passedTests": 9,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:0f0140cbf44d34b4beb76a656a5521977352dba542c3f6cf6a334cc4d693d1cd",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "0f0140cbf44d34b4beb76a656a5521977352dba542c3f6cf6a334cc4d693d1cd.answer.txt",
+          "0f0140cbf44d34b4beb76a656a5521977352dba542c3f6cf6a334cc4d693d1cd.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:3cf8fc8ebf68c87f279bff0b99c16920ab7a08180f2ad9d5f36e1a04390545ee",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H02-unknown-session",
+        "testsPassed": true,
+        "passedTests": 9,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:3cf8fc8ebf68c87f279bff0b99c16920ab7a08180f2ad9d5f36e1a04390545ee",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "3cf8fc8ebf68c87f279bff0b99c16920ab7a08180f2ad9d5f36e1a04390545ee.answer.txt",
+          "3cf8fc8ebf68c87f279bff0b99c16920ab7a08180f2ad9d5f36e1a04390545ee.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:088ea92c4bbc7b825211d78c8db8bfbbbdba9af57610d111464119d64cd14de1",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H03-editor-upgrade",
+        "testsPassed": true,
+        "passedTests": 3,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:088ea92c4bbc7b825211d78c8db8bfbbbdba9af57610d111464119d64cd14de1",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "088ea92c4bbc7b825211d78c8db8bfbbbdba9af57610d111464119d64cd14de1.answer.txt",
+          "088ea92c4bbc7b825211d78c8db8bfbbbdba9af57610d111464119d64cd14de1.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": {
+        "reason": "Historical snapshot declares lit 3.3.3; current main dependencies omit it. Restored the exact historical lockfile with npm ci --ignore-scripts.",
+        "modelEditsChanged": false,
+        "originalEvidence": "088ea92c4bbc7b825211d78c8db8bfbbbdba9af57610d111464119d64cd14de1.verification.environment.json",
+        "dependencyCommit": "f63de6c5300dfc505b91917c9900c020a623661f",
+        "additionalSeconds": 7.925973833
+      },
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:a12c0e04778ad9b727b29916c1f55991efade24bd7443b8102f8220b5ee59d1d",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H03-editor-upgrade",
+        "testsPassed": true,
+        "passedTests": 3,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:a12c0e04778ad9b727b29916c1f55991efade24bd7443b8102f8220b5ee59d1d",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "a12c0e04778ad9b727b29916c1f55991efade24bd7443b8102f8220b5ee59d1d.answer.txt",
+          "a12c0e04778ad9b727b29916c1f55991efade24bd7443b8102f8220b5ee59d1d.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": {
+        "reason": "Historical snapshot declares lit 3.3.3; current main dependencies omit it. Restored the exact historical lockfile with npm ci --ignore-scripts.",
+        "modelEditsChanged": false,
+        "originalEvidence": "a12c0e04778ad9b727b29916c1f55991efade24bd7443b8102f8220b5ee59d1d.verification.environment.json",
+        "dependencyCommit": "f63de6c5300dfc505b91917c9900c020a623661f",
+        "additionalSeconds": 6.284809791000001
+      },
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:cc173fd8663240897ab56531a636fc46a82d236488ef7e153460c9119f983719",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H03-editor-upgrade",
+        "testsPassed": true,
+        "passedTests": 3,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:cc173fd8663240897ab56531a636fc46a82d236488ef7e153460c9119f983719",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "cc173fd8663240897ab56531a636fc46a82d236488ef7e153460c9119f983719.answer.txt",
+          "cc173fd8663240897ab56531a636fc46a82d236488ef7e153460c9119f983719.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": {
+        "reason": "Historical snapshot declares lit 3.3.3; current main dependencies omit it. Restored the exact historical lockfile with npm ci --ignore-scripts.",
+        "modelEditsChanged": false,
+        "originalEvidence": "cc173fd8663240897ab56531a636fc46a82d236488ef7e153460c9119f983719.verification.environment.json",
+        "dependencyCommit": "f63de6c5300dfc505b91917c9900c020a623661f",
+        "additionalSeconds": 5.975248417000001
+      },
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:884c6a44e07540c88db0c963ad546284c530077de3b43f94046e5cbd30da210f",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H03-editor-upgrade",
+        "testsPassed": true,
+        "passedTests": 3,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:884c6a44e07540c88db0c963ad546284c530077de3b43f94046e5cbd30da210f",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "884c6a44e07540c88db0c963ad546284c530077de3b43f94046e5cbd30da210f.answer.txt",
+          "884c6a44e07540c88db0c963ad546284c530077de3b43f94046e5cbd30da210f.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": {
+        "reason": "Historical snapshot declares lit 3.3.3; current main dependencies omit it. Restored the exact historical lockfile with npm ci --ignore-scripts.",
+        "modelEditsChanged": false,
+        "originalEvidence": "884c6a44e07540c88db0c963ad546284c530077de3b43f94046e5cbd30da210f.verification.environment.json",
+        "dependencyCommit": "f63de6c5300dfc505b91917c9900c020a623661f",
+        "additionalSeconds": 5.488406790999999
+      },
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:34bca41be07763bca53fa74851188731f827d33b0db9094e740bab3a40c4b9a0",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H03-editor-upgrade",
+        "testsPassed": true,
+        "passedTests": 3,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:34bca41be07763bca53fa74851188731f827d33b0db9094e740bab3a40c4b9a0",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "34bca41be07763bca53fa74851188731f827d33b0db9094e740bab3a40c4b9a0.answer.txt",
+          "34bca41be07763bca53fa74851188731f827d33b0db9094e740bab3a40c4b9a0.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": {
+        "reason": "Historical snapshot declares lit 3.3.3; current main dependencies omit it. Restored the exact historical lockfile with npm ci --ignore-scripts.",
+        "modelEditsChanged": false,
+        "originalEvidence": "34bca41be07763bca53fa74851188731f827d33b0db9094e740bab3a40c4b9a0.verification.environment.json",
+        "dependencyCommit": "f63de6c5300dfc505b91917c9900c020a623661f",
+        "additionalSeconds": 5.148052457999999
+      },
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:e4c125eb0d469bd886e29ea0b3a28797969b9208ea23dc0dbf31e720c45386dd",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H03-editor-upgrade",
+        "testsPassed": true,
+        "passedTests": 3,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:e4c125eb0d469bd886e29ea0b3a28797969b9208ea23dc0dbf31e720c45386dd",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "e4c125eb0d469bd886e29ea0b3a28797969b9208ea23dc0dbf31e720c45386dd.answer.txt",
+          "e4c125eb0d469bd886e29ea0b3a28797969b9208ea23dc0dbf31e720c45386dd.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": {
+        "reason": "Historical snapshot declares lit 3.3.3; current main dependencies omit it. Restored the exact historical lockfile with npm ci --ignore-scripts.",
+        "modelEditsChanged": false,
+        "originalEvidence": "e4c125eb0d469bd886e29ea0b3a28797969b9208ea23dc0dbf31e720c45386dd.verification.environment.json",
+        "dependencyCommit": "f63de6c5300dfc505b91917c9900c020a623661f",
+        "additionalSeconds": 5.086101957999997
+      },
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:8362a7deb6a7cb0c5b870f4b1ae3ae3cfb426820ddbd92694e32deffdd7c7bcb",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H04-upload-reclaim",
+        "testsPassed": true,
+        "passedTests": 1,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:8362a7deb6a7cb0c5b870f4b1ae3ae3cfb426820ddbd92694e32deffdd7c7bcb",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "8362a7deb6a7cb0c5b870f4b1ae3ae3cfb426820ddbd92694e32deffdd7c7bcb.answer.txt",
+          "8362a7deb6a7cb0c5b870f4b1ae3ae3cfb426820ddbd92694e32deffdd7c7bcb.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:8b37cc8066b9f9400366ee09a0aaa4018f163020f9399ddf485f29ab97e43f2c",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H04-upload-reclaim",
+        "testsPassed": true,
+        "passedTests": 1,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:8b37cc8066b9f9400366ee09a0aaa4018f163020f9399ddf485f29ab97e43f2c",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "8b37cc8066b9f9400366ee09a0aaa4018f163020f9399ddf485f29ab97e43f2c.answer.txt",
+          "8b37cc8066b9f9400366ee09a0aaa4018f163020f9399ddf485f29ab97e43f2c.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:d7db0a80fe6d698b02a69d4a578b1e0fc3cdf1ad17cf892da0606a2332348b64",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": true,
+      "basis": {
+        "caseId": "H04-upload-reclaim",
+        "testsPassed": true,
+        "passedTests": 1,
+        "budgetSatisfied": true,
+        "maintainerAccepted": true,
+        "portableImports": null,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:d7db0a80fe6d698b02a69d4a578b1e0fc3cdf1ad17cf892da0606a2332348b64",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": true,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Concrete edits match the scoped correction, preserve assertions, and passed the affected historical suite.",
+        "posthocQualityEndpoint": false,
+        "evidence": [
+          "d7db0a80fe6d698b02a69d4a578b1e0fc3cdf1ad17cf892da0606a2332348b64.answer.txt",
+          "d7db0a80fe6d698b02a69d4a578b1e0fc3cdf1ad17cf892da0606a2332348b64.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:e86378a0cab73d5060094ea5de4e9c33c9af632a4edbd33b5f69ddfc8c2800a8",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": false,
+      "basis": {
+        "caseId": "H05-portable-gzip",
+        "testsPassed": true,
+        "passedTests": 30,
+        "budgetSatisfied": true,
+        "maintainerAccepted": false,
+        "portableImports": true,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:e86378a0cab73d5060094ea5de4e9c33c9af632a4edbd33b5f69ddfc8c2800a8",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": false,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Reject: proposal retains an unused legacy gunzip helper and introduces unchecked casts or any. Existing protocol tests pass but do not prove maintainability acceptance.",
+        "posthocQualityEndpoint": true,
+        "evidence": [
+          "e86378a0cab73d5060094ea5de4e9c33c9af632a4edbd33b5f69ddfc8c2800a8.answer.txt",
+          "e86378a0cab73d5060094ea5de4e9c33c9af632a4edbd33b5f69ddfc8c2800a8.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:9a5831676d7defde4d688441c58e37684436ed5976c308ce25cc71be720cb0ce",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": false,
+      "basis": {
+        "caseId": "H05-portable-gzip",
+        "testsPassed": true,
+        "passedTests": 30,
+        "budgetSatisfied": true,
+        "maintainerAccepted": false,
+        "portableImports": true,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:9a5831676d7defde4d688441c58e37684436ed5976c308ce25cc71be720cb0ce",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": false,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Reject: proposal retains an unused legacy gunzip helper and introduces unchecked casts or any. Existing protocol tests pass but do not prove maintainability acceptance.",
+        "posthocQualityEndpoint": true,
+        "evidence": [
+          "9a5831676d7defde4d688441c58e37684436ed5976c308ce25cc71be720cb0ce.answer.txt",
+          "9a5831676d7defde4d688441c58e37684436ed5976c308ce25cc71be720cb0ce.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:34ef4ab89a88d9a79ed05850e07e66ebbc86a0bb83233a9002c62989607b3bba",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": false,
+      "basis": {
+        "caseId": "H05-portable-gzip",
+        "testsPassed": true,
+        "passedTests": 30,
+        "budgetSatisfied": true,
+        "maintainerAccepted": false,
+        "portableImports": true,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:34ef4ab89a88d9a79ed05850e07e66ebbc86a0bb83233a9002c62989607b3bba",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": false,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Reject: proposal retains an unused legacy gunzip helper and introduces unchecked casts or any. Existing protocol tests pass but do not prove maintainability acceptance.",
+        "posthocQualityEndpoint": true,
+        "evidence": [
+          "34ef4ab89a88d9a79ed05850e07e66ebbc86a0bb83233a9002c62989607b3bba.answer.txt",
+          "34ef4ab89a88d9a79ed05850e07e66ebbc86a0bb83233a9002c62989607b3bba.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:23c0f033a32ad2e0f37e50b0d576480c6ac2d0b92569df9e659ea990996c907f",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": false,
+      "basis": {
+        "caseId": "H05-portable-gzip",
+        "testsPassed": true,
+        "passedTests": 30,
+        "budgetSatisfied": true,
+        "maintainerAccepted": false,
+        "portableImports": true,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:23c0f033a32ad2e0f37e50b0d576480c6ac2d0b92569df9e659ea990996c907f",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": false,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Reject: proposal retains an unused legacy gunzip helper and introduces unchecked casts or any. Existing protocol tests pass but do not prove maintainability acceptance.",
+        "posthocQualityEndpoint": true,
+        "evidence": [
+          "23c0f033a32ad2e0f37e50b0d576480c6ac2d0b92569df9e659ea990996c907f.answer.txt",
+          "23c0f033a32ad2e0f37e50b0d576480c6ac2d0b92569df9e659ea990996c907f.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:2075c0ea01f8be1127a8245748d7be7018151343e4062ed4bcc3ff06907736bf",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": false,
+      "basis": {
+        "caseId": "H05-portable-gzip",
+        "testsPassed": true,
+        "passedTests": 30,
+        "budgetSatisfied": true,
+        "maintainerAccepted": false,
+        "portableImports": true,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:2075c0ea01f8be1127a8245748d7be7018151343e4062ed4bcc3ff06907736bf",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": false,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Reject: proposal retains an unused legacy gunzip helper and introduces unchecked casts or any. Existing protocol tests pass but do not prove maintainability acceptance.",
+        "posthocQualityEndpoint": true,
+        "evidence": [
+          "2075c0ea01f8be1127a8245748d7be7018151343e4062ed4bcc3ff06907736bf.answer.txt",
+          "2075c0ea01f8be1127a8245748d7be7018151343e4062ed4bcc3ff06907736bf.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 0,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    },
+    {
+      "version": 1,
+      "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+      "slot": "sha256:9c7d5828e591df4fe2b2c00187b78da07a4afec9a428869940542c01cb869e28",
+      "reviewer": "benchmark preparer using retained source, preregistered criteria, and executed historical tests",
+      "acceptedTaskResult": false,
+      "basis": {
+        "caseId": "H05-portable-gzip",
+        "testsPassed": true,
+        "passedTests": 30,
+        "budgetSatisfied": true,
+        "maintainerAccepted": false,
+        "portableImports": true,
+        "modelSelfReportUsedForAcceptance": false
+      },
+      "reviewerCorrections": 0,
+      "maintainerReview": {
+        "slot": "sha256:9c7d5828e591df4fe2b2c00187b78da07a4afec9a428869940542c01cb869e28",
+        "reviewer": "Codex benchmark preparer",
+        "accepted": false,
+        "criteria": "Scoped historical task requirements, affected executed suites, and repository maintainability rules.",
+        "reason": "Reject: proposal retains an unused legacy gunzip helper and introduces unchecked casts or any. Existing protocol tests pass but do not prove maintainability acceptance.",
+        "posthocQualityEndpoint": true,
+        "evidence": [
+          "9c7d5828e591df4fe2b2c00187b78da07a4afec9a428869940542c01cb869e28.answer.txt",
+          "9c7d5828e591df4fe2b2c00187b78da07a4afec9a428869940542c01cb869e28.verification.log"
+        ],
+        "diagnosisSupported": true
+      },
+      "environmentCorrection": null,
+      "claimUnit": "one preregistered lesson supplied in startup context; does not count individual clauses as independent claims",
+      "unsupportedClaimsSupplied": 1,
+      "staleClaimsSupplied": 0,
+      "limitations": [
+        "No model tools were enabled; exploration was fixed at zero by the design.",
+        "The supported-diagnosis time is an upper bound at the completed first response, not a streaming first-token measurement.",
+        "Curated knowledge was fixture-reviewed against known historical fixes; this does not evaluate autonomous semantic curation quality."
+      ]
+    }
+  ],
+  "cliReportedListPriceUSD": 2.592374,
+  "historicalTaskScopes": 5,
+  "historicalFixCommits": 3,
+  "controlledVariantCombinations": 8,
+  "completedCLIInvocations": 24
+}

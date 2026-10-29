@@ -352,6 +352,7 @@ describe("the Code screen", () => {
         LoadFileAt,
         AppMessage.SucceededLoadFileAt({
           oid: "c".repeat(40),
+          tip: null,
           path: "README.md",
           content: "# older",
         }),
@@ -365,12 +366,70 @@ describe("the Code screen", () => {
       Story.Command.expectHas(LoadFile),
       Story.Command.resolve(
         LoadFile,
-        AppMessage.SucceededLoadFileAt({ oid: "", path: "README.md", content: "# hi" }),
+        AppMessage.SucceededLoadFileAt({
+          oid: "",
+          tip: "b".repeat(40),
+          path: "README.md",
+          content: "# hi",
+        }),
       ),
       Story.model((model) => {
         assert.equal(model.codeScreen.at, null);
       }),
     );
+  });
+
+  it("drops both stale file success and failure after a branch switch", () => {
+    const original = openOn(AppRoute.Code({ path: "README.md" }));
+    const pending = update(original, AppMessage.ClickedFile({ path: "src/a.ts" })).model;
+    const switched = update(pending, AppMessage.SelectedBranch({ ref: "topic" })).model;
+    const topic = {
+      ...viewOf(original),
+      ref: "topic",
+      tip: "d".repeat(40),
+      selected: "src/a.ts",
+      content: "topic content",
+    };
+    const loaded = update(
+      switched,
+      AppMessage.SucceededLoadCode({ ref: "topic", view: topic }),
+    ).model;
+    for (const message of [
+      AppMessage.SucceededLoadFileAt({
+        oid: "",
+        tip: "b".repeat(40),
+        path: "src/a.ts",
+        content: "main content",
+      }),
+      AppMessage.FailedLoadFileAt({
+        oid: "",
+        tip: "b".repeat(40),
+        path: "src/a.ts",
+        reason: "main failure",
+      }),
+    ]) {
+      assert.equal(update(loaded, message).model, loaded);
+    }
+    const fresh = update(
+      loaded,
+      AppMessage.SucceededLoadFileAt({
+        oid: "",
+        tip: "d".repeat(40),
+        path: "src/a.ts",
+        content: "fresh topic content",
+      }),
+    ).model;
+    assert.equal(viewOf(fresh).content, "fresh topic content");
+    const failed = update(
+      loaded,
+      AppMessage.FailedLoadFileAt({
+        oid: "",
+        tip: "d".repeat(40),
+        path: "src/a.ts",
+        reason: "topic failure",
+      }),
+    ).model;
+    assert.equal(failed.codeScreen.unreadable, true);
   });
 
   it("drops an older branch answer rather than painting it over the newer one", () => {
@@ -576,9 +635,15 @@ describe("looking back at a file", () => {
     const after = [
       AppMessage.ClickedHistoryRow({ oid: "c".repeat(40) }),
       AppMessage.ClickedBackToTip(),
-      AppMessage.SucceededLoadFileAt({ oid: "", path: "README.md", content: "# tip" }),
+      AppMessage.SucceededLoadFileAt({
+        oid: "",
+        tip: "b".repeat(40),
+        path: "README.md",
+        content: "# tip",
+      }),
       AppMessage.SucceededLoadFileAt({
         oid: "c".repeat(40),
+        tip: null,
         path: "README.md",
         content: "# as it was",
       }),
@@ -870,6 +935,7 @@ describe("looking back and coming forward", () => {
       back,
       AppMessage.SucceededLoadFileAt({
         oid: "c".repeat(40),
+        tip: null,
         path: "README.md",
         content: "# was",
       }),
@@ -892,6 +958,7 @@ describe("looking back and coming forward", () => {
       back,
       AppMessage.SucceededLoadFileAt({
         oid: "c".repeat(40),
+        tip: null,
         path: "README.md",
         content: "# was",
       }),
@@ -1699,7 +1766,12 @@ describe("an address naming a file the tree does not hold", () => {
     const opened = update(base, AppMessage.ClickedFile({ path: "src/a.ts" })).model;
     const failed = update(
       opened,
-      AppMessage.FailedLoadFileAt({ oid: "", path: "src/a.ts", reason: "not found" }),
+      AppMessage.FailedLoadFileAt({
+        oid: "",
+        tip: "b".repeat(40),
+        path: "src/a.ts",
+        reason: "not found",
+      }),
     ).model;
     assert.equal(failed.codeScreen.unreadable, true);
     assert.equal(update(failed, AppMessage.ClickedEdit()).model.codeScreen.mode, "view");

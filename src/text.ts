@@ -67,3 +67,41 @@ export const outboundUrl = (raw: string, secretField?: string): string | null =>
   }
   return null;
 };
+
+/**
+ * The terms a task is searched for.
+ *
+ * Shared by the two searches so neither owns the other's: `context/Select`
+ * searches source files, `knowledge/Recall` searches Concepts, and §9.1 ranks
+ * knowledge by the same terms the source search uses — two copies of the rule
+ * would drift, and the selector importing the knowledge layer for a tokenizer
+ * made it depend on the whole of it.
+ *
+ * Deliberately dull: split on non-word characters, drop what is too short to
+ * discriminate, and keep the order the operator typed so the ranking is
+ * reproducible. A stemmer or a synonym list would make the *selection*
+ * marginally better and the *explanation* materially worse.
+ */
+export const terms = (task: string): ReadonlyArray<string> => {
+  const seen = new Set<string>();
+  for (const word of task.split(/[^\p{L}\p{N}_]+/u)) {
+    const term = word.toLowerCase();
+    if (term.length < 3) continue;
+    seen.add(term);
+  }
+  return [...seen].slice(0, 16);
+};
+
+/** UTF-8 byte order, including astral characters that UTF-16 string comparison orders differently. */
+export const compareUtf8 = (left: string, right: string): number => {
+  if (left === right) return 0;
+  const encoder = new TextEncoder();
+  const a = encoder.encode(left);
+  const b = encoder.encode(right);
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    const difference = a[index]! - b[index]!;
+    if (difference !== 0) return difference;
+  }
+  // Distinct malformed surrogate strings can encode to the same replacement bytes.
+  return a.length - b.length || (left < right ? -1 : 1);
+};

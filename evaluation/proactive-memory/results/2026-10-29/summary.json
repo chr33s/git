@@ -1,0 +1,449 @@
+{
+  "version": 1,
+  "plan": "sha256:26a419d44287fe5d66bdd196efd94ce4c886bdffdfcbb512c68a071fb899b5c1",
+  "state": "recorded",
+  "expected": 24,
+  "recorded": 24,
+  "missing": [],
+  "statistics": [
+    {
+      "condition": "current-main",
+      "expected": 8,
+      "recorded": 8,
+      "completed": 8,
+      "failed": 0,
+      "incomplete": 0,
+      "metrics": {
+        "repeatedExploratoryWork": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "timeToSupportedDiagnosisMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 124227.06558300003,
+          "mean": 15528.383197875004
+        },
+        "acceptedTaskResult": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 6,
+          "mean": 0.75
+        },
+        "reviewerCorrections": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "unsupportedClaimsSupplied": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 2,
+          "mean": 0.25
+        },
+        "staleClaimsSupplied": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 1,
+          "mean": 0.125
+        },
+        "correctionLatencyMs": {
+          "measured": 0,
+          "unavailable": 8,
+          "sum": null,
+          "mean": null
+        },
+        "inputTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 133465,
+          "mean": 16683.125
+        },
+        "outputTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 10544,
+          "mean": 1318
+        },
+        "cacheReadTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "cacheWriteTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 133433,
+          "mean": 16679.125
+        },
+        "startupLatencyMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 14.863166000000021,
+          "mean": 1.8578957500000026
+        },
+        "maintenanceRuntimeMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "conflicts": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "incompleteJobs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        }
+      }
+    },
+    {
+      "condition": "integrated-recall",
+      "expected": 8,
+      "recorded": 8,
+      "completed": 8,
+      "failed": 0,
+      "incomplete": 0,
+      "metrics": {
+        "repeatedExploratoryWork": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "timeToSupportedDiagnosisMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 107387.988541,
+          "mean": 13423.498567625
+        },
+        "acceptedTaskResult": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 6,
+          "mean": 0.75
+        },
+        "reviewerCorrections": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "unsupportedClaimsSupplied": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "staleClaimsSupplied": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "correctionLatencyMs": {
+          "measured": 2,
+          "unavailable": 6,
+          "sum": 451.1403329999997,
+          "mean": 225.57016649999986
+        },
+        "inputTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 136593,
+          "mean": 17074.125
+        },
+        "outputTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 8660,
+          "mean": 1082.5
+        },
+        "cacheReadTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "cacheWriteTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 136561,
+          "mean": 17070.125
+        },
+        "startupLatencyMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 54.133750000000305,
+          "mean": 6.766718750000038
+        },
+        "maintenanceRuntimeMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "conflicts": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "incompleteJobs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        }
+      }
+    },
+    {
+      "condition": "recall-with-reviewed-curation",
+      "expected": 8,
+      "recorded": 8,
+      "completed": 8,
+      "failed": 0,
+      "incomplete": 0,
+      "metrics": {
+        "repeatedExploratoryWork": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "timeToSupportedDiagnosisMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 104477.239668,
+          "mean": 13059.6549585
+        },
+        "acceptedTaskResult": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 6,
+          "mean": 0.75
+        },
+        "reviewerCorrections": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "unsupportedClaimsSupplied": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "staleClaimsSupplied": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "correctionLatencyMs": {
+          "measured": 3,
+          "unavailable": 5,
+          "sum": 705.3859590000003,
+          "mean": 235.1286530000001
+        },
+        "inputTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 137672,
+          "mean": 17209
+        },
+        "outputTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 8487,
+          "mean": 1060.875
+        },
+        "cacheReadTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "cacheWriteTokens": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 137640,
+          "mean": 17205
+        },
+        "startupLatencyMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 66.06954200000109,
+          "mean": 8.258692750000137
+        },
+        "maintenanceRuntimeMs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 1365.477706,
+          "mean": 170.68471325
+        },
+        "conflicts": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        },
+        "incompleteJobs": {
+          "measured": 8,
+          "unavailable": 0,
+          "sum": 0,
+          "mean": 0
+        }
+      }
+    }
+  ],
+  "paired": [
+    {
+      "condition": "integrated-recall",
+      "baseline": "current-main",
+      "metrics": {
+        "repeatedExploratoryWork": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "timeToSupportedDiagnosisMs": {
+          "pairs": 8,
+          "meanDifference": -2104.8846302500033
+        },
+        "acceptedTaskResult": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "reviewerCorrections": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "unsupportedClaimsSupplied": {
+          "pairs": 8,
+          "meanDifference": -0.25
+        },
+        "staleClaimsSupplied": {
+          "pairs": 8,
+          "meanDifference": -0.125
+        },
+        "correctionLatencyMs": {
+          "pairs": 0,
+          "meanDifference": null
+        },
+        "inputTokens": {
+          "pairs": 8,
+          "meanDifference": 391
+        },
+        "outputTokens": {
+          "pairs": 8,
+          "meanDifference": -235.5
+        },
+        "cacheReadTokens": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "cacheWriteTokens": {
+          "pairs": 8,
+          "meanDifference": 391
+        },
+        "startupLatencyMs": {
+          "pairs": 8,
+          "meanDifference": 4.9088230000000355
+        },
+        "maintenanceRuntimeMs": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "conflicts": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "incompleteJobs": {
+          "pairs": 8,
+          "meanDifference": 0
+        }
+      }
+    },
+    {
+      "condition": "recall-with-reviewed-curation",
+      "baseline": "current-main",
+      "metrics": {
+        "repeatedExploratoryWork": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "timeToSupportedDiagnosisMs": {
+          "pairs": 8,
+          "meanDifference": -2468.7282393750056
+        },
+        "acceptedTaskResult": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "reviewerCorrections": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "unsupportedClaimsSupplied": {
+          "pairs": 8,
+          "meanDifference": -0.25
+        },
+        "staleClaimsSupplied": {
+          "pairs": 8,
+          "meanDifference": -0.125
+        },
+        "correctionLatencyMs": {
+          "pairs": 0,
+          "meanDifference": null
+        },
+        "inputTokens": {
+          "pairs": 8,
+          "meanDifference": 525.875
+        },
+        "outputTokens": {
+          "pairs": 8,
+          "meanDifference": -257.125
+        },
+        "cacheReadTokens": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "cacheWriteTokens": {
+          "pairs": 8,
+          "meanDifference": 525.875
+        },
+        "startupLatencyMs": {
+          "pairs": 8,
+          "meanDifference": 6.400797000000134
+        },
+        "maintenanceRuntimeMs": {
+          "pairs": 8,
+          "meanDifference": 170.68471325
+        },
+        "conflicts": {
+          "pairs": 8,
+          "meanDifference": 0
+        },
+        "incompleteJobs": {
+          "pairs": 8,
+          "meanDifference": 0
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Aggregates describe retained measurements; they do not establish semantic truth or productivity improvement.",
+    "Per-metric coverage can differ. Missing telemetry is excluded and must be inspected before comparing means.",
+    "Retrospective known-fix tasks do not demonstrate generalization to unseen tasks."
+  ]
+}

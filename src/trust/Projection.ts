@@ -22,7 +22,6 @@ import {
   parsePublicKey,
   verify,
 } from "../crypto/SshSignature.ts";
-import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import * as Certificate from "./Certificate.ts";
@@ -814,5 +813,3 @@ const rootsOf = Effect.fn("trust.Projection.rootsOf")(function* (lines: Readonly
   }
   return roots;
 });
-
-export type ProjectionError = Invalid | ObjectNotFound | StorageFailure;

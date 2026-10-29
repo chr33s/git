@@ -22,6 +22,10 @@
  */
 import { Effect } from "effect";
 
+import { qualify } from "../git/Oid.ts";
+import { readGenesis } from "../trust/Genesis.ts";
+import { project as projectTrust } from "../trust/Projection.ts";
+import * as Provenance from "../knowledge/Provenance.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import { Repository } from "../git/Repository.ts";
 import { changedPaths } from "./NoteAudit.ts";
@@ -77,15 +81,27 @@ const touched = Effect.fn("hub.NoteCandidate.touched")(function* (commit: Oid) {
  * already wrote down is how a shortlist stops being read.
  */
 export const candidates = Effect.fn("hub.NoteCandidate.candidates")(function* () {
+  const stored = yield* readGenesis();
+  if (stored === null) return [];
+  const trust = yield* projectTrust(stored.genesis);
+  const repository = yield* Repository;
+  const heads = new Map(
+    (yield* repository.refs).filter(([ref]) => Session.sessionOf(ref) !== null),
+  );
+  const judge = Provenance.judge(stored.genesis.repoId, trust, heads, new Date());
   const written = new Set((yield* Notes.all()).map((note) => note.text.trim()));
   const found: Candidate[] = [];
 
-  for (const session of yield* Session.sessions()) {
+  for (const ref of heads.keys()) {
+    const session = Session.sessionOf(ref);
+    if (session === null) continue;
     const observations: Array<{ kind: string; text: string }> = [];
     const commits: string[] = [];
 
-    for (const { payload } of (yield* Session.entries(session)).events) {
+    for (const { commit, payload } of (yield* Session.entries(session, heads.get(ref) ?? null))
+      .events) {
       if (payload.type !== "session.produced") continue;
+      if ((yield* Provenance.evaluate(qualify(commit), judge)).state !== "accepted") continue;
       commits.push(...payload.commits);
       if (payload.note === null) continue;
       // `kind: text` where the note offers one, exactly as `Memory.distill`

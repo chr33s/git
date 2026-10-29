@@ -61,7 +61,7 @@ describe.skipIf(!hasGit || !fs.existsSync(sea))("SEA CLI parity", () => {
       assert.equal(stopped.code, 0, stopped.stdout.toString() + stopped.stderr.toString());
       const shown = await runProcess({
         command: executable,
-        args: ["session", "show", "--root", root, "project", id],
+        args: ["session", "show", "--root", root, "--repo", "project", id],
       });
       assert.equal(shown.code, 0);
       const projection: { prompts: Array<{ prompt: string }>; refs: Array<string> } = JSON.parse(

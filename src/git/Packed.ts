@@ -16,7 +16,7 @@
  * bytes and either answer is right; if a repack is interrupted, the loose
  * copy is the one that is certainly complete.
  */
-import { Context, Effect, Layer, Stream } from "effect";
+import { Context, Effect, Layer, Predicate, Stream } from "effect";
 
 import { ObjectNotFound, StorageFailure } from "./Error.ts";
 import { type PackInflate, type PackSource, readAt } from "./PackFile.ts";
@@ -173,16 +173,15 @@ export const packed = (
   );
 
   const read = (oid: Oid): Effect.Effect<RawObject, ObjectNotFound | StorageFailure> =>
-    loose.read(oid).pipe(
-      Effect.catchTag("ObjectNotFound", () =>
-        fromPack(oid).pipe(
-          Effect.filterOrFail(
-            (found) => found !== null,
-            () => new ObjectNotFound({ oid }),
+    loose
+      .read(oid)
+      .pipe(
+        Effect.catchTag("ObjectNotFound", () =>
+          fromPack(oid).pipe(
+            Effect.filterOrFail(Predicate.isNotNull, () => new ObjectNotFound({ oid })),
           ),
         ),
-      ),
-    );
+      );
 
   const store: ObjectStore["Service"] = {
     read,

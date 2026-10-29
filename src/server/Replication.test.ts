@@ -63,8 +63,27 @@ describe("Replication", () => {
     Effect.sync(() => {
       assert.deepEqual(
         stateFetchPasses.map((pass) => pass.map((spec) => spec.source)),
-        [["refs/meta/trust/*", "refs/meta/policy"], ["refs/social/log"], ["refs/hub/*"]],
+        [
+          ["refs/meta/trust/*", "refs/meta/policy"],
+          ["refs/social/log"],
+          ["refs/hub/pr/*", "refs/hub/queue/*", "refs/hub/session/*", "refs/hub/task/*"],
+        ],
       );
+
+      // Sessions and tasks stay, unlike in `HUB_FETCH`: a host that folds
+      // policy needs what the fold reads, and `provenanceOf` requires
+      // `Session.producedBy` to name each introduced commit. Without them
+      // every push to a `requireProvenance` branch was refused on a replica
+      // while the origin accepted it.
+      const pulled = stateFetchPasses.flat().map((spec) => spec.source);
+      assert.equal(pulled.includes("refs/hub/session/*"), true);
+
+      // Traces do not, and are not part of any fold: what a retained
+      // `context/render.bin` holds is the verbatim task string and the exact
+      // bytes of every exposed file, and `refs/hub/*` was pulling it here for
+      // nothing.
+      assert.equal(pulled.includes("refs/hub/trace/*"), false);
+      assert.equal(pulled.includes("refs/hub/*"), false);
     }),
   );
 

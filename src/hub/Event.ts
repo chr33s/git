@@ -30,8 +30,10 @@ import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import { NAMESPACE, type PrivateKey, sign } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import { Invalid } from "../git/Error.ts";
+import type { TreeEntry } from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
+import { qualify, unqualify } from "../git/Oid.ts";
 import { checkRefName, isOid, type Oid } from "../git/Store.ts";
 import { checkCapability } from "../trust/Certificate.ts";
 import type { RepoId } from "../trust/Genesis.ts";
@@ -153,20 +155,13 @@ export const branchRef = (value: string): string =>
   value.startsWith("refs/") ? value : `refs/heads/${value}`;
 
 /**
- * An object id as a payload spells one: `sha1:<hex>`.
+ * How a payload spells an object id — `sha1:<hex>` — and how one is read back.
  *
- * Qualified even though this version only writes SHA-1, because the point of
- * qualifying is that the payloads never have to change when it does not.
+ * Re-exported rather than defined here: the trace namespace and the context
+ * protocol qualify oids in exactly this spelling, and a second copy of it is
+ * a second place a second object format has to be taught about.
  */
-export const qualify = (oid: Oid): string => `sha1:${oid}`;
-
-export const unqualify = (value: string): Oid | null => {
-  const [algorithm, hex] = value.split(":");
-  if (algorithm !== "sha1" || hex === undefined || !/^[0-9a-f]{40}$/.test(hex)) return null;
-  // SAFETY: the pattern above is exactly the forty lowercase hex characters
-  // the `Oid` brand names.
-  return hex as Oid;
-};
+export { qualify, unqualify };
 
 // -- payloads -------------------------------------------------------------------
 
@@ -546,6 +541,8 @@ export const appendTo = Effect.fn("hub.Event.appendTo")(
     readonly message: string;
     readonly payload: Uint8Array;
     readonly signatures: ReadonlyArray<string>;
+    /** Further entries in the record's tree; see `trust/Record.write`. */
+    readonly attach?: ReadonlyArray<TreeEntry>;
     /** A state-dependent append must fail rather than rebase onto an unseen event. */
     readonly expected?: Oid | null | undefined;
   }) {
@@ -564,6 +561,7 @@ export const appendTo = Effect.fn("hub.Event.appendTo")(
       signatures: input.signatures,
       parents: head === null ? [] : [head],
       message: input.message,
+      attach: input.attach,
     });
 
     yield* repository.setRef({ name: input.ref, to: commit, expected: head });
@@ -641,12 +639,10 @@ export const join = Effect.fn("hub.Event.join")(function* (pr: string, heads: Re
  * redacted event that survives, and "something was removed here" is a more
  * useful thing for a projection to be able to say than a silent gap.
  */
-const summaryOf = Effect.fn("hub.Event.summaryOf")(function* (commit: Oid) {
-  const repository = yield* Repository;
-  const info = yield* repository.readCommit(commit);
-  const [type = "", id = ""] = info.message.split("\n")[0]?.split(" ") ?? [];
+export const summaryOf = (message: string): { type: string; id: string } | null => {
+  const [type = "", id = ""] = message.split("\n")[0]?.split(" ") ?? [];
   return type === "" || id === "" ? null : { type, id };
-});
+};
 
 /**
  * Every event in a pull request, oldest first, parents before children.
@@ -687,7 +683,7 @@ export const entries = Effect.fn("hub.Event.entries")(function* (pr: string) {
     // Joins carry nothing: they are how two histories became one.
     if (!(yield* Record.carries(oid, RECORD))) continue;
 
-    const summary = yield* summaryOf(oid);
+    const summary = summaryOf((yield* repository.readCommit(oid)).message);
 
     // A redaction deletes the payload blob but leaves the tree entry naming
     // it, so the read fails where every other event's succeeds. That is the
@@ -821,9 +817,10 @@ export interface Walk<A> {
 export const walk = Effect.fn("hub.Event.walk")(function* <A>(
   ref: string,
   decodeOne: (bytes: Uint8Array) => Effect.Effect<A, Invalid>,
+  capturedHead?: Oid | null,
 ) {
   const repository = yield* Repository;
-  const head = yield* repository.resolve(ref);
+  const head = capturedHead === undefined ? yield* repository.resolve(ref) : capturedHead;
   if (head === null) {
     return {
       records: [],
@@ -941,5 +938,3 @@ export const pullRequests = Effect.fn("hub.Event.pullRequests")(function* () {
   }
   return ids.sort();
 });
-
-export type EventError = Invalid | ObjectNotFound | StorageFailure;

@@ -340,7 +340,7 @@ const prose = (payload: SessionPayload): string => {
 };
 
 /** Sign one session event and append it to its session's ref. */
-export const issue = Effect.fn("hub.Session.issue")(function* (
+export const prepare = Effect.fn("hub.Session.prepare")(function* (
   payload: SessionPayload,
   key: PrivateKey,
 ) {
@@ -382,11 +382,18 @@ export const issue = Effect.fn("hub.Session.issue")(function* (
   }
 
   const signature = yield* sign(key, bytes, NAMESPACE);
+  return { payload: bytes, signatures: [signature] };
+});
+
+export const issue = Effect.fn("hub.Session.issue")(function* (
+  payload: SessionPayload,
+  key: PrivateKey,
+) {
+  const prepared = yield* prepare(payload, key);
   return yield* Event.appendTo({
     ref: refOf(payload.session),
     message: `${payload.type} ${payload.id}\n`,
-    payload: bytes,
-    signatures: [signature],
+    ...prepared,
   });
 });
 
@@ -502,17 +509,28 @@ export const redact = Effect.fn("hub.Session.redact")(function* (input: {
  * projection that failed on a single bad record would take the session's whole
  * account down with it.
  */
-export const entries = Effect.fn("hub.Session.entries")(function* (session: string) {
+export const entries = Effect.fn("hub.Session.entries")(function* (
+  session: string,
+  capturedHead?: Oid | null,
+) {
+  const repository = yield* Repository;
   // No signer read at all: nothing a session projection decides turns on which
   // key signed which event, which is the whole reason the walk hands back
-  // signatures rather than verifying them.
-  const walked = yield* Event.walk(refOf(session), decode);
+  // signatures rather than verifying them. The bytes and signatures ride
+  // along for the one reader that does verify — `Tombstone.removals` — so a
+  // memory fold or a citation check takes this ref once rather than once to
+  // read it and once more to re-read each tombstone.
+  const head =
+    capturedHead === undefined ? yield* repository.resolve(refOf(session)) : capturedHead;
+  const walked = yield* Event.walk(refOf(session), decode, head);
   const events = walked.records.map((record) => ({
     commit: record.commit,
     payload: record.payload,
+    bytes: record.bytes,
+    signatures: record.signatures,
   }));
 
-  return { events, parents: walked.parents, unreadable: walked.unreadable } as const;
+  return { head, events, parents: walked.parents, unreadable: walked.unreadable } as const;
 });
 
 /**

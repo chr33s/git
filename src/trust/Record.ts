@@ -25,8 +25,15 @@
  */
 import { Effect, Schema } from "effect";
 
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
-import type { Signature } from "../git/Format.ts";
+import { Invalid } from "../git/Error.ts";
+import {
+  encodeCommit,
+  encodeTree,
+  hashObject,
+  type CommitInfo,
+  type Signature,
+  type TreeEntry,
+} from "../git/Format.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 
@@ -73,12 +80,51 @@ export const encodePayload = (text: string): Uint8Array => encoder.encode(`${tex
 export const encodeSignatures = (armored: ReadonlyArray<string>): Uint8Array =>
   encoder.encode(`${JSON.stringify(armored, null, 2)}\n`);
 
+/** Compute a prepared record identity without restoring blobs removed by redaction. */
+export const identify = Effect.fn("trust.Record.identify")(function* (input: {
+  readonly name: string;
+  readonly payload: Uint8Array;
+  readonly signatures: ReadonlyArray<string>;
+  readonly parents: ReadonlyArray<Oid>;
+  readonly message: string;
+  readonly at: Date;
+}) {
+  const payload = yield* hashObject({ type: "blob", data: input.payload });
+  const signatures = yield* hashObject({ type: "blob", data: encodeSignatures(input.signatures) });
+  const tree = yield* hashObject({
+    type: "tree",
+    data: encodeTree([
+      { mode: BLOB_MODE, name: `${input.name}.json`, oid: payload },
+      { mode: BLOB_MODE, name: `${input.name}.sig`, oid: signatures },
+    ]),
+  });
+  return yield* hashObject({
+    type: "commit",
+    data: encodeCommit({
+      tree,
+      parents: input.parents,
+      message: input.message,
+      author: identityAt(input.at),
+      committer: identityAt(input.at),
+    }),
+  });
+});
+
 /**
  * Write one record and return the commit that holds it.
  *
  * The commit is *not* attached to a ref here: which ref, and under what
  * compare-and-swap, is the caller's decision — an append to a trust log and an
  * append to a pull request's event DAG differ in exactly that.
+ *
+ * `attach` puts further entries beside the payload in the record's own tree.
+ * A Context Exposure needs one (docs/context-pack.md §10): naming a view's
+ * tree oid inside JSON does not make that tree reachable, so the record has to
+ * carry a real tree edge to it or the object it names is collected out from
+ * under the audit that was supposed to be able to read it. Beside the payload
+ * rather than inside it, for the reason the signatures are: the payload's
+ * bytes are what every signature covers, and they must not change to hold
+ * something a signature is not making a claim about.
  */
 export const write = Effect.fn("trust.Record.write")(function* (input: {
   readonly name: string;
@@ -87,6 +133,7 @@ export const write = Effect.fn("trust.Record.write")(function* (input: {
   readonly parents: ReadonlyArray<Oid>;
   readonly message: string;
   readonly at?: Date;
+  readonly attach?: ReadonlyArray<TreeEntry>;
 }) {
   const repository = yield* Repository;
 
@@ -95,6 +142,7 @@ export const write = Effect.fn("trust.Record.write")(function* (input: {
   const tree = yield* repository.writeTree([
     { mode: BLOB_MODE, name: `${input.name}.json`, oid: payload },
     { mode: BLOB_MODE, name: `${input.name}.sig`, oid: signatures },
+    ...(input.attach ?? []),
   ]);
 
   return yield* repository.commitTree({
@@ -114,8 +162,23 @@ export const write = Effect.fn("trust.Record.write")(function* (input: {
  */
 export const read = Effect.fn("trust.Record.read")(function* (commit: Oid, name: string) {
   const repository = yield* Repository;
+  return yield* readFrom(commit, yield* repository.readCommit(commit), name);
+});
 
-  const info = yield* repository.readCommit(commit);
+/**
+ * `read`, for a caller that has already fetched the commit.
+ *
+ * A walk asks three questions of one commit — does it carry a record, what
+ * does its message say, what does the record hold — and answering each with
+ * its own `readCommit` tripled the object reads on the longest refs there are.
+ */
+export const readFrom = Effect.fn("trust.Record.readFrom")(function* (
+  commit: Oid,
+  info: CommitInfo,
+  name: string,
+) {
+  const repository = yield* Repository;
+
   const payloadEntry = yield* repository.findPath(info.tree, `${name}.json`);
   if (payloadEntry === null) {
     return yield* new Invalid({ field: "record", reason: `${commit} carries no ${name}.json` });
@@ -147,10 +210,43 @@ export const read = Effect.fn("trust.Record.read")(function* (commit: Oid, name:
 });
 
 /** Whether a commit carries a record of this name, without reading it. */
-export const carries = Effect.fn("trust.Record.carries")(function* (commit: Oid, name: string) {
+/**
+ * Whether a commit carries this record, and its payload if it still holds one.
+ *
+ * Both facts from one commit read, because the pair is what a *scan* needs and
+ * asking for them separately is what a scan cannot afford. `Redaction`'s walk
+ * ran `carries` and then `read` over every record on every session, task and
+ * trace ref — two commit reads, three path lookups and two blob reads each —
+ * to answer a question that discards all but a handful of them, on a path
+ * `context for --session` takes once per model invocation.
+ *
+ * The two are distinct on purpose. A redaction leaves the tree entry naming a
+ * blob that is gone, so `carried` is true where `bytes` is null, and a caller
+ * that conflated them would read a removal as a commit that was never a
+ * record at all.
+ */
+export const payloadOf = Effect.fn("trust.Record.payloadOf")(function* (commit: Oid, name: string) {
   const repository = yield* Repository;
   const info = yield* repository.readCommit(commit);
-  return (yield* repository.findPath(info.tree, `${name}.json`)) !== null;
+  const entry = yield* repository.findPath(info.tree, `${name}.json`);
+  if (entry === null) return { carried: false, bytes: null } as const;
+
+  const bytes = yield* repository
+    .readBlob(entry.oid)
+    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+  return { carried: true, bytes } as const;
 });
 
-export type RecordError = Invalid | ObjectNotFound | StorageFailure;
+export const carries = Effect.fn("trust.Record.carries")(function* (commit: Oid, name: string) {
+  const repository = yield* Repository;
+  return yield* carriesIn(yield* repository.readCommit(commit), name);
+});
+
+/** `carries`, for a caller that has already fetched the commit. */
+export const carriesIn = Effect.fn("trust.Record.carriesIn")(function* (
+  info: CommitInfo,
+  name: string,
+) {
+  const repository = yield* Repository;
+  return (yield* repository.findPath(info.tree, `${name}.json`)) !== null;
+});

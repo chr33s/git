@@ -142,7 +142,7 @@ export const encodeDocument = (document: GenesisDocument): Uint8Array =>
 /** `SHA256:<unpadded base64>` over the stored bytes. */
 export const repoIdOf = (bytes: Uint8Array): Effect.Effect<RepoId> =>
   Effect.promise(async () => {
-    const hash = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+    const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer);
     let binary = "";
     for (const byte of new Uint8Array(hash)) binary += String.fromCharCode(byte);
     // SAFETY: a SHA-256 digest is thirty-two bytes, whose base64 is

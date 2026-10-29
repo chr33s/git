@@ -265,6 +265,8 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
   readonly capability: string;
   /** Absent for a live request; present when judging a stored event. */
   readonly made?: Made;
+  /** Explicit current-use clock for deterministic stored-record evaluation. */
+  readonly evaluatedAt?: Date;
   /**
    * Trust-log ancestry, memoised by the caller.
    *
@@ -308,6 +310,7 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
   readonly permanent?: boolean;
 }) {
   const made = input.made ?? null;
+  const now = input.evaluatedAt?.getTime() ?? Date.now();
   const ancestry = input.seen ?? Log.ancestry;
   const membership = input.contains ?? Log.contains;
   const found = input.signed ?? (yield* signers(input.bytes, input.signatures));
@@ -349,7 +352,7 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
     if (
       input.permanent !== true &&
       member.expiresAt !== null &&
-      member.expiresAt.getTime() <= Date.now()
+      member.expiresAt.getTime() <= now
     ) {
       closest = `${signer}'s membership expired on ${member.expiresAt.toISOString()}`;
       continue;
@@ -388,6 +391,7 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
       projection: input.projection,
       signer,
       includeFormer: made !== null,
+      at: new Date(now),
     });
     for (const match of resolved.matches) {
       if (
@@ -406,7 +410,7 @@ export const authorize = Effect.fn("trust.Verify.authorize")(function* (input: {
       if (
         input.permanent !== true &&
         match.principal.expiresAt !== null &&
-        match.principal.expiresAt.getTime() <= Date.now()
+        match.principal.expiresAt.getTime() <= now
       ) {
         closest = `${match.grant.principal}'s membership expired on ${match.principal.expiresAt.toISOString()}`;
         continue;
@@ -535,5 +539,3 @@ export const fresh = (
     reason: `every trust checkpoint on record (${ahead}) is dated in the future`,
   };
 };
-
-export type VerifyError = Invalid | ObjectNotFound | StorageFailure;

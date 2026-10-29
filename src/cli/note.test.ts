@@ -232,6 +232,25 @@ describe.skipIf(!hasGit)("git+ note, end to end", () => {
     assert.equal(audited.code, 0);
   });
 
+  it("keeps renamed and modified constraints in scoped range checks", async () => {
+    await added("--anchor", "function verify", "src/auth.ts", "must stay constant-time");
+    const base = await revision("HEAD");
+    await fs.mkdir(path.join(root, "src/security"), { recursive: true });
+    await git("mv", "src/auth.ts", "src/security/auth.ts");
+    await write("src/security/auth.ts", VERIFY.replace("length > 0", "length > 1"));
+    await git("add", ".");
+    await git("commit", "--quiet", "-m", "move and modify");
+    const head = await revision("HEAD");
+    const full = await statuses("--base", base, "--head", head);
+    for (const query of ["src/security/auth.ts", "src/security/"]) {
+      const scoped = await statuses(query, "--base", base, "--head", head);
+      assert.deepEqual(scoped.notes, full.notes);
+      assert.equal(scoped.notes[0]?.path, "src/security/auth.ts");
+      assert.equal(scoped.notes[0]?.status, "content-changed");
+      assert.equal(scoped.code, 2);
+    }
+  });
+
   it("scopes a merge check to the paths a range changed", async () => {
     await added("--anchor", "function verify", "src/auth.ts", "must stay constant-time");
     await added("docs/readme.md", "the synopsis is generated");

@@ -237,15 +237,25 @@ export const AppMessage = Message.defineMessageUnion({
   FellBackLoadCode: { ref: Schema.String, reason: Schema.String },
   ClickedFile: { path: Schema.String },
   /**
-   * One file's text, as of `oid` — empty for the tip.
+   * One file's text, as of `oid` — empty for the live tip, which travels separately.
    *
    * The revision travels with the answer because `LoadFile` and `LoadFileAt`
    * do not supersede each other: Foldkit keys an interrupt by Command name,
    * so a "back to tip" read and the history read it replaces are in flight
    * together, and only the one the reader is still asking for may paint.
    */
-  SucceededLoadFileAt: { oid: Schema.String, path: Schema.String, content: Schema.String },
-  FailedLoadFileAt: { oid: Schema.String, path: Schema.String, reason: Schema.String },
+  SucceededLoadFileAt: {
+    oid: Schema.String,
+    tip: Schema.NullOr(Schema.String),
+    path: Schema.String,
+    content: Schema.String,
+  },
+  FailedLoadFileAt: {
+    oid: Schema.String,
+    tip: Schema.NullOr(Schema.String),
+    path: Schema.String,
+    reason: Schema.String,
+  },
   SelectedBranch: { ref: Schema.String },
   ChangedNewBranch: { name: Schema.String },
   /** Cancel: the dialog has no trigger to press again, so it is closed here. */
