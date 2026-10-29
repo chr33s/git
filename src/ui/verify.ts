@@ -1020,6 +1020,24 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
   await page.waitForTimeout(400);
   check("All restores the hierarchy", (await page.locator(".gp-task-row").count()) === 9);
 
+  await page.getByRole("radio", { name: "All", exact: true }).press("ArrowRight");
+  await page.waitForFunction(
+    () =>
+      document.querySelector('.gp-segment[value="tasks"]')?.getAttribute("aria-checked") === "true",
+  );
+  check(
+    "task filters support arrow-key selection and focus",
+    (await page.locator(".gp-task-row").count()) === 7 &&
+      (await page
+        .locator('.gp-segment[value="tasks"]')
+        .evaluate((button) => button === document.activeElement)),
+  );
+  await page.getByRole("radio", { name: "Tasks", exact: true }).press("ArrowLeft");
+  await page.waitForFunction(
+    () =>
+      document.querySelector('.gp-segment[value="all"]')?.getAttribute("aria-checked") === "true",
+  );
+
   // 224px plus the 1px right border — content-box, as the design sizes it.
   const wide = await railWidth();
   await page.click(".gp-logo-row");
@@ -1072,8 +1090,20 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     check(`the ${tab} tab shows its rows`, shown === rows, `${String(shown)}`);
   }
   check(
-    "base-wc keeps ui-tabs in step with the panel",
-    (await page.getAttribute("ui-tabs", "value")) === "checks",
+    "Foldkit tabs keep selection and panels aligned",
+    (await page.getAttribute('.gp-tab[value="checks"]', "aria-selected")) === "true",
+  );
+
+  await page.locator('.gp-tab[value="checks"]').press("ArrowLeft");
+  await page.waitForFunction(
+    () =>
+      document.querySelector('.gp-tab[value="commits"]')?.getAttribute("aria-selected") === "true",
+  );
+  check(
+    "tabs activate and move focus with the keyboard",
+    await page
+      .locator('.gp-tab[value="commits"]')
+      .evaluate((tab) => tab === document.activeElement),
   );
 
   await page.click('.gp-tab[value="diff"]');
@@ -1235,10 +1265,8 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     ((await page.textContent(".gp-notice")) ?? "").includes("Code search needs the server"),
   );
 
-  // The field clears itself on Escape and on the ✕ it inserts, and says so
-  // only through its own `search` event. A Model bound to the inner input's
-  // `input` never hears either, and then keeps answering for text that is no
-  // longer on screen — which is what this pins.
+  // Escape and the clear button update both the controlled input and the
+  // query being answered, invalidating any pending debounced search.
   await page.keyboard.press("Escape");
   await page.waitForTimeout(500);
   check(
@@ -1293,7 +1321,7 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     await page.evaluate(
       () =>
         document.querySelector<HTMLButtonElement>(".gp-branch-trigger")?.disabled === true &&
-        document.querySelector("ui-menu.gp-branch-menu") === null,
+        document.querySelector(".gp-branch-menu") === null,
     ),
   );
 
@@ -1546,15 +1574,33 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await shot(page, "live-code-edited");
 
   // --- Clone, over the real origin ---------------------------------------
-  await page.click(".gp-clone [data-dialog-trigger]");
+  await page.click(".gp-clone > button");
   await page.waitForTimeout(400);
   check(
     "Clone offers the smart-HTTP URL this page is served from",
     (await page.inputValue(".gp-clone-url")) === `${origin}/core`,
     await page.inputValue(".gp-clone-url"),
   );
+  check(
+    "Clone has an accessible dialog name",
+    (await page.getByRole("dialog", { name: "Clone", exact: true }).count()) === 1,
+  );
+  await page.keyboard.press("Tab");
+  check(
+    "dialog focus stays inside the open modal",
+    await page
+      .locator(".gp-clone dialog")
+      .evaluate((dialog) => dialog.contains(document.activeElement)),
+  );
   await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
+  check(
+    "Escape closes Clone and returns focus to its trigger",
+    (await page.locator(".gp-clone dialog[open]").count()) === 0 &&
+      (await page
+        .locator(".gp-clone > button")
+        .evaluate((button) => button === document.activeElement)),
+  );
 
   // --- history, from /commits and /history --------------------------------
   await page.click(".gp-commit-bar");
@@ -1595,7 +1641,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   // --- creating a branch, through POST /branches/create -------------------
   await page.click(".gp-branch-trigger");
   await page.waitForTimeout(400);
-  await page.click('.gp-menu-item[value="__new-branch"]');
+  await page.getByRole("menuitem", { name: "New branch…", exact: true }).click();
   await page.waitForTimeout(400);
   await page.fill("#gp-new-branch-name", "topic/from-the-ui");
   await page.click(".gp-new-branch button[type='submit']");
@@ -1608,23 +1654,23 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
   await page.waitForTimeout(400);
   check(
     "and it joins the picker",
-    (await page.locator(".gp-branch-menu .gp-menu-item:not([data-action])").count()) === 3,
+    (await page.locator("#gp-branch-menu-items .gp-menu-item:not(.gp-menu-action)").count()) === 3,
   );
-  await page.click('.gp-menu-item[value="main"]');
+  await page.getByRole("menuitem", { name: "main", exact: true }).click();
   await page.waitForTimeout(1500);
 
   // --- the branch picker, over the real ref list -------------------------
   check(
     "the branch picker is a menu when there is more than one branch",
-    (await page.locator("ui-menu.gp-branch-menu").count()) === 1,
+    (await page.locator(".gp-branch-menu").count()) === 1,
   );
   await page.click(".gp-branch-trigger");
   await page.waitForTimeout(400);
   check(
     "it lists every branch",
-    (await page.locator(".gp-branch-menu .gp-menu-item:not([data-action])").count()) === 3,
+    (await page.locator("#gp-branch-menu-items .gp-menu-item:not(.gp-menu-action)").count()) === 3,
   );
-  await page.click(`.gp-menu-item[value="${BRANCH}"]`);
+  await page.getByRole("menuitem", { name: BRANCH, exact: true }).click();
   await page.waitForTimeout(2000);
   check(
     "choosing one switches the ref",
@@ -1646,14 +1692,10 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     await new Promise((resolve) => setTimeout(resolve, ref === OID_BRANCH ? 20 : 450));
     await route.continue();
   });
-  await page.locator("ui-menu.gp-branch-menu").evaluate((menu, branch) => {
-    menu.dispatchEvent(
-      new CustomEvent("menu-select", { bubbles: true, detail: { value: "main" } }),
-    );
-    menu.dispatchEvent(
-      new CustomEvent("menu-select", { bubbles: true, detail: { value: branch } }),
-    );
-  }, BRANCH);
+  await page.click(".gp-branch-trigger");
+  await page.getByRole("menuitem", { name: "main", exact: true }).click();
+  await page.click(".gp-branch-trigger");
+  await page.getByRole("menuitem", { name: BRANCH, exact: true }).click();
   await page.waitForTimeout(1200);
   check(
     "an older branch request cannot overwrite the latest selection",
@@ -1803,22 +1845,23 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     ),
   );
 
-  // The policy card's toggles are the ui-switch adoption in the flesh:
-  // clicking the native checkbox must flip the element's `data-state`.
-  const switchState = (): Promise<string> =>
-    page.evaluate(
-      () =>
-        document.querySelector('[data-card="policy"] ui-switch')?.getAttribute("data-state") ?? "",
-    );
+  const switchState = (): Promise<string | null> =>
+    page.getByRole("switch").first().getAttribute("aria-checked");
   const off = await switchState();
-  await page.evaluate(() =>
-    document.querySelector('[data-card="policy"] ui-switch')?.querySelector("input")?.click(),
+  await page.getByRole("switch").first().click();
+  await page.waitForFunction(
+    () => document.querySelector('[role="switch"]')?.getAttribute("aria-checked") === "true",
   );
-  await page.waitForTimeout(300);
   check(
-    "ui-switch mirrors the native checkbox it adopted",
-    off === "unchecked" && (await switchState()) === "checked",
+    "Foldkit Switch updates its controlled state",
+    off === "false" && (await switchState()) === "true",
   );
+  await page.getByRole("switch").first().press("Space");
+  await page.waitForFunction(
+    () => document.querySelector('[role="switch"]')?.getAttribute("aria-checked") === "false",
+  );
+  check("the policy switch is keyboard operable", (await switchState()) === "false");
+  await page.getByRole("switch").first().press("Space");
 
   // A tag, then its removal — the whole round trip through /tags.
   await page.fill('[data-card="tags"] input[name="name"]', "v0.4.0");
@@ -2182,7 +2225,7 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.waitForSelector(".gp-sync", { timeout: 30_000 });
     await page.click(".gp-branch-trigger");
     await page.waitForTimeout(400);
-    await page.click('.gp-menu-item[value="__new-branch"]');
+    await page.getByRole("menuitem", { name: "New branch…", exact: true }).click();
     await page.waitForTimeout(400);
     await page.fill("#gp-new-branch-name", "topic");
     await page.click(".gp-new-branch button[type='submit']");
@@ -2233,15 +2276,15 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.waitForSelector(".gp-sync", { timeout: 30_000 });
     await page.click(".gp-branch-trigger");
     await page.waitForTimeout(400);
-    await page.click('.gp-menu-item[value="topic"]');
+    await page.getByRole("menuitem", { name: "topic", exact: true }).click();
     await page.waitForTimeout(1500);
-    await page.waitForSelector("ui-dialog.gp-propose button[data-dialog-trigger]", {
+    await page.waitForSelector(".gp-propose > button", {
       timeout: 10_000,
     });
-    await page.click("ui-dialog.gp-propose button[data-dialog-trigger]");
+    await page.click(".gp-propose > button");
     await page.waitForTimeout(400);
     await page.fill("#gp-propose-title", "Proposed from the browser");
-    await page.click("ui-dialog.gp-propose form button[type='submit']");
+    await page.click(".gp-propose form button[type='submit']");
     await page.waitForTimeout(4000);
     const detailPath = await route();
     check("proposing opens the new Change Request", detailPath.startsWith("/hub/detail/"));

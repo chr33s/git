@@ -29,7 +29,8 @@ import {
   Viewer,
 } from "./app.model.ts";
 import { AdminAction } from "./settings.ts";
-import { Outcome } from "./element.base-wc.ts";
+import { Dialog, Menu, Tabs, RadioGroup } from "@foldkit/ui";
+import { DialogName, MenuName } from "./controls.ts";
 
 /** What the "New task" dialog sent, trimmed, as its answer names it. */
 export const SubmittedTask = Schema.Struct({
@@ -40,6 +41,13 @@ export const SubmittedTask = Schema.Struct({
 export type SubmittedTask = typeof SubmittedTask.Type;
 
 export const AppMessage = Message.defineMessageUnion({
+  ClickedOpenDialog: { name: DialogName },
+  GotDialogMessage: { dialogId: DialogName, message: Dialog.Message },
+  GotMenuMessage: { menuId: MenuName, message: Menu.Message },
+  GotDetailTabsMessage: { message: Tabs.Message },
+  GotTaskFilterMessage: { message: RadioGroup.Message },
+  GotTimelineZoomMessage: { message: RadioGroup.Message },
+  CompletedSearchDebounce: { query: Schema.String, version: Schema.Number },
   // -- the shell --------------------------------------------------------
   /** The address changed: a link, Back, Forward, or a `pushUrl` of our own. */
   ChangedUrl: { route: AppRoute },
@@ -107,7 +115,6 @@ export const AppMessage = Message.defineMessageUnion({
   FellBackCreateTask: { id: Schema.String, submitted: SubmittedTask },
   SucceededMoveTask: { id: Schema.String, parent: Schema.String },
   FailedMoveTask: { id: Schema.String, reason: Schema.String },
-  CompletedCloseNewTaskDialog: { outcome: Outcome },
 
   // -- the Search screen ------------------------------------------------
   ClickedCodeHit: { path: Schema.String },

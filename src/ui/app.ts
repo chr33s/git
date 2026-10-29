@@ -11,6 +11,7 @@
  * it starts are the two the page cannot draw itself: who is asking, and what
  * the repository's hub holds.
  */
+import * as Controls from "./controls.ts";
 import { AsyncData, Runtime, Update, Url } from "foldkit";
 import { Option } from "effect";
 
@@ -33,6 +34,7 @@ const init = (url: Url.Url): Update.Return<Model, AppMessage> => {
   const route = routeOfUrl(url);
   return {
     model: {
+      controls: Controls.init(),
       route,
       repo: repoFromDocument(),
       cloneUrl: clientFromDocument().cloneUrl,

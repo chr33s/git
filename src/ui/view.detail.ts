@@ -13,9 +13,9 @@
  * fixture Change Requests name branches that only exist in the design) the tab
  * falls back to the design's own diff and says so.
  */
+import { DetailTabs } from "./controls.ts";
 import { AsyncData, Html } from "foldkit";
 
-import type { Elements } from "./element.base-wc.ts";
 import * as icon from "./icon.ts";
 import { type ChangeRequest, isChangeRequest, type Task, type Thread } from "./model.ts";
 import { AppMessage } from "./app.message.ts";
@@ -271,40 +271,7 @@ const review = (h: H, model: Model, cr: ChangeRequest): Html.Html => {
   );
 };
 
-const tab = (
-  h: H,
-  model: Model,
-  id: (typeof TABS)[number],
-  label: readonly (Html.Html | string)[],
-): Html.Html =>
-  h.button(
-    [
-      h.Class("gp-tab"),
-      h.Type("button"),
-      h.DataAttribute("tab", ""),
-      h.Attribute("value", id),
-      ...(model.detailScreen.tab === id ? [h.DataAttribute("selected", "")] : []),
-      h.OnClick(AppMessage.ChangedDetailTab({ tab: id })),
-    ],
-    label,
-  );
-
-const changeRequest = (
-  h: H,
-  ui: Elements<AppMessage>,
-  model: Model,
-  cr: ChangeRequest,
-): Html.Html => {
-  const panel = (id: (typeof TABS)[number], body: Html.Html): Html.Html =>
-    h.div(
-      [
-        h.Class("gp-tabpanel"),
-        h.DataAttribute("tab-panel", ""),
-        h.Attribute("value", id),
-        h.Hidden(model.detailScreen.tab !== id),
-      ],
-      [body],
-    );
+const changeRequest = (h: H, model: Model, cr: ChangeRequest): Html.Html => {
   return h.div(
     [],
     [
@@ -316,76 +283,96 @@ const changeRequest = (
           h.span([h.Class("gp-ref")], [cr.targetRef]),
         ],
       ),
-      ui.tabs(
-        [
-          h.Class("gp-tabs"),
-          // An attribute: `ui-tabs` reflects its selection there, and the
-          // element reads it back on connect. A property alone would leave
-          // the DOM disagreeing with the Model about which panel is open.
-          h.Attribute("value", model.detailScreen.tab),
-          // And the element's own `change` comes back, because arrow-key
-          // activation moves the selection without any button being clicked.
-          ui.tabs.OnChange(({ value }) =>
-            value === "conversation" ||
-            value === "diff" ||
-            value === "commits" ||
-            value === "checks"
-              ? AppMessage.ChangedDetailTab({ tab: value })
-              : AppMessage.ChangedDetailTab({ tab: model.detailScreen.tab }),
-          ),
-        ],
-        [
-          ui.tabList(
-            [h.Class("gp-tablist")],
-            [
-              tab(h, model, "conversation", ["Conversation"]),
-              tab(h, model, "diff", ["Diff ", h.span([h.Class("gp-tab-count")], [cr.diffStat])]),
-              tab(h, model, "commits", [
-                "Commits ",
-                h.span([h.Class("gp-tab-count")], [cr.commitCount]),
-              ]),
-              tab(h, model, "checks", ["Checks"]),
-            ],
-          ),
-          panel("conversation", review(h, model, cr)),
-          panel("diff", diffPanel(h, model, cr)),
-          panel(
-            "commits",
-            h.div(
-              [h.Class("gp-panel-card")],
-              cr.commits.map((held) =>
+      h.submodel({
+        slotId: "detail-tabs",
+        model: model.controls.detailTabs,
+        view: DetailTabs.view,
+        toParentMessage: (message) => AppMessage.GotDetailTabsMessage({ message }),
+        viewInputs: {
+          tabs: TABS,
+          selectedValue: model.detailScreen.tab,
+          panelMount: "All",
+          ariaLabel: "Change request",
+          toView: (render) => {
+            const panel = (id: (typeof TABS)[number], body: Html.Html): Html.Html =>
+              h.div(
+                [
+                  ...(render.tabs.find((tab) => tab.value === id)?.panel ?? []),
+                  h.Class("gp-tabpanel"),
+                  h.DataAttribute("tab-panel", ""),
+                  h.Attribute("value", id),
+                  h.Hidden(model.detailScreen.tab !== id),
+                ],
+                [body],
+              );
+            return h.div(
+              [h.Class("gp-tabs")],
+              [
                 h.div(
-                  [h.Class("gp-list-row")],
-                  [
-                    h.span([h.Class("gp-sha")], [held.sha]),
-                    h.span([], [held.msg]),
-                    h.span([h.Class("gp-when")], [held.when]),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          panel(
-            "checks",
-            h.div(
-              [h.Class("gp-panel-card")],
-              cr.checks.map((check) =>
-                h.div(
-                  [h.Class("gp-list-row")],
-                  [
-                    h.span(
-                      [h.Class("gp-check-dot"), ...(check.ok ? [h.DataAttribute("ok", "")] : [])],
-                      [],
+                  [...render.tablist, h.Class("gp-tablist")],
+                  render.tabs.map((tab) =>
+                    h.button(
+                      [
+                        ...tab.tab,
+                        h.Type("button"),
+                        h.Class("gp-tab"),
+                        h.Attribute("value", tab.value),
+                      ],
+                      tab.value === "conversation"
+                        ? ["Conversation"]
+                        : tab.value === "diff"
+                          ? ["Diff ", h.span([h.Class("gp-tab-count")], [cr.diffStat])]
+                          : tab.value === "commits"
+                            ? ["Commits ", h.span([h.Class("gp-tab-count")], [cr.commitCount])]
+                            : ["Checks"],
                     ),
-                    h.span([], [check.name]),
-                    h.span([h.Class("gp-when")], [check.detail]),
-                  ],
+                  ),
                 ),
-              ),
-            ),
-          ),
-        ],
-      ),
+                panel("conversation", review(h, model, cr)),
+                panel("diff", diffPanel(h, model, cr)),
+                panel(
+                  "commits",
+                  h.div(
+                    [h.Class("gp-panel-card")],
+                    cr.commits.map((held) =>
+                      h.div(
+                        [h.Class("gp-list-row")],
+                        [
+                          h.span([h.Class("gp-sha")], [held.sha]),
+                          h.span([], [held.msg]),
+                          h.span([h.Class("gp-when")], [held.when]),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                panel(
+                  "checks",
+                  h.div(
+                    [h.Class("gp-panel-card")],
+                    cr.checks.map((check) =>
+                      h.div(
+                        [h.Class("gp-list-row")],
+                        [
+                          h.span(
+                            [
+                              h.Class("gp-check-dot"),
+                              ...(check.ok ? [h.DataAttribute("ok", "")] : []),
+                            ],
+                            [],
+                          ),
+                          h.span([], [check.name]),
+                          h.span([h.Class("gp-when")], [check.detail]),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        },
+      }),
     ],
   );
 };
@@ -645,7 +632,7 @@ const meta = (h: H, model: Model, task: Task): Html.Html => {
   );
 };
 
-export const view = (model: Model, h: H, ui: Elements<AppMessage>): Html.Html => {
+export const view = (model: Model, h: H): Html.Html => {
   const task = taskOf(model);
   const cr = isChangeRequest(task) ? task : null;
   return h.div(
@@ -671,7 +658,7 @@ export const view = (model: Model, h: H, ui: Elements<AppMessage>): Html.Html =>
               ),
               h.h1([h.Class("gp-detail-title")], [task.title]),
               h.p([h.Class("gp-detail-desc")], [task.desc]),
-              cr === null ? h.empty : changeRequest(h, ui, model, cr),
+              cr === null ? h.empty : changeRequest(h, model, cr),
               subtasks(h, model, task),
               lifecycle(h, model, task),
               h.h2([h.Class("gp-section-label")], ["Discussion"]),

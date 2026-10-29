@@ -64,26 +64,27 @@
   color: var(--gp-fg-muted);
 }
 
-.gp-segmented ui-toggle,
 .gp-segmented .gp-segment {
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
   padding: 4px 12px;
   border-radius: var(--gp-radius-sm);
   cursor: pointer;
   display: inline-block;
 }
 
-.gp-segmented ui-toggle:hover,
 .gp-segmented .gp-segment:hover {
   color: var(--gp-fg);
 }
 
-.gp-segmented ui-toggle[pressed],
 .gp-segmented .gp-segment[data-active] {
   background: var(--gp-surface-active);
   color: var(--gp-fg);
 }
 
-.gp-segmented ui-toggle[disabled] {
+.gp-segmented .gp-segment[aria-disabled="true"] {
   color: var(--gp-fg-fainter);
   cursor: default;
 }
@@ -268,8 +269,17 @@
 
 /* ------------------------------------------------------------------- dialog */
 
-/* `ui-dialog-popup` opens through the Popover API, so it sits in the top
-   layer; the dimmed page behind it is the popover's own `::backdrop`. */
+/* Foldkit Dialog owns focus and isolation; its backdrop and panel are ours. */
+.gp-dialog-root {
+  margin: 0;
+  color: var(--gp-fg);
+}
+
+.gp-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.45);
+}
 .gp-dialog {
   position: fixed;
   inset: 0;
@@ -282,10 +292,6 @@
   border-radius: var(--gp-radius-lg);
   padding: 20px 22px;
   box-shadow: 0 20px 60px rgb(0 0 0 / 0.35);
-}
-
-.gp-dialog::backdrop {
-  background: rgb(0 0 0 / 0.45);
 }
 
 .gp-dialog-title {

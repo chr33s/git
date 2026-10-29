@@ -16,8 +16,10 @@
  * Commands are resolved by name here rather than executed, so nothing reaches
  * the network and each story says exactly which answer it is testing.
  */
+import * as Controls from "./controls.ts";
 import { describe, it } from "@effect/vitest";
 import { Option } from "effect";
+import { Dialog, Menu, RadioGroup, Tabs } from "@foldkit/ui";
 import { AsyncData, Story } from "foldkit";
 import assert from "node:assert/strict";
 
@@ -44,7 +46,7 @@ import {
   SignLocalAs,
 } from "./app.command.code.ts";
 import { CreateTask, LoadCommits, LoadTasks } from "./app.command.ts";
-import { CloseNewTaskDialog, Navigate } from "./app.command.shell.ts";
+import { Navigate } from "./app.command.shell.ts";
 import type { Task } from "./model.ts";
 
 const task = (over: Partial<Task> = {}): Task => ({
@@ -78,6 +80,7 @@ const openOn = (route: AppRoute, tasks: readonly Task[] = [task()]): Model => ({
   route,
   repo: "core",
   cloneUrl: "http://localhost/core",
+  controls: Controls.init(),
   theme: "dark",
   themePinned: false,
   viewer: AsyncData.Idle(),
@@ -299,10 +302,7 @@ describe("the Tasks composer", () => {
           submitted: { title: "Write it down", desc: "", parent: "T-1" },
         }),
       ),
-      Story.Command.resolve(
-        CloseNewTaskDialog,
-        AppMessage.CompletedCloseNewTaskDialog({ outcome: "Closed" }),
-      ),
+
       Story.Command.resolve(Navigate, AppMessage.CompletedNavigate()),
       Story.model((model) => {
         const filed = model.tasks.tasks.find((held) => held.id === "T-2");
@@ -825,12 +825,7 @@ describe("the new-branch dialog", () => {
       AppMessage.ClickedCancelNewBranch(),
     );
     assert.equal(after.codeScreen.newBranch, "");
-    // Opened imperatively from a menu item, so there is no trigger to press
-    // again and nothing else would dismiss it but Escape or the backdrop.
-    assert.equal(
-      (commands ?? []).some((command) => command.name === "CloseNewTaskDialog"),
-      true,
-    );
+    assert.equal(after.controls.dialogs.newBranch.isOpen, false);
   });
 });
 
@@ -1157,8 +1152,17 @@ describe("the rail search box", () => {
       openOn(AppRoute.Search()),
       AppMessage.ChangedSearchDraft({ query: "auth" }),
     );
-    assert.equal((drafted.commands ?? []).length, 0);
-    const searched = update(drafted.model, AppMessage.ChangedSearchQuery({ query: "auth" }));
+    assert.deepEqual(
+      (drafted.commands ?? []).map((command) => command.name),
+      ["DebounceSearch"],
+    );
+    const searched = update(
+      drafted.model,
+      AppMessage.CompletedSearchDebounce({
+        query: "auth",
+        version: drafted.model.controls.searchVersion,
+      }),
+    );
     assert.equal(
       (searched.commands ?? []).some((command) => command.name === "Grep"),
       true,
@@ -1948,5 +1952,80 @@ describe("a copy the clipboard refused", () => {
   it("never says Copied", () => {
     const refused = update(openOn(AppRoute.Code({ path: "" })), AppMessage.FailedCopy());
     assert.equal(refused.model.codeScreen.copied, false);
+  });
+});
+
+describe("Foldkit UI controls", () => {
+  it("opens and closes dialogs through their child state", () => {
+    const opened = update(
+      openOn(AppRoute.Code({ path: "" })),
+      AppMessage.ClickedOpenDialog({ name: "clone" }),
+    );
+    assert.equal(opened.model.controls.dialogs.clone.isOpen, true);
+    assert.ok(opened.commands?.some((command) => command.name === "ShowDialog"));
+    const closed = update(
+      opened.model,
+      AppMessage.GotDialogMessage({ dialogId: "clone", message: Dialog.Message.RequestedClose() }),
+    );
+    assert.equal(closed.model.controls.dialogs.clone.isOpen, false);
+    assert.ok(closed.commands?.some((command) => command.name === "CloseDialog"));
+  });
+
+  it("opens the branch composer when its menu selects New branch", () => {
+    const result = update(
+      openOn(AppRoute.Code({ path: "" })),
+      AppMessage.GotMenuMessage({
+        menuId: "branch",
+        message: Menu.Message.SelectedItem({ index: 1, item: "__new-branch" }),
+      }),
+    );
+    assert.equal(result.model.controls.menus.branch.isOpen, false);
+    assert.equal(result.model.controls.dialogs.newBranch.isOpen, true);
+    const canceled = update(result.model, AppMessage.ClickedCancelNewBranch());
+    assert.equal(canceled.model.controls.dialogs.newBranch.isOpen, false);
+  });
+
+  it("routes keyboard tab selection through the existing diff loader", () => {
+    const result = update(
+      openOn(AppRoute.Detail({ id: "CR-14" })),
+      AppMessage.GotDetailTabsMessage({
+        message: Tabs.Message.SelectedTab({ index: 1, value: "diff" }),
+      }),
+    );
+    assert.equal(result.model.detailScreen.tab, "diff");
+    assert.ok(result.commands?.some((command) => command.name === "LoadDiff"));
+  });
+
+  it("preserves deselection of the active task filter", () => {
+    const initial = openOn(AppRoute.Tasks());
+    const message = AppMessage.GotTaskFilterMessage({
+      message: RadioGroup.Message.SelectedOption({ index: 1, value: "tasks" }),
+    });
+    const selected = update(initial, message).model;
+    assert.equal(selected.tasksScreen.filter, "tasks");
+    assert.equal(update(selected, message).model.tasksScreen.filter, "all");
+  });
+
+  it("rejects an older debounce even when the query returns to the same text", () => {
+    const first = update(
+      openOn(AppRoute.Search()),
+      AppMessage.ChangedSearchDraft({ query: "a" }),
+    ).model;
+    const second = update(first, AppMessage.ChangedSearchDraft({ query: "ab" })).model;
+    const last = update(second, AppMessage.ChangedSearchDraft({ query: "a" })).model;
+    const stale = update(
+      last,
+      AppMessage.CompletedSearchDebounce({ query: "a", version: first.controls.searchVersion }),
+    );
+    assert.equal(stale.model, last);
+    assert.equal((stale.commands ?? []).length, 0);
+    const cleared = update(last, AppMessage.ChangedSearchQuery({ query: "" })).model;
+    assert.equal(
+      update(
+        cleared,
+        AppMessage.CompletedSearchDebounce({ query: "a", version: last.controls.searchVersion }),
+      ).model,
+      cleared,
+    );
   });
 });

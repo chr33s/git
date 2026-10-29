@@ -13,9 +13,10 @@
  * with their own heading, so Code renders that header itself rather than the
  * shell rendering it for everyone.
  */
+import { Input } from "@foldkit/ui";
+import { Option } from "effect";
 import { Html } from "foldkit";
 
-import type { Elements } from "./element.base-wc.ts";
 import * as icon from "./icon.ts";
 import { initials } from "./time.ts";
 import { AppMessage } from "./app.message.ts";
@@ -49,11 +50,7 @@ const item = (
     ],
   );
 
-export const sidebar = (
-  model: Model,
-  h: Html.HtmlBuilder<AppMessage>,
-  ui: Elements<AppMessage>,
-): Html.Html =>
+export const sidebar = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Html =>
   h.nav(
     [
       h.Class("gp-sidebar"),
@@ -75,28 +72,50 @@ export const sidebar = (
         ],
       ),
 
-      ui.searchField(
+      h.div(
         [
           h.Class("gp-search"),
-          h.Attribute("debounce", "200"),
+          ...(model.query === "" ? [h.DataAttribute("empty", "")] : []),
           h.Title("Search"),
           h.OnClick(AppMessage.ClickedSearchField()),
-          ui.searchField.OnSearch(({ value }) => AppMessage.ChangedSearchQuery({ query: value })),
         ],
         [
           icon.search(h),
           h.span([h.Class("gp-nav-label")], ["Search"]),
           h.span([h.Class("gp-search-kbd")], ["⌘K"]),
-          h.input([
-            h.Class("gp-visually-hidden"),
-            h.Type("search"),
-            h.Name("q"),
-            h.AriaLabel("Search"),
-            h.Value(model.query),
-            // Per keystroke, beside the element's debounced `search` above:
-            // this keeps the Model level with the box, that one searches.
-            h.OnInput((query) => AppMessage.ChangedSearchDraft({ query })),
-          ]),
+          Input.view(
+            {
+              id: "gp-search-input",
+              type: "search",
+              name: "q",
+              value: model.query,
+              onInput: (query) => AppMessage.ChangedSearchDraft({ query }),
+              toView: (attributes) =>
+                h.input([
+                  ...attributes.input,
+                  h.Class("gp-visually-hidden"),
+                  h.AriaLabel("Search"),
+                  h.OnKeyDownPreventDefault((key) =>
+                    key === "Escape"
+                      ? Option.some(AppMessage.ChangedSearchQuery({ query: "" }))
+                      : Option.none(),
+                  ),
+                ]),
+            },
+            h,
+          ),
+          model.query === ""
+            ? h.empty
+            : h.button(
+                [
+                  h.Type("button"),
+                  h.Class("gp-search-clear"),
+                  h.DataAttribute("search-clear", ""),
+                  h.AriaLabel("Clear search"),
+                  h.OnClick(AppMessage.ChangedSearchQuery({ query: "" })),
+                ],
+                ["×"],
+              ),
         ],
       ),
 

@@ -9,7 +9,6 @@
 import { Html } from "foldkit";
 import { Option } from "effect";
 
-import { elements } from "./element.base-wc.ts";
 import { AppMessage } from "./app.message.ts";
 import { AppRoute } from "./app.route.ts";
 import type { Model } from "./app.model.ts";
@@ -22,8 +21,6 @@ import { view as settings } from "./view.settings.ts";
 import { view as tasks } from "./view.tasks.ts";
 
 export const view = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Document => {
-  const ui = elements(h);
-
   /**
    * The explanation above whichever screen fell back to.
    *
@@ -45,7 +42,7 @@ export const view = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Docume
    * shell supplies that column for it.
    *
    * The key is what stops the diff reusing one screen's elements for the
-   * next: two screens both open with a `ui-toggle-group`, and a reused one
+   * next: two screens both open with a segmented control, and a reused one
    * carries its selection across — the Tasks filter arriving as the Activity
    * zoom. A different screen is a different element.
    */
@@ -53,17 +50,17 @@ export const view = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Docume
     h.keyed("main")(screen, [h.Class("gp-main")], [notice, body]);
 
   const body = AppRoute.match(model.route, {
-    Code: () => [code(model, h, ui, notice)],
-    NotFound: () => [code(model, h, ui, notice)],
-    Tasks: () => [column("tasks", tasks(model, h, ui))],
-    Activity: () => [column("activity", activity(model, h, ui))],
-    Detail: () => [column("detail", detail(model, h, ui))],
-    Settings: () => [column("settings", settings(model, h, ui))],
+    Code: () => [code(model, h, notice)],
+    NotFound: () => [code(model, h, notice)],
+    Tasks: () => [column("tasks", tasks(model, h))],
+    Activity: () => [column("activity", activity(model, h))],
+    Detail: () => [column("detail", detail(model, h))],
+    Settings: () => [column("settings", settings(model, h))],
     Search: () => [column("search", search(model, h))],
   });
 
   return {
     title: "git+",
-    body: h.div([h.Class("gp-shell")], [sidebar(model, h, ui), ...body]),
+    body: h.div([h.Class("gp-shell")], [sidebar(model, h), ...body]),
   };
 };

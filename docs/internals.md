@@ -36,7 +36,7 @@ all Vite consumers use Vite+'s core to share one module registry.
 
 Oxlint `typeCheck` and `tsc` both run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).
 Foldkit's `@foldkit/oxlint-plugin` is loaded the same way, scoped to the UI's
-TEA files (`src/ui/app*.ts`, views, mounts, `element.base-wc.ts`).
+TEA files (`src/ui/app*.ts`, views, mounts, controls).
 
 ## Module map
 

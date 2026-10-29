@@ -92,6 +92,7 @@ describe("the source tree", () => {
       const declared = { ...own.dependencies, ...own.devDependencies };
       for (const name of [
         "foldkit",
+        "@foldkit/ui",
         "@foldkit/vite-plugin",
         "@foldkit/devtools",
         "@foldkit/oxlint-plugin",
@@ -105,6 +106,7 @@ describe("the source tree", () => {
       const effectFrom = (name: string) =>
         createRequire(import.meta.resolve(name)).resolve("effect");
       assert.equal(effectFrom("foldkit"), fileURLToPath(import.meta.resolve("effect")));
+      assert.equal(effectFrom("@foldkit/ui"), effectFrom("foldkit"));
       assert.equal(manifestAt("node_modules/effect/package.json").version, declared["effect"]);
     }),
   );

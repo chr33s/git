@@ -15,8 +15,10 @@
  * earns its wrapping when a screen owns Messages the shell must not see; here
  * every screen's work is the application's work — opening a Task from Search
  * is the same navigation as opening it from Tasks — so one Message union and
- * one `update` keep the transitions in one place to read.
+ * one `update` keep the transitions in one place to read. Accessible controls
+ * keep their private interaction state in child submodels under `controls`.
  */
+import * as Controls from "./controls.ts";
 import { AsyncData } from "foldkit";
 import { Schema } from "effect";
 
@@ -446,6 +448,7 @@ export const CodeScreen = Schema.Struct({
 export type CodeScreen = typeof CodeScreen.Type;
 
 export const Model = Schema.Struct({
+  controls: Controls.Model,
   route: AppRoute,
   /** Which repository this build talks to — from the page's own meta tag. */
   repo: Schema.String,
@@ -462,7 +465,7 @@ export const Model = Schema.Struct({
   themePinned: Schema.Boolean,
   viewer: AsyncData.Schema(Viewer, Schema.String).schema,
   localRepository: LocalRepository,
-  /** The rail's query, already debounced by `ui-search-field`. */
+  /** The rail's query, kept current while its search command is debounced. */
   query: Schema.String,
   /**
    * Whether the rail is the 64px strip.

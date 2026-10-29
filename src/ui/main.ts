@@ -6,9 +6,6 @@
  * the only way to avoid a flash of the wrong palette without blocking on the
  * bundle. `restore()` is called again here so the module is also correct when
  * the UI is mounted into a host page that has no such script.
- *
- * `elements.ts` is imported before the application so every `ui-*` definition
- * exists by the time the first view using one is rendered.
  */
 import "./tokens.css";
 import "./styles/base.css";
@@ -24,14 +21,9 @@ import "./styles/a11y.css";
 
 import { Runtime } from "foldkit";
 
-import { REGISTERED } from "./elements.ts";
 import { restore } from "./theme.ts";
 import { application } from "./app.ts";
 
 restore();
-
-// Reading the array is what keeps `elements.ts` — and so every custom element
-// definition in it — from being tree-shaken out of the bundle.
-if (REGISTERED.length === 0) throw new Error("git+ UI: no base-wc elements registered");
 
 Runtime.run(application);

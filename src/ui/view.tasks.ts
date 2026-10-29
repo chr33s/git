@@ -17,9 +17,11 @@
  * navigation all happen in `app.update.ts`, which is why nothing here is
  * async and nothing here touches the DOM.
  */
+import { TaskFilter } from "./controls.ts";
+import { Option } from "effect";
+import { modal } from "./view.controls.ts";
 import { Html } from "foldkit";
 
-import { type Elements } from "./element.base-wc.ts";
 import { isTerminal, ringToken, statusToken, type Task } from "./model.ts";
 import { AppMessage } from "./app.message.ts";
 import { AppRoute } from "./app.route.ts";
@@ -52,7 +54,6 @@ const SEGMENTS: readonly { readonly value: Tasks.Filter; readonly label: string 
 ];
 
 /** The selector `CloseDialog` is given; the dialog is found by it, not held. */
-export const NEW_TASK_DIALOG = "ui-dialog.gp-new-task";
 
 const row = (h: Html.HtmlBuilder<AppMessage>, task: Task, depth: number): Html.Html =>
   h.button(
@@ -93,87 +94,85 @@ const row = (h: Html.HtmlBuilder<AppMessage>, task: Task, depth: number): Html.H
 /**
  * The "New task" dialog.
  *
- * `ui-dialog` owns the modality — trigger wiring, focus trap, Escape and
+ * Foldkit Dialog owns the modality — trigger wiring, focus trap, Escape and
  * outside-press dismissal — and this owns only the form. The fields are Model
  * values rather than DOM state, so the composer survives a re-render and the
  * submit reads what the reader typed from the same place the view drew it.
  */
-const newTask = (
-  h: Html.HtmlBuilder<AppMessage>,
-  ui: Elements<AppMessage>,
-  model: Model,
-): Html.Html =>
-  ui.dialog(
-    [h.Class("gp-new-task")],
-    [
-      h.button(
-        [h.Class("gp-btn-primary"), h.DataAttribute("dialog-trigger", ""), h.Type("button")],
-        ["New task"],
-      ),
-      ui.dialogPopup(
-        [h.Class("gp-dialog")],
+const newTask = (h: Html.HtmlBuilder<AppMessage>, model: Model): Html.Html =>
+  modal(
+    h,
+    model,
+    "newTask",
+    "gp-new-task",
+    h.button(
+      [
+        h.Class("gp-btn-primary"),
+        h.OnClick(AppMessage.ClickedOpenDialog({ name: "newTask" })),
+        h.Type("button"),
+      ],
+      ["New task"],
+    ),
+    (render) => [
+      h.h2([h.Class("gp-dialog-title"), ...render.title], ["New task"]),
+      h.p(
+        [h.Class("gp-dialog-hint"), ...render.description],
         [
-          h.h2([h.Class("gp-dialog-title"), h.DataAttribute("dialog-title", "")], ["New task"]),
-          h.p(
-            [h.Class("gp-dialog-hint"), h.DataAttribute("dialog-description", "")],
+          "Signed with this browser's key and appended to the repository's hub. If the repository refuses the key — it may not be a member yet — the task stays in this tab instead.",
+        ],
+      ),
+      h.form(
+        [h.OnSubmit(AppMessage.SubmittedNewTask())],
+        [
+          h.label([h.Class("gp-field-label"), h.For("gp-new-title")], ["Title"]),
+          h.input([
+            h.Id("gp-new-title"),
+            h.Class("gp-input"),
+            h.Name("title"),
+            h.Required(true),
+            h.Autocomplete("off"),
+            h.Placeholder("What needs doing?"),
+            h.Value(model.tasksScreen.title),
+            h.OnInput((value) => AppMessage.ChangedNewTaskTitle({ title: value })),
+          ]),
+          h.label([h.Class("gp-field-label"), h.For("gp-new-parent")], ["Belongs to"]),
+          h.select(
             [
-              "Signed with this browser's key and appended to the repository's hub. If the repository refuses the key — it may not be a member yet — the task stays in this tab instead.",
+              h.Id("gp-new-parent"),
+              h.Class("gp-input"),
+              h.Name("parent"),
+              h.Value(model.tasksScreen.parent),
+              h.OnChange((value) => AppMessage.ChangedNewTaskParent({ parent: value })),
+            ],
+            [
+              h.option([h.Value("")], ["Nothing"]),
+              ...model.tasks.tasks.map((candidate) =>
+                h.option([h.Value(candidate.id)], [`${candidate.id} — ${candidate.title}`]),
+              ),
             ],
           ),
-          h.form(
-            [h.OnSubmit(AppMessage.SubmittedNewTask())],
+          h.label([h.Class("gp-field-label"), h.For("gp-new-desc")], ["Description"]),
+          h.textarea([
+            h.Id("gp-new-desc"),
+            h.Class("gp-textarea"),
+            h.Name("desc"),
+            h.Rows(4),
+            h.Placeholder("Context, constraints, links…"),
+            h.Value(model.tasksScreen.desc),
+            h.OnInput((value) => AppMessage.ChangedNewTaskDescription({ desc: value })),
+          ]),
+          h.div(
+            [h.Class("gp-dialog-actions")],
             [
-              h.label([h.Class("gp-field-label"), h.For("gp-new-title")], ["Title"]),
-              h.input([
-                h.Id("gp-new-title"),
-                h.Class("gp-input"),
-                h.Name("title"),
-                h.Required(true),
-                h.Autocomplete("off"),
-                h.Placeholder("What needs doing?"),
-                h.Value(model.tasksScreen.title),
-                h.OnInput((value) => AppMessage.ChangedNewTaskTitle({ title: value })),
-              ]),
-              h.label([h.Class("gp-field-label"), h.For("gp-new-parent")], ["Belongs to"]),
-              h.select(
+              h.button(
                 [
-                  h.Id("gp-new-parent"),
-                  h.Class("gp-input"),
-                  h.Name("parent"),
-                  h.Value(model.tasksScreen.parent),
-                  h.OnChange((value) => AppMessage.ChangedNewTaskParent({ parent: value })),
+                  h.Class("gp-btn-quiet"),
+                  h.Type("button"),
+                  h.OnClick(AppMessage.ClickedCancelNewTask()),
                 ],
-                [
-                  h.option([h.Value("")], ["Nothing"]),
-                  ...model.tasks.tasks.map((candidate) =>
-                    h.option([h.Value(candidate.id)], [`${candidate.id} — ${candidate.title}`]),
-                  ),
-                ],
+                ["Cancel"],
               ),
-              h.label([h.Class("gp-field-label"), h.For("gp-new-desc")], ["Description"]),
-              h.textarea([
-                h.Id("gp-new-desc"),
-                h.Class("gp-textarea"),
-                h.Name("desc"),
-                h.Rows(4),
-                h.Placeholder("Context, constraints, links…"),
-                h.Value(model.tasksScreen.desc),
-                h.OnInput((value) => AppMessage.ChangedNewTaskDescription({ desc: value })),
-              ]),
-              h.div(
-                [h.Class("gp-dialog-actions")],
-                [
-                  h.button(
-                    [
-                      h.Class("gp-btn-quiet"),
-                      h.Type("button"),
-                      h.OnClick(AppMessage.ClickedCancelNewTask()),
-                    ],
-                    ["Cancel"],
-                  ),
-                  h.button([h.Class("gp-btn-primary"), h.Type("submit")], ["Create task"]),
-                ],
-              ),
+              h.button([h.Class("gp-btn-primary"), h.Type("submit")], ["Create task"]),
             ],
           ),
         ],
@@ -181,11 +180,7 @@ const newTask = (
     ],
   );
 
-export const view = (
-  model: Model,
-  h: Html.HtmlBuilder<AppMessage>,
-  ui: Elements<AppMessage>,
-): Html.Html => {
+export const view = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Html => {
   const groups = Tasks.groups(model.tasks.tasks, model.tasksScreen.filter);
   const empty = groups.every((group) => group.rows.length === 0);
   return h.div(
@@ -198,34 +193,43 @@ export const view = (
         [h.Class("gp-tasks-head")],
         [
           h.h1([h.Class("gp-heading")], ["Tasks"]),
-          ui.toggleGroup(
-            [
-              h.Class("gp-segmented"),
-              h.AriaLabel("Filter by kind"),
-              ui.toggleGroup.OnChange(({ value }) =>
-                // A single-select group allows deselection; no segment is "all".
-                AppMessage.ChangedTaskFilter({
-                  filter: value === "tasks" || value === "crs" ? value : "all",
-                }),
-              ),
-            ],
-            SEGMENTS.map((segment) =>
-              ui.toggle(
-                [
-                  h.Class("gp-segment"),
-                  // An attribute, not a property: `ui-toggle` exposes `value`
-                  // as a getter over its own attribute, and writing the
-                  // property throws.
-                  h.Attribute("value", segment.value),
-                  ...(model.tasksScreen.filter === segment.value
-                    ? [h.DataAttribute("active", "")]
-                    : []),
-                ],
-                [segment.label],
-              ),
-            ),
-          ),
-          newTask(h, ui, model),
+          h.submodel({
+            slotId: "taskFilter",
+            view: TaskFilter.view,
+            model: model.controls.taskFilter,
+            toParentMessage: (message) => AppMessage.GotTaskFilterMessage({ message }),
+            viewInputs: {
+              options: SEGMENTS.map((segment) => segment.value),
+              selectedValue: Option.some(model.tasksScreen.filter),
+              ariaLabel: "Filter by kind",
+              orientation: "Horizontal",
+              toView: (render) =>
+                h.div(
+                  [...render.group, h.Class("gp-segmented")],
+                  render.options.map((option) =>
+                    h.button(
+                      [
+                        ...option.option,
+                        h.Type("button"),
+                        h.Class("gp-segment"),
+                        h.Attribute("value", option.value),
+                        ...(option.isSelected ? [h.DataAttribute("active", "")] : []),
+                      ],
+                      [
+                        h.span(
+                          [...option.label],
+                          [
+                            SEGMENTS.find((segment) => segment.value === option.value)?.label ??
+                              option.value,
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            },
+          }),
+          newTask(h, model),
         ],
       ),
       ...(empty

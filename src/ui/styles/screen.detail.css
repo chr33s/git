@@ -74,7 +74,7 @@
   color: var(--gp-accent);
 }
 
-/* Tabs are `ui-tabs` from base-wc; the design's underline treatment is ours. */
+/* Foldkit Tabs owns keyboard interaction; the underline treatment is ours. */
 .gp-tabs {
   display: block;
 }

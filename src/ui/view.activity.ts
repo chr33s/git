@@ -16,9 +16,10 @@
  * many days the window spans and ‹ › page it back and forth. All of that
  * arithmetic is in `activity.ts`; this only draws what it answers.
  */
+import { TimelineZoom } from "./controls.ts";
+import { Option } from "effect";
 import { AsyncData, Html } from "foldkit";
 
-import type { Elements } from "./element.base-wc.ts";
 import { byId, timeline } from "./fixtures.ts";
 import { statusToken, type Task } from "./model.ts";
 import { ago, initials } from "./time.ts";
@@ -155,11 +156,7 @@ const sessions = (h: Html.HtmlBuilder<AppMessage>, model: Model): Html.Html => {
   );
 };
 
-export const view = (
-  model: Model,
-  h: Html.HtmlBuilder<AppMessage>,
-  ui: Elements<AppMessage>,
-): Html.Html => {
+export const view = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Html => {
   const { zoom, offset } = model.activityScreen;
   const live = AsyncData.isSuccess(model.activityScreen.commits);
   const days = Activity.daysOf(zoom, live, offset);
@@ -194,27 +191,39 @@ export const view = (
         [h.Class("gp-activity-head")],
         [
           h.h1([h.Class("gp-heading")], ["Activity"]),
-          ui.toggleGroup(
-            [
-              h.Class("gp-segmented"),
-              h.AriaLabel("Timeline zoom"),
-              ui.toggleGroup.OnChange(({ value }) =>
-                value === "day" || value === "week" || value === "month"
-                  ? AppMessage.ChangedTimelineZoom({ zoom: value })
-                  : AppMessage.ChangedTimelineZoom({ zoom }),
-              ),
-            ],
-            ZOOMS.map((level) =>
-              ui.toggle(
-                [
-                  h.Class("gp-segment"),
-                  h.Attribute("value", level),
-                  ...(zoom === level ? [h.DataAttribute("active", "")] : []),
-                ],
-                [level.charAt(0).toUpperCase() + level.slice(1)],
-              ),
-            ),
-          ),
+          h.submodel({
+            slotId: "timelineZoom",
+            view: TimelineZoom.view,
+            model: model.controls.timelineZoom,
+            toParentMessage: (message) => AppMessage.GotTimelineZoomMessage({ message }),
+            viewInputs: {
+              options: ZOOMS,
+              selectedValue: Option.some(zoom),
+              ariaLabel: "Timeline zoom",
+              orientation: "Horizontal",
+              toView: (render) =>
+                h.div(
+                  [...render.group, h.Class("gp-segmented")],
+                  render.options.map((option) =>
+                    h.button(
+                      [
+                        ...option.option,
+                        h.Type("button"),
+                        h.Class("gp-segment"),
+                        h.Attribute("value", option.value),
+                        ...(option.isSelected ? [h.DataAttribute("active", "")] : []),
+                      ],
+                      [
+                        h.span(
+                          [...option.label],
+                          [option.value.charAt(0).toUpperCase() + option.value.slice(1)],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            },
+          }),
           h.div(
             [h.Class("gp-range")],
             [

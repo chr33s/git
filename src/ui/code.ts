@@ -161,7 +161,6 @@ const PENDING: CodeView = {
  * and must not reach into a view module — `view.code.ts` pulls in the Pierre
  * mounts, and the pure half of the application cannot depend on them.
  */
-export const NEW_BRANCH_DIALOG = "ui-dialog.gp-new-branch";
 
 /**
  * A blob's identity, for a keyed host that must rebuild when the text changes.

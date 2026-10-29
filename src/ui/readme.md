@@ -56,15 +56,12 @@ What follows from that, and is worth knowing before changing anything here:
 
 ## Stack
 
-- **[Foldkit](https://github.com/foldkit/foldkit)** for the application: Model,
-  Message, update, view, Commands, Subscriptions and Mounts, over Effect.
-  Rendering is a virtual DOM into the **light DOM**, never a shadow root —
-  `element.base-wc.ts` explains why that matters here.
-- **[`@chr33s/base-wc`](https://github.com/chr33s/base-wc)** for behaviour:
-  `ui-tabs`, `ui-switch`, `ui-toggle-group`, `ui-search-field`. Its contract is
-  light DOM and native-first form controls, which is what the light-DOM choice
-  above is in service of — the settings toggles wrap real checkboxes and submit
-  without JS.
+- **[Foldkit](https://github.com/foldkit/foldkit)** for Model, Message, update,
+  view, Commands, Subscriptions and Mounts, over Effect. Rendering uses the light DOM.
+- **[`@foldkit/ui`](https://foldkit.dev/ui/overview)** for accessible controls.
+  Dialogs, menus, tabs and radio groups are submodels under `Model.controls`;
+  switches and inputs are controlled render helpers. The application owns the
+  styles, immediate search draft and guarded 200 ms search debounce.
 - **[`@pierre/trees`](https://github.com/pierrecomputer/pierre)** for the
   explorer. It is path-first, so the `/files` response feeds it unchanged.
 - **[`@pierre/diffs`](https://github.com/pierrecomputer/pierre)** for the file
@@ -284,8 +281,9 @@ The application, in the order the Architecture table above puts it:
 | `view.shell.ts`           | The left rail                                    |
 | `view.*.ts`               | One module per screen                            |
 | `mount.pierre-*.ts`       | The `@pierre/diffs` and `@pierre/trees` mounts   |
-| `element.base-wc.ts`      | base-wc elements, declared to Foldkit            |
-| `elements.ts`             | base-wc element registration                     |
+| `controls.ts`             | control schemas, typed bundles and initial state |
+| `app.controls.ts`         | child updates folded into the application        |
+| `view.controls.ts`        | styled native dialogs backed by Foldkit UI       |
 | `icon.ts`                 | Phosphor Icons (regular), as Foldkit nodes       |
 
 What the screens read, and what they read it with:
@@ -333,13 +331,6 @@ And the surrounding build:
   `vite.config.ts` aliases the specifier to the file, and `globals.d.ts`
   declares it. Both can go once the package exports it.
 
-- **`@chr33s/base-wc` bare imports do not survive bundling.** The package marks
-  only `./dist/elements.js` and its stylesheets as having side effects, and this
-  build consumes the TypeScript sources behind `./src/*`, which that list does
-  not cover — so a bundler drops `import "@chr33s/base-wc/src/switch"` as dead
-  weight and the elements silently never register. `elements.ts` imports the
-  classes and holds them instead.
-
 - **The UI is its own TypeScript project.** `src/ui/tsconfig.json` sets
   `lib: ["ES2024", "DOM", "DOM.Iterable"]`; the root project keeps `WebWorker`
   for `src/`. Both in one program mis-resolves DOM members — it made
@@ -347,13 +338,10 @@ And the surrounding build:
   `lib.dom.d.ts` itself reports duplicate index signatures — so `npm run check`
   runs `tsc` once per project.
 
-- **`@chr33s/base-wc` is consumed as unbuilt TypeScript**, so its sources are
-  type-checked as part of this project and `skipLibCheck` does not cover them.
-  Three unguarded `items[i]` reads in `src/roving.ts` failed this repository's
-  `noUncheckedIndexedAccess`; they were fixed upstream in `1.0.1`, which is what
-  the lockfile now pins. Anything similar in a future version will surface as a
-  `npm run check` failure in `node_modules/`, not in `src/ui/` — fix it upstream by
-  preference, or carry it in `patches/` as the `alchemy` dependency does.
+- **Foldkit controls own their interactions.** Parent events use the child's
+  public capabilities through `Update.foldChildStep`; child messages flow through
+  `Update.foldChild`. Dialog lifecycle cleanup releases focus traps and background
+  isolation when a route unmounts. Menus own their anchoring and keyboard navigation.
 
 - **Shiki is loaded on demand.** It carries every bundled grammar, which is
   megabytes. `highlight.ts` defers `@pierre/diffs` to first use so Activity,

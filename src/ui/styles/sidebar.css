@@ -125,13 +125,12 @@
   display: none;
 }
 
-/* WebKit draws its own clear affordance on `input[type=search]`; base-wc
-   generates one it actually controls, so the native one is a duplicate. */
+/* The application owns clearing so the Model and search results stay aligned. */
 .gp-search input::-webkit-search-cancel-button {
   appearance: none;
 }
 
-/* base-wc generates the ✕; keep it quiet and only when there is a query. */
+/* Keep the clear button quiet and show it only when there is a query. */
 .gp-search [data-search-clear] {
   margin-left: auto;
   border: 0;
@@ -351,20 +350,10 @@
   display: contents;
 }
 
-/* base-wc puts the popup in the top layer via the Popover API, so it escapes
-   the header's overflow; position and look are ours. Where CSS anchor
-   positioning exists base-wc only pairs `position-anchor` to the trigger and
-   leaves placement to this rule — without it the UA popover `inset: 0` pins
-   the popup to the viewport corner. Elsewhere the `anchor()` declarations are
-   invalid and drop out, `inset: auto` clears the UA default, and base-wc's JS
-   fallback places it with inline viewport `top`/`left` — which is why
-   `position` must be `fixed`. */
+/* Foldkit Anchor places the menu beside its trigger. */
 .gp-menu-popup {
   position: fixed;
   inset: auto;
-  top: calc(anchor(bottom) + 6px);
-  left: anchor(left);
-  position-try-fallbacks: flip-inline;
   margin: 0;
   min-width: 220px;
   max-height: 320px;
@@ -390,12 +379,12 @@
   white-space: nowrap;
 }
 
-.gp-menu-item[data-highlighted],
+.gp-menu-item[data-active],
 .gp-menu-item:hover {
   background: var(--gp-surface-hover);
   color: var(--gp-fg);
 }
 
-.gp-menu-item[data-current] {
+.gp-menu-item.gp-current {
   color: var(--gp-accent);
 }

@@ -6,8 +6,8 @@
  * authoring), tags, remotes with their sync verbs, webhooks, maintenance, and
  * the branch policy the repository actually enforces.
  *
- * The policy switches are `ui-switch` from `@chr33s/base-wc`, authored the
- * native-first way its contract asks for: a real checkbox inside the element.
+ * Foldkit UI switches read their checked state from the Model and report
+ * toggles through the application's Messages.
  * The danger zone is the one section the server has no endpoint for, and it
  * says so rather than pretending — its buttons are disabled.
  *
@@ -15,9 +15,9 @@
  * line, whether it landed or refused — an admin screen that swallows a policy
  * refusal teaches its reader the wrong lesson.
  */
+import { Switch } from "@foldkit/ui";
 import { AsyncData, Html } from "foldkit";
 
-import type { Elements } from "./element.base-wc.ts";
 import { AppMessage } from "./app.message.ts";
 import type { Model, SettingsData, SettingsFailure } from "./app.model.ts";
 import { subjectOf } from "./app.model.ts";
@@ -679,12 +679,7 @@ const maintenance = (h: H, model: Model, data: SettingsData | null): Html.Html =
  * new ones through `policy.write`'s own door. Local toggles are gone: what
  * this card shows is what a push meets.
  */
-const policy = (
-  h: H,
-  ui: Elements<AppMessage>,
-  model: Model,
-  data: SettingsData | null,
-): Html.Html => {
+const policy = (h: H, model: Model, data: SettingsData | null): Html.Html => {
   const rules = data?.policy ?? null;
   const forms = model.settingsScreen.forms;
   const failure = AsyncData.getError(model.settingsScreen.data);
@@ -693,28 +688,26 @@ const policy = (
     checked: boolean,
     label: string,
   ): Html.Html =>
-    h.label(
-      [h.Class("gp-field-label gp-switch-row")],
-      [
-        ui.uiSwitch(
-          [h.Class("gp-switch")],
-          [
-            // A controlled checkbox: `Checked` draws the Model's answer and
-            // the click asks to flip it. Foldkit's `OnChange` reports
-            // `event.target.value`, which for a checkbox is the constant
-            // `"on"` — the useful fact is which way it was pointing, and the
-            // Model already holds that.
-            h.input([
-              h.Type("checkbox"),
-              h.Name(field),
-              h.Checked(checked),
-              h.OnClick(AppMessage.ToggledSettingsField({ field, value: !checked })),
-            ]),
-            h.span([h.Class("gp-switch-thumb")], []),
-          ],
-        ),
-        label,
-      ],
+    Switch.view(
+      {
+        id: `gp-${field}`,
+        name: field,
+        isChecked: checked,
+        onToggle: (value) => AppMessage.ToggledSettingsField({ field, value }),
+        toView: (attributes) =>
+          h.div(
+            [h.Class("gp-field-label gp-switch-row")],
+            [
+              h.button(
+                [...attributes.button, h.Class("gp-switch")],
+                [h.span([h.Class("gp-switch-thumb")], [])],
+              ),
+              h.span([...attributes.label], [label]),
+              h.input([...attributes.hiddenInput]),
+            ],
+          ),
+      },
+      h,
     );
   return h.section(
     [h.Class("gp-setting-card"), h.DataAttribute("card", "policy")],
@@ -888,7 +881,7 @@ const danger = (h: H): Html.Html =>
     ],
   );
 
-export const view = (model: Model, h: H, ui: Elements<AppMessage>): Html.Html => {
+export const view = (model: Model, h: H): Html.Html => {
   const held = AsyncData.getData(model.settingsScreen.data);
   const data = held._tag === "Some" ? held.value : null;
   return h.div(
@@ -905,7 +898,7 @@ export const view = (model: Model, h: H, ui: Elements<AppMessage>): Html.Html =>
           remotes(h, model, data),
           webhooks(h, model, data),
           maintenance(h, model, data),
-          policy(h, ui, model, data),
+          policy(h, model, data),
           danger(h),
         ],
       ),

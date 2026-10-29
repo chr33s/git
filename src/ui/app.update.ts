@@ -10,6 +10,16 @@
  * `evo` is not used: these Models are small enough that a spread says the same
  * thing with one less concept in the file.
  */
+import { Dialog } from "@foldkit/ui";
+import {
+  closeDialog,
+  changeDialog,
+  foldDialog,
+  foldMenu,
+  foldDetailTabs,
+  foldTaskFilter,
+  foldTimelineZoom,
+} from "./app.controls.ts";
 import { AsyncData, Navigation, Update } from "foldkit";
 import { Option } from "effect";
 
@@ -52,21 +62,19 @@ import {
   Rebase,
   RefreshSync,
 } from "./app.command.code.ts";
-import { NEW_TASK_DIALOG } from "./view.tasks.ts";
 import { SEARCH_INPUT } from "./view.shell.ts";
 import {
   ApplyTheme,
-  CloseNewTaskDialog,
+  DebounceSearch,
   CopyText,
   ForgetCopied,
   FocusSearch,
   LoadUrl,
-  OpenDialog,
   Navigate,
   RememberRail,
 } from "./app.command.shell.ts";
 import { initials } from "./time.ts";
-import { NEW_BRANCH_DIALOG, viewOf, writableBranch as writableRef } from "./code.ts";
+import { viewOf, writableBranch as writableRef } from "./code.ts";
 import * as Activity from "./activity.ts";
 import * as Settings from "./settings.ts";
 import * as Tasks from "./task.ts";
@@ -96,6 +104,38 @@ const holdsSubmitted = (model: Model, submitted: SubmittedTask): boolean =>
 
 export const update = (model: Model, message: AppMessage): Return =>
   AppMessage.match<Return>(message, {
+    ClickedOpenDialog: ({ name }) => changeDialog(model, name, Dialog.open),
+    GotDialogMessage: ({ dialogId, message }) => foldDialog(model, dialogId, message),
+    GotMenuMessage: ({ menuId, message }) =>
+      foldMenu(model, menuId, message, (next, item) =>
+        update(
+          next,
+          menuId === "branch"
+            ? AppMessage.SelectedBranch({ ref: item })
+            : AppMessage.ClickedRefresh(),
+        ),
+      ),
+    GotDetailTabsMessage: ({ message }) =>
+      foldDetailTabs(model, message, (next, tab) =>
+        update(next, AppMessage.ChangedDetailTab({ tab })),
+      ),
+    GotTaskFilterMessage: ({ message }) =>
+      foldTaskFilter(model, message, (next, filter) =>
+        update(
+          next,
+          AppMessage.ChangedTaskFilter({
+            filter: filter === next.tasksScreen.filter ? "all" : filter,
+          }),
+        ),
+      ),
+    GotTimelineZoomMessage: ({ message }) =>
+      foldTimelineZoom(model, message, (next, zoom) =>
+        update(next, AppMessage.ChangedTimelineZoom({ zoom })),
+      ),
+    CompletedSearchDebounce: ({ query, version }) =>
+      version === model.controls.searchVersion && query === model.query
+        ? update(model, AppMessage.ChangedSearchQuery({ query }))
+        : { model },
     // -- the shell ------------------------------------------------------
     /**
      * A new address is a new question.
@@ -261,10 +301,15 @@ export const update = (model: Model, message: AppMessage): Return =>
       model: {
         ...model,
         query,
+        controls: { ...model.controls, searchVersion: model.controls.searchVersion + 1 },
         searchScreen: {
           code: query.trim() === "" ? AsyncData.Idle() : AsyncData.Loading(),
         },
       },
+      commands:
+        query.trim() === ""
+          ? []
+          : [DebounceSearch({ query, version: model.controls.searchVersion + 1 })],
     }),
 
     ChangedSearchQuery: ({ query }) => {
@@ -273,6 +318,7 @@ export const update = (model: Model, message: AppMessage): Return =>
         model: {
           ...model,
           query,
+          controls: { ...model.controls, searchVersion: model.controls.searchVersion + 1 },
           // An empty field is not a search in progress; showing the previous
           // answer under no query would say the repository still matches it.
           searchScreen: {
@@ -280,7 +326,7 @@ export const update = (model: Model, message: AppMessage): Return =>
           },
         },
         commands: [
-          ...(pattern === "" ? [] : [Grep({ pattern })]),
+          ...(pattern === "" ? [FocusSearch({ selector: SEARCH_INPUT })] : [Grep({ pattern })]),
           ...(pattern !== "" && model.route._tag !== "Search"
             ? [Navigate({ url: urlOf(AppRoute.Search()) })]
             : []),
@@ -432,13 +478,16 @@ export const update = (model: Model, message: AppMessage): Return =>
 
     // A create still out stays out: its answer is what clears `submitting`.
     // Letting a second one start meanwhile would pick the same fallback id.
-    ClickedCancelNewTask: () => ({
-      model: {
-        ...model,
-        tasksScreen: { ...clearComposer(model), submitting: model.tasksScreen.submitting },
-      },
-      commands: [CloseNewTaskDialog({ selector: NEW_TASK_DIALOG })],
-    }),
+    ClickedCancelNewTask: () =>
+      closeDialog(
+        {
+          model: {
+            ...model,
+            tasksScreen: { ...clearComposer(model), submitting: model.tasksScreen.submitting },
+          },
+        },
+        "newTask",
+      ),
 
     /**
      * The hub took it, so the projection is what carries it.
@@ -451,17 +500,17 @@ export const update = (model: Model, message: AppMessage): Return =>
      */
     SucceededCreateTask: ({ id, submitted }) => {
       const held = holdsSubmitted(model, submitted);
-      return {
+      const result: Return = {
         model: {
           ...model,
           tasksScreen: held ? clearComposer(model) : { ...model.tasksScreen, submitting: false },
         },
         commands: [
-          ...(held ? [CloseNewTaskDialog({ selector: NEW_TASK_DIALOG })] : []),
           LoadTasks(),
           ...(held ? [Navigate({ url: urlOf(AppRoute.Detail({ id })) })] : []),
         ],
       };
+      return held ? closeDialog(result, "newTask") : result;
     },
 
     /**
@@ -481,7 +530,7 @@ export const update = (model: Model, message: AppMessage): Return =>
         author: { name, avatar: initials(name) },
       });
       const withTask = [...model.tasks.tasks, task];
-      return {
+      const result: Return = {
         model: {
           ...model,
           tasks: {
@@ -490,13 +539,9 @@ export const update = (model: Model, message: AppMessage): Return =>
           },
           tasksScreen: held ? clearComposer(model) : { ...model.tasksScreen, submitting: false },
         },
-        commands: held
-          ? [
-              CloseNewTaskDialog({ selector: NEW_TASK_DIALOG }),
-              Navigate({ url: urlOf(AppRoute.Detail({ id })) }),
-            ]
-          : [],
+        commands: held ? [Navigate({ url: urlOf(AppRoute.Detail({ id })) })] : [],
       };
+      return held ? closeDialog(result, "newTask") : result;
     },
 
     SucceededMoveTask: ({ id, parent }) => ({
@@ -515,8 +560,6 @@ export const update = (model: Model, message: AppMessage): Return =>
         ? { ...model, detailScreen: { ...model.detailScreen, acting: false, moveNotice: reason } }
         : model,
     }),
-
-    CompletedCloseNewTaskDialog: () => ({ model }),
 
     // -- the Search screen ----------------------------------------------
     ClickedCodeHit: ({ path }) => ({
@@ -1210,12 +1253,11 @@ export const update = (model: Model, message: AppMessage): Return =>
      * than trying to patch the explorer, the pane and the commit bar in place.
      *
      * The menu's last item is not a branch: it opens the dialog that creates
-     * one. `ui-dialog` opens from a trigger it owns, and a menu item is not
-     * that trigger, so this is the one place the show is a Command.
+     * one. Opening it folds Dialog's public capability into the same update.
      */
     SelectedBranch: ({ ref }) =>
       ref === "__new-branch"
-        ? { model, commands: [OpenDialog({ selector: NEW_BRANCH_DIALOG })] }
+        ? changeDialog(model, "newBranch", Dialog.open)
         : ref === "__rebase"
           ? update(model, AppMessage.ClickedRebase())
           : {
@@ -1229,15 +1271,15 @@ export const update = (model: Model, message: AppMessage): Return =>
     /**
      * Cancel.
      *
-     * The dialog closes as well as clearing: it is opened imperatively from a
-     * menu item rather than from a `[data-dialog-trigger]`, so `ui-dialog` has
-     * no trigger to press again and only Escape or the backdrop would have
-     * dismissed it — with the focus trap over the screen until then.
+     * The dialog closes in the same transition that clears its draft.
      */
-    ClickedCancelNewBranch: () => ({
-      model: { ...model, codeScreen: { ...model.codeScreen, newBranch: "", syncNotice: null } },
-      commands: [CloseNewTaskDialog({ selector: NEW_BRANCH_DIALOG })],
-    }),
+    ClickedCancelNewBranch: () =>
+      closeDialog(
+        {
+          model: { ...model, codeScreen: { ...model.codeScreen, newBranch: "", syncNotice: null } },
+        },
+        "newBranch",
+      ),
 
     ChangedNewBranch: ({ name }) => ({
       model: { ...model, codeScreen: { ...model.codeScreen, newBranch: name } },
@@ -1252,21 +1294,22 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    SucceededCreateBranch: ({ name }) => ({
-      model: {
-        ...model,
-        codeScreen: {
-          ...model.codeScreen,
-          newBranch: "",
-          wantedRef: name,
-          view: AsyncData.Loading(),
+    SucceededCreateBranch: ({ name }) =>
+      closeDialog(
+        {
+          model: {
+            ...model,
+            codeScreen: {
+              ...model.codeScreen,
+              newBranch: "",
+              wantedRef: name,
+              view: AsyncData.Loading(),
+            },
+          },
+          commands: [LoadCode({ ref: name, keep: "" })],
         },
-      },
-      commands: [
-        CloseNewTaskDialog({ selector: NEW_BRANCH_DIALOG }),
-        LoadCode({ ref: name, keep: "" }),
-      ],
-    }),
+        "newBranch",
+      ),
 
     ClickedRefresh: () => ({
       model: { ...model, codeScreen: { ...model.codeScreen, wantedRef: askedFor(model).ref } },
@@ -1704,23 +1747,23 @@ export const update = (model: Model, message: AppMessage): Return =>
       };
     },
 
-    SucceededPropose: ({ id }) => ({
-      model: {
-        ...model,
-        codeScreen: {
-          ...model.codeScreen,
-          syncing: false,
-          syncNotice: null,
-          proposeTitle: "",
-          proposeDescription: "",
+    SucceededPropose: ({ id }) =>
+      closeDialog(
+        {
+          model: {
+            ...model,
+            codeScreen: {
+              ...model.codeScreen,
+              syncing: false,
+              syncNotice: null,
+              proposeTitle: "",
+              proposeDescription: "",
+            },
+          },
+          commands: [LoadTasks(), Navigate({ url: urlOf(AppRoute.Detail({ id })) })],
         },
-      },
-      commands: [
-        CloseNewTaskDialog({ selector: "ui-dialog.gp-propose" }),
-        LoadTasks(),
-        Navigate({ url: urlOf(AppRoute.Detail({ id })) }),
-      ],
-    }),
+        "propose",
+      ),
 
     FailedPropose: ({ reason }) => ({
       model: {

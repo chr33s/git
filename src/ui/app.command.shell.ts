@@ -12,7 +12,6 @@ import { Effect, Schema } from "effect";
 import { Theme } from "./app.model.ts";
 import { AppMessage } from "./app.message.ts";
 import * as palette from "./theme.ts";
-import { hideDialog, showDialog } from "./element.base-wc.ts";
 
 /**
  * Pin a palette: stamps the root so `tokens.css` switches, and remembers it.
@@ -93,16 +92,6 @@ export const Navigate = Command.define("Navigate", {
   execute: ({ url }) => Navigation.pushUrl(url).pipe(Effect.as(AppMessage.CompletedNavigate())),
 });
 
-/** Close the "New task" dialog, and say what closing it did. */
-export const CloseNewTaskDialog = Command.define("CloseNewTaskDialog", {
-  args: { selector: Schema.String },
-  messages: [AppMessage.CompletedCloseNewTaskDialog],
-  execute: ({ selector }) =>
-    hideDialog(selector).pipe(
-      Effect.map((outcome) => AppMessage.CompletedCloseNewTaskDialog({ outcome })),
-    ),
-});
-
 /** Leave the application, for a link that points off-site. */
 export const LoadUrl = Command.define("LoadUrl", {
   args: { href: Schema.String },
@@ -140,12 +129,12 @@ export const ForgetCopied = Command.define("ForgetCopied", {
   execute: Effect.sleep("1500 millis").pipe(Effect.as(AppMessage.ForgotCopied())),
 });
 
-/** Open a dialog that has no trigger of its own — the branch menu's. */
-export const OpenDialog = Command.define("OpenDialog", {
-  args: { selector: Schema.String },
-  messages: [AppMessage.CompletedCloseNewTaskDialog],
-  execute: ({ selector }) =>
-    showDialog(selector).pipe(
-      Effect.map((outcome) => AppMessage.CompletedCloseNewTaskDialog({ outcome })),
+/** Keep typing responsive while delaying the repository search. */
+export const DebounceSearch = Command.define("DebounceSearch", {
+  args: { query: Schema.String, version: Schema.Number },
+  messages: [AppMessage.CompletedSearchDebounce],
+  execute: ({ query, version }) =>
+    Effect.sleep("200 millis").pipe(
+      Effect.as(AppMessage.CompletedSearchDebounce({ query, version })),
     ),
 });

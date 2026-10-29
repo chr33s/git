@@ -17,9 +17,10 @@
  * sample tree and README and says so, which keeps the branch reviewable
  * without a running worker — and read-only, since there is nothing to write to.
  */
+import { ActionMenu } from "./controls.ts";
+import { modal } from "./view.controls.ts";
 import { AsyncData, Html } from "foldkit";
 
-import type { Elements } from "./element.base-wc.ts";
 import * as icon from "./icon.ts";
 import { AppMessage } from "./app.message.ts";
 import type { CodeView, HeadCommit, Model } from "./app.model.ts";
@@ -35,7 +36,7 @@ type H = Html.HtmlBuilder<AppMessage>;
 const writable = (view: CodeView): boolean =>
   !view.offline && Code.writableBranch(view.ref, view.branches, view.defaultBranch);
 
-const explorer = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView): Html.Html =>
+const explorer = (h: H, model: Model, view: CodeView): Html.Html =>
   h.div(
     [h.Class("gp-explorer")],
     [
@@ -65,33 +66,25 @@ const explorer = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView):
                 ],
                 [icon.plus(h)],
               ),
-              ui.menu(
-                [
-                  h.Class("gp-explorer-menu"),
-                  ui.menu.OnMenuSelect(() => AppMessage.ClickedRefresh()),
-                ],
-                [
-                  h.button(
-                    [
-                      h.Class("gp-icon-btn"),
-                      h.Type("button"),
-                      h.DataAttribute("menu-trigger", ""),
-                      h.Title("Explorer actions"),
-                      h.AriaLabel("Explorer actions"),
-                    ],
-                    [icon.ellipsis(h)],
-                  ),
-                  ui.menuPopup(
-                    [h.Class("gp-menu-popup")],
-                    [
-                      ui.menuItem(
-                        [h.Class("gp-menu-item"), h.Attribute("value", "refresh")],
-                        ["Refresh"],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+              h.submodel({
+                slotId: "explorer-menu",
+                view: ActionMenu.view,
+                model: model.controls.menus.explorer,
+                toParentMessage: (message) =>
+                  AppMessage.GotMenuMessage({ menuId: "explorer", message }),
+                viewInputs: {
+                  items: ["refresh"],
+                  itemToConfig: () => ({
+                    className: "gp-menu-item",
+                    content: h.span([], ["Refresh"]),
+                  }),
+                  buttonContent: h.span([h.Title("Explorer actions")], [icon.ellipsis(h)]),
+                  buttonClassName: "gp-icon-btn",
+                  className: "gp-explorer-menu",
+                  itemsClassName: "gp-menu-popup",
+                  ariaLabel: "Explorer actions",
+                },
+              }),
             ],
           ),
         ],
@@ -127,7 +120,7 @@ const explorer = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView):
     ],
   );
 
-const branchMenu = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView): Html.Html => {
+const branchMenu = (h: H, model: Model, view: CodeView): Html.Html => {
   const trigger = [icon.branch(h), ` ${view.ref} `, icon.chevronDown(h)];
   if (view.offline) {
     return h.button([h.Class("gp-branch-trigger"), h.Type("button"), h.Disabled(true)], trigger);
@@ -135,148 +128,127 @@ const branchMenu = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView
   return h.div(
     [],
     [
-      ui.menu(
-        [
-          h.Class("gp-branch-menu"),
-          ui.menu.OnMenuSelect(({ value }) => AppMessage.SelectedBranch({ ref: value })),
-        ],
-        [
-          h.button(
-            [h.Class("gp-branch-trigger"), h.Type("button"), h.DataAttribute("menu-trigger", "")],
-            trigger,
-          ),
-          ui.menuPopup(
-            [h.Class("gp-menu-popup")],
-            [
-              ...view.branches.map((branch) =>
-                ui.menuItem(
+      h.submodel({
+        slotId: "branch-menu",
+        view: ActionMenu.view,
+        model: model.controls.menus.branch,
+        toParentMessage: (message) => AppMessage.GotMenuMessage({ menuId: "branch", message }),
+        viewInputs: {
+          items: [
+            ...view.branches,
+            "__new-branch",
+            ...(view.defaultBranch === null || view.ref === view.defaultBranch ? [] : ["__rebase"]),
+          ],
+          itemToSearchText: (item) =>
+            item === "__new-branch"
+              ? "New branch"
+              : item === "__rebase"
+                ? `Rebase onto ${view.defaultBranch}`
+                : item,
+          itemToConfig: (item) => ({
+            className: `gp-menu-item${item === view.ref ? " gp-current" : ""}${item.startsWith("__") ? " gp-menu-action" : ""}`,
+            content: h.span(
+              [],
+              item === "__new-branch"
+                ? [icon.plus(h, 12), " New branch…"]
+                : item === "__rebase"
+                  ? [icon.branch(h, 12), ` Rebase onto ${view.defaultBranch}`]
+                  : [icon.branch(h, 12), ` ${item}`],
+            ),
+          }),
+          buttonContent: h.span([], trigger),
+          buttonClassName: "gp-branch-trigger",
+          className: "gp-branch-menu",
+          itemsClassName: "gp-menu-popup",
+          ariaLabel: `Branch: ${view.ref}`,
+        },
+      }),
+      modal(h, model, "newBranch", "gp-new-branch", h.empty, (render) => [
+        h.h2([h.Class("gp-dialog-title"), ...render.title], ["New branch"]),
+        h.p(
+          [h.Class("gp-dialog-hint"), ...render.description],
+          [`Created at the tip of ${view.ref} and switched to.`],
+        ),
+        h.form(
+          [h.OnSubmit(AppMessage.SubmittedNewBranch())],
+          [
+            h.label([h.Class("gp-field-label"), h.For("gp-new-branch-name")], ["Name"]),
+            h.input([
+              h.Id("gp-new-branch-name"),
+              h.Class("gp-input"),
+              h.Name("branch"),
+              h.Required(true),
+              h.Autocomplete("off"),
+              h.Spellcheck(false),
+              h.Placeholder("topic/branch-name"),
+              h.Value(model.codeScreen.newBranch),
+              h.OnInput((name) => AppMessage.ChangedNewBranch({ name })),
+            ]),
+            model.codeScreen.syncNotice === null
+              ? h.empty
+              : h.p([h.Class("gp-notice"), h.Role("alert")], [model.codeScreen.syncNotice]),
+            h.div(
+              [h.Class("gp-dialog-actions")],
+              [
+                h.button(
                   [
-                    h.Class("gp-menu-item"),
-                    h.Attribute("value", branch),
-                    ...(branch === view.ref ? [h.DataAttribute("current", "")] : []),
+                    h.Class("gp-btn-quiet"),
+                    h.Type("button"),
+                    h.OnClick(AppMessage.ClickedCancelNewBranch()),
                   ],
-                  [icon.branch(h, 12), ` ${branch}`],
+                  ["Cancel"],
                 ),
-              ),
-              ui.menuItem(
-                [
-                  h.Class("gp-menu-item"),
-                  h.DataAttribute("action", ""),
-                  h.Attribute("value", "__new-branch"),
-                ],
-                [icon.plus(h, 12), " New branch…"],
-              ),
-              // Only off the default branch: rebasing a branch onto itself is
-              // not an operation, and offering it would earn a refusal.
-              view.defaultBranch === null || view.ref === view.defaultBranch
-                ? h.empty
-                : ui.menuItem(
-                    [
-                      h.Class("gp-menu-item"),
-                      h.DataAttribute("action", ""),
-                      h.Attribute("value", "__rebase"),
-                    ],
-                    [icon.branch(h, 12), ` Rebase onto ${view.defaultBranch}`],
-                  ),
-            ],
-          ),
-        ],
-      ),
-      ui.dialog(
-        [h.Class("gp-new-branch")],
-        [
-          ui.dialogPopup(
-            [h.Class("gp-dialog")],
-            [
-              h.h2(
-                [h.Class("gp-dialog-title"), h.DataAttribute("dialog-title", "")],
-                ["New branch"],
-              ),
-              h.p(
-                [h.Class("gp-dialog-hint"), h.DataAttribute("dialog-description", "")],
-                [`Created at the tip of ${view.ref} and switched to.`],
-              ),
-              h.form(
-                [h.OnSubmit(AppMessage.SubmittedNewBranch())],
-                [
-                  h.label([h.Class("gp-field-label"), h.For("gp-new-branch-name")], ["Name"]),
-                  h.input([
-                    h.Id("gp-new-branch-name"),
-                    h.Class("gp-input"),
-                    h.Name("branch"),
-                    h.Required(true),
-                    h.Autocomplete("off"),
-                    h.Spellcheck(false),
-                    h.Placeholder("topic/branch-name"),
-                    h.Value(model.codeScreen.newBranch),
-                    h.OnInput((name) => AppMessage.ChangedNewBranch({ name })),
-                  ]),
-                  model.codeScreen.syncNotice === null
-                    ? h.empty
-                    : h.p([h.Class("gp-notice"), h.Role("alert")], [model.codeScreen.syncNotice]),
-                  h.div(
-                    [h.Class("gp-dialog-actions")],
-                    [
-                      h.button(
-                        [
-                          h.Class("gp-btn-quiet"),
-                          h.Type("button"),
-                          h.OnClick(AppMessage.ClickedCancelNewBranch()),
-                        ],
-                        ["Cancel"],
-                      ),
-                      h.button([h.Class("gp-btn-primary"), h.Type("submit")], ["Create branch"]),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ],
-      ),
+                h.button([h.Class("gp-btn-primary"), h.Type("submit")], ["Create branch"]),
+              ],
+            ),
+          ],
+        ),
+      ]),
     ],
   );
 };
 
 /** The Clone dialog: the smart-HTTP URL, and a copy that says it copied. */
-const clone = (h: H, ui: Elements<AppMessage>, model: Model, url: string): Html.Html =>
-  ui.dialog(
-    [h.Class("gp-clone")],
-    [
-      h.button(
-        [h.Class("gp-btn-primary"), h.DataAttribute("dialog-trigger", ""), h.Type("button")],
-        ["Clone"],
+const clone = (h: H, model: Model, url: string): Html.Html =>
+  modal(
+    h,
+    model,
+    "clone",
+    "gp-clone",
+    h.button(
+      [
+        h.Class("gp-btn-primary"),
+        h.OnClick(AppMessage.ClickedOpenDialog({ name: "clone" })),
+        h.Type("button"),
+      ],
+      ["Clone"],
+    ),
+    (render) => [
+      h.h2([h.Class("gp-dialog-title"), ...render.title], ["Clone"]),
+      h.p(
+        [h.Class("gp-dialog-hint"), ...render.description],
+        ["Smart HTTP, served from the same place as this page."],
       ),
-      ui.dialogPopup(
-        [h.Class("gp-dialog")],
+      h.div(
+        [h.Class("gp-clone-row")],
         [
-          h.h2([h.Class("gp-dialog-title"), h.DataAttribute("dialog-title", "")], ["Clone"]),
-          h.p(
-            [h.Class("gp-dialog-hint"), h.DataAttribute("dialog-description", "")],
-            ["Smart HTTP, served from the same place as this page."],
-          ),
-          h.div(
-            [h.Class("gp-clone-row")],
+          h.input([
+            h.Class("gp-input gp-clone-url"),
+            h.Readonly(true),
+            h.Value(url),
+            h.AriaLabel("Clone URL"),
+          ]),
+          h.button(
             [
-              h.input([
-                h.Class("gp-input gp-clone-url"),
-                h.Readonly(true),
-                h.Value(url),
-                h.AriaLabel("Clone URL"),
-              ]),
-              h.button(
-                [
-                  h.Class("gp-btn-quiet"),
-                  h.Type("button"),
-                  h.OnClick(AppMessage.ClickedClone({ text: url })),
-                ],
-                [model.codeScreen.copied ? "Copied" : "Copy"],
-              ),
+              h.Class("gp-btn-quiet"),
+              h.Type("button"),
+              h.OnClick(AppMessage.ClickedClone({ text: url })),
             ],
+            [model.codeScreen.copied ? "Copied" : "Copy"],
           ),
-          h.p([h.Class("gp-dialog-hint")], [`git clone ${url}`]),
         ],
       ),
+      h.p([h.Class("gp-dialog-hint")], [`git clone ${url}`]),
     ],
   );
 
@@ -286,7 +258,7 @@ const clone = (h: H, ui: Elements<AppMessage>, model: Model, url: string): Html.
  * Only the local client answers it — against the HTTP client there is no
  * "against" — so the controls are absent rather than showing zeroes.
  */
-const syncControls = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView): Html.Html => {
+const syncControls = (h: H, model: Model, view: CodeView): Html.Html => {
   const sync = model.codeScreen.sync;
   if (sync === null || !writable(view)) return h.empty;
   const busy = model.codeScreen.syncing;
@@ -324,7 +296,7 @@ const syncControls = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeVi
       // itself is not a proposal.
       view.defaultBranch === null || view.ref === view.defaultBranch
         ? h.empty
-        : propose(h, ui, model, view),
+        : propose(h, model, view),
     ],
   );
 };
@@ -335,72 +307,63 @@ const syncControls = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeVi
  * Pushed first, signed with the browser's key, and read back from the
  * projection — the order `Propose` runs them in, which is the honest one.
  */
-const propose = (h: H, ui: Elements<AppMessage>, model: Model, view: CodeView): Html.Html =>
-  ui.dialog(
-    [h.Class("gp-propose")],
-    [
-      h.button(
+const propose = (h: H, model: Model, view: CodeView): Html.Html =>
+  modal(
+    h,
+    model,
+    "propose",
+    "gp-propose",
+    h.button(
+      [
+        h.Class("gp-btn-primary"),
+        h.OnClick(AppMessage.ClickedOpenDialog({ name: "propose" })),
+        h.Type("button"),
+        h.Disabled(model.codeScreen.syncing),
+        h.Title(`Push ${view.ref} and open a Change Request against ${view.defaultBranch ?? ""}`),
+      ],
+      ["Propose"],
+    ),
+    (render) => [
+      h.h2([h.Class("gp-dialog-title"), ...render.title], [`Propose ${view.ref}`]),
+      h.p(
+        [h.Class("gp-dialog-hint"), ...render.description],
         [
-          h.Class("gp-btn-primary"),
-          h.DataAttribute("dialog-trigger", ""),
-          h.Type("button"),
-          h.Disabled(model.codeScreen.syncing),
-          h.Title(`Push ${view.ref} and open a Change Request against ${view.defaultBranch ?? ""}`),
+          `Pushes the branch, then opens a Change Request against ${view.defaultBranch ?? ""} — signed with this browser's key.`,
         ],
-        ["Propose"],
       ),
-      ui.dialogPopup(
-        [h.Class("gp-dialog")],
+      h.form(
+        [h.OnSubmit(AppMessage.SubmittedPropose())],
         [
-          h.h2(
-            [h.Class("gp-dialog-title"), h.DataAttribute("dialog-title", "")],
-            [`Propose ${view.ref}`],
-          ),
-          h.p(
-            [h.Class("gp-dialog-hint"), h.DataAttribute("dialog-description", "")],
+          h.label([h.Class("gp-field-label"), h.For("gp-propose-title")], ["Title"]),
+          h.input([
+            h.Id("gp-propose-title"),
+            h.Class("gp-input"),
+            h.Name("title"),
+            h.Required(true),
+            h.Autocomplete("off"),
+            h.Placeholder("What this changes"),
+            h.Value(model.codeScreen.proposeTitle),
+            h.OnInput((value) => AppMessage.ChangedProposeField({ field: "title", value })),
+          ]),
+          h.label([h.Class("gp-field-label"), h.For("gp-propose-desc")], ["Description"]),
+          h.textarea([
+            h.Id("gp-propose-desc"),
+            h.Class("gp-textarea"),
+            h.Name("desc"),
+            h.Rows(3),
+            h.Placeholder("Why, and anything a reviewer should know…"),
+            h.Value(model.codeScreen.proposeDescription),
+            h.OnInput((value) => AppMessage.ChangedProposeField({ field: "desc", value })),
+          ]),
+          model.codeScreen.syncNotice === null
+            ? h.empty
+            : h.p([h.Class("gp-notice"), h.Role("alert")], [model.codeScreen.syncNotice]),
+          h.div(
+            [h.Class("gp-dialog-actions")],
             [
-              `Pushes the branch, then opens a Change Request against ${view.defaultBranch ?? ""} — signed with this browser's key.`,
-            ],
-          ),
-          h.form(
-            [h.OnSubmit(AppMessage.SubmittedPropose())],
-            [
-              h.label([h.Class("gp-field-label"), h.For("gp-propose-title")], ["Title"]),
-              h.input([
-                h.Id("gp-propose-title"),
-                h.Class("gp-input"),
-                h.Name("title"),
-                h.Required(true),
-                h.Autocomplete("off"),
-                h.Placeholder("What this changes"),
-                h.Value(model.codeScreen.proposeTitle),
-                h.OnInput((value) => AppMessage.ChangedProposeField({ field: "title", value })),
-              ]),
-              h.label([h.Class("gp-field-label"), h.For("gp-propose-desc")], ["Description"]),
-              h.textarea([
-                h.Id("gp-propose-desc"),
-                h.Class("gp-textarea"),
-                h.Name("desc"),
-                h.Rows(3),
-                h.Placeholder("Why, and anything a reviewer should know…"),
-                h.Value(model.codeScreen.proposeDescription),
-                h.OnInput((value) => AppMessage.ChangedProposeField({ field: "desc", value })),
-              ]),
-              model.codeScreen.syncNotice === null
-                ? h.empty
-                : h.p([h.Class("gp-notice"), h.Role("alert")], [model.codeScreen.syncNotice]),
-              h.div(
-                [h.Class("gp-dialog-actions")],
-                [
-                  h.button(
-                    [
-                      h.Class("gp-btn-primary"),
-                      h.Type("submit"),
-                      h.Disabled(model.codeScreen.syncing),
-                    ],
-                    ["Open Change Request"],
-                  ),
-                ],
+              h.button(
+                [h.Class("gp-btn-primary"), h.Type("submit"), h.Disabled(model.codeScreen.syncing)],
+                ["Open Change Request"],
               ),
             ],
           ),
@@ -833,12 +796,7 @@ const fileCard = (h: H, model: Model, view: CodeView): Html.Html => {
  * the shell wraps it in, and Code supplies its own column — so the one thing
  * it has to carry across is this.
  */
-export const view = (
-  model: Model,
-  h: H,
-  ui: Elements<AppMessage>,
-  notice: Html.Html,
-): Html.Html => {
+export const view = (model: Model, h: H, notice: Html.Html): Html.Html => {
   const current = viewOf(model);
   const viewer = AsyncData.getOrElse(model.viewer, () => null);
   // Two columns of the shell, not one. A view returns one element, so this
@@ -848,7 +806,7 @@ export const view = (
   return h.div(
     [h.Class("gp-code")],
     [
-      explorer(h, ui, model, current),
+      explorer(h, model, current),
       h.div(
         [h.Class("gp-main")],
         [
@@ -870,9 +828,9 @@ export const view = (
               h.div(
                 [h.Class("gp-repo-actions")],
                 [
-                  syncControls(h, ui, model, current),
-                  branchMenu(h, ui, model, current),
-                  clone(h, ui, model, model.cloneUrl),
+                  syncControls(h, model, current),
+                  branchMenu(h, model, current),
+                  clone(h, model, model.cloneUrl),
                 ],
               ),
             ],

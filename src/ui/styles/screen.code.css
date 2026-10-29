@@ -238,7 +238,7 @@
   color: var(--gp-fg);
 }
 
-.gp-menu-item[data-action] {
+.gp-menu-item.gp-menu-action {
   border-top: 1px solid var(--gp-divider);
   color: var(--gp-fg-muted);
 }
