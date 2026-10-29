@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -143,7 +144,27 @@ export default defineConfig(({ mode }) => ({
   },
   // View branding rewrites return values and cannot cross Playwright's
   // serialized-function boundary. The built UI is exercised by verify:ui.
-  plugins: mode === "test" ? [] : foldkitPlugins,
+  plugins:
+    mode === "test"
+      ? []
+      : [
+          ...foldkitPlugins,
+          {
+            name: "font-licenses",
+            generateBundle() {
+              for (const font of ["instrument-sans", "jetbrains-mono"]) {
+                this.emitFile({
+                  type: "asset",
+                  fileName: `licenses/${font}.txt`,
+                  source: readFileSync(
+                    new URL(import.meta.resolve(`@fontsource-variable/${font}/LICENSE`)),
+                    "utf8",
+                  ),
+                });
+              }
+            },
+          },
+        ],
   resolve: {
     alias: { "@pierre/diffs/components/web-components": diffsWebComponents },
   },

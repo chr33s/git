@@ -37,6 +37,33 @@ describe("Static", () => {
     await rm(outside, { recursive: true, force: true });
   });
 
+  it.effect("configures a reader-backed page at runtime, including HEAD and deep links", () =>
+    Effect.promise(async () => {
+      const page = new TextEncoder().encode(
+        '<meta name="gp-repo" content="core" /><meta name="gp-api-base" content="https://old.example" />',
+      );
+      const read = async (name: string) => (name === "/index.html" || name === "/" ? page : null);
+      for (const path of ["/hub", "/hub/", "/hub/code/src/test.ts"]) {
+        const response = await assetResponse(read, new Request(`http://host${path}`), "repo");
+        assert.equal(response?.headers.get("content-type"), "text/html");
+        assert.ok(response);
+        const html = await response.text();
+        assert.match(html, /name="gp-repo" content="repo"/);
+        assert.match(html, /name="gp-api-base" content=""/);
+        const head = await assetResponse(
+          read,
+          new Request(`http://host${path}`, { method: "HEAD" }),
+          "repo",
+        );
+        assert.equal(
+          head?.headers.get("content-length"),
+          String(new TextEncoder().encode(html).length),
+        );
+        assert.equal(await head?.text(), "");
+      }
+    }),
+  );
+
   it.effect("answers the root with the page, and a built directory as built", () =>
     Effect.promise(async () => {
       assert.equal(await built(root), true);

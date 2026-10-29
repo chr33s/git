@@ -280,8 +280,11 @@ The web interface in `src/ui/` provides a lightweight file browser, commit viewe
 # Development mode: watch UI and bind embedded API server on :8000
 GIT_ROOT=./repos npm run dev:ui
 
-# Build production bundle and serve statically
+# Serve the current repository (also discovers it from subdirectories)
 npm run build:ui
+git+ serve --ui
+
+# Host a directory of repositories explicitly
 git+ serve --root ./repos --ui
 ```
 
@@ -317,7 +320,15 @@ npm test
 # Build the preferred end-user executable (Node 26+)
 npm run build:sea
 ./dist/sea/git+ --help
+# From any repository, using just the executable:
+/path/to/git+ serve --ui
 ```
+
+The SEA embeds the production UI and Fontsource fonts; it needs no adjacent
+`dist/ui`, Node installation, or npm packages. `serve --ui` uses the current
+repository at `/repo` and injects that selection into the page. `--ui-dir`
+overrides the embedded UI. Explicit `--root` or `GIT_ROOT` retains multi-repository
+hosting; that mode uses the repository named by the UI page.
 
 `npm run check` intentionally includes the repository's Effect and anti-slop
 rules as correctness checks, not automatic style fixes. `npm run fix` is the

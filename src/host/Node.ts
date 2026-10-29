@@ -41,7 +41,7 @@ import { file as lfsFile } from "../server/Lfs.node.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
 import { collects, readsStore, routeOf, settledWithin, UI_HOME } from "../server/Route.ts";
 import * as Router from "../server/Router.ts";
-import { assetResponse } from "../server/Static.node.ts";
+import { assetResponse, type AssetSource } from "../server/Static.node.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
 import { resolve as resolveConfiguration, type ServeConfig } from "./ServeConfig.ts";
 import { stores as writableStores } from "./NodeStorage.ts";
@@ -83,19 +83,21 @@ export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname" | "h
    */
   readonly allowAnonymousWrites?: boolean;
   /**
-   * Directory of a built UI to serve from this origin, if any.
+   * Built UI directory or embedded asset reader to serve from this origin.
    *
    * The page and the API have to share an origin for the browser to let them
    * talk; see `server/Static.node.ts`. Unset serves the git API alone, which is
    * what a host with no interest in the browser half wants.
    */
-  readonly ui?: string;
+  readonly ui?: AssetSource;
+  /** Serve this Git metadata directory alone, at the stable `/repo` route. */
+  readonly repository?: string;
   /**
    * Development assets mounted on this server's origin.
    *
    * Kept as a factory so Vite can attach its HMR websocket to the already
    * created HTTP server. Production never constructs it and keeps serving
-   * `ui` from disk.
+   * the built `ui` assets.
    */
   readonly development?: (server: http.Server) => Promise<DevelopmentMiddleware>;
   /**
@@ -282,6 +284,9 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
    * it was thrashing. Built per request and thrown away: the guard is one read
    * of two refs, and the repositories that pass it go on to be cached below.
    */
+  const repositoryDirectory = (repo: string): string =>
+    options.repository ?? path.join(options.root, repo);
+
   const guardLayer = (repo: string) =>
     GitRepository.layer.pipe(
       Layer.provide(GitRepository.hooksNoop),
@@ -291,7 +296,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       // and an origin and its mirror under one root shared every entry again.
       // The aliasing was invisible because nothing fails: the wrong answer is
       // a well-formed one.
-      Layer.provideMerge(stores(path.join(options.root, repo))),
+      Layer.provideMerge(stores(repositoryDirectory(repo))),
     );
 
   /**
@@ -305,6 +310,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
    * reason to take the target repository down.
    */
   const localRepositories = Effect.fn("host.Node.localRepositories")(function* () {
+    if (options.repository !== undefined) return ["repo"];
     const entries = yield* Effect.promise(() =>
       fs.readdir(options.root, { withFileTypes: true }).catch(() => []),
     );
@@ -435,12 +441,12 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const openRepo = (repo: string): RepoState => {
     // The registry lives beside the repository it reports on, so a webhook
     // survives a restart the same way a ref does.
-    const subscribers = subscribersFile(path.join(options.root, repo, "webhooks.json"));
+    const subscribers = subscribersFile(path.join(repositoryDirectory(repo), "webhooks.json"));
 
     // And the remotes it fetches from, for the same reason and in the same
     // place: a remote that does not survive a restart is a URL somebody has
     // to remember.
-    const remotes = remotesFile(path.join(options.root, repo, "remotes.json"));
+    const remotes = remotesFile(path.join(repositoryDirectory(repo), "remotes.json"));
 
     // What happens after a push lands: deliver to whoever subscribed, forward
     // to whoever this repository is configured to send to, and — where the
@@ -451,10 +457,10 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     //
     // Background work outlives the response, but belongs to this host. Its
     // shutdown interrupts and awaits delivery and wake finalizers.
-    const directory = path.join(options.root, repo);
+    const directory = repositoryDirectory(repo);
     const afterPush = AfterPush.chain({
-      root: options.root,
-      repo,
+      root: path.dirname(directory),
+      repo: path.basename(directory),
       wake: options.wake === true,
       background: (effect) => Effect.forkIn(effect, scope).pipe(Effect.asVoid),
     });
@@ -473,7 +479,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     const router = Router.handler({
       api: Api.layer(remotes, anchorSyntax),
       services: layer.pipe(
-        Layer.provideMerge(lfsFile(path.join(options.root, repo, "lfs"))),
+        Layer.provideMerge(lfsFile(path.join(repositoryDirectory(repo), "lfs"))),
         Layer.provideMerge(subscribers),
         Layer.provideMerge(openWrites),
       ),
@@ -607,7 +613,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       const asset =
         options.ui === undefined
           ? null
-          : await assetResponse(options.ui, new Request(url, { method: incoming.method ?? "GET" }));
+          : await assetResponse(
+              options.ui,
+              new Request(url, { method: incoming.method ?? "GET" }),
+              options.repository === undefined ? undefined : "repo",
+            );
       if (asset !== null) {
         outgoing.writeHead(asset.status, nodeHeaders(asset.headers));
         outgoing.end(Buffer.from(await asset.arrayBuffer()));
@@ -629,6 +639,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         return;
       }
       const repo = matched.repo;
+      if (options.repository !== undefined && repo !== "repo") {
+        outgoing.writeHead(404);
+        outgoing.end("unknown repository");
+        return;
+      }
       // `/repo.git/info/refs` and `/repo/info/refs` are the same request;
       // the handlers see the second spelling either way.
       url.pathname = `/${repo}${matched.rest === "" ? "" : `/${matched.rest}`}`;

@@ -1,9 +1,9 @@
 /**
  * Single-executable build (`npm run build:sea`).
  *
- * Two steps: Vite+ Pack folds the CLI and its dependencies into one minified
+ * After building the UI, Vite+ Pack folds the CLI and its dependencies into one minified
  * ESM file, then `node --build-sea` (Node 26+) embeds it into a copy of the
- * running node binary. Result: `dist/sea/git+`, needing no `node` or
+ * running node binary alongside the UI assets and local fonts. Result: `dist/sea/git+`, needing no `node` or
  * `node_modules` on the machine it runs on, for the platform this builds on.
  *
  * Knobs (40 interleaved `--version` runs on Node 26.7: ESM+code cache median
@@ -95,6 +95,15 @@ fs.writeFileSync(
       output: executable,
       disableExperimentalSEAWarning: true,
       useCodeCache: true,
+      assets: Object.fromEntries(
+        fs
+          .readdirSync("dist/ui", { recursive: true, withFileTypes: true })
+          .filter((entry) => entry.isFile() && !entry.name.endsWith(".map"))
+          .map((entry) => {
+            const file = path.join(entry.parentPath, entry.name);
+            return [`ui/${path.relative("dist/ui", file).split(path.sep).join("/")}`, file];
+          }),
+      ),
     },
     null,
     2,

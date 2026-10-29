@@ -18,20 +18,29 @@
  * the same shape the deployed Worker takes, where Cloudflare's asset manifest
  * carries the prefix and `worker.ts` serves the page for what it misses.
  */
+import { getAsset, getAssetKeys, isSea } from "node:sea";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
+
+import { Predicate } from "effect";
 
 import { UI_PREFIX } from "./Route.ts";
 
 /** The extensions the built UI actually emits; anything else is a byte stream. */
 export const mimeOf = (extension: string): string => {
   switch (extension) {
+    case ".txt":
+      return "text/plain";
     case ".css":
       return "text/css";
     case ".html":
       return "text/html";
     case ".js":
       return "text/javascript";
+    case ".woff2":
+      return "font/woff2";
+    case ".woff":
+      return "font/woff";
     case ".map":
       return "application/json";
     default:
@@ -120,6 +129,19 @@ export const fileAt = async (
   return bytes;
 };
 
+/** Read a built file without coupling HTTP routing to its storage. */
+export type AssetReader = (pathname: string) => Promise<Uint8Array<ArrayBuffer> | null>;
+export type AssetSource = string | AssetReader;
+
+/** SEA keys are build-generated relative paths; requests can only select an exact key. */
+export const embeddedFile: AssetReader = async (pathname) => {
+  const decoded = decodedPath(pathname);
+  if (decoded === null || !isSea()) return null;
+  const key = `ui${decoded}`;
+  if (!getAssetKeys().includes(key)) return null;
+  return new Uint8Array(getAsset(key));
+};
+
 /**
  * The built UI's answer for this request, or `null` to let the API have it.
  *
@@ -127,7 +149,12 @@ export const fileAt = async (
  * the API whatever its path looks like. A HEAD keeps the headers and drops the
  * body, which is what makes it a HEAD.
  */
-export const assetResponse = async (root: string, request: Request): Promise<Response | null> => {
+export const assetResponse = async (
+  source: AssetSource,
+  request: Request,
+  repo?: string,
+): Promise<Response | null> => {
+  const read: AssetReader = Predicate.isString(source) ? (name) => fileAt(source, name) : source;
   if (request.method !== "GET" && request.method !== "HEAD") return null;
 
   const { pathname } = new URL(request.url);
@@ -138,10 +165,26 @@ export const assetResponse = async (root: string, request: Request): Promise<Res
   // page — with its own address left in the bar, which is the whole point of
   // the deep link. `index.html` is looked up rather than assumed present: a
   // root with no build falls through and the caller answers as it would have.
-  const found = await fileAt(root, within);
-  const served = found === null ? "/index.html" : within;
-  const bytes = found ?? (await fileAt(root, served));
+  const found = await read(within);
+  const served = found === null || within === "/" ? "/index.html" : within;
+  let bytes = found ?? (await read(served));
   if (bytes === null) return null;
+
+  if (repo !== undefined && (decodedPath(served) ?? served).endsWith(".html")) {
+    // The host supplies a fixed, validated route alias, never a filesystem path.
+    bytes = new TextEncoder().encode(
+      new TextDecoder()
+        .decode(bytes)
+        .replace(
+          /<meta name="gp-repo" content="[^"]*"\s*\/?>/,
+          `<meta name="gp-repo" content="${repo}" />`,
+        )
+        .replace(
+          /<meta name="gp-api-base" content="[^"]*"\s*\/?>/,
+          '<meta name="gp-api-base" content="" />',
+        ),
+    );
+  }
 
   // The decoded name, so an escaped extension picks the same type the lookup
   // just used rather than falling through to `application/octet-stream`. A
@@ -160,5 +203,7 @@ export const assetResponse = async (root: string, request: Request): Promise<Res
  * Asked once at startup so `--ui` can refuse with the command that fixes it,
  * rather than serving a port that answers 404 for the page and nothing else.
  */
-export const built = async (root: string): Promise<boolean> =>
-  (await stat(join(root, "index.html")).catch(() => null))?.isFile() === true;
+export const built = async (source: AssetSource): Promise<boolean> =>
+  Predicate.isString(source)
+    ? (await stat(join(source, "index.html")).catch(() => null))?.isFile() === true
+    : (await source("/index.html")) !== null;

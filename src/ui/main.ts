@@ -7,6 +7,8 @@
  * bundle. `restore()` is called again here so the module is also correct when
  * the UI is mounted into a host page that has no such script.
  */
+import "@fontsource-variable/instrument-sans";
+import "@fontsource-variable/jetbrains-mono";
 import "./tokens.css";
 import "./styles/base.css";
 import "./styles/sidebar.css";

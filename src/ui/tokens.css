@@ -218,8 +218,8 @@
 }
 
 :root {
-  --gp-font: "Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --gp-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --gp-font: "Instrument Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --gp-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
   --gp-radius-sm: 6px;
   --gp-radius: 9px;
   --gp-radius-lg: 12px;

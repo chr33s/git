@@ -1,20 +1,22 @@
 /** `git+ serve` — the node host, with the same configuration as its standalone entry. */
 import * as path from "node:path";
 
-import { Console, Effect, Result } from "effect";
+import { Config, Console, Effect, Predicate, Result } from "effect";
 import { Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { parseHosts, resolve } from "../host/ServeConfig.ts";
+import { GitInvocation } from "./GitCompat.ts";
+import { discoverRepository } from "./GitCompat.node.ts";
 import * as Static from "../server/Static.node.ts";
 
 /** The bundle is beside this source when run from a checkout or package. */
 const defaultUiDir = path.join(import.meta.dirname, "..", "..", "dist", "ui");
 
 /**
- * Explicit flags win, followed by `GIT_ROOT`, `PORT`, `HOSTNAME` and
- * `GIT_HOSTS`, then the node host defaults. Keeping the resolution in the host makes `git+ serve`
- * and `node src/host/Node.ts` one configuration surface.
+ * Explicit flags win over environment configuration. With no hosting root,
+ * discover the current repository; an explicit `--root` or `GIT_ROOT` selects
+ * the multi-repository host. Bind options share the standalone node host defaults.
  */
 export const serveCommand = Command.make(
   "serve",
@@ -61,13 +63,36 @@ export const serveCommand = Command.make(
       if (named !== null && Result.isFailure(named)) {
         return yield* new Invalid({ field: "hosts", reason: named.failure });
       }
+      // An explicit hosting root keeps the multi-repository mode. Otherwise
+      // bind exactly the repository selected by the normal CLI invocation.
+      const configuredRoot = yield* Config.String("GIT_ROOT").pipe(Config.option);
+      const hostingRoot = root._tag === "Some" ? root : configuredRoot;
+      const repository =
+        hostingRoot._tag === "Some" ? null : yield* discoverRepository(yield* GitInvocation);
+      if (hostingRoot._tag !== "Some" && repository === null) {
+        return yield* new Invalid({
+          field: "repository",
+          reason: "not inside a Git repository; run from a repository or pass --root",
+        });
+      }
       const options = yield* resolve({
-        root: root._tag === "Some" ? root.value : undefined,
+        root:
+          hostingRoot._tag === "Some"
+            ? hostingRoot.value
+            : repository === null
+              ? undefined
+              : path.dirname(repository.gitDir),
         port: port._tag === "Some" ? port.value : undefined,
         hostname: hostname._tag === "Some" ? hostname.value : undefined,
         hosts: named === null ? undefined : named.success,
       });
-      const assets = ui ? (uiDir === "" ? defaultUiDir : uiDir) : undefined;
+      let assets: Static.AssetSource | undefined;
+      if (ui) {
+        assets = uiDir === "" ? defaultUiDir : uiDir;
+        if (uiDir === "" && (yield* Effect.promise(() => Static.built(Static.embeddedFile)))) {
+          assets = Static.embeddedFile;
+        }
+      }
       if (assets !== undefined && !(yield* Effect.promise(() => Static.built(assets)))) {
         return yield* new Invalid({
           field: "ui",
@@ -77,17 +102,25 @@ export const serveCommand = Command.make(
       const server = yield* Effect.acquireRelease(
         Effect.promise(() =>
           import("../host/Node.ts").then(({ serve }) =>
-            serve({ ...options, allowAnonymousWrites: open, wake, ui: assets }),
+            serve({
+              ...options,
+              allowAnonymousWrites: open,
+              wake,
+              ui: assets,
+              repository: repository?.gitDir,
+            }),
           ),
         ),
         (server) => Effect.promise(() => server.close({ force: true })),
       );
       yield* Console.log(
-        `git smart-HTTP server on ${server.url}, repositories under ${options.root}/`,
+        repository === null
+          ? `git smart-HTTP server on ${server.url}, repositories under ${options.root}/`
+          : `git smart-HTTP server on ${server.url}, repository ${repository.gitDir} at /repo`,
       );
       if (assets !== undefined) {
         yield* Console.log(
-          `browser UI on ${server.url} from ${assets}, showing the repository its index.html names`,
+          `browser UI on ${server.url}/hub/code from ${Predicate.isString(assets) ? assets : "embedded assets"}`,
         );
       }
       if (wake) {

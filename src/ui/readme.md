@@ -239,11 +239,18 @@ same route boundary: Vite serves source modules during development, while
 `serve --ui` and the Worker serve `dist/ui` after a finished build:
 
 ```bash
-npm run build:ui && npx git+ serve --root /path/to/repos --ui
+npm run build:ui && npx git+ serve --ui
 ```
 
 Deployed, it is the same shape again: the Worker serves both the page and the
 API, and `gp-api-base` stays empty.
+
+`serve --ui` discovers the current repository, including from subdirectories and
+bare repositories, and supplies its `/repo` API route to the page at runtime.
+Explicit `--root` or `GIT_ROOT` keeps multi-repository hosting. `build:sea` builds
+and embeds the UI, generated chunks, and Fontsource Instrument Sans / JetBrains
+Mono fonts. The executable serves these directly; `--ui-dir` selects a disk
+build instead. Fonts require no external requests.
 
 `verify.ts` runs four suites in Chromium: every screen mounts in both palettes
 with nothing thrown; the behaviours from the design conversation still work
