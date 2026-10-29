@@ -17,19 +17,24 @@ constraints the code cannot show you.
 
 ## Pinned dependencies
 
-Both `effect` and `alchemy` are pinned betas that break between releases; the
-repo sets `save-exact=true` deliberately.
+Effect 4 is stable; Alchemy remains in beta. The repo pins exact versions
+with `save-exact=true` so dependency upgrades are tested together.
 
-| package                 | version         | why it matters                                               |
-| ----------------------- | --------------- | ------------------------------------------------------------ |
-| `effect`                | `4.0.0-rc.112`  | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
-| `alchemy`               | `2.0.0-beta.76` | Workers stack as effects                                     |
-| `@effect/platform-node` | `4.0.0-rc.112`  | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
-| `@effect/tsgo`          | `0.43.0`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
-| `typescript`            | `7.0.2`         | TypeScript-Go                                                |
+| package                   | version         | why it matters                                               |
+| ------------------------- | --------------- | ------------------------------------------------------------ |
+| `effect`                  | `4.0.7`         | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
+| `alchemy`                 | `2.0.0-beta.84` | deployment stack as effects                                  |
+| `@alchemy.run/cloudflare` | `2.0.0-beta.84` | Cloudflare resources and runtime bindings                    |
+| `@effect/platform-node`   | `4.0.7`         | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
+| `@effect/tsgo`            | `0.63.0`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
+| `typescript`              | `7.0.2`         | TypeScript-Go                                                |
 
-`alchemy` is behind a `patch-package` patch. Oxlint `typeCheck` and `tsc` both
-run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).
+`@alchemy.run/cloudflare` is behind a `patch-package` patch for deferred
+`RepoClient.raw` handles. Alchemy's Cloudflare exports now live in that package.
+Overrides align Foldkit's exact Effect 4.0.0 peers with Effect 4.0.7 and make
+all Vite consumers use Vite+'s core to share one module registry.
+
+Oxlint `typeCheck` and `tsc` both run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).
 Foldkit's `@foldkit/oxlint-plugin` is loaded the same way, scoped to the UI's
 TEA files (`src/ui/app*.ts`, views, mounts, `element.base-wc.ts`).
 
@@ -569,7 +574,7 @@ Four kinds of evidence, deliberately:
   against DO SQLite and R2 inside workerd, not against a mock.
 - **behaviour matches git's, not our description of it** — `git status`
   porcelain, `git log -- <path>`, `git rev-list --bisect`, `git ls-files
---stage`, `verify-pack`.
+  --stage`, `verify-pack`.
 
 Where git's answer is genuinely one of several equally good ones — bisect on an
 even split — assert the property (`--bisect-all` distance is maximal), not
@@ -811,10 +816,10 @@ for its bases.
 
 ## Open questions
 
-- **Bundle size in a Worker is unmeasured.** Effect core plus `unstable/http`
-  and `unstable/httpapi` is not small, and nothing has checked it against the
+- **Bundle size in a Worker is unmeasured.** Effect core plus `http`
+  and `http-api` is not small, and nothing has checked it against the
   3 MiB compressed limit.
-- **`alchemy` is still beta** and breaks between releases. Effect is on RC.
+- **`alchemy` is still beta** and breaks between releases. Effect 4 is stable.
 - **Fetch-path deltas and thin packs.** Repack writes ofs-deltas; live
   upload-pack stays full-object. Measure before spending serve-time CPU on
   delta search.

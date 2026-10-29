@@ -80,14 +80,14 @@ export const configuration = Effect.fn("host.ServeConfig.configuration")(functio
   overrides: Partial<ServeConfig> = {},
 ) {
   return {
-    root: overrides.root ?? (yield* Config.string("GIT_ROOT").pipe(Config.withDefault("repos"))),
-    port: overrides.port ?? (yield* Config.number("PORT").pipe(Config.withDefault(8080))),
+    root: overrides.root ?? (yield* Config.String("GIT_ROOT").pipe(Config.withDefault("repos"))),
+    port: overrides.port ?? (yield* Config.Number("PORT").pipe(Config.withDefault(8080))),
     hostname:
       overrides.hostname ??
-      (yield* Config.string("HOSTNAME").pipe(Config.withDefault("127.0.0.1"))),
+      (yield* Config.String("HOSTNAME").pipe(Config.withDefault("127.0.0.1"))),
     hosts:
       overrides.hosts === undefined
-        ? yield* Config.string("GIT_HOSTS").pipe(Config.withDefault(""))
+        ? yield* Config.String("GIT_HOSTS").pipe(Config.withDefault(""))
         : "",
   } as const;
 });

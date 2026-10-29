@@ -12,6 +12,7 @@
  * the repository's hub holds.
  */
 import { AsyncData, Runtime, Update, Url } from "foldkit";
+import { Option } from "effect";
 
 import { AppMessage } from "./app.message.ts";
 import { Model } from "./app.model.ts";
@@ -42,7 +43,8 @@ const init = (url: Url.Url): Update.Return<Model, AppMessage> => {
       query: "",
       // A cold load on a malformed address explains itself too, not only one
       // reached by a link: the address bar is the one place a reader types.
-      navError: route._tag === "NotFound" ? "this link's address is malformed" : null,
+      navError:
+        route._tag === "NotFound" ? Option.some("this link's address is malformed") : Option.none(),
       railCollapsed: railCollapsed(),
       tasks: {
         // The design's sample data, which is what an offline page shows. The

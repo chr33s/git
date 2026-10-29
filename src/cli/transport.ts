@@ -2,7 +2,7 @@
 import * as path from "node:path";
 
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { fetchRepository } from "../client/Fetch.ts";
 import { Invalid } from "../git/Error.ts";
@@ -28,13 +28,13 @@ export const fetchCommand = Command.make(
   "fetch",
   {
     root: rootFlag,
-    token: Flag.string("token").pipe(Flag.withDefault("")),
-    branch: Flag.string("branch").pipe(
+    token: Flag.String("token").pipe(Flag.withDefault("")),
+    branch: Flag.String("branch").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Fetch one branch instead of everything advertised"),
     ),
     repo: repoArgument,
-    url: Argument.string("url"),
+    url: Argument.String("url"),
   },
   ({ branch, repo, root, token, url }) =>
     Effect.gen(function* () {
@@ -61,10 +61,10 @@ export const pullCommand = Command.make(
   "pull",
   {
     root: rootFlag,
-    token: Flag.string("token").pipe(Flag.withDefault("")),
+    token: Flag.String("token").pipe(Flag.withDefault("")),
     repo: repoArgument,
-    url: Argument.string("url"),
-    branch: Argument.string("branch"),
+    url: Argument.String("url"),
+    branch: Argument.String("branch"),
   },
   ({ branch, repo, root, token, url }) =>
     Effect.gen(function* () {

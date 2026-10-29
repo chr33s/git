@@ -6,7 +6,7 @@
  * registration site in `main.ts`.
  */
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { next as bisectNext } from "../git/Bisect.ts";
@@ -55,9 +55,9 @@ export const cherryPickCommand = Command.make(
   {
     root: rootFlag,
     repo: repoArgument,
-    commit: Argument.string("commit"),
-    onto: Flag.string("onto").pipe(Flag.withDescription("The commit or branch to replay onto")),
-    into: Flag.string("into").pipe(
+    commit: Argument.String("commit"),
+    onto: Flag.String("onto").pipe(Flag.withDescription("The commit or branch to replay onto")),
+    into: Flag.String("into").pipe(
       Flag.optional,
       Flag.withDescription("Ref to move on success; absent computes the replay and stops"),
     ),
@@ -86,9 +86,9 @@ export const rebaseCommand = Command.make(
   {
     root: rootFlag,
     repo: repoArgument,
-    branch: Argument.string("branch"),
-    onto: Flag.string("onto").pipe(Flag.withDescription("The commit or branch to replay onto")),
-    into: Flag.string("into").pipe(
+    branch: Argument.String("branch"),
+    onto: Flag.String("onto").pipe(Flag.withDescription("The commit or branch to replay onto")),
+    into: Flag.String("into").pipe(
       Flag.optional,
       Flag.withDescription("Ref to move on success; absent computes the replay and stops"),
     ),
@@ -124,8 +124,8 @@ export const bisectCommand = Command.make(
   {
     root: rootFlag,
     repo: repoArgument,
-    bad: Flag.string("bad").pipe(Flag.withDescription("A revision known to have the problem")),
-    good: Flag.string("good").pipe(
+    bad: Flag.String("bad").pipe(Flag.withDescription("A revision known to have the problem")),
+    good: Flag.String("good").pipe(
       Flag.atLeast(1),
       Flag.withDescription("A revision known not to; repeat for more than one"),
     ),

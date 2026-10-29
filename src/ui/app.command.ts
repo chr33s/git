@@ -15,7 +15,7 @@
  * instance appears in the Model: it is a handle, and the Model holds facts.
  */
 import { Command } from "foldkit";
-import { Effect, Schema } from "effect";
+import { Effect, Match, Schema } from "effect";
 
 import { SessionRow, Task } from "./model.ts";
 import { AppMessage } from "./app.message.ts";
@@ -56,14 +56,14 @@ export const LoadTasks = Command.define("LoadTasks", {
   execute: Effect.gen(function* () {
     const hub = yield* Effect.tryPromise(async () => await import("./hub.ts"));
     const answer = yield* Effect.tryPromise(async () => await hub.listings());
-    switch (answer._tag) {
-      case "Loaded":
-        return AppMessage.SucceededLoadTasks({ tasks: answer.tasks, sessions: answer.sessions });
-      case "Denied":
-        return AppMessage.DeniedLoadTasks({ reason: answer.reason });
-      case "Unreachable":
-        return AppMessage.FailedLoadTasks({ reason: answer.reason });
-    }
+    return Match.value(answer).pipe(
+      Match.tag("Loaded", ({ tasks, sessions }) =>
+        AppMessage.SucceededLoadTasks({ tasks, sessions }),
+      ),
+      Match.tag("Denied", ({ reason }) => AppMessage.DeniedLoadTasks({ reason })),
+      Match.tag("Unreachable", ({ reason }) => AppMessage.FailedLoadTasks({ reason })),
+      Match.exhaustive,
+    );
   }).pipe(
     // As above: the reason is what the notice shows, so the cause is carried.
     Effect.catch((cause) =>

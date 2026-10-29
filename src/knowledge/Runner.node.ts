@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { NodeServices } from "@effect/platform-node";
 import { Config, Effect, Schema, Stream } from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import { concatBytes } from "../git/Format.ts";
 import * as Proposal from "./Proposal.ts";
@@ -74,7 +74,7 @@ export const invoke = Effect.fn("knowledge.Runner.invoke")(
       }),
       (directory) => Effect.promise(() => fs.rm(directory, { recursive: true, force: true })),
     );
-    const environmentPath = yield* Config.string("PATH").pipe(Config.withDefault("/usr/bin:/bin"));
+    const environmentPath = yield* Config.String("PATH").pipe(Config.withDefault("/usr/bin:/bin"));
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const handle = yield* spawner
       .spawn(

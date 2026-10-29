@@ -9,7 +9,7 @@
 import * as path from "node:path";
 
 import { Console, Effect } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import * as Wake from "../server/Wake.node.ts";
@@ -19,7 +19,7 @@ const wake = Command.make(
   "wake",
   {
     root: rootFlag,
-    dry: Flag.boolean("dry-run").pipe(
+    dry: Flag.Boolean("dry-run").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Say what would run, run nothing, and leave the bookmark alone"),
     ),

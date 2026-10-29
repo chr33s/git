@@ -1,6 +1,6 @@
 /** `git+ note …` and `git+ why`: code-anchored repository memory. */
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import * as Checkout from "../git/Checkout.ts";
 import { Invalid } from "../git/Error.ts";
@@ -18,12 +18,12 @@ import { readGenesis } from "../trust/Genesis.ts";
 import { membershipOrNull, mustResolve, readPrivateKey, withWork, workFlag } from "./shared.ts";
 import * as Pack from "../context/Pack.ts";
 
-const keyFlag = Flag.string("key").pipe(
+const keyFlag = Flag.String("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
 );
-const jsonFlag = Flag.boolean("json").pipe(Flag.withDefault(false));
-const pathArgument = Argument.string("path");
-const noteArgument = Argument.string("note");
+const jsonFlag = Flag.Boolean("json").pipe(Flag.withDefault(false));
+const pathArgument = Argument.String("path");
+const noteArgument = Argument.String("note");
 
 const identity = Effect.fn("note.identity")(function* () {
   const stored = yield* readGenesis();
@@ -80,10 +80,10 @@ const add = Command.make(
   {
     work: workFlag,
     key: keyFlag,
-    anchor: Flag.string("anchor").pipe(Flag.withDefault(Anchor.FILE_ANCHOR)),
-    pinned: Flag.boolean("pinned").pipe(Flag.withDefault(false)),
+    anchor: Flag.String("anchor").pipe(Flag.withDefault(Anchor.FILE_ANCHOR)),
+    pinned: Flag.Boolean("pinned").pipe(Flag.withDefault(false)),
     path: pathArgument,
-    text: Argument.string("text"),
+    text: Argument.String("text"),
   },
   ({ anchor, key, path, pinned, text, work }) =>
     Effect.gen(function* () {
@@ -191,19 +191,19 @@ const check = Command.make(
   {
     work: workFlag,
     json: jsonFlag,
-    base: Flag.string("base").pipe(
+    base: Flag.String("base").pipe(
       Flag.optional,
       Flag.withDescription("Check only notes on paths this range changed"),
     ),
-    head: Flag.string("head").pipe(
+    head: Flag.String("head").pipe(
       Flag.optional,
       Flag.withDescription("The revision whose source the range is checked against"),
     ),
-    touched: Flag.boolean("touched").pipe(
+    touched: Flag.Boolean("touched").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Check only notes on paths this work tree has changed"),
     ),
-    path: Argument.string("path").pipe(Argument.optional),
+    path: Argument.String("path").pipe(Argument.optional),
   },
   ({ base, head, json, path, touched, work }) =>
     withWork(
@@ -307,7 +307,7 @@ const confirm = Command.make(
 
 const replace = Command.make(
   "replace",
-  { work: workFlag, key: keyFlag, note: noteArgument, text: Argument.string("text") },
+  { work: workFlag, key: keyFlag, note: noteArgument, text: Argument.String("text") },
   ({ key, note, text, work }) =>
     Effect.gen(function* () {
       const signer = yield* readPrivateKey(key);
@@ -334,7 +334,7 @@ const retire = Command.make(
   {
     work: workFlag,
     key: keyFlag,
-    reason: Flag.string("reason").pipe(Flag.withDefault("")),
+    reason: Flag.String("reason").pipe(Flag.withDefault("")),
     note: noteArgument,
   },
   ({ key, note, reason, work }) =>
@@ -406,8 +406,8 @@ const redact = Command.make(
   {
     work: workFlag,
     key: keyFlag,
-    target: Flag.string("target").pipe(Flag.withDescription("The record's event id")),
-    reason: Flag.string("reason").pipe(Flag.withDescription("Why it is being removed")),
+    target: Flag.String("target").pipe(Flag.withDescription("The record's event id")),
+    reason: Flag.String("reason").pipe(Flag.withDescription("Why it is being removed")),
     note: noteArgument,
   },
   ({ key, note, reason, target, work }) =>
@@ -500,7 +500,7 @@ export const noteCommand = Command.make("note", {}, () =>
  */
 export const whyCommand = Command.make(
   "why",
-  { work: workFlag, json: jsonFlag, path: Argument.string("path").pipe(Argument.optional) },
+  { work: workFlag, json: jsonFlag, path: Argument.String("path").pipe(Argument.optional) },
   ({ json, path, work }) =>
     withWork(
       work,

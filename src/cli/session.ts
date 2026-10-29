@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { isSea } from "node:sea";
 
 import { Config, Console, Effect, Schema } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { readGenesis } from "../trust/Genesis.ts";
@@ -98,7 +98,7 @@ const readNote = Effect.fn("session.readNote")(function* (location: string) {
   return contents.trim();
 });
 
-const keyFlag = Flag.string("key").pipe(
+const keyFlag = Flag.String("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
 );
 
@@ -118,18 +118,18 @@ const open = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    agent: Flag.string("agent").pipe(
+    agent: Flag.String("agent").pipe(
       Flag.withDefault("unknown"),
       Flag.withDescription("What kind of agent this is, e.g. claude-code"),
     ),
-    model: Flag.string("model").pipe(Flag.withDefault(""), Flag.withDescription("Model name")),
-    harness: Flag.string("harness").pipe(
+    model: Flag.String("model").pipe(Flag.withDefault(""), Flag.withDescription("Model name")),
+    harness: Flag.String("harness").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Harness and version"),
     ),
-    prompt: Flag.string("prompt").pipe(Flag.withDescription("The instruction, as given")),
-    role: Flag.choice("role", ["user", "system"]).pipe(Flag.withDefault("user" as const)),
-    instructions: Flag.string("instructions").pipe(
+    prompt: Flag.String("prompt").pipe(Flag.withDescription("The instruction, as given")),
+    role: Flag.Literals("role", ["user", "system"]).pipe(Flag.withDefault("user" as const)),
+    instructions: Flag.String("instructions").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Object id of the standing instructions in force"),
     ),
@@ -165,29 +165,29 @@ const produce = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    session: Flag.string("session").pipe(Flag.withDescription("The session this reports on")),
-    commit: Flag.string("commit").pipe(
+    session: Flag.String("session").pipe(Flag.withDescription("The session this reports on")),
+    commit: Flag.String("commit").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Commits this session produced, comma-separated"),
     ),
-    ref: Flag.string("ref").pipe(
+    ref: Flag.String("ref").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Refs it wrote, comma-separated"),
     ),
-    pull: Flag.string("pull").pipe(
+    pull: Flag.String("pull").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Pull requests it opened, comma-separated"),
     ),
-    note: Flag.string("note").pipe(
+    note: Flag.String("note").pipe(
       Flag.withDefault(""),
       Flag.withDescription("What was decided or learned, distilled"),
     ),
-    noteFile: Flag.string("note-file").pipe(
+    noteFile: Flag.String("note-file").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Read the learning from a file, or from - for stdin"),
     ),
-    inputTokens: Flag.integer("input-tokens").pipe(Flag.withDefault(0)),
-    outputTokens: Flag.integer("output-tokens").pipe(Flag.withDefault(0)),
+    inputTokens: Flag.Int("input-tokens").pipe(Flag.withDefault(0)),
+    outputTokens: Flag.Int("output-tokens").pipe(Flag.withDefault(0)),
     repo: repoArgument,
   },
   ({ commit, inputTokens, key, note, noteFile, outputTokens, pull, ref, repo, root, session }) =>
@@ -250,19 +250,19 @@ const show = Command.make(
   {
     root: rootFlag,
     repo: repoFlag,
-    branch: Flag.string("branch").pipe(
+    branch: Flag.String("branch").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Show the session that last produced this ref instead of an id"),
     ),
-    audit: Flag.boolean("audit").pipe(
+    audit: Flag.Boolean("audit").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Join the run's Invocations, context exposures and capture health"),
     ),
-    json: Flag.boolean("json").pipe(
+    json: Flag.Boolean("json").pipe(
       Flag.withDefault(false),
       Flag.withDescription("The joined projection as JSON rather than the Invocation layout"),
     ),
-    session: Argument.string("session").pipe(Argument.optional),
+    session: Argument.String("session").pipe(Argument.optional),
   },
   ({ audit, branch, json, repo, root, session }) =>
     Effect.gen(function* () {
@@ -377,9 +377,9 @@ const ask = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    session: Flag.string("session").pipe(Flag.withDescription("The session that is blocked")),
-    question: Flag.string("question").pipe(Flag.withDescription("What only a person can answer")),
-    option: Flag.string("option").pipe(
+    session: Flag.String("session").pipe(Flag.withDescription("The session that is blocked")),
+    question: Flag.String("question").pipe(Flag.withDescription("What only a person can answer")),
+    option: Flag.String("option").pipe(
       Flag.withDefault(""),
       Flag.withDescription("The answers on offer, comma-separated"),
     ),
@@ -412,10 +412,10 @@ const answer = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    session: Flag.string("session").pipe(Flag.withDescription("The session that asked")),
-    decision: Flag.string("decision").pipe(Flag.withDescription("The question being answered")),
-    chose: Flag.string("chose").pipe(Flag.withDescription("The answer")),
-    note: Flag.string("note").pipe(Flag.withDefault("")),
+    session: Flag.String("session").pipe(Flag.withDescription("The session that asked")),
+    decision: Flag.String("decision").pipe(Flag.withDescription("The question being answered")),
+    chose: Flag.String("chose").pipe(Flag.withDescription("The answer")),
+    note: Flag.String("note").pipe(Flag.withDefault("")),
     repo: repoArgument,
   },
   ({ chose, decision, key, note, repo, root, session }) =>
@@ -490,9 +490,9 @@ const hook = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    work: Flag.string("work"),
+    work: Flag.String("work"),
     repo: repoArgument,
-    phase: Argument.choice("phase", ["start", "stop"]),
+    phase: Argument.Literals("phase", ["start", "stop"]),
   },
   ({ key, phase, repo, root, work }) =>
     Effect.gen(function* () {
@@ -511,7 +511,7 @@ const hook = Command.make(
       if (phase === "start") {
         // One opening per session: the harness calls this on every prompt,
         // and a second opening would be a second account of the same work.
-        const recall = yield* Config.boolean("CHR33S_GIT_STARTUP_MEMORY").pipe(
+        const recall = yield* Config.Boolean("CHR33S_GIT_STARTUP_MEMORY").pipe(
           Config.withDefault(true),
         );
         if (exists) {
@@ -550,8 +550,8 @@ const hook = Command.make(
           return;
         }
         const signer = yield* readPrivateKey(key);
-        const model = yield* Config.string("CLAUDE_MODEL").pipe(Config.withDefault(""));
-        const harness = yield* Config.string("CLAUDE_CODE_VERSION").pipe(Config.withDefault(""));
+        const model = yield* Config.String("CLAUDE_MODEL").pipe(Config.withDefault(""));
+        const harness = yield* Config.String("CLAUDE_CODE_VERSION").pipe(Config.withDefault(""));
         const opened = yield* withRepo(
           root,
           repo,
@@ -609,11 +609,11 @@ const hook = Command.make(
               });
             const learned = yield* hookFile(() => fs.existsSync(learning));
             const retained = saved;
-            const branch = yield* Config.string("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
+            const branch = yield* Config.String("CHR33S_GIT_BRANCH").pipe(Config.withDefault(""));
             // Explicit harness output only. A branch hint never guesses authored commits.
-            const commits = yield* Config.string("CHR33S_GIT_COMMITS").pipe(Config.withDefault(""));
-            const pulls = yield* Config.string("CHR33S_GIT_PULLS").pipe(Config.withDefault(""));
-            const usageJson = yield* Config.string("CHR33S_GIT_USAGE").pipe(Config.withDefault(""));
+            const commits = yield* Config.String("CHR33S_GIT_COMMITS").pipe(Config.withDefault(""));
+            const pulls = yield* Config.String("CHR33S_GIT_PULLS").pipe(Config.withDefault(""));
+            const usageJson = yield* Config.String("CHR33S_GIT_USAGE").pipe(Config.withDefault(""));
             const usage =
               usageJson === "" || retained !== null
                 ? null
@@ -744,9 +744,9 @@ const redact = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    session: Flag.string("session").pipe(Flag.withDescription("The session holding the record")),
-    target: Flag.string("target").pipe(Flag.withDescription("The record's event id")),
-    reason: Flag.string("reason").pipe(Flag.withDescription("Why it is being removed")),
+    session: Flag.String("session").pipe(Flag.withDescription("The session holding the record")),
+    target: Flag.String("target").pipe(Flag.withDescription("The record's event id")),
+    reason: Flag.String("reason").pipe(Flag.withDescription("Why it is being removed")),
     repo: repoArgument,
   },
   ({ key, reason, repo, root, session, target }) =>
@@ -774,7 +774,7 @@ const enable = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    work: Flag.string("work").pipe(
+    work: Flag.String("work").pipe(
       Flag.withDefault("."),
       Flag.withDescription("The checkout whose harness should record sessions"),
     ),
@@ -861,15 +861,15 @@ const memoryShow = Command.make(
   "memory",
   {
     root: rootFlag,
-    distill: Flag.boolean("distill").pipe(
+    distill: Flag.Boolean("distill").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Rebuild it from the current Concepts and session records, and persist"),
     ),
-    derive: Flag.boolean("derive").pipe(
+    derive: Flag.Boolean("derive").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Print the validated projection without persisting it"),
     ),
-    bundle: Flag.string("bundle").pipe(
+    bundle: Flag.String("bundle").pipe(
       Flag.withDefault(Concept.BUNDLE),
       Flag.withDescription("Repository-relative Concept bundle root"),
     ),

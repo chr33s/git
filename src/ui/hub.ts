@@ -24,7 +24,7 @@
  * key is not a member), the caller falls back to tab-local state and says so.
  */
 import { Effect } from "effect";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 
 import type {
   HubCheck,
@@ -37,7 +37,7 @@ import type {
 
 import { ApiError } from "./api.ts";
 import { registry } from "./atoms.ts";
-import type { Atom } from "effect/unstable/reactivity";
+import type { Atom } from "effect/reactivity";
 import { apiBase, GitPlusApi, repoFromDocument } from "./client.ts";
 import {
   type ChangeRequest,

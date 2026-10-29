@@ -59,9 +59,9 @@ const program = Effect.gen(function* () {
       field: "evaluation",
       reason: "this adapter requires fixed system instructions and a no-tools comparison",
     });
-  const key = yield* Config.redacted("ANTHROPIC_API_KEY");
-  const apiURL = yield* Config.option(Config.string("ANTHROPIC_BASE_URL"));
-  const environmentPath = yield* Config.string("PATH");
+  const key = yield* Config.Redacted("ANTHROPIC_API_KEY");
+  const apiURL = yield* Config.option(Config.String("ANTHROPIC_BASE_URL"));
+  const environmentPath = yield* Config.String("PATH");
   for (const slot of plan.slots) {
     const stem = path.join(directory, slot.id.slice(7));
     const completed = `${stem}.run.json`;

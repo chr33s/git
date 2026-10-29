@@ -1,13 +1,13 @@
 /** The Node worker's request/run/show surface. A timer invokes run directly. */
 import * as path from "node:path";
 import { Console, Effect, Option, Schema } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import { routeOf } from "../server/Route.ts";
 import * as Host from "../knowledge/Maintenance.node.ts";
 import { repoFlag, rootFlag, withRepo } from "./shared.ts";
 
-const jsonFlag = Flag.boolean("json").pipe(
+const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDefault(false),
   Flag.withDescription("One versioned result on stdout; diagnostics on stderr"),
 );
@@ -61,7 +61,7 @@ const request = Command.make(
     root: rootFlag,
     repo: repoFlag,
     json: jsonFlag,
-    trigger: Flag.choice("trigger", ["manual", "wake"]).pipe(Flag.withDefault("manual")),
+    trigger: Flag.Literals("trigger", ["manual", "wake"]).pipe(Flag.withDefault("manual")),
   },
   ({ root, repo, json, trigger }) =>
     emit(
@@ -81,41 +81,41 @@ const run = Command.make(
     root: rootFlag,
     repo: repoFlag,
     json: jsonFlag,
-    ref: Flag.string("ref").pipe(
+    ref: Flag.String("ref").pipe(
       Flag.optional,
       Flag.withDescription(
         "Full committed source branch; required for a new run unless configured",
       ),
     ),
-    at: Flag.string("at").pipe(
+    at: Flag.String("at").pipe(
       Flag.optional,
       Flag.withDescription(
         "Explicit ISO 8601 evaluation instant with offset, required for new jobs",
       ),
     ),
-    job: Flag.string("job").pipe(
+    job: Flag.String("job").pipe(
       Flag.optional,
       Flag.withDescription("Resume this job using its saved inputs and limits"),
     ),
-    maximumConcepts: Flag.integer("max-concepts").pipe(
+    maximumConcepts: Flag.Int("max-concepts").pipe(
       Flag.optional,
       Flag.withDescription("Lower the Concept count ceiling for each pass"),
     ),
-    maximumOutcomes: Flag.integer("max-outcomes").pipe(
+    maximumOutcomes: Flag.Int("max-outcomes").pipe(
       Flag.optional,
       Flag.withDescription("Lower the native-outcome count ceiling"),
     ),
-    timeout: Flag.string("timeout").pipe(
+    timeout: Flag.String("timeout").pipe(
       Flag.optional,
       Flag.withDescription("Lower the pass time ceiling, for example 120s, 2m or 500ms"),
     ),
-    dryRun: Flag.boolean("dry-run").pipe(
+    dryRun: Flag.Boolean("dry-run").pipe(
       Flag.withDefault(false),
       Flag.withDescription(
         "Check without model calls, journal/cache/proposal writes or request acknowledgement",
       ),
     ),
-    propose: Flag.boolean("propose").pipe(
+    propose: Flag.Boolean("propose").pipe(
       Flag.withDefault(false),
       Flag.withDescription(
         "Prepare a local draft branch when validated changes exist; otherwise no-proposal",
@@ -164,7 +164,7 @@ const show = Command.make(
     root: rootFlag,
     repo: repoFlag,
     json: jsonFlag,
-    job: Flag.string("job").pipe(
+    job: Flag.String("job").pipe(
       Flag.withDescription("Job identity to inspect, including failed and partial jobs"),
     ),
   },

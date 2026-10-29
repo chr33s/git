@@ -1,6 +1,6 @@
 /** Stable principal identity repositories: bootstrap, rotate, revoke, inspect. */
 import { Console, Effect, Result } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 
 import { formatPublicKey, isFingerprint } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
@@ -19,7 +19,7 @@ import {
   withRepo,
 } from "./shared.ts";
 
-const rootKeys = Flag.string("root-key").pipe(
+const rootKeys = Flag.String("root-key").pipe(
   Flag.withDescription("Path to an offline root private key (repeat for a quorum)"),
   Flag.atLeast(1),
 );
@@ -41,11 +41,11 @@ const init = Command.make(
   "init",
   {
     root: rootFlag,
-    key: Flag.string("key").pipe(
+    key: Flag.String("key").pipe(
       Flag.withDescription("Path to a root private key (repeat for a quorum)"),
       Flag.atLeast(1),
     ),
-    threshold: Flag.integer("threshold").pipe(Flag.withDefault(1)),
+    threshold: Flag.Int("threshold").pipe(Flag.withDefault(1)),
     repo: repoArgument,
   },
   ({ key, repo, root, threshold }) =>
@@ -95,10 +95,10 @@ const rotate = Command.make(
   {
     root: rootFlag,
     rootKey: rootKeys,
-    newKey: Flag.string("new-key").pipe(
+    newKey: Flag.String("new-key").pipe(
       Flag.withDescription("Path to the new device's SSH public key"),
     ),
-    old: Flag.string("revoke").pipe(
+    old: Flag.String("revoke").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Old device fingerprint to revoke after granting the new one"),
     ),
@@ -145,8 +145,8 @@ const revoke = Command.make(
   {
     root: rootFlag,
     rootKey: rootKeys,
-    subject: Flag.string("subject").pipe(Flag.withDescription("Device key fingerprint")),
-    reason: Flag.choice("reason", ["rotated", "left", "compromised", "superseded"]).pipe(
+    subject: Flag.String("subject").pipe(Flag.withDescription("Device key fingerprint")),
+    reason: Flag.Literals("reason", ["rotated", "left", "compromised", "superseded"]).pipe(
       Flag.withDefault("compromised"),
     ),
     repo: repoArgument,

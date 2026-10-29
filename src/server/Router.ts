@@ -12,7 +12,7 @@
  * reaches its handler as the stream it arrived as.
  */
 import { Context, Effect, Layer } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { type GitError, statusOf } from "../git/Error.ts";
 import type { Repository } from "../git/Repository.ts";

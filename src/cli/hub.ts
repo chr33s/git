@@ -14,7 +14,7 @@
 import * as readline from "node:readline/promises";
 
 import { Console, Effect, Layer, Result } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import {
   type Fingerprint,
@@ -125,7 +125,7 @@ const verifierWeb = (root: string, identityRepo: string) =>
  * refused by the fold for want of a quorum, and sit in an append-only log
  * forever with nothing to show for it.
  */
-const keyFlag = Flag.string("key").pipe(
+const keyFlag = Flag.String("key").pipe(
   Flag.withDescription("Path to an SSH private key to sign with (repeat for a quorum)"),
   Flag.atLeast(1),
 );
@@ -135,11 +135,11 @@ const init = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    threshold: Flag.integer("threshold").pipe(
+    threshold: Flag.Int("threshold").pipe(
       Flag.withDefault(1),
       Flag.withDescription("How many root keys an authority operation needs"),
     ),
-    also: Flag.string("root-key").pipe(
+    also: Flag.String("root-key").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Additional root public key files, comma-separated"),
     ),
@@ -220,14 +220,14 @@ const grant = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    subject: Flag.string("subject").pipe(
+    subject: Flag.String("subject").pipe(
       Flag.withDescription("Path to an SSH public key, or principal:<PrincipalID>"),
     ),
-    capability: Flag.string("capability").pipe(
+    capability: Flag.String("capability").pipe(
       Flag.withDescription("Capabilities to grant, comma-separated"),
       Flag.withAlias("c"),
     ),
-    expires: Flag.integer("expires-in").pipe(
+    expires: Flag.Int("expires-in").pipe(
       Flag.withDefault(0),
       Flag.withDescription("Seconds until the grant expires; 0 never expires"),
     ),
@@ -274,10 +274,10 @@ const revoke = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    subject: Flag.string("subject").pipe(
+    subject: Flag.String("subject").pipe(
       Flag.withDescription("A key fingerprint or principal:<PrincipalID>"),
     ),
-    reason: Flag.choice("reason", ["rotated", "left", "compromised", "superseded"]).pipe(
+    reason: Flag.Literals("reason", ["rotated", "left", "compromised", "superseded"]).pipe(
       Flag.withDefault("left"),
     ),
     repo: repoArgument,
@@ -504,7 +504,7 @@ const whoami = Command.make(
   "whoami",
   {
     root: rootFlag,
-    key: Flag.string("key").pipe(
+    key: Flag.String("key").pipe(
       Flag.withDescription("Path to the SSH key to answer for; either half will do"),
     ),
     repo: repoArgument,
@@ -601,33 +601,33 @@ const enable = Command.make(
   "enable",
   {
     root: rootFlag,
-    yes: Flag.boolean("yes").pipe(
+    yes: Flag.Boolean("yes").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Accept a new repository identity without prompting"),
     ),
-    name: Flag.string("as").pipe(
+    name: Flag.String("as").pipe(
       Flag.withDefault("origin"),
       Flag.withDescription("Local repository directory to fetch into"),
     ),
-    identity: Flag.string("identity").pipe(
+    identity: Flag.String("identity").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Local identity repository whose web should evaluate first use"),
     ),
-    minPaths: Flag.integer("min-paths").pipe(
+    minPaths: Flag.Int("min-paths").pipe(
       Flag.withDefault(1),
       Flag.withDescription("Independent introduction paths required from --identity"),
     ),
-    token: Flag.string("token").pipe(
+    token: Flag.String("token").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Credential for a repository that requires one"),
     ),
-    refs: Flag.string("refs").pipe(
+    refs: Flag.String("refs").pipe(
       Flag.withDefault(""),
       Flag.withDescription(
         "Hub namespaces to fetch beside the defaults, comma-separated, under refs/hub/ (e.g. refs/hub/trace/*)",
       ),
     ),
-    url: Argument.string("url"),
+    url: Argument.String("url"),
   },
   ({ identity: identityRepo, minPaths, name, refs, root, token, url, yes }) =>
     Effect.gen(function* () {
@@ -862,11 +862,11 @@ const disable = Command.make(
   "disable",
   {
     root: rootFlag,
-    name: Flag.string("as").pipe(
+    name: Flag.String("as").pipe(
       Flag.withDefault("origin"),
       Flag.withDescription("Local repository directory to disable"),
     ),
-    url: Argument.string("url"),
+    url: Argument.String("url"),
   },
   ({ name, root, url }) =>
     Effect.gen(function* () {
@@ -944,7 +944,7 @@ const disable = Command.make(
     }).pipe(Effect.provide(knownRepos)),
 );
 
-const status = Command.make("status", { url: Argument.string("url") }, ({ url }) =>
+const status = Command.make("status", { url: Argument.String("url") }, ({ url }) =>
   Effect.gen(function* () {
     const key = yield* canonicalUrl(url);
     const store = yield* KnownRepos;
@@ -955,7 +955,7 @@ const status = Command.make("status", { url: Argument.string("url") }, ({ url })
   }).pipe(Effect.provide(knownRepos)),
 );
 
-const forget = Command.make("forget", { url: Argument.string("url") }, ({ url }) =>
+const forget = Command.make("forget", { url: Argument.String("url") }, ({ url }) =>
   Effect.gen(function* () {
     const key = yield* canonicalUrl(url);
     const store = yield* KnownRepos;

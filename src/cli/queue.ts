@@ -16,7 +16,7 @@
  * at all safe too.
  */
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
 import * as GitRepository from "../git/Repository.ts";
@@ -62,11 +62,11 @@ const settled = <A, R>(
     }),
   );
 
-const keyFlag = Flag.string("key").pipe(
+const keyFlag = Flag.String("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
 );
 
-const queueArgument = Argument.string("queue");
+const queueArgument = Argument.String("queue");
 
 /**
  * A target as somebody types it.
@@ -167,7 +167,7 @@ const open = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    target: Flag.string("target").pipe(
+    target: Flag.String("target").pipe(
       Flag.withDescription("The branch this queue lands on, as a full ref name"),
     ),
     repo: repoArgument,
@@ -228,10 +228,10 @@ const enter = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    queue: Flag.string("queue").pipe(Flag.withDefault("")),
-    target: Flag.string("target").pipe(Flag.withDefault("")),
+    queue: Flag.String("queue").pipe(Flag.withDefault("")),
+    target: Flag.String("target").pipe(Flag.withDefault("")),
     repo: repoArgument,
-    pr: Argument.string("pr"),
+    pr: Argument.String("pr"),
   },
   ({ key, pr, queue, repo, root, target }) =>
     Effect.gen(function* () {
@@ -286,14 +286,14 @@ const leave = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    queue: Flag.string("queue").pipe(Flag.withDefault("")),
-    target: Flag.string("target").pipe(Flag.withDefault("")),
-    reason: Flag.string("reason").pipe(
+    queue: Flag.String("queue").pipe(Flag.withDefault("")),
+    target: Flag.String("target").pipe(Flag.withDefault("")),
+    reason: Flag.String("reason").pipe(
       Flag.withDefault("withdrawn"),
       Flag.withDescription("landed | failed | conflict | stale | withdrawn"),
     ),
     repo: repoArgument,
-    pr: Argument.string("pr"),
+    pr: Argument.String("pr"),
   },
   ({ key, pr, queue, reason, repo, root, target }) =>
     Effect.gen(function* () {
@@ -352,9 +352,9 @@ const close = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    queue: Flag.string("queue").pipe(Flag.withDefault("")),
-    target: Flag.string("target").pipe(Flag.withDefault("")),
-    reason: Flag.string("reason").pipe(
+    queue: Flag.String("queue").pipe(Flag.withDefault("")),
+    target: Flag.String("target").pipe(Flag.withDefault("")),
+    reason: Flag.String("reason").pipe(
       Flag.withDefault("rotated"),
       Flag.withDescription("Why this queue is being ended"),
     ),
@@ -1480,13 +1480,13 @@ const run = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    queue: Flag.string("queue").pipe(Flag.withDefault("")),
-    target: Flag.string("target").pipe(Flag.withDefault("")),
-    dryRun: Flag.boolean("dry-run").pipe(
+    queue: Flag.String("queue").pipe(Flag.withDefault("")),
+    target: Flag.String("target").pipe(Flag.withDefault("")),
+    dryRun: Flag.Boolean("dry-run").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Say what one pass would do, moving no ref and recording nothing"),
     ),
-    notify: Flag.boolean("notify").pipe(
+    notify: Flag.Boolean("notify").pipe(
       Flag.withDefault(true),
       Flag.withDescription(
         "Deliver to subscribers and forward to mirrors when a batch lands (--no-notify to skip)",

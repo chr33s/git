@@ -1,7 +1,7 @@
 /** Fresh reads and locked updates for the local provider's repository registry. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ArtifactsError } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
+import { ArtifactsError } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import { Effect, Schema, Semaphore } from "effect";
 
 import type { Registry, RepoRecord } from "./Namespace.ts";

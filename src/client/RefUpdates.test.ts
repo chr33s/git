@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { NodeServices } from "@effect/platform-node";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 import { fetchCommand } from "../cli/transport.ts";
 import { stores } from "../git/Node.ts";
 import * as Repository from "../git/Repository.ts";

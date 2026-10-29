@@ -474,7 +474,7 @@ export const Model = Schema.Struct({
    */
   railCollapsed: Schema.Boolean,
   /** A malformed address's explanation, shown above the screen it fell back to. */
-  navError: Schema.NullOr(Schema.String),
+  navError: Schema.Option(Schema.String),
   tasks: TasksModel,
   tasksScreen: TasksScreen,
   searchScreen: SearchScreen,

@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "@effect/vitest";
-import { ReadWriteNamespace } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
+import { ReadWriteNamespace } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { Deferred, Effect, Exit, Fiber, Layer } from "effect";
 
@@ -292,7 +292,7 @@ describe("Artifacts initialization", () => {
                       `
                     import assert from "node:assert/strict";
                     import { Effect, Layer } from "effect";
-                    import { ReadWriteNamespace } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
+                    import { ReadWriteNamespace } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
                     import { RuntimeContext } from "alchemy/RuntimeContext";
                     import { localNode } from ${JSON.stringify(new URL("./Namespace.ts", import.meta.url).href)};
                     await Effect.runPromise(Effect.gen(function* () {

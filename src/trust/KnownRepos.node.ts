@@ -59,7 +59,7 @@ export const knownReposPath = (
 export const defaultPath: Effect.Effect<string | undefined, Config.ConfigError> = Effect.gen(
   function* () {
     const configured = Option.getOrUndefined(
-      yield* Config.option(Config.string("XDG_CONFIG_HOME")),
+      yield* Config.option(Config.String("XDG_CONFIG_HOME")),
     );
     const home = yield* Effect.sync((): string | undefined => {
       try {

@@ -2,7 +2,7 @@
 /**
  * CLI.
  *
- * `effect/unstable/cli` owns parsing, flags, help and exit codes; each
+ * `effect/cli` owns parsing, flags, help and exit codes; each
  * handler calls the same `Repository` service, host, client and auth code
  * the server runs — the CLI is not another implementation of anything.
  *
@@ -28,7 +28,7 @@ import { pipeline } from "node:stream/promises";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Console, Effect, Logger, Predicate, Stream } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import * as Client from "../client/Client.ts";
 import { fetchRepository } from "../client/Fetch.ts";
@@ -91,7 +91,7 @@ const init = Command.make(
   "init",
   {
     root: rootFlag,
-    branch: Flag.string("branch").pipe(Flag.withDefault("main"), Flag.withAlias("b")),
+    branch: Flag.String("branch").pipe(Flag.withDefault("main"), Flag.withAlias("b")),
     repo: repoArgument,
   },
   ({ branch, repo, root }) =>
@@ -119,8 +119,8 @@ const log = Command.make(
   "log",
   {
     root: rootFlag,
-    limit: Flag.integer("max-count").pipe(Flag.withDefault(20), Flag.withAlias("n")),
-    ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
+    limit: Flag.Int("max-count").pipe(Flag.withDefault(20), Flag.withAlias("n")),
+    ref: Flag.String("ref").pipe(Flag.withDefault("HEAD")),
     repo: repoArgument,
   },
   ({ limit, ref, repo, root }) =>
@@ -149,13 +149,13 @@ const clone = Command.make(
   "clone",
   {
     root: rootFlag,
-    branch: Flag.string("branch").pipe(Flag.withDefault(""), Flag.withAlias("b")),
-    token: Flag.string("token").pipe(
+    branch: Flag.String("branch").pipe(Flag.withDefault(""), Flag.withAlias("b")),
+    token: Flag.String("token").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Access token for a server that requires one"),
     ),
-    url: Argument.string("url"),
-    name: Argument.string("name"),
+    url: Argument.String("url"),
+    name: Argument.String("name"),
   },
   ({ branch, name, root, token: accessToken, url }) =>
     Effect.gen(function* () {
@@ -193,13 +193,13 @@ const credential = Command.make(
   "credential",
   {
     root: rootFlag,
-    key: Flag.string("key").pipe(Flag.withDescription("Path to the SSH private key to sign with")),
-    capability: Flag.string("capability").pipe(
+    key: Flag.String("key").pipe(Flag.withDescription("Path to the SSH private key to sign with")),
+    capability: Flag.String("capability").pipe(
       Flag.withDefault("repo.read"),
       Flag.withDescription("Capability to scope the credential to (repeatable as a,b)"),
       Flag.withAlias("c"),
     ),
-    ttl: Flag.integer("ttl").pipe(
+    ttl: Flag.Int("ttl").pipe(
       Flag.withDefault(3600),
       Flag.withDescription("Seconds until the credential expires"),
     ),
@@ -304,21 +304,21 @@ const credentialHelper = Command.make(
   "credential-helper",
   {
     root: rootFlag,
-    key: Flag.string("key").pipe(Flag.withDescription("Path to the SSH private key to sign with")),
-    capability: Flag.string("capability").pipe(
+    key: Flag.String("key").pipe(Flag.withDescription("Path to the SSH private key to sign with")),
+    capability: Flag.String("capability").pipe(
       Flag.withDefault("repo.read,source.push"),
       Flag.withDescription("Capabilities to scope the credential to (repeatable as a,b)"),
       Flag.withAlias("c"),
     ),
-    ttl: Flag.integer("ttl").pipe(
+    ttl: Flag.Int("ttl").pipe(
       Flag.withDefault(3600),
       Flag.withDescription("Seconds until the credential expires"),
     ),
-    repo: Flag.string("repo").pipe(
+    repo: Flag.String("repo").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Repository to mint for; defaults to the path git asks about"),
     ),
-    operation: Argument.string("operation"),
+    operation: Argument.String("operation"),
   },
   ({ capability, key, operation, repo, root, ttl }) =>
     Effect.gen(function* () {
@@ -397,9 +397,9 @@ const branch = Command.make(
   "branch",
   {
     root: rootFlag,
-    delete: Flag.string("delete").pipe(Flag.withDefault(""), Flag.withAlias("d")),
-    base: Flag.string("base").pipe(Flag.withDefault("HEAD")),
-    name: Flag.string("create").pipe(Flag.withDefault(""), Flag.withAlias("c")),
+    delete: Flag.String("delete").pipe(Flag.withDefault(""), Flag.withAlias("d")),
+    base: Flag.String("base").pipe(Flag.withDefault("HEAD")),
+    name: Flag.String("create").pipe(Flag.withDefault(""), Flag.withAlias("c")),
     repo: repoArgument,
   },
   ({ base, delete: remove, name, repo, root }) =>
@@ -433,15 +433,15 @@ const tag = Command.make(
   "tag",
   {
     root: rootFlag,
-    message: Flag.string("message").pipe(
+    message: Flag.String("message").pipe(
       Flag.withDefault(""),
       Flag.withAlias("m"),
       Flag.withDescription("Makes it an annotated tag rather than a bare ref"),
     ),
-    delete: Flag.string("delete").pipe(Flag.withDefault(""), Flag.withAlias("d")),
-    name: Flag.string("name").pipe(Flag.withDefault("")),
-    target: Flag.string("target").pipe(Flag.withDefault("HEAD")),
-    force: Flag.boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
+    delete: Flag.String("delete").pipe(Flag.withDefault(""), Flag.withAlias("d")),
+    name: Flag.String("name").pipe(Flag.withDefault("")),
+    target: Flag.String("target").pipe(Flag.withDefault("HEAD")),
+    force: Flag.Boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
     repo: repoArgument,
   },
   ({ delete: remove, force, message, name, repo, root, target }) =>
@@ -478,7 +478,7 @@ const tag = Command.make(
 
 const show = Command.make(
   "show",
-  { root: rootFlag, repo: repoArgument, rev: Argument.string("rev") },
+  { root: rootFlag, repo: repoArgument, rev: Argument.String("rev") },
   ({ repo, rev, root }) =>
     withRepo(
       root,
@@ -508,7 +508,7 @@ const files = Command.make(
   "files",
   {
     root: rootFlag,
-    ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
+    ref: Flag.String("ref").pipe(Flag.withDefault("HEAD")),
     repo: repoArgument,
   },
   ({ ref, repo, root }) =>
@@ -564,8 +564,8 @@ const diff = Command.make(
   {
     root: rootFlag,
     repo: repoArgument,
-    from: Argument.string("from"),
-    to: Argument.string("to"),
+    from: Argument.String("from"),
+    to: Argument.String("to"),
   },
   ({ from, repo, root, to }) =>
     withRepo(
@@ -617,17 +617,17 @@ const merge = Command.make(
   "merge",
   {
     root: rootFlag,
-    into: Flag.string("into").pipe(
+    into: Flag.String("into").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Move this ref on success; omit to compute and stop"),
     ),
-    strategy: Flag.choice("strategy", ["recursive", "ours", "theirs"]).pipe(
+    strategy: Flag.Literals("strategy", ["recursive", "ours", "theirs"]).pipe(
       Flag.withDefault("recursive"),
       Flag.withAlias("s"),
     ),
     repo: repoArgument,
-    ours: Argument.string("ours"),
-    theirs: Argument.string("theirs"),
+    ours: Argument.String("ours"),
+    theirs: Argument.String("theirs"),
   },
   ({ into, ours, repo, root, strategy, theirs }) =>
     withRepo(
@@ -672,10 +672,10 @@ const grep = Command.make(
   "grep",
   {
     root: rootFlag,
-    ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
-    ignoreCase: Flag.boolean("ignore-case").pipe(Flag.withDefault(false), Flag.withAlias("i")),
+    ref: Flag.String("ref").pipe(Flag.withDefault("HEAD")),
+    ignoreCase: Flag.Boolean("ignore-case").pipe(Flag.withDefault(false), Flag.withAlias("i")),
     repo: repoArgument,
-    pattern: Argument.string("pattern"),
+    pattern: Argument.String("pattern"),
   },
   ({ ignoreCase, pattern, ref, repo, root }) =>
     withRepo(
@@ -734,8 +734,8 @@ const gc = Command.make(
   "gc",
   {
     root: rootFlag,
-    dryRun: Flag.boolean("dry-run").pipe(Flag.withDefault(false), Flag.withAlias("n")),
-    repack: Flag.boolean("repack").pipe(
+    dryRun: Flag.Boolean("dry-run").pipe(Flag.withDefault(false), Flag.withAlias("n")),
+    repack: Flag.Boolean("repack").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Write what survives into one pack and drop the loose objects"),
     ),
@@ -783,17 +783,17 @@ const pushCommand = Command.make(
   "push",
   {
     root: rootFlag,
-    token: Flag.string("token").pipe(Flag.withDefault("")),
-    force: Flag.boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
-    atomic: Flag.boolean("atomic").pipe(Flag.withDefault(false)),
-    delete: Flag.boolean("delete").pipe(
+    token: Flag.String("token").pipe(Flag.withDefault("")),
+    force: Flag.Boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
+    atomic: Flag.Boolean("atomic").pipe(Flag.withDefault(false)),
+    delete: Flag.Boolean("delete").pipe(
       Flag.withDefault(false),
       Flag.withAlias("d"),
       Flag.withDescription("Remove the ref on the server instead of updating it"),
     ),
     repo: repoArgument,
-    url: Argument.string("url"),
-    ref: Argument.string("ref"),
+    url: Argument.String("url"),
+    ref: Argument.String("ref"),
   },
   ({ atomic, delete: remove, force, ref, repo, root, token: accessToken, url }) =>
     withRepo(
@@ -827,9 +827,9 @@ const archiveCommand = Command.make(
   "archive",
   {
     root: rootFlag,
-    ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
-    prefix: Flag.string("prefix").pipe(Flag.withDefault("")),
-    output: Flag.string("output").pipe(
+    ref: Flag.String("ref").pipe(Flag.withDefault("HEAD")),
+    prefix: Flag.String("prefix").pipe(Flag.withDefault("")),
+    output: Flag.String("output").pipe(
       Flag.withAlias("o"),
       Flag.withDescription("Where to write it; the extension picks the format"),
     ),
@@ -870,9 +870,9 @@ const history = Command.make(
   {
     root: rootFlag,
     repo: repoArgument,
-    ref: Flag.string("ref").pipe(Flag.withDefault("HEAD")),
-    limit: Flag.integer("max-count").pipe(Flag.withDefault(20), Flag.withAlias("n")),
-    file: Argument.string("path"),
+    ref: Flag.String("ref").pipe(Flag.withDefault("HEAD")),
+    limit: Flag.Int("max-count").pipe(Flag.withDefault(20), Flag.withAlias("n")),
+    file: Argument.String("path"),
   },
   ({ file, limit, ref, repo, root }) =>
     withRepo(
@@ -899,9 +899,9 @@ const reset = Command.make(
   {
     root: rootFlag,
     repo: repoArgument,
-    ref: Argument.string("ref"),
-    to: Argument.string("to"),
-    expected: Flag.string("expected").pipe(
+    ref: Argument.String("ref"),
+    to: Argument.String("to"),
+    expected: Flag.String("expected").pipe(
       Flag.optional,
       Flag.withDescription("Refuse unless the ref is currently this oid"),
     ),
@@ -932,7 +932,7 @@ const reset = Command.make(
 
 const reflogCommand = Command.make(
   "reflog",
-  { root: rootFlag, repo: repoArgument, ref: Argument.string("ref") },
+  { root: rootFlag, repo: repoArgument, ref: Argument.String("ref") },
   ({ ref, repo, root }) =>
     withRepo(
       root,
@@ -953,10 +953,10 @@ const reflogCommand = Command.make(
 
 /** A server flag pair every registry verb shares. */
 const serverFlags = {
-  server: Flag.string("server").pipe(
+  server: Flag.String("server").pipe(
     Flag.withDescription("The git+ server's base URL, e.g. https://git.example.com"),
   ),
-  token: Flag.string("token").pipe(Flag.withDefault("")),
+  token: Flag.String("token").pipe(Flag.withDefault("")),
 };
 
 const clientFor = (server: string, token: string) =>
@@ -974,10 +974,10 @@ const remoteAdd = Command.make(
   "add",
   {
     ...serverFlags,
-    credential: Flag.string("credential").pipe(Flag.withDefault("")),
+    credential: Flag.String("credential").pipe(Flag.withDefault("")),
     repo: repoArgument,
-    name: Argument.string("name"),
-    url: Argument.string("url"),
+    name: Argument.String("name"),
+    url: Argument.String("url"),
   },
   ({ credential, name, repo, server, token, url }) =>
     Effect.gen(function* () {
@@ -1003,7 +1003,7 @@ const remoteList = Command.make(
 
 const remoteRemove = Command.make(
   "rm",
-  { ...serverFlags, repo: repoArgument, name: Argument.string("name") },
+  { ...serverFlags, repo: repoArgument, name: Argument.String("name") },
   ({ name, repo, server, token }) =>
     Effect.gen(function* () {
       const client = yield* clientFor(server, token);
@@ -1039,9 +1039,9 @@ const webhookAdd = Command.make(
   "add",
   {
     ...serverFlags,
-    secret: Flag.string("secret").pipe(Flag.withDescription("Signs each delivery")),
+    secret: Flag.String("secret").pipe(Flag.withDescription("Signs each delivery")),
     repo: repoArgument,
-    url: Argument.string("url"),
+    url: Argument.String("url"),
   },
   ({ repo, secret, server, token, url }) =>
     Effect.gen(function* () {
@@ -1064,7 +1064,7 @@ const webhookList = Command.make(
 
 const webhookRemove = Command.make(
   "rm",
-  { ...serverFlags, repo: repoArgument, id: Argument.string("id") },
+  { ...serverFlags, repo: repoArgument, id: Argument.String("id") },
   ({ id, repo, server, token }) =>
     Effect.gen(function* () {
       const client = yield* clientFor(server, token);

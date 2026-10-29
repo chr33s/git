@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version=2.55.0
+version=2.56.0
 prefix="${RUNNER_TEMP:?This installer is for GitHub Actions}/git-${version}"
 archive="${RUNNER_TEMP}/git-${version}.tar.xz"
 source_dir="${RUNNER_TEMP}/git-${version}"

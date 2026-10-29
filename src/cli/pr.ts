@@ -14,7 +14,7 @@
  * not land).
  */
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
@@ -33,11 +33,11 @@ import {
   withRepo,
 } from "./shared.ts";
 
-const keyFlag = Flag.string("key").pipe(
+const keyFlag = Flag.String("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
 );
 
-const prArgument = Argument.string("pr");
+const prArgument = Argument.String("pr");
 
 const identityOf = Effect.fn("pr.identityOf")(function* (repo: string) {
   const stored = yield* readGenesis();
@@ -104,13 +104,13 @@ const open = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    title: Flag.string("title").pipe(Flag.withDescription("What this proposes, in one line")),
-    description: Flag.string("description").pipe(Flag.withDefault("")),
-    base: Flag.string("base").pipe(
+    title: Flag.String("title").pipe(Flag.withDescription("What this proposes, in one line")),
+    description: Flag.String("description").pipe(Flag.withDefault("")),
+    base: Flag.String("base").pipe(
       Flag.withDefault("main"),
       Flag.withDescription("The branch this asks to change"),
     ),
-    head: Flag.string("head").pipe(
+    head: Flag.String("head").pipe(
       Flag.withDescription("The proposed revision — a branch or a commit"),
     ),
     repo: repoArgument,
@@ -144,7 +144,7 @@ const update = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    head: Flag.string("head").pipe(Flag.withDescription("The new revision proposed")),
+    head: Flag.String("head").pipe(Flag.withDescription("The new revision proposed")),
     repo: repoArgument,
     pr: prArgument,
   },
@@ -192,14 +192,14 @@ const review = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    decision: Flag.choice("decision", ["approve", "reject", "comment"]).pipe(
+    decision: Flag.Literals("decision", ["approve", "reject", "comment"]).pipe(
       Flag.withDescription("An approval is of a revision, never of a pull request"),
     ),
-    head: Flag.string("head").pipe(
+    head: Flag.String("head").pipe(
       Flag.withDefault(""),
       Flag.withDescription("The revision reviewed; defaults to the pull request's head"),
     ),
-    body: Flag.string("body").pipe(Flag.withDefault("")),
+    body: Flag.String("body").pipe(Flag.withDefault("")),
     repo: repoArgument,
     pr: prArgument,
   },
@@ -241,8 +241,8 @@ const dismiss = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    review: Flag.string("review").pipe(Flag.withDescription("The review event id to dismiss")),
-    reason: Flag.string("reason").pipe(Flag.withDefault("")),
+    review: Flag.String("review").pipe(Flag.withDescription("The review event id to dismiss")),
+    reason: Flag.String("reason").pipe(Flag.withDefault("")),
     repo: repoArgument,
     pr: prArgument,
   },
@@ -277,12 +277,12 @@ const comment = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    body: Flag.string("body"),
-    path: Flag.string("path").pipe(
+    body: Flag.String("body"),
+    path: Flag.String("path").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Make it an inline comment on this path"),
     ),
-    line: Flag.integer("line").pipe(Flag.withDefault(0)),
+    line: Flag.Int("line").pipe(Flag.withDefault(0)),
     repo: repoArgument,
     pr: prArgument,
   },
@@ -309,8 +309,8 @@ const reply = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    thread: Flag.string("thread").pipe(Flag.withDescription("The thread id to answer in")),
-    body: Flag.string("body"),
+    thread: Flag.String("thread").pipe(Flag.withDescription("The thread id to answer in")),
+    body: Flag.String("body"),
     repo: repoArgument,
     pr: prArgument,
   },
@@ -346,7 +346,7 @@ const threadState = (
     {
       root: rootFlag,
       key: keyFlag,
-      thread: Flag.string("thread"),
+      thread: Flag.String("thread"),
       repo: repoArgument,
       pr: prArgument,
     },
@@ -370,13 +370,13 @@ const check = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    name: Flag.string("name").pipe(
+    name: Flag.String("name").pipe(
       Flag.withDescription("The check's name — what a policy requires"),
     ),
-    provider: Flag.string("provider").pipe(Flag.withDefault("cli")),
-    head: Flag.string("head").pipe(Flag.withDescription("The revision the check ran against")),
-    status: Flag.choice("status", ["started", "success", "failure", "neutral"]),
-    url: Flag.string("url").pipe(Flag.withDefault("")),
+    provider: Flag.String("provider").pipe(Flag.withDefault("cli")),
+    head: Flag.String("head").pipe(Flag.withDescription("The revision the check ran against")),
+    status: Flag.Literals("status", ["started", "success", "failure", "neutral"]),
+    url: Flag.String("url").pipe(Flag.withDefault("")),
     repo: repoArgument,
     pr: prArgument,
   },
@@ -416,7 +416,7 @@ const merge = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    strategy: Flag.choice("strategy", ["recursive", "ours", "theirs"]).pipe(
+    strategy: Flag.Literals("strategy", ["recursive", "ours", "theirs"]).pipe(
       Flag.withDefault("recursive"),
       Flag.withAlias("s"),
     ),
@@ -484,7 +484,7 @@ const list = Command.make(
   "list",
   {
     root: rootFlag,
-    all: Flag.boolean("all").pipe(
+    all: Flag.Boolean("all").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Include closed and merged pull requests"),
     ),

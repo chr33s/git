@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { describe, it } from "@effect/vitest";
-import { ReadWriteNamespace } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
+import { ReadWriteNamespace } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { Effect, Layer } from "effect";
 

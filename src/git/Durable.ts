@@ -12,7 +12,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { Context, Effect, Layer } from "effect";
-import { FetchHttpClient, HttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpRouter, HttpServerResponse } from "effect/http";
 
 import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
@@ -96,7 +96,7 @@ export class GitRepo extends DurableObject<TestEnv> {
   /**
    * Whether this host serves writes to repositories with no genesis.
    *
-   * Exactly the spellings `Config.boolean` accepts, and exactly as it accepts
+   * Exactly the spellings `Config.Boolean` accepts, and exactly as it accepts
    * them — case-sensitively, `y` included — because that is what the Worker
    * beside this reads the very same variable with. A list that merely looked
    * similar was the same defect in a smaller size: `=y` opened one host and

@@ -13,7 +13,7 @@
 import * as path from "node:path";
 
 import { Effect, Fiber, Layer } from "effect";
-import { FetchHttpClient, HttpClient } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient } from "effect/http";
 
 import { stores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";

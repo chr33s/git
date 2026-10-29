@@ -9,8 +9,8 @@
  * inside real Chromium.
  */
 import { Effect, Layer } from "effect";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
-import { HttpApiClient } from "effect/unstable/httpapi";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { HttpApiClient } from "effect/http-api";
 
 import { noPacks, type PackStore } from "../git/Packed.ts";
 import * as GitRepository from "../git/Repository.ts";

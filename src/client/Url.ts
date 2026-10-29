@@ -1,4 +1,4 @@
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest } from "effect/http";
 
 /** Hosts strip one transport suffix; preserve a literal suffix in the storage name. */
 export const repositoryPath = (repo: string): string =>

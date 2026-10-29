@@ -12,8 +12,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 
 import { Effect, FileSystem, Layer, Path } from "effect";
-import { Etag, HttpPlatform, HttpRouter } from "effect/unstable/http";
-import { HttpApiTest } from "effect/unstable/httpapi";
+import { Etag, HttpPlatform, HttpRouter } from "effect/http";
+import { HttpApiTest } from "effect/http-api";
 
 import { fingerprint, formatPublicKey, generate, NAMESPACE, sign } from "../crypto/SshSignature.ts";
 import * as Anchor from "../hub/Anchor.ts";

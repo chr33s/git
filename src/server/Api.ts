@@ -19,14 +19,14 @@
  * algorithms in `git/`.
  */
 import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
-import { Etag, HttpPlatform, HttpServerResponse } from "effect/unstable/http";
+import { Etag, HttpPlatform, HttpServerResponse } from "effect/http";
 import {
   HttpApi,
   HttpApiBuilder,
   HttpApiEndpoint,
   HttpApiGroup,
   HttpApiSchema,
-} from "effect/unstable/httpapi";
+} from "effect/http-api";
 
 import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";

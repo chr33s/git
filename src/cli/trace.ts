@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 
 import { Console, Effect, Predicate } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { qualify } from "../git/Oid.ts";
@@ -89,28 +89,28 @@ const record = Command.make(
   {
     root: rootFlag,
     repo: repoFlag,
-    key: Flag.string("key").pipe(
+    key: Flag.String("key").pipe(
       Flag.withDescription("Path to the SSH private key the record is signed with"),
     ),
-    session: Flag.string("session").pipe(Flag.withDescription("The session this record traces")),
-    event: Flag.string("event").pipe(Flag.withDescription("A file holding the normalized event")),
-    otel: Flag.boolean("otel").pipe(
+    session: Flag.String("session").pipe(Flag.withDescription("The session this record traces")),
+    event: Flag.String("event").pipe(Flag.withDescription("A file holding the normalized event")),
+    otel: Flag.Boolean("otel").pipe(
       Flag.withDefault(false),
       Flag.withDescription("The file holds a GenAI span to normalize rather than a Git+ event"),
     ),
-    exposure: Flag.string("exposure").pipe(
+    exposure: Flag.String("exposure").pipe(
       Flag.withDefault(""),
       Flag.withDescription("The Context Exposure this invocation was made against, by record OID"),
     ),
-    invocation: Flag.string("invocation").pipe(
+    invocation: Flag.String("invocation").pipe(
       Flag.withDefault(""),
       Flag.withDescription("The invocation a tool span belongs beneath, by record OID"),
     ),
-    stage: Flag.string("stage").pipe(
+    stage: Flag.String("stage").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Where the signal was captured: sdk-export, local-collector, hook, …"),
     ),
-    revision: Flag.string("semconv-revision").pipe(
+    revision: Flag.String("semconv-revision").pipe(
       Flag.withDefault(""),
       Flag.withDescription(
         "The upstream semconv revision this span declared, when it declared one",
@@ -252,12 +252,12 @@ const redact = Command.make(
   {
     root: rootFlag,
     repo: repoFlag,
-    key: Flag.string("key").pipe(
+    key: Flag.String("key").pipe(
       Flag.withDescription("Path to the SSH private key the tombstone is signed with"),
     ),
-    session: Flag.string("session").pipe(Flag.withDescription("The session holding the record")),
-    target: Flag.string("target").pipe(Flag.withDescription("The record's own id")),
-    reason: Flag.string("reason").pipe(Flag.withDescription("Why it is being removed")),
+    session: Flag.String("session").pipe(Flag.withDescription("The session holding the record")),
+    target: Flag.String("target").pipe(Flag.withDescription("The record's own id")),
+    reason: Flag.String("reason").pipe(Flag.withDescription("Why it is being removed")),
   },
   ({ key, reason, repo, root, session, target }) =>
     Effect.gen(function* () {

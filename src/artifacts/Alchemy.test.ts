@@ -5,8 +5,8 @@
  * satisfy the Artifacts binding:
  * `RepoClient.raw` must be deferred (an `Effect`) rather than an eager
  * `ArtifactsRepo` no off-platform provider can construct.
- * `patches/alchemy+2.0.0-beta.76.patch` applies exactly that change — the one
- * proposed upstream — via `patch-package` on `postinstall`.
+ * `patches/@alchemy.run+cloudflare+2.0.0-beta.84.patch` applies exactly that change — the one
+ * proposed upstream — via `patch-package` on `prepare`.
  *
  * The assertions here are compile-time: if the patch stopped applying, `raw`
  * reverts to an eager handle and this file fails `npm run check`.
@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { describe, it } from "@effect/vitest";
 
-import type { Artifacts } from "alchemy/Cloudflare";
+import type { Artifacts } from "@alchemy.run/cloudflare";
 import { Effect } from "effect";
 
 type Raw = Artifacts.RepoClient["raw"];
@@ -34,7 +34,7 @@ describe("alchemy patch", () => {
       assert.equal(rawIsDeferred, true);
       assert.equal(failureIsDeclined, true);
       assert.ok(
-        fs.existsSync("patches/alchemy+2.0.0-beta.76.patch"),
+        fs.existsSync("patches/@alchemy.run+cloudflare+2.0.0-beta.84.patch"),
         "the patch file ships with the repository",
       );
     }),

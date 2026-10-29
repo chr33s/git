@@ -41,7 +41,7 @@
  *   (`std::length_error: vector::_M_range_insert`, no JS-level error) — 63
  *   call sites here, no user-space workaround.
  * Also not obviously worth it: built against the largest subset that does
- * snapshot (`effect/unstable/cli` + `@effect/platform-node`, no app code),
+ * snapshot (`effect/cli` + `@effect/platform-node`, no app code),
  * the snapshot binary starts in 39 ms vs the code cache's 27 ms and carries
  * 13 MiB more RSS — deserializing effect's heap costs more than compiling
  * it from cache.

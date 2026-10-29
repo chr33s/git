@@ -14,7 +14,7 @@
 import { bytesToHex } from "../git/Format.ts";
 import { Effect, Layer } from "effect";
 
-import { ArtifactsError } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
+import { ArtifactsError } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 
 import { Registry, type RepoRecord, Tokens } from "./Namespace.ts";
 

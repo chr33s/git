@@ -7,7 +7,7 @@
  * by a task ref actually reads — the tasks nobody currently holds.
  */
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
@@ -26,11 +26,11 @@ const identityOf = Effect.fn("task.identityOf")(function* (repo: string) {
   return stored.genesis.repoId;
 });
 
-const keyFlag = Flag.string("key").pipe(
+const keyFlag = Flag.String("key").pipe(
   Flag.withDescription("Path to the SSH private key to sign with"),
 );
 
-const taskArgument = Argument.string("task");
+const taskArgument = Argument.String("task");
 
 const existingTask = Effect.fn("task.existingTask")(function* (task: string) {
   const state = yield* Task.project(task);
@@ -55,17 +55,17 @@ const open = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    title: Flag.string("title").pipe(Flag.withDescription("What needs doing, in one line")),
-    description: Flag.string("description").pipe(Flag.withDefault("")),
-    ref: Flag.string("ref").pipe(
+    title: Flag.String("title").pipe(Flag.withDescription("What needs doing, in one line")),
+    description: Flag.String("description").pipe(Flag.withDefault("")),
+    ref: Flag.String("ref").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Refs this task concerns, comma-separated"),
     ),
-    pull: Flag.string("pull").pipe(
+    pull: Flag.String("pull").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Pull requests it concerns, comma-separated"),
     ),
-    parent: Flag.string("parent").pipe(
+    parent: Flag.String("parent").pipe(
       Flag.withDefault(""),
       Flag.withDescription("The task this one belongs to — a release, an epic, a parent story"),
     ),
@@ -100,7 +100,7 @@ const claim = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    ttl: Flag.integer("ttl").pipe(
+    ttl: Flag.Int("ttl").pipe(
       Flag.withDefault(3600),
       Flag.withDescription("Seconds this lease lasts before it frees itself"),
     ),
@@ -179,11 +179,11 @@ const close = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    outcome: Flag.choice("outcome", ["completed", "abandoned", "superseded"]).pipe(
+    outcome: Flag.Literals("outcome", ["completed", "abandoned", "superseded"]).pipe(
       Flag.withDefault("completed" as const),
     ),
-    pull: Flag.string("pull").pipe(Flag.withDefault("")),
-    session: Flag.string("session").pipe(Flag.withDefault("")),
+    pull: Flag.String("pull").pipe(Flag.withDefault("")),
+    session: Flag.String("session").pipe(Flag.withDefault("")),
     repo: repoArgument,
     task: taskArgument,
   },
@@ -241,7 +241,7 @@ const reparent = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    parent: Flag.string("parent").pipe(
+    parent: Flag.String("parent").pipe(
       Flag.withDefault(""),
       Flag.withDescription("The task it now belongs to; omit to detach it"),
     ),
@@ -269,8 +269,8 @@ const redact = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    target: Flag.string("target").pipe(Flag.withDescription("The record's event id")),
-    reason: Flag.string("reason").pipe(Flag.withDescription("Why it is being removed")),
+    target: Flag.String("target").pipe(Flag.withDescription("The record's event id")),
+    reason: Flag.String("reason").pipe(Flag.withDescription("Why it is being removed")),
     repo: repoArgument,
     task: taskArgument,
   },
@@ -298,7 +298,7 @@ const list = Command.make(
   "list",
   {
     root: rootFlag,
-    all: Flag.boolean("all").pipe(
+    all: Flag.Boolean("all").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Include claimed and closed tasks"),
     ),

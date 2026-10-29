@@ -191,7 +191,7 @@ the HTTP client; nothing about the page changes.
 
 **The client is derived, not written.** `client.ts` derives an atom-backed
 client from `src/server/Api.ts`'s own `HttpApi` declaration
-(`AtomHttpApi.Service` from `effect/unstable/reactivity`), so paths, payloads
+(`AtomHttpApi.Service` from `effect/reactivity`), so paths, payloads
 and error unions cannot drift from the server — the compiler owns that now.
 It loads lazily (like Shiki) so the entry bundle does not carry the Effect
 runtime; `atoms.ts` holds the one `AtomRegistry` the page reads through, and

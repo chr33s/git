@@ -2,7 +2,7 @@
 import * as path from "node:path";
 
 import { Console, Effect, Result } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { parseHosts, resolve } from "../host/ServeConfig.ts";
@@ -19,34 +19,34 @@ const defaultUiDir = path.join(import.meta.dirname, "..", "..", "dist", "ui");
 export const serveCommand = Command.make(
   "serve",
   {
-    root: Flag.string("root").pipe(
+    root: Flag.String("root").pipe(
       Flag.optional,
       Flag.withDescription("Directory holding one bare repository per subdirectory"),
     ),
-    port: Flag.integer("port").pipe(Flag.optional, Flag.withAlias("p")),
-    hostname: Flag.string("hostname").pipe(
+    port: Flag.Int("port").pipe(Flag.optional, Flag.withAlias("p")),
+    hostname: Flag.String("hostname").pipe(
       Flag.optional,
       Flag.withDescription("Host interface to bind (or HOSTNAME)"),
     ),
-    hosts: Flag.string("hosts").pipe(
+    hosts: Flag.String("hosts").pipe(
       Flag.optional,
       Flag.withDescription(
         "Public authorities this server answers to, comma-separated (or GIT_HOSTS)",
       ),
     ),
-    open: Flag.boolean("open").pipe(
+    open: Flag.Boolean("open").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Serve writes to repositories that have no genesis"),
     ),
-    wake: Flag.boolean("wake").pipe(
+    wake: Flag.Boolean("wake").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Run each repository's wake.json rules when a push moves its hub refs"),
     ),
-    ui: Flag.boolean("ui").pipe(
+    ui: Flag.Boolean("ui").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Serve the built browser UI from this origin as well"),
     ),
-    uiDir: Flag.string("ui-dir").pipe(
+    uiDir: Flag.String("ui-dir").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Where the built UI is, if not the one built beside this install"),
     ),

@@ -8,7 +8,8 @@
  * a second listener racing the first.
  */
 import { Subscription } from "foldkit";
-import { Option, Schema } from "effect";
+import * as Dom from "foldkit/dom";
+import { Option, Schema, Stream } from "effect";
 
 import { AppMessage } from "./app.message.ts";
 import type { Model } from "./app.model.ts";
@@ -20,10 +21,10 @@ export const subscriptions = Subscription.make<Model, AppMessage>()((entry) => (
     {
       modelToDependencies: () => ({}),
       dependenciesToStream: () =>
-        Subscription.fromEventFilterMap({
+        Dom.streamFromEventFilterMap({
           target: globalThis,
           type: "keydown",
-          toMessage: (event: KeyboardEvent) => {
+          filterMapEvent: (event: KeyboardEvent) => {
             if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") {
               return Option.none();
             }
@@ -50,15 +51,11 @@ export const subscriptions = Subscription.make<Model, AppMessage>()((entry) => (
       modelToDependencies: (model: Model) => ({ pinned: model.themePinned }),
       dependenciesToStream: ({ pinned }) =>
         pinned
-          ? Subscription.fromEventFilterMap({
-              target: globalThis,
-              type: "gp-never",
-              toMessage: () => Option.none<AppMessage>(),
-            })
-          : Subscription.fromEvent({
+          ? Stream.never
+          : Dom.streamFromEvent({
               target: globalThis.matchMedia("(prefers-color-scheme: dark)"),
               type: "change",
-              toMessage: (event: MediaQueryListEvent) =>
+              mapEvent: (event: MediaQueryListEvent) =>
                 AppMessage.ChangedTheme({ theme: event.matches ? "dark" : "light" }),
             }),
     },

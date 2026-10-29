@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "@effect/vitest";
 
@@ -10,7 +12,6 @@ interface Manifest {
   readonly version?: string;
   readonly dependencies?: Readonly<Record<string, string>>;
   readonly devDependencies?: Readonly<Record<string, string>>;
-  readonly peerDependencies?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -51,8 +52,7 @@ describe("the source tree", () => {
 
   it.effect("resolves exactly one Vite, and one Foldkit peers against it", () =>
     Effect.sync(() => {
-      // Foldkit's Vite plugin declares Vite as a peer, and Vite+ reaches its
-      // own through `@voidzero-dev/vite-plus-core` rather than declaring it.
+      // The Vite override gives Foldkit and Vite+ the same core module.
       // A second copy would give the plugin a different module registry from
       // the one running the build: the dev server would hold two HMR graphs
       // and the production build would silently drop the plugin's transform.
@@ -79,14 +79,15 @@ describe("the source tree", () => {
         "more than one Vite is installed",
       );
 
-      assert.match(
-        manifestAt("node_modules/vite/package.json").version ?? "",
-        /^[78]\./,
-        "Vite is outside @foldkit/vite-plugin's peer range",
+      assert.equal(
+        manifestAt("node_modules/vite/package.json").version,
+        manifestAt("node_modules/vite-plus/package.json").version,
+        "Vite+ and its Vite core must use the same release",
       );
+      const viteFrom = (name: string) => createRequire(import.meta.resolve(name)).resolve("vite");
+      assert.equal(viteFrom("@foldkit/vite-plugin"), viteFrom("vite-plus"));
 
-      // The pair is pinned, not ranged: Foldkit peers on one exact Effect, so
-      // an Effect bump is a Foldkit bump and has to be made deliberately.
+      // Exact pins and one resolved Effect keep the peer override explicit.
       const own = manifestAt("package.json");
       const declared = { ...own.dependencies, ...own.devDependencies };
       for (const name of [
@@ -101,11 +102,10 @@ describe("the source tree", () => {
         assert.match(pin ?? "", /^\d/, `${name} is ranged rather than pinned: ${pin ?? ""}`);
       }
 
-      assert.equal(
-        manifestAt("node_modules/foldkit/package.json").peerDependencies?.["effect"],
-        declared["effect"],
-        "Foldkit peers on an Effect this repository does not install",
-      );
+      const effectFrom = (name: string) =>
+        createRequire(import.meta.resolve(name)).resolve("effect");
+      assert.equal(effectFrom("foldkit"), fileURLToPath(import.meta.resolve("effect")));
+      assert.equal(manifestAt("node_modules/effect/package.json").version, declared["effect"]);
     }),
   );
 });

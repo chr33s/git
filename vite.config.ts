@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { foldkit } from "@foldkit/vite-plugin";
 import foldkitRecommended from "@foldkit/oxlint-plugin/recommended.json" with { type: "json" };
 import effectRecommended from "@effect/tsgo/oxlint-presets/recommended.json" with { type: "json" };
-import { defineConfig, type PluginOption } from "vite-plus";
+import { defineConfig } from "vite-plus";
 
 const effectRules = Object.fromEntries(
   Object.entries(effectRecommended.rules).map(
@@ -49,26 +49,8 @@ const diffsWebComponents = join(
   "web-components.js",
 );
 
-/**
- * Foldkit's plugin, on the Vite the Vite+ toolchain already brings.
- *
- * One `vite@8.2.2` is installed and `@foldkit/vite-plugin` peers on
- * `^7 || ^8`, so a single module registry runs the dev server and the build.
- * `Sources.test.ts` asserts both, because a second copy would give the plugin
- * a different registry from the one building: two HMR graphs in development,
- * and a production build that silently drops the plugin's transform.
- *
- * SAFETY: the *types* are two declarations of that one runtime. Foldkit
- * declares its plugins against the `vite` package's `Plugin`, and Vite+ ships
- * its own `interface Plugin extends Rolldown.Plugin` inside
- * `@voidzero-dev/vite-plus-core`. They describe the same objects, but each is
- * large enough that asking the checker to relate them exhausts its
- * instantiation depth rather than answering — so the equivalence is asserted
- * once, here, at the only point where the two toolchains meet. The invariant
- * behind it is the single installed Vite, which is checked in CI rather than
- * assumed.
- */
-const foldkitPlugins = foldkit() as PluginOption[];
+// The Vite override lets Foldkit and Vite+ share one core and its plugin types.
+const foldkitPlugins = foldkit();
 
 export default defineConfig(({ mode }) => ({
   appType: "custom",
@@ -159,7 +141,9 @@ export default defineConfig(({ mode }) => ({
       "anti-slop/require-safety-comment-for-type-assertion": "error",
     },
   },
-  plugins: foldkitPlugins,
+  // View branding rewrites return values and cannot cross Playwright's
+  // serialized-function boundary. The built UI is exercised by verify:ui.
+  plugins: mode === "test" ? [] : foldkitPlugins,
   resolve: {
     alias: { "@pierre/diffs/components/web-components": diffsWebComponents },
   },

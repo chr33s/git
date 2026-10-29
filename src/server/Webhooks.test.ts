@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
 import { Deferred, Effect, Fiber, Layer, Predicate } from "effect";
 import { TestClock } from "effect/testing";
-import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 import type { ReceiveResult } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";

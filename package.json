@@ -37,38 +37,39 @@
     "verify:ui": "npm run build:ui && node src/ui/verify.ts"
   },
   "dependencies": {
-    "effect": "4.0.0-rc.112",
-    "ignore": "7.0.8"
+    "effect": "4.0.7",
+    "ignore": "7.0.14"
   },
   "devDependencies": {
+    "@alchemy.run/cloudflare": "2.0.0-beta.84",
     "@chr33s/base-wc": "github:chr33s/base-wc",
-    "@effect/platform-node": "4.0.0-rc.112",
-    "@effect/tsgo": "0.43.0",
-    "@effect/vitest": "4.0.0-rc.112",
-    "@foldkit/devtools": "0.158.2",
-    "@foldkit/oxlint-plugin": "0.12.0",
-    "@foldkit/vite-plugin": "0.20.2",
-    "@oxlint/plugins": "1.82.0",
+    "@effect/platform-node": "4.0.7",
+    "@effect/tsgo": "0.63.0",
+    "@effect/vitest": "4.0.7",
+    "@foldkit/devtools": "0.169.0",
+    "@foldkit/oxlint-plugin": "0.15.3",
+    "@foldkit/vite-plugin": "0.28.0",
+    "@oxlint/plugins": "1.90.0",
     "@phosphor-icons/core": "2.1.1",
-    "@pierre/diffs": "1.4.1",
+    "@pierre/diffs": "1.6.2",
     "@pierre/trees": "1.0.0-beta.6",
-    "@types/node": "26.5.0",
-    "alchemy": "2.0.0-beta.76",
-    "foldkit": "0.158.2",
+    "@types/node": "26.6.6",
+    "alchemy": "2.0.0-beta.84",
+    "foldkit": "0.169.0",
     "patch-package": "8.0.1",
-    "playwright": "1.63.0",
+    "playwright": "1.64.1",
     "typescript": "7.0.2",
-    "vite-plus": "0.3.0",
-    "vitest": "4.1.11",
-    "wrangler": "4.129.1"
+    "vite-plus": "1.4.0",
+    "vitest": "5.0.5",
+    "wrangler": "4.155.0"
   },
   "overrides": {
-    "nuxt": {
-      "rolldown": "1.1.5"
-    }
+    "@effect/platform-browser": "4.0.7",
+    "effect": "$effect",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0"
   },
   "engines": {
-    "git": "2.55.0",
+    "git": "2.56.0",
     "node": ">=24.12.0"
   },
   "allowScripts": {

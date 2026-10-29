@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { Config, Context, Effect, Layer, Result } from "effect";
-import { Argument, Flag } from "effect/unstable/cli";
+import { Argument, Flag } from "effect/cli";
 
 import {
   formatPublicKey,
@@ -48,12 +48,12 @@ export const commaList = (value: string): ReadonlyArray<string> =>
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
 
-export const rootFlag = Flag.string("root").pipe(
+export const rootFlag = Flag.String("root").pipe(
   Flag.withDefault("."),
   Flag.withDescription("Directory holding one bare repository per subdirectory"),
 );
 
-export const repoArgument = Argument.string("repo");
+export const repoArgument = Argument.String("repo");
 
 /**
  * Who a CLI commit is by. `git` reads `user.name`/`user.email` from its own
@@ -61,11 +61,11 @@ export const repoArgument = Argument.string("repo");
  * can say, and the fallback is honest rather than a fake identity.
  */
 export const cliSignature = Effect.fn("cli.signature")(function* () {
-  const name = yield* Config.string("GIT_AUTHOR_NAME").pipe(
-    Config.orElse(() => Config.string("USER")),
+  const name = yield* Config.String("GIT_AUTHOR_NAME").pipe(
+    Config.orElse(() => Config.String("USER")),
     Config.withDefault("chr33s-git"),
   );
-  const email = yield* Config.string("GIT_AUTHOR_EMAIL").pipe(
+  const email = yield* Config.String("GIT_AUTHOR_EMAIL").pipe(
     Config.withDefault("chr33s-git@localhost"),
   );
   return {
@@ -288,7 +288,7 @@ export const readPublicKey = Effect.fn("cli.readPublicKey")(function* (location:
  * which is the layout `git` itself uses and the reason the two can be
  * pointed at the same directory.
  */
-export const workFlag = Flag.string("work").pipe(
+export const workFlag = Flag.String("work").pipe(
   Flag.optional,
   Flag.withDescription("Explicit checkout selector for extension commands"),
 );
@@ -433,7 +433,7 @@ export const withDiscovered = <A, E>(
 };
 
 /** Selects a bare repository under `--root`; empty means the current checkout. */
-export const repoFlag = Flag.string("repo").pipe(
+export const repoFlag = Flag.String("repo").pipe(
   Flag.withDefault(""),
   Flag.withDescription("A bare repository under --root, instead of the current checkout"),
 );

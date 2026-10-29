@@ -20,7 +20,7 @@ import { fastImport, gitIn, hasGit, importCommit } from "../testing/Git.ts";
 
 const entry = `
   import { Effect } from "effect";
-  import { AtomRegistry } from "effect/unstable/reactivity";
+  import { AtomRegistry } from "effect/reactivity";
   import { GitApi } from "./src/ui/api.ts";
   import { GitPlusApi, repoFromDocument } from "./src/ui/client.ts";
   import { registry } from "./src/ui/atoms.ts";

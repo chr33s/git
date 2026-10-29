@@ -10,7 +10,7 @@
  *   alchemy dev · alchemy deploy --stage pr-123 · alchemy destroy
  */
 import * as Alchemy from "alchemy";
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cloudflare from "@alchemy.run/cloudflare";
 import { Effect } from "effect";
 
 import GitLive, { Git } from "./worker.ts";

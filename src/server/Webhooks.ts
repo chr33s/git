@@ -17,7 +17,7 @@
  */
 import { bytesToHex } from "../git/Format.ts";
 import { Effect, Layer, Schedule, Schema } from "effect";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import { Hooks, type ReceiveResult } from "../git/Repository.ts";
 import { type Subscriber, Subscribers } from "./Subscribers.ts";

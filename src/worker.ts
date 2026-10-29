@@ -10,9 +10,9 @@
  * not pull in `.make()` — the bundler tree-shakes it.
  */
 import type { RuntimeContext } from "alchemy";
-import * as Alchemy from "alchemy/Cloudflare";
+import * as Alchemy from "@alchemy.run/cloudflare";
 import { Effect, Layer } from "effect";
-import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { objectStore, packStore } from "./git/Cloudflare.ts";
 import * as GitRepository from "./git/Repository.ts";

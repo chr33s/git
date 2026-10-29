@@ -14,7 +14,7 @@
  * disk writes" (docs/context-pack.knowledge.md §12.1).
  */
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { Invalid } from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
@@ -95,29 +95,29 @@ const check = Command.make(
     root: rootFlag,
     repo: repoFlag,
     work: workFlag,
-    ref: Flag.string("ref").pipe(
+    ref: Flag.String("ref").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Check this committed revision instead of the working view"),
     ),
-    bundle: Flag.string("bundle").pipe(
+    bundle: Flag.String("bundle").pipe(
       Flag.withDefault(Concept.BUNDLE),
       Flag.withDescription("Repository-relative bundle root"),
     ),
-    strict: Flag.boolean("strict").pipe(
+    strict: Flag.Boolean("strict").pipe(
       Flag.withDefault(false),
       Flag.withDescription(
         "Also fail on changed dependencies, expired deadlines and unverified citations",
       ),
     ),
-    json: Flag.boolean("json").pipe(
+    json: Flag.Boolean("json").pipe(
       Flag.withDefault(false),
       Flag.withDescription("One parseable report on stdout"),
     ),
-    at: Flag.string("at").pipe(
+    at: Flag.String("at").pipe(
       Flag.withDefault(""),
       Flag.withDescription("The evaluation instant, as an ISO 8601 datetime with an offset"),
     ),
-    concept: Argument.string("concept").pipe(Argument.optional),
+    concept: Argument.String("concept").pipe(Argument.optional),
   },
   ({ at, bundle, concept, json, ref, repo, root, strict, work }) =>
     Effect.gen(function* () {

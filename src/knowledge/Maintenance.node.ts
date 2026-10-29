@@ -83,10 +83,10 @@ export const request = Effect.fn("knowledge.MaintenanceHost.request")(function* 
   let ref: string | null = null;
   let commit: string | null = null;
   if (input.trigger === "wake") {
-    event = yield* Config.string("CHR33S_GIT_EVENT");
-    ref = yield* Config.string("CHR33S_GIT_REF");
-    commit = yield* Config.string("CHR33S_GIT_COMMIT");
-    const hintedRepo = yield* Config.string("CHR33S_GIT_REPO");
+    event = yield* Config.String("CHR33S_GIT_EVENT");
+    ref = yield* Config.String("CHR33S_GIT_REF");
+    commit = yield* Config.String("CHR33S_GIT_COMMIT");
+    const hintedRepo = yield* Config.String("CHR33S_GIT_REPO");
     if (
       hintedRepo !== input.repository ||
       !supported.has(event) ||

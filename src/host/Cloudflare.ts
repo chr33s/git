@@ -11,15 +11,10 @@
  * backend in `git/Cloudflare.ts` plugs straight in, unchanged — the whole
  * point of having kept the ports platform-shaped.
  */
-import * as Alchemy from "alchemy/Cloudflare";
+import * as Alchemy from "@alchemy.run/cloudflare";
 import type * as Http from "alchemy/Http";
 import { Config, Context, Effect, Layer } from "effect";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpServerRequest,
-  HttpServerResponse,
-} from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { stores } from "../git/Cloudflare.ts";
 import type { Sql } from "../git/Sql.ts";
@@ -253,7 +248,7 @@ export default Repo.make(
        * has no membership to authorize anybody with.
        */
       const openWrites = Policy.anonymousWrites(
-        yield* Config.boolean("ALLOW_ANONYMOUS_WRITES").pipe(
+        yield* Config.Boolean("ALLOW_ANONYMOUS_WRITES").pipe(
           Config.withDefault(false),
           Effect.orElseSucceed(() => false),
         ),

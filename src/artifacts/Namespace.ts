@@ -14,20 +14,20 @@
  *
  * The two `raw` escape hatches follow alchemy's `LocalR2Gateway` precedent:
  * the namespace-level one dies with guidance (its type says `never`), and
- * `RepoClient.raw` — deferred by `patches/alchemy+2.0.0-beta.76.patch` —
+ * `RepoClient.raw` — deferred by `patches/@alchemy.run+cloudflare+2.0.0-beta.84.patch` —
  * fails with a typed `ArtifactsError` a caller can handle.
  */
-// Deep imports on purpose: the `alchemy/Cloudflare` barrel drags in modules
+// Deep imports on purpose: the `@alchemy.run/cloudflare` barrel drags in modules
 // whose runtime needs `@effect/platform-node` and a newer `effect` than this
 // repo pins. The patch adds these two file-level export entries.
-import type { Namespace as ArtifactsNamespace } from "alchemy/Cloudflare/Artifacts/Namespace";
+import type { Namespace as ArtifactsNamespace } from "@alchemy.run/cloudflare/Artifacts/Namespace";
 import {
   ArtifactsError,
   type ListOptions,
   ReadWriteNamespace,
   type ReadWriteNamespaceClient,
   type RepoClient,
-} from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
+} from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import { Context, Effect, Exit, Layer, Result, Schema, Semaphore, Stream } from "effect";
 
 import { realpathSync, statSync } from "node:fs";

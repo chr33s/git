@@ -1,6 +1,6 @@
 /** Commands that publish and query one principal's signed social log. */
 import { Console, Effect, Layer, Result } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import { fingerprint, parsePublicKey } from "../crypto/SshSignature.ts";
 import { Invalid } from "../git/Error.ts";
@@ -31,7 +31,7 @@ import {
   commaList,
 } from "./shared.ts";
 
-const keyFlag = Flag.string("key").pipe(
+const keyFlag = Flag.String("key").pipe(
   Flag.withDescription("Path to the identity device private key"),
 );
 
@@ -108,8 +108,8 @@ const follow = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    petname: Flag.string("name").pipe(Flag.withDescription("Your local name for this principal")),
-    subject: Argument.string("principal"),
+    petname: Flag.String("name").pipe(Flag.withDescription("Your local name for this principal")),
+    subject: Argument.String("principal"),
     repo: repoArgument,
   },
   ({ key, petname, repo, root, subject }) =>
@@ -136,13 +136,13 @@ const vouch = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    scope: Flag.string("scope").pipe(
+    scope: Flag.String("scope").pipe(
       Flag.withDefault("introduce.repo"),
       Flag.withDescription("Comma-separated introduce.repo, introduce.key, review, vouch"),
     ),
-    depth: Flag.integer("depth").pipe(Flag.withDefault(0)),
-    expires: Flag.integer("expires-in").pipe(Flag.withDefault(0)),
-    subject: Argument.string("principal"),
+    depth: Flag.Int("depth").pipe(Flag.withDefault(0)),
+    expires: Flag.Int("expires-in").pipe(Flag.withDefault(0)),
+    subject: Argument.String("principal"),
     repo: repoArgument,
   },
   ({ depth, expires, key, repo, root, scope, subject }) =>
@@ -178,15 +178,15 @@ const attest = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    url: Flag.string("url").pipe(
+    url: Flag.String("url").pipe(
       Flag.withDescription("Repository URL (repeat for mirrors)"),
       Flag.atLeast(1),
     ),
-    role: Flag.choice("role", ["origin", "mirror", "fork"]).pipe(Flag.withDefault("origin")),
-    forkOf: Flag.string("fork-of").pipe(Flag.withDefault("")),
-    lineage: Flag.string("lineage").pipe(Flag.withDefault("")),
-    inbox: Flag.string("inbox").pipe(Flag.withDefault("")),
-    target: Argument.string("RepoID"),
+    role: Flag.Literals("role", ["origin", "mirror", "fork"]).pipe(Flag.withDefault("origin")),
+    forkOf: Flag.String("fork-of").pipe(Flag.withDefault("")),
+    lineage: Flag.String("lineage").pipe(Flag.withDefault("")),
+    inbox: Flag.String("inbox").pipe(Flag.withDefault("")),
+    target: Argument.String("RepoID"),
     repo: repoArgument,
   },
   ({ forkOf, inbox, key, lineage, repo, role, root, target, url }) =>
@@ -217,19 +217,19 @@ const attestPrincipal = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    publicKey: Flag.string("public-key").pipe(
+    publicKey: Flag.String("public-key").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Path to the subject's SSH public key"),
     ),
-    externalIdentity: Flag.string("identity").pipe(
+    externalIdentity: Flag.String("identity").pipe(
       Flag.withDefault(""),
       Flag.withDescription("External platform identity, for example github:alice"),
     ),
-    proof: Flag.string("proof").pipe(
+    proof: Flag.String("proof").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Bidirectional proof URL for --identity"),
     ),
-    subject: Argument.string("PrincipalID"),
+    subject: Argument.String("PrincipalID"),
     repo: repoArgument,
   },
   ({ externalIdentity, key, proof, publicKey, repo, root, subject }) =>
@@ -277,9 +277,9 @@ const publishMirrors = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    url: Flag.string("url").pipe(Flag.atLeast(1)),
-    mode: Flag.choice("mode", ["read", "write"]).pipe(Flag.withDefault("read")),
-    target: Argument.string("repo-or-self"),
+    url: Flag.String("url").pipe(Flag.atLeast(1)),
+    mode: Flag.Literals("mode", ["read", "write"]).pipe(Flag.withDefault("read")),
+    target: Argument.String("repo-or-self"),
     repo: repoArgument,
   },
   ({ key, mode, repo, root, target, url }) =>
@@ -306,9 +306,9 @@ const label = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    namespace: Flag.string("namespace"),
-    value: Flag.string("label"),
-    subject: Argument.string("subject"),
+    namespace: Flag.String("namespace"),
+    value: Flag.String("label"),
+    subject: Argument.String("subject"),
     repo: repoArgument,
   },
   ({ key, namespace, repo, root, subject, value }) =>
@@ -331,10 +331,10 @@ const revoke = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    reason: Flag.choice("reason", ["withdrawn", "superseded", "compromised"]).pipe(
+    reason: Flag.Literals("reason", ["withdrawn", "superseded", "compromised"]).pipe(
       Flag.withDefault("withdrawn"),
     ),
-    target: Argument.string("statement-id"),
+    target: Argument.String("statement-id"),
     repo: repoArgument,
   },
   ({ key, reason, repo, root, target }) =>
@@ -373,8 +373,8 @@ const lineage = Command.make(
   "lineage",
   {
     root: rootFlag,
-    revision: Flag.string("revision").pipe(Flag.withDefault("HEAD")),
-    upstream: Flag.string("from").pipe(
+    revision: Flag.String("revision").pipe(Flag.withDefault("HEAD")),
+    upstream: Flag.String("from").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Upstream revision; omit to compute an origin's root lineage"),
     ),
@@ -414,7 +414,7 @@ const graphOf = Effect.fn("cli.social.graphOf")(function* (repo: string) {
 
 const find = Command.make(
   "find",
-  { root: rootFlag, query: Argument.string("name-or-RepoID"), repo: repoArgument },
+  { root: rootFlag, query: Argument.String("name-or-RepoID"), repo: repoArgument },
   ({ query, repo, root }) =>
     withRepo(
       root,
@@ -444,7 +444,7 @@ const find = Command.make(
 
 const mirrors = Command.make(
   "mirrors",
-  { root: rootFlag, target: Argument.string("repo-or-self"), repo: repoArgument },
+  { root: rootFlag, target: Argument.String("repo-or-self"), repo: repoArgument },
   ({ repo, root, target }) =>
     withRepo(
       root,
@@ -463,7 +463,7 @@ const mirrors = Command.make(
 
 const who = Command.make(
   "who",
-  { root: rootFlag, key: Argument.string("fingerprint"), repo: repoArgument },
+  { root: rootFlag, key: Argument.String("fingerprint"), repo: repoArgument },
   ({ key, repo, root }) =>
     withRepo(
       root,
@@ -492,11 +492,11 @@ const sync = Command.make(
   "sync",
   {
     root: rootFlag,
-    depth: Flag.integer("depth").pipe(
+    depth: Flag.Int("depth").pipe(
       Flag.withDefault(1),
       Flag.withDescription("Follow depth to synchronize (1-16)"),
     ),
-    token: Flag.string("token").pipe(
+    token: Flag.String("token").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Credential shared by identity mirrors that require one"),
     ),
@@ -593,9 +593,9 @@ const inboxList = Command.make(
 const inboxSubmit = Command.make(
   "inbox-submit",
   {
-    url: Flag.string("url").pipe(Flag.withDescription("Announced repository inbox URL")),
-    id: Flag.string("id").pipe(Flag.withDefault("")),
-    head: Argument.string("revision"),
+    url: Flag.String("url").pipe(Flag.withDescription("Announced repository inbox URL")),
+    id: Flag.String("id").pipe(Flag.withDefault("")),
+    head: Argument.String("revision"),
   },
   ({ head, id, url }) =>
     Effect.gen(function* () {
@@ -610,7 +610,7 @@ const inboxAdopt = Command.make(
   {
     root: rootFlag,
     key: keyFlag,
-    proposal: Argument.string("proposal-id"),
+    proposal: Argument.String("proposal-id"),
     repo: repoArgument,
   },
   ({ key, proposal, repo, root }) =>

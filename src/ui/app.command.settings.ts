@@ -130,27 +130,24 @@ interface Outcome {
  * an operator reads to know whether to try again, and rewording them during a
  * framework migration would change the product under cover of the port.
  */
-// SAFETY: the client is `GitApi`, whose methods this switch names one by one;
-// typing the parameter as that class would import the API surface into a
-// module that only needs to call it.
 const run = async (client: GitApiLike, action: AdminAction): Promise<Outcome> => {
   const plain = (text: string): Outcome => ({ text, reflog: null });
-  switch (action._tag) {
-    case "DeleteBranch": {
+  return AdminAction.match(action, {
+    DeleteBranch: async (action) => {
       const gone = await client.branchDelete(action.name);
       return plain(`${action.name} ${gone ? "deleted" : "was already gone"}`);
-    }
-    case "ResetBranch": {
+    },
+    ResetBranch: async (action) => {
       const moved = await client.reset(action.ref, action.to);
       const from =
         moved.previous === null ? "into existence" : `from ${moved.previous.slice(0, 7)}`;
       return plain(`${short(moved.ref)} moved ${from} to ${moved.oid.slice(0, 7)}`);
-    }
-    case "DeleteTag": {
+    },
+    DeleteTag: async (action) => {
       const gone = await client.tagDelete(action.name);
       return plain(`${action.name} ${gone ? "deleted" : "was already gone"}`);
-    }
-    case "CreateTag": {
+    },
+    CreateTag: async (action) => {
       const created = await client.tagCreate(
         action.message === ""
           ? { name: action.name, target: action.target }
@@ -158,14 +155,14 @@ const run = async (client: GitApiLike, action: AdminAction): Promise<Outcome> =>
       );
       const annotated = action.message === "" ? "" : " (annotated)";
       return plain(`${short(created.ref)} → ${created.target.slice(0, 7)}${annotated}`);
-    }
-    case "FetchRemote": {
+    },
+    FetchRemote: async (action) => {
       const result = await client.fetchRemote(action.name);
       return plain(
         `fetched ${String(result.refs.length)} refs, ${String(result.objects)} objects into ${result.remote}`,
       );
-    }
-    case "PushRemote": {
+    },
+    PushRemote: async (action) => {
       const result = await client.pushRemote(action.name, action.branch);
       const failed = result.refs.filter((line) => !line.ok);
       return plain(
@@ -173,56 +170,56 @@ const run = async (client: GitApiLike, action: AdminAction): Promise<Outcome> =>
           ? `pushed ${action.branch} to ${action.name}`
           : failed.map((line) => `${line.ref}: ${line.reason ?? "refused"}`).join("; "),
       );
-    }
-    case "PullRemote": {
+    },
+    PullRemote: async (action) => {
       const result = await client.pullRemote(action.name, action.branch);
       return plain(
         result.kind === "non-fast-forward"
           ? `${action.branch} diverged from ${action.name} — merge or rebase, a pull cannot guess which`
           : `${action.branch}: ${result.kind}, now ${result.to.slice(0, 7)}`,
       );
-    }
-    case "DeleteRemote": {
+    },
+    DeleteRemote: async (action) => {
       const gone = await client.remoteDelete(action.name);
       return plain(`${action.name} ${gone ? "removed" : "was already gone"}`);
-    }
-    case "AddRemote": {
+    },
+    AddRemote: async (action) => {
       const added = await client.remoteAdd(
         action.name,
         action.url,
         action.credential === "" ? undefined : action.credential,
       );
       return plain(`${added.name} registered${added.has_credential ? " with a credential" : ""}`);
-    }
-    case "DeleteWebhook": {
+    },
+    DeleteWebhook: async (action) => {
       const gone = await client.webhookDelete(action.id);
       return plain(`webhook ${gone ? "removed" : "was already gone"}`);
-    }
-    case "AddWebhook": {
+    },
+    AddWebhook: async (action) => {
       const added = await client.webhookAdd(action.url, action.secret);
       return plain(`registered ${added.url}`);
-    }
-    case "Fsck": {
+    },
+    Fsck: async () => {
       const report = await client.fsck();
       return plain(
         report.ok
           ? `fsck: ${String(report.checked)} objects checked, all sound`
           : `fsck: ${String(report.problems.length)} problems, ${String(report.dangling_refs.length)} dangling refs`,
       );
-    }
-    case "PreviewGc": {
+    },
+    PreviewGc: async () => {
       const report = await client.gc({ dry_run: true });
       return plain(
         `gc (dry run): ${String(report.scanned)} scanned, ${String(report.reachable)} reachable, ${String(report.removed.length)} would go`,
       );
-    }
-    case "Gc": {
+    },
+    Gc: async () => {
       const report = await client.gc();
       return plain(
         `gc: ${String(report.removed.length)} removed of ${String(report.scanned)} scanned`,
       );
-    }
-    case "ShowReflog": {
+    },
+    ShowReflog: async (action) => {
       const entries = await client.reflog(action.branch);
       return {
         text: `reflog of ${action.branch}: ${String(entries.length)} entries`,
@@ -233,8 +230,8 @@ const run = async (client: GitApiLike, action: AdminAction): Promise<Outcome> =>
           message: entry.message,
         })),
       };
-    }
-    case "WritePolicy": {
+    },
+    WritePolicy: async (action) => {
       const current = await client.policy();
       const written = await client.policyWrite({
         ...current.rules,
@@ -245,8 +242,8 @@ const run = async (client: GitApiLike, action: AdminAction): Promise<Outcome> =>
         requireResolvedThreads: action.requireResolvedThreads,
       });
       return plain(`policy published at ${written.commit.slice(0, 7)}`);
-    }
-  }
+    },
+  });
 };
 
 /** The methods `run` above calls, and only those. */

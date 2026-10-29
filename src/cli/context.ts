@@ -14,7 +14,7 @@
 import * as fs from "node:fs";
 
 import { Console, Effect, Predicate } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import * as Exposure from "../context/Exposure.ts";
 import * as Pack from "../context/Pack.ts";
@@ -46,7 +46,7 @@ import {
   workFlag,
 } from "./shared.ts";
 
-const jsonFlag = Flag.boolean("json").pipe(
+const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDefault(false),
   Flag.withDescription("Structured output, for machine consumers"),
 );
@@ -138,38 +138,38 @@ const forCommand = Command.make(
   {
     work: workFlag,
     json: jsonFlag,
-    task: Flag.string("task").pipe(Flag.withDescription("What the context is being built for")),
-    rev: Flag.string("rev").pipe(
+    task: Flag.String("task").pipe(Flag.withDescription("What the context is being built for")),
+    rev: Flag.String("rev").pipe(
       Flag.withDefault("HEAD"),
       Flag.withDescription("The commit the view is anchored to"),
     ),
-    maxItems: Flag.integer("max-items").pipe(
+    maxItems: Flag.Int("max-items").pipe(
       Flag.withDefault(Select.MAX_ITEMS),
       Flag.withDescription("How many evidence items the selector may choose"),
     ),
-    maxBytes: Flag.integer("max-bytes").pipe(
+    maxBytes: Flag.Int("max-bytes").pipe(
       Flag.withDefault(Select.MAX_BYTES),
       Flag.withDescription("How many evidence bytes the selector may choose"),
     ),
-    session: Flag.string("session").pipe(
+    session: Flag.String("session").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Record an exposure on this session's trace ref"),
     ),
-    key: Flag.string("key").pipe(
+    key: Flag.String("key").pipe(
       Flag.withDefault(""),
       Flag.withDescription("Path to the SSH private key the exposure is signed with"),
     ),
-    retain: Flag.boolean("retain-render").pipe(
+    retain: Flag.Boolean("retain-render").pipe(
       Flag.withDefault(true),
       Flag.withDescription("Keep the exact render bytes so the digest can be recomputed"),
     ),
-    knowledge: Flag.boolean("knowledge").pipe(
+    knowledge: Flag.Boolean("knowledge").pipe(
       Flag.withDefault(false),
       Flag.withDescription(
         "Also recall eligible Knowledge Concepts, each with the evidence it declares",
       ),
     ),
-    at: Flag.string("at").pipe(
+    at: Flag.String("at").pipe(
       Flag.withDefault(""),
       Flag.withDescription(
         "The instant --knowledge judges freshness at, as an ISO 8601 datetime with an offset",
@@ -491,8 +491,8 @@ const why = Command.make(
     root: rootFlag,
     repo: repoFlag,
     json: jsonFlag,
-    pack: Argument.string("pack"),
-    item: Argument.string("item").pipe(Argument.optional),
+    pack: Argument.String("pack"),
+    item: Argument.String("item").pipe(Argument.optional),
   },
   ({ item, json, pack, repo, root }) =>
     withDiscovered(
@@ -772,7 +772,7 @@ const auditCommand = Command.make(
     root: rootFlag,
     repo: repoFlag,
     json: jsonFlag,
-    target: Argument.string("invocation-or-exposure"),
+    target: Argument.String("invocation-or-exposure"),
   },
   ({ json, repo, root, target }) =>
     withDiscovered(

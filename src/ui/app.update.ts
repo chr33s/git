@@ -154,7 +154,10 @@ export const update = (model: Model, message: AppMessage): Return =>
         model: {
           ...model,
           route,
-          navError: route._tag === "NotFound" ? "this link's address is malformed" : null,
+          navError:
+            route._tag === "NotFound"
+              ? Option.some("this link's address is malformed")
+              : Option.none(),
           settingsScreen: Option.isSome(reading)
             ? { ...model.settingsScreen, data: reading.value }
             : model.settingsScreen,

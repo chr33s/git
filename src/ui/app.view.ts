@@ -7,6 +7,7 @@
  * compile error rather than a blank panel.
  */
 import { Html } from "foldkit";
+import { Option } from "effect";
 
 import { elements } from "./element.base-wc.ts";
 import { AppMessage } from "./app.message.ts";
@@ -29,10 +30,11 @@ export const view = (model: Model, h: Html.HtmlBuilder<AppMessage>): Html.Docume
    * Rendered by the shell rather than by each screen, because the thing it
    * explains is the address, and the address belongs to the shell.
    */
-  const notice =
-    model.navError === null
-      ? h.empty
-      : h.p([h.Class("gp-notice gp-nav-error"), h.DataAttribute("error", "")], [model.navError]);
+  const notice = Option.match(model.navError, {
+    onNone: () => h.empty,
+    onSome: (reason) =>
+      h.p([h.Class("gp-notice gp-nav-error"), h.DataAttribute("error", "")], [reason]),
+  });
 
   /**
    * One column, keyed by the screen in it.

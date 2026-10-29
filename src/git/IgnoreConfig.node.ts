@@ -4,15 +4,15 @@ import * as path from "node:path";
 import { Config, Effect } from "effect";
 
 export const environment = Effect.fn("git.IgnoreConfig.environment")(function* () {
-  const home = yield* Config.string("HOME").pipe(Config.withDefault(os.homedir()));
+  const home = yield* Config.String("HOME").pipe(Config.withDefault(os.homedir()));
   const xdg =
-    (yield* Config.string("XDG_CONFIG_HOME").pipe(Config.withDefault(""))) ||
+    (yield* Config.String("XDG_CONFIG_HOME").pipe(Config.withDefault(""))) ||
     path.join(home, ".config");
-  const global = yield* Config.string("GIT_CONFIG_GLOBAL").pipe(Config.withDefault(""));
-  const system = yield* Config.string("GIT_CONFIG_SYSTEM").pipe(
+  const global = yield* Config.String("GIT_CONFIG_GLOBAL").pipe(Config.withDefault(""));
+  const system = yield* Config.String("GIT_CONFIG_SYSTEM").pipe(
     Config.withDefault("/etc/gitconfig"),
   );
-  const noSystem = yield* Config.string("GIT_CONFIG_NOSYSTEM").pipe(Config.withDefault("false"));
+  const noSystem = yield* Config.String("GIT_CONFIG_NOSYSTEM").pipe(Config.withDefault("false"));
   return {
     home,
     defaultExcludes: path.join(xdg, "git/ignore"),

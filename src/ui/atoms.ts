@@ -17,6 +17,6 @@
  * turn what it answers into Messages, which is what keeps the atoms an
  * implementation detail of the hub rather than a second store beside the Model.
  */
-import { AtomRegistry } from "effect/unstable/reactivity";
+import { AtomRegistry } from "effect/reactivity";
 
 export const registry = AtomRegistry.make();

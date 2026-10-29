@@ -45,7 +45,7 @@ jobs:
           node-version: 26
           cache: npm
       - run: tools/install-git-baseline.sh
-      - run: git --version | grep --fixed-strings "git version 2.55.0"
+      - run: git --version | grep --fixed-strings "git version 2.56.0"
       - run: npm ci
       - run: npm run build:sea
       - run: npx playwright install --with-deps chromium

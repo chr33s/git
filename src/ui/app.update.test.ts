@@ -83,7 +83,7 @@ const openOn = (route: AppRoute, tasks: readonly Task[] = [task()]): Model => ({
   viewer: AsyncData.Idle(),
   localRepository: "Unavailable",
   query: "",
-  navError: null,
+  navError: Option.none(),
   railCollapsed: false,
   tasks: { tasks, sessions: [], liveNotice: null, load: AsyncData.Idle() },
   tasksScreen: { filter: "all", title: "", desc: "", parent: "", submitting: false },
@@ -1735,12 +1735,15 @@ describe("the address", () => {
       Story.given(openOn(AppRoute.Tasks())),
       Story.message(AppMessage.ChangedUrl({ route: AppRoute.NotFound({ path: "/hub/code/%E0" }) })),
       Story.model((model) => {
-        assert.match(model.navError ?? "", /malformed/);
+        assert.match(
+          Option.getOrElse(model.navError, () => ""),
+          /malformed/,
+        );
       }),
       Story.message(AppMessage.ChangedUrl({ route: AppRoute.Tasks() })),
       // A new address is a new question; the old explanation goes with it.
       Story.model((model) => {
-        assert.equal(model.navError, null);
+        assert.ok(Option.isNone(model.navError));
       }),
     );
   });

@@ -1,7 +1,7 @@
 /** Cross-process reservations for complete local repository operations. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ArtifactsError } from "alchemy/Cloudflare/Artifacts/ReadWriteNamespace";
+import { ArtifactsError } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import { Effect } from "effect";
 
 import type { RepoStores } from "./Namespace.ts";

@@ -6,7 +6,7 @@
  * Descriptions stay at the registration site in `main.ts`.
  */
 import { Console, Effect } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 
 import * as Checkout from "../git/Checkout.ts";
 import { quoteListPath } from "../git/Diff.ts";
@@ -48,7 +48,7 @@ export const statusCommand = Command.make("status", { work: workFlag }, ({ work 
 
 export const addCommand = Command.make(
   "add",
-  { work: workFlag, paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })) },
+  { work: workFlag, paths: Argument.String("paths").pipe(Argument.variadic({ min: 1 })) },
   ({ paths, work }) =>
     withWork(
       work,
@@ -63,12 +63,12 @@ export const rm = Command.make(
   "rm",
   {
     work: workFlag,
-    force: Flag.boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
-    cached: Flag.boolean("cached").pipe(
+    force: Flag.Boolean("force").pipe(Flag.withDefault(false), Flag.withAlias("f")),
+    cached: Flag.Boolean("cached").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Unstage only, and leave the file on disk"),
     ),
-    paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })),
+    paths: Argument.String("paths").pipe(Argument.variadic({ min: 1 })),
   },
   ({ cached, force, paths, work }) =>
     withWork(
@@ -85,7 +85,7 @@ export const rm = Command.make(
 
 export const mv = Command.make(
   "mv",
-  { work: workFlag, from: Argument.string("from"), to: Argument.string("to") },
+  { work: workFlag, from: Argument.String("from"), to: Argument.String("to") },
   ({ from, to, work }) =>
     withWork(
       work,
@@ -100,15 +100,15 @@ export const restore = Command.make(
   "restore",
   {
     work: workFlag,
-    staged: Flag.boolean("staged").pipe(
+    staged: Flag.Boolean("staged").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Restore the index rather than the work tree"),
     ),
-    source: Flag.string("source").pipe(
+    source: Flag.String("source").pipe(
       Flag.optional,
       Flag.withDescription("Take content from this revision instead of the index"),
     ),
-    paths: Argument.string("paths").pipe(Argument.variadic({ min: 1 })),
+    paths: Argument.String("paths").pipe(Argument.variadic({ min: 1 })),
   },
   ({ paths, source, staged, work }) =>
     withWork(
@@ -130,15 +130,15 @@ export const switchCommand = Command.make(
   "switch",
   {
     work: workFlag,
-    create: Flag.boolean("create").pipe(
+    create: Flag.Boolean("create").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Branch from HEAD first"),
     ),
-    force: Flag.boolean("force").pipe(
+    force: Flag.Boolean("force").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Overwrite unstaged changes instead of refusing"),
     ),
-    branch: Argument.string("branch"),
+    branch: Argument.String("branch"),
   },
   ({ branch, create, force, work }) =>
     withWork(
@@ -154,7 +154,7 @@ export const commitCommand = Command.make(
   "commit",
   {
     work: workFlag,
-    message: Flag.string("message").pipe(Flag.withDescription("Commit message")),
+    message: Flag.String("message").pipe(Flag.withDescription("Commit message")),
   },
   ({ message, work }) =>
     withWork(
